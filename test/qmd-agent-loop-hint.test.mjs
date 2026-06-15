@@ -1,70 +1,31 @@
+// novel 흡수 회귀 (재작성): 통합 코어는 recall.py 위임(데몬/fixture) 아키텍처.
+// 원본은 fake qmd CLI 모킹이었으나, CLI fallback 금지(Critical-1)로 fixture 주입 방식으로 적응.
+// 동작 계약 보존: manuscript 산문 편집 → EP hint, 비-산문 → quiet.
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, writeFileSync } from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { execFileSync } from 'node:child_process';
+import { resolve } from 'node:path';
 import test from 'node:test';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const scriptPath = path.join(__dirname, '../core/posttool.py');
-const novelRoot = '/Users/dulee/work/novel/귀신은 약효가 돌 때 보인다';
+const PROJ = resolve('test/fixtures/story-proj');
 
 function runHook(payload) {
-  const tempDir = mkdtempSync(path.join(os.tmpdir(), 'yakbbal-qmd-test-'));
-  const callsPath = path.join(tempDir, 'calls.jsonl');
-  const fakeQmdPath = path.join(tempDir, 'qmd');
-  writeFileSync(fakeQmdPath, [
-    '#!/usr/bin/env node',
-    "import { appendFileSync, fstatSync } from 'node:fs';",
-    'const stat = fstatSync(0);',
-    'if (stat.isFIFO()) {',
-    "  console.error('qmd inherited hook stdin pipe');",
-    '  process.exit(44);',
-    '}',
-    'appendFileSync(process.env.QMD_FAKE_CALLS, JSON.stringify(process.argv.slice(2)) + "\\n");',
-    'const args = process.argv.slice(2);',
-    "if (!args.includes('--min-score')) {",
-    "  console.error('missing --min-score');",
-    '  process.exit(45);',
-    '}',
-    "const collection = args[args.indexOf('-c') + 1] || 'yakbbal-manuscript';",
-    "const file = collection === 'yakbbal-plot' ? 'qmd://yakbbal-plot/EP001-005-장례식장-첫발현.md' : 'qmd://yakbbal-manuscript/EP004-상가-음식.md';",
-    "const title = collection === 'yakbbal-plot' ? 'EP001~005. 장례식장 첫 발현' : 'EP004. 상가 음식';",
-    "console.log(JSON.stringify([{ docid: '#c5dd33', score: 0.92, file, line: 1, title, snippet: '# EP004. 상가 음식' }]));",
-  ].join('\n'));
-  chmodSync(fakeQmdPath, 0o755);
-
-  const result = spawnSync('python3', [scriptPath], {
-    cwd: novelRoot,
-    env: {
-      ...process.env,
-      PATH: `${tempDir}${path.delimiter}${process.env.PATH}`,
-      QMD_FAKE_CALLS: callsPath,
-    },
+  const out = execFileSync('python3', ['core/posttool.py'], {
     input: JSON.stringify(payload),
     encoding: 'utf8',
+    env: { ...process.env, QMD_QUERY_FIXTURE: 'test/fixtures/daemon-response-ep.json' },
   });
-
-  return {
-    status: result.status,
-    stdout: result.stdout,
-    stderr: result.stderr,
-    json: result.stdout.trim() ? JSON.parse(result.stdout) : null,
-  };
+  return out.trim() ? JSON.parse(out) : null;
 }
 
-function assertEp004Hint(result) {
-  assert.equal(result.status, 0);
-  assert.equal(result.stderr, '');
-  assert.ok(result.json);
-  assert.equal(result.json.hookSpecificOutput.hookEventName, 'PostToolUse');
-  assert.match(result.json.hookSpecificOutput.additionalContext, /EP004/i);
-  assert.match(result.json.hookSpecificOutput.additionalContext, /EP004-상가-음식\.md/i);
+function assertEp004Hint(json) {
+  assert.ok(json);
+  assert.equal(json.hookSpecificOutput.hookEventName, 'PostToolUse');
+  assert.match(json.hookSpecificOutput.additionalContext, /EP004/i);
+  assert.match(json.hookSpecificOutput.additionalContext, /EP004-상가-음식\.md/i);
 }
 
-test('Codex apply_patch manuscript edit emits qmd hint for episode phrase with josa', () => {
-  const result = runHook({
+test('Codex apply_patch manuscript edit emits qmd hint for episode phrase', () => {
+  const json = runHook({
     hook_event_name: 'PostToolUse',
     tool_name: 'apply_patch',
     tool_input: {
@@ -75,36 +36,33 @@ test('Codex apply_patch manuscript edit emits qmd hint for episode phrase with j
         '*** End Patch',
       ].join('\n'),
     },
+    cwd: PROJ,
   });
-
-  assertEp004Hint(result);
+  assertEp004Hint(json);
 });
 
 test('Claude Write manuscript edit emits qmd hint', () => {
-  const result = runHook({
+  const json = runHook({
     hook_event_name: 'PostToolUse',
     tool_name: 'Write',
     tool_input: {
-      file_path: `${novelRoot}/04_Manuscript/ep004-상가-음식.md`,
+      file_path: `${PROJ}/04_Manuscript/ep004-상가-음식.md`,
       content: '4화에 대해서 집필해줘. 도준이 죽었다는 문장을 확인한다.',
     },
+    cwd: PROJ,
   });
-
-  assertEp004Hint(result);
+  assertEp004Hint(json);
 });
 
 test('non-story file stays quiet', () => {
-  const result = runHook({
+  const json = runHook({
     hook_event_name: 'PostToolUse',
     tool_name: 'Write',
     tool_input: {
-      file_path: `${novelRoot}/docs/plans/example.md`,
-      content: '4화에 대해서 집필해줘.',
+      file_path: `${PROJ}/docs/plans/example.md`,
+      content: '4화에 대해서 집필해줘 충분히 긴 텍스트',
     },
+    cwd: PROJ,
   });
-
-  assert.equal(result.status, 0);
-  assert.equal(result.stderr, '');
-  assert.equal(result.stdout, '');
-  assert.equal(result.json, null);
+  assert.equal(json, null);
 });

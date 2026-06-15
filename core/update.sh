@@ -28,12 +28,11 @@ retry() {
   return 1
 }
 
-is_risky_path() {
-  case "$1" in
-    /|/Library|/Library/*|/System|/System/*|/private|/private/*|/usr|/usr/*|/bin|/bin/*|/sbin|/sbin/*|/dev|/dev/*|/var|/var/*|/opt|/opt/*|/tmp|/tmp/*)
-      return 0 ;;
-  esac
-  return 1
+path_refused_by_resolver() {
+  local candidate="$1"
+  local resolved
+  resolved=$(printf '{}' | python3 "$(dirname "$0")/resolve_paths.py" --cwd "$candidate" 2>/dev/null || true)
+  [ "$(echo "$resolved" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("refused"))' 2>/dev/null)" = "True" ]
 }
 
 preflight_remove_risky() {
@@ -41,7 +40,7 @@ preflight_remove_risky() {
     [ -z "$name" ] && continue
     path=$(qmd collection show "$name" 2>/dev/null | awk -F': +' '/^ *Path|^ *Root/ {print $2; exit}')
     [ -z "$path" ] && continue
-    if is_risky_path "$path"; then
+    if path_refused_by_resolver "$path"; then
       log "PREFLIGHT: removing risky collection '$name' (path=$path)"
       qmd collection remove "$name" >>"$LOG" 2>&1 || true
     fi
@@ -134,11 +133,6 @@ run_update() {
   cd "$workdir" 2>/dev/null || exit 0
   
   log "START: cwd=$workdir"
-
-  if is_risky_path "$workdir"; then
-    log "ABORT: refusing to register risky path '$workdir'"
-    exit 0
-  fi
 
   # 1. read config from .agents/qmd-recall.json if exists
   local config_json="{}"

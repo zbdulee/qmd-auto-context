@@ -49,6 +49,14 @@
       },
       "default": {}
     },
+    "prefixStyle": {
+      "type": "string",
+      "enum": [
+        "full",
+        "tag"
+      ],
+      "default": "full"
+    },
     "events": {
       "type": "array",
       "items": {

@@ -29,8 +29,11 @@ def normalize_path(path_str: str, cwd: str) -> str:
 def is_story_path(path_str: str, cwd: str, config: dict) -> bool:
     normalized = normalize_path(path_str, cwd)
     
-    story_dirs = ["01_Settings", "03_Plot", "04_Manuscript"]
     col_paths = config.get("collectionPaths", {})
+    if not isinstance(col_paths, dict) or not col_paths:
+        return False
+
+    story_dirs = []
     for val in col_paths.values():
         if isinstance(val, str):
             val_clean = val.strip("/")

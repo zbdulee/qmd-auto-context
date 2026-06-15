@@ -1,8 +1,41 @@
 #!/usr/bin/env python3
 import sys
 import os
+import json
 import subprocess
 from pathlib import Path
+
+def command_mentions_qmd_recall(value):
+    if isinstance(value, dict):
+        command = value.get("command")
+        if isinstance(command, str):
+            lowered = command.lower()
+            if "qmd" in lowered and "recall" in lowered:
+                return True
+        return any(command_mentions_qmd_recall(v) for v in value.values())
+    if isinstance(value, list):
+        return any(command_mentions_qmd_recall(item) for item in value)
+    return False
+
+def should_yield_to_local_recall(raw_input):
+    try:
+        payload = json.loads(raw_input)
+    except (json.JSONDecodeError, ValueError):
+        return False
+    cwd = payload.get("cwd") if isinstance(payload, dict) else None
+    if not isinstance(cwd, str) or not cwd:
+        return False
+
+    hook_file = Path(cwd) / ".codex" / "hooks.json"
+    try:
+        with open(hook_file, "r", encoding="utf-8") as handle:
+            settings = json.load(handle)
+    except (OSError, json.JSONDecodeError, ValueError):
+        return False
+
+    hooks = settings.get("hooks", {}) if isinstance(settings, dict) else {}
+    user_prompt_hooks = hooks.get("UserPromptSubmit") if isinstance(hooks, dict) else None
+    return command_mentions_qmd_recall(user_prompt_hooks)
 
 def main():
     if len(sys.argv) < 2:
@@ -10,12 +43,15 @@ def main():
         return 1
 
     action = sys.argv[1]
+    raw_input = sys.stdin.read()
     
     # Resolve core scripts
     base_dir = Path(__file__).parent.parent.parent.resolve()
     core_dir = base_dir / "core"
     
     if action == "recall":
+        if should_yield_to_local_recall(raw_input):
+            return 0
         script_path = core_dir / "recall.py"
         cmd = ["python3", str(script_path)]
     elif action == "update":
@@ -37,7 +73,7 @@ def main():
     try:
         proc = subprocess.run(
             cmd,
-            input=sys.stdin.read(),
+            input=raw_input,
             capture_output=True,
             text=True,
             env=env

@@ -13,6 +13,7 @@ DEFAULT_CONFIG = {
     "lexicalPatterns": [],
     "skipPaths": [],
     "collectionPaths": {},
+    "prefixStyle": "full",
     "events": ["sessionStart", "userPromptSubmit", "postToolUse"],
 }
 

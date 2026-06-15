@@ -2,10 +2,9 @@
 import sys
 import os
 import json
+import re
 import urllib.request
 import urllib.error
-import subprocess
-import shutil
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -68,34 +67,41 @@ def qmd_uri_to_collection(uri: str) -> str:
         return uri[len("qmd://"):].split("/", 1)[0]
     return uri.split("/", 1)[0] if "/" in uri else ""
 
-def run_qmd_cli_fallback(query_text: str, collections: list[str], min_score: float) -> list[dict]:
-    qmd_path = shutil.which("qmd")
-    if not qmd_path:
-        return []
-        
-    results = []
-    for col in collections:
-        cmd = [
-            "qmd", "query", query_text,
-            "-c", col,
-            "--min-score", str(min_score),
-            "--limit", "8"
-        ]
-        try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, check=True, stdin=subprocess.DEVNULL)
-            output = proc.stdout.strip()
-            if output:
-                parsed = json.loads(output)
-                if isinstance(parsed, list):
-                    for item in parsed:
-                        if isinstance(item, dict):
-                            item["_collection"] = col
-                            results.append(item)
-        except (subprocess.SubprocessError, json.JSONDecodeError, ValueError):
-            pass
-    return results
+def ep_numbers(prompt: str) -> list[int]:
+    nums: list[int] = []
+    for match in re.finditer(r"\bEP[\s_-]*0*(\d{1,3})\b|\b0*(\d{1,3})\s*화", prompt, re.IGNORECASE):
+        ep = match.group(1) or match.group(2)
+        if ep:
+            nums.append(int(ep))
+    return list(dict.fromkeys(nums))
 
-def format_context(results: list[dict]) -> str:
+def ep_file_matches(filepath: str, n: int) -> bool:
+    base = qmd_uri_to_filepath(filepath or "").rsplit("/", 1)[-1].lower()
+    for match in re.finditer(r"ep[-_]?0*(\d{1,3})(?!\d)|0*(\d{1,3})\s*화(?![가-힣])", base):
+        tok = match.group(1) or match.group(2)
+        if tok and int(tok) == n:
+            return True
+    return False
+
+def promote_ep_exact_matches(results: list[dict], nums: list[int]) -> None:
+    if not nums:
+        return
+    for result in results:
+        filepath = result.get("file", "")
+        if any(ep_file_matches(filepath, n) for n in nums):
+            try:
+                score = float(result.get("score", 0) or 0)
+            except (TypeError, ValueError):
+                score = 0
+            result["score"] = max(score, 1.0)
+            result["_exact_match"] = True
+
+def resolve_prefix_style(config: dict) -> str:
+    if os.environ.get("QMD_PREFIX_STYLE") == "tag" or config.get("prefixStyle") == "tag":
+        return "tag"
+    return "full"
+
+def format_context(results: list[dict], prefix_style: str = "full") -> str:
     lines = ["관련 문서:"]
     for result in results:
         uri = result.get("file", "")
@@ -103,8 +109,9 @@ def format_context(results: list[dict]) -> str:
         title = result.get("title", "")
         collection = result.get("_collection", "") or qmd_uri_to_collection(uri)
         
-        # Format the collection prefix (tag)
-        tag = collection.rsplit("-", 1)[-1] if collection else ""
+        tag = collection
+        if prefix_style == "tag" and collection:
+            tag = collection.rsplit("-", 1)[-1]
         prefix = f"[{tag}] " if tag else ""
         
         if title:
@@ -192,11 +199,7 @@ def main():
     else:
         daemon_url = os.environ.get("QMD_DAEMON_URL", DEFAULT_DAEMON_URL)
         if not daemon_alive(daemon_url):
-            min_score = float(config.get("minScore", 0.0))
-            lexical_query = " ".join(deduped_lexical_terms)
-            results = run_qmd_cli_fallback(lexical_query, collections, min_score)
-            if not results:
-                return 0
+            return 0
         else:
             lexical_query = " ".join(deduped_lexical_terms)
             vector_query = re.sub(r"\s+", " ", prompt).strip()
@@ -242,6 +245,9 @@ def main():
             if uri.startswith("qmd://"):
                 result["_collection"] = uri[len("qmd://"):].split("/", 1)[0]
 
+    if "ep" in config.get("lexicalPatterns", []):
+        promote_ep_exact_matches(results, ep_numbers(prompt))
+
     # Filter and sort results
     # Sort by score descending
     results = sorted(results, key=lambda r: r.get("score", 0), reverse=True)
@@ -283,7 +289,7 @@ def main():
     output = {
         "hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",
-            "additionalContext": format_context(final_results)
+            "additionalContext": format_context(final_results, resolve_prefix_style(config))
         }
     }
     print(json.dumps(output, ensure_ascii=False))
