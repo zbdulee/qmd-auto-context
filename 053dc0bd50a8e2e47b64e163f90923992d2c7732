@@ -1,0 +1,15 @@
+adapters/gemini/hooks.json
+  h_42d950683aaaea 15-16
+adapters/gemini/wrapper.py
+  h_42d950683aaaea 37-38,41-44,51,55
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "053dc0bd50a8e2e47b64e163f90923992d2c7732",
+  "prompts": {},
+  "humans": {
+    "h_42d950683aaaea": {
+      "author": "dulee@zigbang.com"
+    }
+  }
+}
