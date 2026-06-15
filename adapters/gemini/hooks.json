@@ -1,0 +1,20 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "command": "python3 @@REPO_ROOT@@/adapters/gemini/wrapper.py update"
+      }
+    ],
+    "BeforeAgent": [
+      {
+        "command": "python3 @@REPO_ROOT@@/adapters/gemini/wrapper.py recall"
+      }
+    ],
+    "AfterTool": [
+      {
+        "matcher": "write_file|replace",
+        "command": "python3 @@REPO_ROOT@@/adapters/gemini/wrapper.py posttool"
+      }
+    ]
+  }
+}
