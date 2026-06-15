@@ -1,0 +1,19 @@
+core/posttool.py
+  h_42d950683aaaea 1-196
+core/recall.py
+  h_42d950683aaaea 7-8,71-97,195-202,204-231
+test/posttool.test.mjs
+  h_42d950683aaaea 1-38
+test/qmd-agent-loop-hint.test.mjs
+  h_42d950683aaaea 1-110
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "5037c27a16be5ade65a32f88f9f7e28a10569136",
+  "prompts": {},
+  "humans": {
+    "h_42d950683aaaea": {
+      "author": "dulee@zigbang.com"
+    }
+  }
+}
