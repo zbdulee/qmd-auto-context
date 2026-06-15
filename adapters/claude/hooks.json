@@ -1,0 +1,19 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "command": "python3 @@REPO_ROOT@@/adapters/claude/wrapper.py update"
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "command": "python3 @@REPO_ROOT@@/adapters/claude/wrapper.py recall"
+      }
+    ],
+    "PostToolUse": [
+      {
+        "command": "python3 @@REPO_ROOT@@/adapters/claude/wrapper.py posttool"
+      }
+    ]
+  }
+}
