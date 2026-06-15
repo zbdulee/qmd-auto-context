@@ -1,0 +1,15 @@
+package.json
+  h_42d950683aaaea 1-7
+test/smoke.test.mjs
+  h_42d950683aaaea 1-6
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "cce3fcc3f481fe45dabd0fd2c5bc6f7778ba33e3",
+  "prompts": {},
+  "humans": {
+    "h_42d950683aaaea": {
+      "author": "dulee@zigbang.com"
+    }
+  }
+}
