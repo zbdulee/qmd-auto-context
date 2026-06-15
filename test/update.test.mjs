@@ -25,3 +25,16 @@ test('risky 시스템 경로 거부', () => {
   const r = resolvePaths('/Library/OSAnalytics', '');
   assert.equal(r.refused, true);
 });
+
+test('update core: QMD_SANDBOX=true → 무출력 exit 0', () => {
+  const out = execFileSync('bash', ['core/update.sh'], {
+    env: { ...process.env, QMD_SANDBOX: 'true' },
+  });
+  assert.equal(out.toString().trim(), '');
+});
+
+test('update core: --sandbox 인자 → 무출력 exit 0', () => {
+  const out = execFileSync('bash', ['core/update.sh', '--sandbox']);
+  assert.equal(out.toString().trim(), '');
+});
+

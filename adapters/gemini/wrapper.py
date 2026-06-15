@@ -38,8 +38,8 @@ def should_yield_to_local_recall(raw_input):
     return command_mentions_qmd_recall(before_agent_hooks)
 
 def main():
-    # If GEMINI_SANDBOX is set, exit immediately with no output
-    if os.environ.get("GEMINI_SANDBOX"):
+    # If GEMINI_SANDBOX is set or --sandbox option is in sys.argv, exit immediately with no output
+    if os.environ.get("GEMINI_SANDBOX") or "--sandbox" in sys.argv:
         return 0
 
     if len(sys.argv) < 2:

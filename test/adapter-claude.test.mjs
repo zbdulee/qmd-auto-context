@@ -30,3 +30,19 @@ test('recall 위임 → engine=claude 라벨 주입', () => {
   assert.ok(r);
   assert.equal(r.hookSpecificOutput.hookEventName, 'UserPromptSubmit');
 });
+
+test('CLAUDE_SANDBOX=true → 무출력 exit 0', () => {
+  const out = execFileSync('python3', ['adapters/claude/wrapper.py', 'recall'], {
+    input: JSON.stringify({ prompt: '원오빌 문의 정렬 동작', cwd: '/Users/dulee/work/axiom' }),
+    env: { ...process.env, CLAUDE_SANDBOX: 'true', QMD_QUERY_FIXTURE: 'test/fixtures/daemon-response.json' },
+  });
+  assert.equal(out.toString().trim(), '');
+});
+
+test('claude 어댑터: --sandbox 인자가 들어오면 즉시 우회 → 빈 출력', () => {
+  const out = execFileSync('python3', ['adapters/claude/wrapper.py', 'recall', '--sandbox'], {
+    input: JSON.stringify({ prompt: '원오빌 문의 정렬 동작', cwd: '/Users/dulee/work/axiom' }),
+  });
+  assert.equal(out.toString().trim(), '');
+});
+

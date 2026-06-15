@@ -40,3 +40,12 @@ test('gemini 어댑터: GEMINI_SANDBOX=true 이면 양보 → 빈 출력', () =>
   assert.equal(r, null);
 });
 
+test('gemini 어댑터: --sandbox 인자가 들어오면 즉시 우회 → 빈 출력', () => {
+  const out = execFileSync('python3', ['adapters/gemini/wrapper.py', 'recall', '--sandbox'], {
+    input: JSON.stringify({ prompt: '원오빌 문의 기반 정렬 어떻게 동작해?', cwd: '/Users/dulee/work/axiom' }),
+    encoding: 'utf8',
+  });
+  assert.equal(out.trim(), '');
+});
+
+

@@ -45,3 +45,29 @@ test('collectionPaths 없는 프로젝트는 보수적으로 skip', () => {
   });
   assert.equal(r, null);
 });
+
+test('posttool core: QMD_SANDBOX=true → 무출력 exit 0', () => {
+  const out = execFileSync('python3', ['core/posttool.py'], {
+    input: JSON.stringify({
+      hook_event_name: 'PostToolUse',
+      tool_name: 'Write',
+      tool_input: { file_path: `${PROJ}/04_Manuscript/ep004-상가-음식.md`, content: '4화에 대해서 집필. 도준이 죽었다는 문장을 확인한다.' },
+      cwd: PROJ,
+    }),
+    env: { ...process.env, QMD_SANDBOX: 'true', QMD_QUERY_FIXTURE: 'test/fixtures/daemon-response-ep.json' },
+  });
+  assert.equal(out.toString().trim(), '');
+});
+
+test('posttool core: --sandbox 인자 → 무출력 exit 0', () => {
+  const out = execFileSync('python3', ['core/posttool.py', '--sandbox'], {
+    input: JSON.stringify({
+      hook_event_name: 'PostToolUse',
+      tool_name: 'Write',
+      tool_input: { file_path: `${PROJ}/04_Manuscript/ep004-상가-음식.md`, content: '4화에 대해서 집필. 도준이 죽었다는 문장을 확인한다.' },
+      cwd: PROJ,
+    }),
+  });
+  assert.equal(out.toString().trim(), '');
+});
+

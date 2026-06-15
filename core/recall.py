@@ -142,6 +142,10 @@ def log_score_observation(log_path: str, results: list[dict], collections: list[
         pass
 
 def main():
+    # If QMD_SANDBOX is set or --sandbox option is in sys.argv, exit immediately with no output
+    if os.environ.get("QMD_SANDBOX") or "--sandbox" in sys.argv:
+        return 0
+
     # Parse stdin
     raw = sys.stdin.read().strip()
     if not raw:

@@ -115,6 +115,10 @@ def story_paths_touched(payload: dict, cwd: str, config: dict) -> bool:
     return any(is_story_path(p, cwd, config) for p in paths)
 
 def main():
+    # If QMD_SANDBOX is set or --sandbox option is in sys.argv, exit immediately with no output
+    if os.environ.get("QMD_SANDBOX") or "--sandbox" in sys.argv:
+        return 0
+
     raw = sys.stdin.read().strip()
     if not raw:
         return 0

@@ -78,3 +78,19 @@ test('claude 골든과 포맷 동일', () => {
     fmt(golden.hookSpecificOutput.additionalContext)
   );
 });
+
+test('recall core: QMD_SANDBOX=true → 무출력 exit 0', () => {
+  const out = execFileSync('python3', ['core/recall.py'], {
+    input: JSON.stringify({ prompt: '원오빌 문의 기반 정렬 어떻게 동작해?', cwd: '/Users/dulee/work/axiom' }),
+    env: { ...process.env, QMD_SANDBOX: 'true' },
+  });
+  assert.equal(out.toString().trim(), '');
+});
+
+test('recall core: --sandbox 인자 → 무출력 exit 0', () => {
+  const out = execFileSync('python3', ['core/recall.py', '--sandbox'], {
+    input: JSON.stringify({ prompt: '원오빌 문의 기반 정렬 어떻게 동작해?', cwd: '/Users/dulee/work/axiom' }),
+  });
+  assert.equal(out.toString().trim(), '');
+});
+

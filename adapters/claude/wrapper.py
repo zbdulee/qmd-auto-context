@@ -38,8 +38,8 @@ def should_yield_to_local_recall(raw_input):
     return command_mentions_qmd_recall(user_prompt_hooks)
 
 def main():
-    # If CLAUDE_HEADLESS is set to 1, exit immediately with no output
-    if os.environ.get("CLAUDE_HEADLESS") == "1":
+    # If CLAUDE_HEADLESS is set to 1, CLAUDE_SANDBOX is set, or --sandbox is in sys.argv, exit immediately with no output
+    if os.environ.get("CLAUDE_HEADLESS") == "1" or os.environ.get("CLAUDE_SANDBOX") or "--sandbox" in sys.argv:
         return 0
 
     if len(sys.argv) < 2:

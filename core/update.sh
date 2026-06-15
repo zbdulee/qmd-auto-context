@@ -2,6 +2,17 @@
 # qmd SessionStart core script.
 set -e
 
+# If QMD_SANDBOX is set or --sandbox option is passed, exit immediately with no output
+if [ -n "$QMD_SANDBOX" ]; then
+  exit 0
+fi
+for arg in "$@"; do
+  if [ "$arg" = "--sandbox" ]; then
+    exit 0
+  fi
+done
+
+
 LOG="/tmp/qmd-hook.log"
 LOCKDIR="/tmp/qmd-update.lock.d"
 STATUS="/tmp/qmd-update-status.txt"
