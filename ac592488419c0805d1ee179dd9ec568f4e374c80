@@ -1,0 +1,40 @@
+test/fixtures/golden/README.md
+  056cd74d6d5815f8 1-30
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "ac592488419c0805d1ee179dd9ec568f4e374c80",
+  "prompts": {
+    "056cd74d6d5815f8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "313e93fa-441e-4eb7-9219-b16cc20f59db",
+        "model": "claude-opus-4-8"
+      },
+      "skills": [
+        {
+          "id": "superpowers:brainstorming",
+          "ts": "2026-06-15T10:23:55.281Z"
+        },
+        {
+          "id": "superpowers:writing-plans",
+          "ts": "2026-06-15T11:50:37.312Z"
+        },
+        {
+          "id": "superpowers:subagent-driven-development",
+          "ts": "2026-06-15T11:56:43.837Z"
+        }
+      ],
+      "tool_counts": {
+        "Bash": 33,
+        "Skill": 3,
+        "AskUserQuestion": 7,
+        "Write": 3,
+        "Read": 1
+      },
+      "total_additions": 30,
+      "total_deletions": 0,
+      "overriden_lines": 0
+    }
+  }
+}
