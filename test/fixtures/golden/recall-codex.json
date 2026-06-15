@@ -1,0 +1,6 @@
+{
+  "hookSpecificOutput": {
+    "hookEventName": "UserPromptSubmit",
+    "additionalContext": "관련 문서:\n- [axiom] axiom/mobile/AxiomApp/Library/PackageCache/com-unity-inputsystem-21a28c3a6c83/Documentation/Interactions.md - Interactions\n필요시 참조."
+  }
+}
