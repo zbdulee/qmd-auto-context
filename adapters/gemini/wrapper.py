@@ -34,25 +34,25 @@ def should_yield_to_local_recall(raw_input):
         return False
 
     hooks = settings.get("hooks", {}) if isinstance(settings, dict) else {}
-    if not isinstance(hooks, dict):
-        return False
-
-    return command_mentions_qmd_recall(hooks.get("BeforeAgent")) or command_mentions_qmd_recall(
-        hooks.get("UserPromptSubmit")
-    )
+    before_agent_hooks = hooks.get("BeforeAgent") if isinstance(hooks, dict) else None
+    return command_mentions_qmd_recall(before_agent_hooks)
 
 def main():
+    # If GEMINI_SANDBOX is set, exit immediately with no output
+    if os.environ.get("GEMINI_SANDBOX"):
+        return 0
+
     if len(sys.argv) < 2:
         sys.stderr.write("Usage: wrapper.py <recall|update|posttool>\n")
         return 1
 
     action = sys.argv[1]
     raw_input = sys.stdin.read()
-
+    
     # Resolve core scripts
     base_dir = Path(__file__).parent.parent.parent.resolve()
     core_dir = base_dir / "core"
-
+    
     if action == "recall":
         if should_yield_to_local_recall(raw_input):
             return 0

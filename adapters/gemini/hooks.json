@@ -12,8 +12,8 @@
     ],
     "AfterTool": [
       {
-        "matcher": "write_file|replace",
-        "command": "python3 @@REPO_ROOT@@/adapters/gemini/wrapper.py posttool"
+        "command": "python3 @@REPO_ROOT@@/adapters/gemini/wrapper.py posttool",
+        "matcher": "write_file|replace"
       }
     ]
   }
