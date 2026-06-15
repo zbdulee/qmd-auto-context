@@ -1,0 +1,19 @@
+{
+  "hooks": {
+    "session_start": [
+      {
+        "command": "python3 @@REPO_ROOT@@/adapters/codex/wrapper.py update"
+      }
+    ],
+    "user_prompt_submit": [
+      {
+        "command": "python3 @@REPO_ROOT@@/adapters/codex/wrapper.py recall"
+      }
+    ],
+    "post_tool_use": [
+      {
+        "command": "python3 @@REPO_ROOT@@/adapters/codex/wrapper.py posttool"
+      }
+    ]
+  }
+}
