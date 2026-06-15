@@ -1,0 +1,17 @@
+core/resolve_paths.py
+  h_42d950683aaaea 1-56
+core/update.sh
+  h_42d950683aaaea 1-240
+test/update.test.mjs
+  h_42d950683aaaea 1-27
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "d1a8d3010362a7c2d8600242935ed8e05e8d8b29",
+  "prompts": {},
+  "humans": {
+    "h_42d950683aaaea": {
+      "author": "dulee@zigbang.com"
+    }
+  }
+}
