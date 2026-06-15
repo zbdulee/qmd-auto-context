@@ -1,0 +1,19 @@
+.gitignore
+  h_42d950683aaaea 5-6
+adapters/codex/hooks.json
+  h_42d950683aaaea 1-19
+adapters/codex/wrapper.py
+  h_42d950683aaaea 1-53
+test/adapter-codex.test.mjs
+  h_42d950683aaaea 1-11
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "51705dc6d8a74a6250ca7fea963467d747d29225",
+  "prompts": {},
+  "humans": {
+    "h_42d950683aaaea": {
+      "author": "dulee@zigbang.com"
+    }
+  }
+}
