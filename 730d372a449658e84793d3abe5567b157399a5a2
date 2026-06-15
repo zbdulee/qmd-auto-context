@@ -1,0 +1,15 @@
+install.sh
+  h_42d950683aaaea 1-268
+uninstall.sh
+  h_42d950683aaaea 1-106
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "730d372a449658e84793d3abe5567b157399a5a2",
+  "prompts": {},
+  "humans": {
+    "h_42d950683aaaea": {
+      "author": "dulee@zigbang.com"
+    }
+  }
+}
