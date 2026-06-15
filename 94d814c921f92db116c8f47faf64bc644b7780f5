@@ -1,0 +1,17 @@
+adapters/claude/hooks.json
+  h_42d950683aaaea 1-19
+adapters/claude/wrapper.py
+  h_42d950683aaaea 1-57
+test/adapter-claude.test.mjs
+  h_42d950683aaaea 1-32
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "94d814c921f92db116c8f47faf64bc644b7780f5",
+  "prompts": {},
+  "humans": {
+    "h_42d950683aaaea": {
+      "author": "dulee@zigbang.com"
+    }
+  }
+}
