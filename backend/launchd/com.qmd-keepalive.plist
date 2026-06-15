@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.qmd-keepalive</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>@@HOME@@/.config/qmd/qmd-keepalive.sh</string>
+    </array>
+
+    <!-- 30초마다 vec warm 핑으로 embedding context 유지(~0.6s). -->
+    <key>StartInterval</key>
+    <integer>30</integer>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>QMD_DAEMON_PORT</key>
+        <string>8483</string>
+    </dict>
+</dict>
+</plist>

@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.qmd-mcp-daemon</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>@@HOME@@/.config/qmd/qmd-daemon.sh</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- 재기동 폭주 방지 -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <!-- 핵심: GUI(Aqua) 로그인 세션에 바인딩해야 Metal GPU 셰이더 컴파일이 가능하다.
+         이게 없으면 Background 컨텍스트로 떠서 vec(embedding)가 CPU fallback(30~74s)이 된다. -->
+    <key>LimitLoadToSessionType</key>
+    <string>Aqua</string>
+
+    <key>StandardOutPath</key>
+    <string>@@HOME@@/.cache/qmd/mcp.daemon.log</string>
+    <key>StandardErrorPath</key>
+    <string>@@HOME@@/.cache/qmd/mcp.daemon.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>@@HOME@@</string>
+        <key>QMD_DAEMON_PORT</key>
+        <string>8483</string>
+    </dict>
+</dict>
+</plist>
