@@ -36,23 +36,42 @@ config_path_for() {
 latest_backup_for() {
   local config="$1"
   local latest=""
-  latest="$(ls -t "$config".bak-* 2>/dev/null | head -n 1 || true)"
+  latest="$(ls -t "$config".bak-* 2>/dev/null | grep -v '\.bak-original$' | head -n 1 || true)"
   printf '%s\n' "$latest"
+}
+
+restore_backup() {
+  local platform="$1"
+  local config="$2"
+  local original="${config}.bak-original"
+  local latest
+
+  if [[ -f "$original" ]]; then
+    say "$platform restore 복원 original backup: $original -> $config"
+    if [[ "$DRY_RUN" != "1" ]]; then
+      cp -p "$original" "$config" || say "$platform restore failed: $original -> $config"
+    fi
+    return
+  fi
+
+  latest="$(latest_backup_for "$config")"
+  if [[ -n "$latest" ]]; then
+    say "$platform restore 복원: $latest -> $config"
+    if [[ "$DRY_RUN" != "1" ]]; then
+      cp -p "$latest" "$config" || say "$platform restore failed: $latest -> $config"
+    fi
+    return
+  fi
+
+  say "$platform restore 복원: no .bak restore candidate"
 }
 
 remove_adapter_hooks() {
   local platform="$1"
   local config="$2"
-  local latest
-  latest="$(latest_backup_for "$config")"
 
-  if [[ -n "$latest" ]]; then
-    say "$platform restore 복원: $latest -> $config; remove 제거 adapter hooks via .bak"
-    [[ "$DRY_RUN" == "1" ]] || cp -p "$latest" "$config"
-    return
-  fi
-
-  say "$platform remove 제거 adapter hooks from $config; no .bak restore 복원 candidate"
+  restore_backup "$platform" "$config"
+  say "$platform remove 제거 adapter hooks from $config"
   if [[ "$DRY_RUN" == "1" || ! -f "$config" ]]; then
     return
   fi

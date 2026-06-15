@@ -38,17 +38,17 @@ config_path_for() {
 backup_if_qmd_related() {
   local platform="$1"
   local config="$2"
-  local backup="${config}.bak-${timestamp}"
+  local backup="${config}.bak-original"
 
   if [[ -f "$config" ]]; then
-    if grep -Eiq 'qmd|wrapper\.py|auto-context' "$config"; then
-      say "$platform backup: $config -> $backup"
-      [[ "$DRY_RUN" == "1" ]] || cp -p "$config" "$backup"
+    if [[ -f "$backup" ]]; then
+      say "$platform original backup exists: $backup"
     else
-      say "$platform backup check: $config has no qmd hooks; no .bak needed"
+      say "$platform original backup: $config -> $backup"
+      [[ "$DRY_RUN" == "1" ]] || cp -p "$config" "$backup"
     fi
   else
-    say "$platform backup check: no config at $config; .bak backup would be used if qmd hooks existed"
+    say "$platform original backup check: no config at $config"
   fi
 }
 
@@ -56,19 +56,24 @@ register_hooks() {
   local platform="$1"
   local config="$2"
   local wrapper="$REPO_ROOT/adapters/$platform/wrapper.py"
+  local hooks_json="$REPO_ROOT/adapters/$platform/hooks.json"
 
-  say "$platform hook register: python3 $wrapper"
+  if [[ -f "$hooks_json" ]]; then
+    say "$platform hook register: $hooks_json"
+  else
+    say "$platform hook register: python3 $wrapper"
+  fi
   if [[ "$DRY_RUN" == "1" ]]; then
     return
   fi
 
   mkdir -p "$(dirname "$config")"
-  python3 - "$platform" "$config" "$wrapper" <<'PY'
+  python3 - "$platform" "$config" "$wrapper" "$hooks_json" "$REPO_ROOT" <<'PY'
 import json
 import os
 import sys
 
-platform, config_path, wrapper = sys.argv[1:4]
+platform, config_path, wrapper, hooks_json, repo_root = sys.argv[1:6]
 
 if os.path.exists(config_path):
     try:
@@ -82,31 +87,55 @@ else:
 if not isinstance(data, dict):
     data = {}
 
+def expand_paths(value):
+    if isinstance(value, str):
+        value = value.replace("@@REPO_ROOT@@", repo_root)
+        for prefix in ("adapters/", "./adapters/"):
+            target = prefix[2:] if prefix.startswith("./") else prefix
+            absolute = os.path.join(repo_root, target)
+            if value.startswith(prefix):
+                value = absolute + value[len(prefix):]
+            value = value.replace(f" {prefix}", f" {absolute}")
+        return value
+    if isinstance(value, list):
+        return [expand_paths(item) for item in value]
+    if isinstance(value, dict):
+        return {key: expand_paths(item) for key, item in value.items()}
+    return value
+
+if os.path.exists(hooks_json):
+    with open(hooks_json, "r", encoding="utf-8") as f:
+        template_data = json.load(f)
+    template_hooks = template_data.get("hooks", {})
+    if not isinstance(template_hooks, dict):
+        template_hooks = {}
+    entries = list(expand_paths(template_hooks).items())
+else:
+    entries = {
+        "claude": [
+            ("SessionStart", [{"command": f"python3 {wrapper} update"}]),
+            ("UserPromptSubmit", [{"command": f"python3 {wrapper} recall"}]),
+            ("PostToolUse", [{"command": f"python3 {wrapper} posttool"}]),
+        ],
+        "codex": [
+            ("session_start", [{"command": f"python3 {wrapper} update"}]),
+            ("user_prompt_submit", [{"command": f"python3 {wrapper} recall"}]),
+            ("post_tool_use", [{"command": f"python3 {wrapper} posttool"}]),
+        ],
+        "gemini": [
+            ("SessionStart", [{"command": f"python3 {wrapper} update"}]),
+            ("BeforeAgent", [{"command": f"python3 {wrapper} recall"}]),
+            ("AfterTool", [{"command": f"python3 {wrapper} posttool", "matcher": "write_file|replace"}]),
+        ],
+    }[platform]
+
 hooks = data.setdefault("hooks", {})
 if not isinstance(hooks, dict):
     hooks = {}
     data["hooks"] = hooks
 
-entries = {
-    "claude": [
-        ("SessionStart", {"command": f"python3 {wrapper} update"}),
-        ("UserPromptSubmit", {"command": f"python3 {wrapper} recall"}),
-        ("PostToolUse", {"command": f"python3 {wrapper} posttool"}),
-    ],
-    "codex": [
-        ("session_start", {"command": f"python3 {wrapper} update"}),
-        ("user_prompt_submit", {"command": f"python3 {wrapper} recall"}),
-        ("post_tool_use", {"command": f"python3 {wrapper} posttool"}),
-    ],
-    "gemini": [
-        ("SessionStart", {"command": f"python3 {wrapper} update"}),
-        ("BeforeAgent", {"command": f"python3 {wrapper} recall"}),
-        ("AfterTool", {"command": f"python3 {wrapper} posttool", "matcher": "write_file|replace"}),
-    ],
-}[platform]
-
 needle = f"/adapters/{platform}/wrapper.py"
-for hook_name, entry in entries:
+for hook_name, template_entries in entries:
     current = hooks.get(hook_name, [])
     if not isinstance(current, list):
         current = []
@@ -114,7 +143,10 @@ for hook_name, entry in entries:
         item for item in current
         if not (isinstance(item, dict) and needle in str(item.get("command", "")))
     ]
-    current.append(entry)
+    if isinstance(template_entries, list):
+        current.extend(item for item in template_entries if isinstance(item, dict))
+    elif isinstance(template_entries, dict):
+        current.append(template_entries)
     hooks[hook_name] = current
 
 with open(config_path, "w", encoding="utf-8") as f:
@@ -154,7 +186,7 @@ install_backend() {
     dest="$launch_agents/$name"
     if [[ "$DRY_RUN" == "1" ]]; then
       say "launchd plist plan: replace @@HOME@@ with $HOME in $plist -> $dest"
-      say "launchctl load plan: $dest (skip if already loaded)"
+      say "launchctl load plan: $dest (reload if already loaded and changed)"
     else
       mkdir -p "$launch_agents"
       local tmp
@@ -167,15 +199,23 @@ with open(src, "r", encoding="utf-8") as f:
 with open(dest, "w", encoding="utf-8") as f:
     f.write(content)
 PY
+      local changed=0
       if [[ ! -f "$dest" ]] || ! cmp -s "$tmp" "$dest"; then
         cp "$tmp" "$dest"
+        changed=1
       fi
       rm -f "$tmp"
 
       label="${name%.plist}"
       if command -v launchctl >/dev/null 2>&1; then
         if launchctl list "$label" >/dev/null 2>&1; then
-          say "launchctl load skip: $label already loaded"
+          if [[ "$changed" == "1" ]]; then
+            say "launchctl reload: $label plist changed"
+            launchctl unload "$dest" >/dev/null 2>&1 || true
+            launchctl load "$dest"
+          else
+            say "launchctl load skip: $label already loaded"
+          fi
         else
           launchctl load "$dest"
         fi
@@ -237,9 +277,11 @@ for root, _, files in os.walk(scan_root):
     print(f"{prefix}collectionPaths 마이그레이션 계획: {path} -> {collection_paths}")
     if not dry_run:
         data["collectionPaths"] = collection_paths
-        with open(path, "w", encoding="utf-8") as f:
+        tmp_path = path + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
             f.write("\n")
+        os.replace(tmp_path, path)
 
 if changed == 0:
     print(f"{prefix}collectionPaths 마이그레이션: no changes needed")
