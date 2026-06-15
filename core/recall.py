@@ -4,6 +4,8 @@ import os
 import json
 import urllib.request
 import urllib.error
+import subprocess
+import shutil
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -65,6 +67,33 @@ def qmd_uri_to_collection(uri: str) -> str:
     if uri.startswith("qmd://"):
         return uri[len("qmd://"):].split("/", 1)[0]
     return uri.split("/", 1)[0] if "/" in uri else ""
+
+def run_qmd_cli_fallback(query_text: str, collections: list[str], min_score: float) -> list[dict]:
+    qmd_path = shutil.which("qmd")
+    if not qmd_path:
+        return []
+        
+    results = []
+    for col in collections:
+        cmd = [
+            "qmd", "query", query_text,
+            "-c", col,
+            "--min-score", str(min_score),
+            "--limit", "8"
+        ]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, check=True, stdin=subprocess.DEVNULL)
+            output = proc.stdout.strip()
+            if output:
+                parsed = json.loads(output)
+                if isinstance(parsed, list):
+                    for item in parsed:
+                        if isinstance(item, dict):
+                            item["_collection"] = col
+                            results.append(item)
+        except (subprocess.SubprocessError, json.JSONDecodeError, ValueError):
+            pass
+    return results
 
 def format_context(results: list[dict]) -> str:
     lines = ["관련 문서:"]
@@ -163,39 +192,43 @@ def main():
     else:
         daemon_url = os.environ.get("QMD_DAEMON_URL", DEFAULT_DAEMON_URL)
         if not daemon_alive(daemon_url):
-            return 0
+            min_score = float(config.get("minScore", 0.0))
+            lexical_query = " ".join(deduped_lexical_terms)
+            results = run_qmd_cli_fallback(lexical_query, collections, min_score)
+            if not results:
+                return 0
+        else:
+            lexical_query = " ".join(deduped_lexical_terms)
+            vector_query = re.sub(r"\s+", " ", prompt).strip()
             
-        lexical_query = " ".join(deduped_lexical_terms)
-        vector_query = re.sub(r"\s+", " ", prompt).strip()
-        
-        query_payload = {
-            "searches": [
-                {"type": "lex", "query": lexical_query},
-                {"type": "vec", "query": vector_query},
-            ],
-            "collections": collections,
-            "limit": 8,
-            "minScore": 0,
-            "rerank": False,
-        }
-        
-        data = json.dumps(query_payload).encode("utf-8")
-        req = urllib.request.Request(
-            f"{daemon_url}/query",
-            data=data,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        try:
-            timeout = float(config.get("queryTimeout", QUERY_TIMEOUT))
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                body = resp.read().decode("utf-8")
-            parsed = json.loads(body)
-            results = parsed.get("results", [])
-            if not isinstance(results, list):
-                results = []
-        except (urllib.error.URLError, OSError, ValueError, json.JSONDecodeError):
-            return 0
+            query_payload = {
+                "searches": [
+                    {"type": "lex", "query": lexical_query},
+                    {"type": "vec", "query": vector_query},
+                ],
+                "collections": collections,
+                "limit": 8,
+                "minScore": 0,
+                "rerank": False,
+            }
+            
+            data = json.dumps(query_payload).encode("utf-8")
+            req = urllib.request.Request(
+                f"{daemon_url}/query",
+                data=data,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            try:
+                timeout = float(config.get("queryTimeout", QUERY_TIMEOUT))
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    body = resp.read().decode("utf-8")
+                parsed = json.loads(body)
+                results = parsed.get("results", [])
+                if not isinstance(results, list):
+                    results = []
+            except (urllib.error.URLError, OSError, ValueError, json.JSONDecodeError):
+                return 0
 
     # Log observation if requested
     log_path = os.environ.get("QMD_RECALL_LOG")
