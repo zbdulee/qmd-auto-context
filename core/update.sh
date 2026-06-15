@@ -1,0 +1,240 @@
+#!/usr/bin/env bash
+# qmd SessionStart core script.
+set -e
+
+LOG="/tmp/qmd-hook.log"
+LOCKDIR="/tmp/qmd-update.lock.d"
+STATUS="/tmp/qmd-update-status.txt"
+
+log() {
+  printf "[%s] %s\n" "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >>"$LOG" 2>&1 || true
+}
+
+retry() {
+  local count=0
+  local max=3
+  local output=""
+  while [ $count -lt $max ]; do
+    count=$((count + 1))
+    if output=$("$@" 2>&1); then
+      LAST_OUT="$output"
+      return 0
+    fi
+    log "RETRY ($count/$max) failed: $* - error: $output"
+    sleep 1
+  done
+  LAST_OUT="$output"
+  log "FAIL: $* - final error: $output"
+  return 1
+}
+
+is_risky_path() {
+  case "$1" in
+    /|/Library|/Library/*|/System|/System/*|/private|/private/*|/usr|/usr/*|/bin|/bin/*|/sbin|/sbin/*|/dev|/dev/*|/var|/var/*|/opt|/opt/*|/tmp|/tmp/*)
+      return 0 ;;
+  esac
+  return 1
+}
+
+preflight_remove_risky() {
+  qmd collection list 2>/dev/null | awk '/^[^ ]/ {print $1}' | while read -r name; do
+    [ -z "$name" ] && continue
+    path=$(qmd collection show "$name" 2>/dev/null | awk -F': +' '/^ *Path|^ *Root/ {print $2; exit}')
+    [ -z "$path" ] && continue
+    if is_risky_path "$path"; then
+      log "PREFLIGHT: removing risky collection '$name' (path=$path)"
+      qmd collection remove "$name" >>"$LOG" 2>&1 || true
+    fi
+  done
+}
+
+acquire_lock() {
+  if mkdir "$LOCKDIR" 2>/dev/null; then
+    echo "$$" >"$LOCKDIR/pid"
+    return 0
+  fi
+
+  local pid
+  pid=$(cat "$LOCKDIR/pid" 2>/dev/null || true)
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    return 1
+  fi
+
+  rm -f "$LOCKDIR/pid" 2>/dev/null || true
+  if rmdir "$LOCKDIR" 2>/dev/null && mkdir "$LOCKDIR" 2>/dev/null; then
+    echo "$$" >"$LOCKDIR/pid"
+    log "LOCK: removed stale qmd update lock"
+    return 0
+  fi
+
+  return 1
+}
+
+release_lock() {
+  rm -f "$LOCKDIR/pid" 2>/dev/null || true
+  rmdir "$LOCKDIR" 2>/dev/null || true
+}
+
+write_failure_status() {
+  local cmd="$1"
+  local output="$2"
+  {
+    echo "FAIL at $(date '+%Y-%m-%d %H:%M:%S %Z')"
+    echo "cmd: $cmd"
+
+    local last_col
+    last_col=$(echo "$output" | grep -E '^\[[0-9]+/[0-9]+\] ' | tail -1)
+    [ -n "$last_col" ] && echo "collection: $last_col"
+
+    local err_line err_code err_path
+    err_line=$(echo "$output" | grep -oE 'Error: [A-Z][A-Z0-9_]+: [^]]+' | head -1)
+    [ -n "$err_line" ] && echo "error: $err_line"
+
+    err_code=$(echo "$err_line" | awk '{print $2}' | tr -d ':')
+    err_path=$(echo "$output" | grep -oE "path: '[^']+'" | head -1 | sed "s/path: //;s/^'//;s/'$//")
+    [ -n "$err_path" ] && echo "path: $err_path"
+
+    if [ -n "$last_col" ]; then
+      local col_name
+      col_name=$(echo "$last_col" | awk '{print $2}')
+      case "$err_code" in
+        EACCES|EPERM|ENOENT)
+          echo "suggest: qmd collection remove \"$col_name\""
+          ;;
+        *)
+          echo "suggest: tail -80 $LOG"
+          ;;
+      esac
+    else
+      echo "suggest: tail -80 $LOG"
+    fi
+
+    echo "log: $LOG"
+  } >"$STATUS"
+}
+
+normalize_qmd_path() {
+  [ -d "$HOME/.bun/bin" ] && PATH="$HOME/.bun/bin:$PATH"
+  local fnm_node_bin
+  fnm_node_bin=$(ls -d "$HOME/.local/share/fnm/node-versions"/v*/installation/bin 2>/dev/null | sort -V | tail -1)
+  [ -n "$fnm_node_bin" ] && PATH="$fnm_node_bin:$PATH"
+  export PATH
+}
+
+run_resolve_only() {
+  local cwd="$1"
+  python3 "$(dirname "$0")/resolve_paths.py" --cwd "$cwd"
+}
+
+run_update() {
+  normalize_qmd_path
+  command -v qmd >/dev/null 2>&1 || exit 0
+
+  workdir="$1"
+  cd "$workdir" 2>/dev/null || exit 0
+  
+  log "START: cwd=$workdir"
+
+  if is_risky_path "$workdir"; then
+    log "ABORT: refusing to register risky path '$workdir'"
+    exit 0
+  fi
+
+  # 1. read config from .agents/qmd-recall.json if exists
+  local config_json="{}"
+  if [ -f ".agents/qmd-recall.json" ]; then
+    config_json=$(cat ".agents/qmd-recall.json")
+  fi
+
+  # 2. Get collections and paths via resolve-only logic
+  local resolved
+  resolved=$(echo "$config_json" | bash "$0" --resolve-only --cwd "$workdir")
+  
+  refused=$(echo "$resolved" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("refused"))' 2>/dev/null)
+  if [ "$refused" = "True" ]; then
+    log "ABORT: resolve-only refused path '$workdir'"
+    exit 0
+  fi
+
+  if ! acquire_lock; then
+    log "SKIP: qmd update already running (lock=$LOCKDIR)"
+    exit 0
+  fi
+  trap 'release_lock' EXIT
+
+  preflight_remove_risky
+
+  # 3. Add collections
+  collections_ok=1
+  while read -r name path; do
+    [ -z "$name" ] && continue
+    # Resolve relative path against workdir
+    local full_path="$path"
+    if [[ "$path" != /* ]]; then
+      full_path="$workdir/$path"
+    fi
+    log "ADD COLLECTION: name=$name path=$full_path"
+    retry qmd collection add "$full_path" --name "$name" || collections_ok=0
+  done < <(echo "$resolved" | python3 -c 'import json,sys; [print(f"{e[\"name\"]}\t{e[\"path\"]}") for e in json.load(sys.stdin).get("entries", [])]' 2>/dev/null)
+
+  # 4. update and embed
+  if [ "$collections_ok" = 1 ] && retry qmd update; then
+    rm -f "$STATUS"
+    log "END rc=0"
+    
+    EMBED_LOCK="/tmp/qmd-embed.lock.d"
+    if [ -d "$EMBED_LOCK" ]; then
+      epid="$(cat "$EMBED_LOCK/pid" 2>/dev/null || true)"
+      { [ -z "$epid" ] || ! kill -0 "$epid" 2>/dev/null; } && rm -rf "$EMBED_LOCK" 2>/dev/null
+    fi
+    
+    if ! mkdir "$EMBED_LOCK" 2>/dev/null; then
+      log "EMBED: already running, skip"
+    else
+      LOG="$LOG" EMBED_LOCK="$EMBED_LOCK" nohup bash -c '
+        echo "$$" > "$EMBED_LOCK/pid" 2>/dev/null || true
+        trap "rm -f \"$EMBED_LOCK/pid\" 2>/dev/null; rmdir \"$EMBED_LOCK\" 2>/dev/null" EXIT
+        out=$(qmd embed 2>&1); printf "%s\n" "$out" >> "$LOG"
+        if printf "%s" "$out" | grep -qiE "embedded|chunks"; then
+          launchctl kickstart -k "gui/$(id -u)/com.qmd-mcp-daemon" 2>/dev/null \
+            && printf "[%s] EMBED->daemon kickstart (new embeddings)\n" "$(date +%H:%M:%S)" >> "$LOG"
+        fi
+      ' >/dev/null 2>&1 &
+      log "EMBED: started in background (pid=$!)"
+    fi
+  else
+    write_failure_status "qmd update" "$LAST_OUT"
+    log "END rc=1 - status written to $STATUS"
+  fi
+}
+
+main() {
+  raw=$(cat)
+  workdir=$(printf '%s' "$raw" | python3 -c 'import json,sys,os; print((json.load(sys.stdin).get("cwd") or os.getcwd()))' 2>/dev/null)
+  [ -z "$workdir" ] && workdir="$PWD"
+
+  if [ -f "$STATUS" ]; then
+    echo "qmd previous update failed: $(cat "$STATUS")"
+  fi
+
+  nohup bash "$0" --worker "$workdir" </dev/null >>"$LOG" 2>&1 &
+  exit 0
+}
+
+# Resolve-only CLI switch
+if [ "$1" = "--resolve-only" ]; then
+  shift
+  cwd="$PWD"
+  if [ "$1" = "--cwd" ]; then
+    cwd="$2"
+  fi
+  run_resolve_only "$cwd"
+  exit 0
+fi
+
+if [ "$1" = "--worker" ]; then
+  shift
+  run_update "${1:-$PWD}"
+else
+  main
+fi
