@@ -142,9 +142,11 @@ load_config_json() {
   local dir prev=""
   dir=$(cd "$1" 2>/dev/null && pwd) || dir="$1"
   while [ -n "$dir" ] && [ "$dir" != "/" ] && [ "$dir" != "$prev" ]; do
+    if [ -f "$dir/.auto-context.json" ]; then
+      cat "$dir/.auto-context.json"; return
+    fi
     if [ -f "$dir/.agents/qmd-recall.json" ]; then
-      cat "$dir/.agents/qmd-recall.json"
-      return
+      cat "$dir/.agents/qmd-recall.json"; return
     fi
     [ "$dir" = "$HOME" ] && break
     prev="$dir"
@@ -297,33 +299,41 @@ main() {
   exit 0
 }
 
-if [ "$1" = "--optout" ]; then
-  target="${2:-$PWD}"
-  python3 "$(dirname "$0")/optin.py" optout "$target"
-  exit 0
-fi
-
-if [ "$1" = "--optin" ]; then
-  target="${2:-$PWD}"
-  # 동의 = 명시 설정 생성(원자적·JSON-safe). 이후 "collections 있음" 경로로 인덱싱+자동갱신.
-  python3 - "$target" <<'PY'
+if [ "$1" = "--optin" ] || [ "$1" = "--optout" ]; then
+  mode="$1"; target="${2:-$PWD}"
+  python3 - "$mode" "$target" <<'PY'
 import json, os, sys, tempfile
 from pathlib import Path
-target = Path(sys.argv[1])
-agents = target / ".agents"
-agents.mkdir(parents=True, exist_ok=True)
-name = target.name.replace(" ", "-")
-dest = agents / "qmd-recall.json"
-fd, tmp = tempfile.mkstemp(dir=str(agents), prefix=".qmd-recall.", suffix=".tmp")
+mode, target = sys.argv[1], Path(sys.argv[2])
+dest = target / ".auto-context.json"
+legacy = target / ".agents" / "qmd-recall.json"
+base = {}
+for src in (dest, legacy):
+    if src.exists():
+        try:
+            base = json.loads(src.read_text())
+            if not isinstance(base, dict): base = {}
+        except (OSError, json.JSONDecodeError): base = {}
+        break
+if mode == "--optin":
+    base["indexing"] = True
+    if not base.get("collections"):
+        base["collections"] = [target.name.replace(" ", "-")]
+    msg = f"[qmd] opt-in 완료: {target} ({base['collections']}). 다음 세션부터 인덱싱됩니다."
+else:
+    base["indexing"] = False
+    msg = f"[qmd] opt-out 완료: {target}. 이 폴더는 인덱싱·검색하지 않습니다."
+target.mkdir(parents=True, exist_ok=True)
+fd, tmp = tempfile.mkstemp(dir=str(target), prefix=".auto-context.", suffix=".tmp")
 try:
     with os.fdopen(fd, "w") as fh:
-        json.dump({"collections": [name]}, fh, ensure_ascii=False)
+        json.dump(base, fh, ensure_ascii=False, indent=2)
     os.replace(tmp, dest)
 except BaseException:
     try: os.unlink(tmp)
     except OSError: pass
     raise
-print(f"[qmd] opt-in 완료: {target} ({name}). 다음 세션부터 인덱싱됩니다.")
+print(msg)
 PY
   exit 0
 fi
