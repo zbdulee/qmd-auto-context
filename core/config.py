@@ -125,6 +125,54 @@ def normalize_config(input_config):
     return config
 
 
+def _is_within(path, root):
+    from pathlib import Path
+    try:
+        Path(path).relative_to(Path(root))
+        return True
+    except ValueError:
+        return False
+
+
+def load_project_config(cwd):
+    """cwd→부모(HOME 경계)로 .auto-context.json 우선, 없으면 레거시 .agents/qmd-recall.json 탐색.
+    indexing:false 면 collections=[] (검색/인덱싱 skip). 못 찾으면 빈 설정(collections=[])."""
+    from pathlib import Path
+    path = Path(cwd).resolve()
+    home = Path.home().resolve()
+    # HOME 하위면 부모까지, 아니면 cwd만 검사
+    if _is_within(path, home):
+        search = [path]
+        for parent in path.parents:
+            search.append(parent)
+            if parent == home:
+                break
+    else:
+        search = [path]
+    config_file = None
+    for d in search:
+        cand = d / ".auto-context.json"
+        legacy = d / ".agents" / "qmd-recall.json"
+        if cand.exists():
+            config_file = cand
+            break
+        if legacy.exists():
+            config_file = legacy
+            break
+    if config_file:
+        try:
+            with open(config_file, "r", encoding="utf-8") as f:
+                config = normalize_config(json.load(f))
+            if config.get("indexing") is False:
+                config["collections"] = []
+            return config
+        except (json.JSONDecodeError, OSError):
+            pass
+    fallback = normalize_config({})
+    fallback["collections"] = []
+    return fallback
+
+
 def main():
     parser = argparse.ArgumentParser(description="Normalize qmd recall configuration.")
     parser.add_argument("--cwd", required=True)

@@ -132,29 +132,9 @@ def main():
         return 0
 
     cwd = payload.get("cwd") or os.getcwd()
-    
-    # Load config to get collection paths
-    # Same logic as recall.py
-    path = Path(cwd).resolve()
-    config_file = None
-    target = path / ".agents" / "qmd-recall.json"
-    if target.exists():
-        config_file = target
-    else:
-        for parent in path.parents:
-            target = parent / ".agents" / "qmd-recall.json"
-            if target.exists():
-                config_file = target
-                break
-                
-    if config_file:
-        try:
-            with open(config_file, "r", encoding="utf-8") as f:
-                config = qmd_config.normalize_config(json.load(f))
-        except (json.JSONDecodeError, OSError):
-            config = qmd_config.normalize_config({})
-    else:
-        config = qmd_config.normalize_config({})
+
+    # Load config to get collection paths (.auto-context.json 우선, 레거시 fallback, indexing:false skip)
+    config = qmd_config.load_project_config(cwd)
 
     if not qmd_config.event_enabled(config, "postToolUse"):
         return 0

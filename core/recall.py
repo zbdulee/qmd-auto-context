@@ -26,39 +26,7 @@ def daemon_alive(daemon_url: str) -> bool:
         return False
 
 def load_project_config(cwd: str) -> dict:
-    path = Path(cwd).resolve()
-    home = Path.home().resolve()
-    config_file = None
-    # .auto-context.json 우선, 없으면 레거시 .agents/qmd-recall.json. cwd→부모, HOME 경계.
-    search = [path] + list(path.parents)
-    for d in search:
-        cand = d / ".auto-context.json"
-        legacy = d / ".agents" / "qmd-recall.json"
-        if cand.exists():
-            config_file = cand
-            break
-        if legacy.exists():
-            config_file = legacy
-            break
-        if d.resolve() == home:
-            break
-
-    if config_file:
-        try:
-            with open(config_file, "r", encoding="utf-8") as f:
-                parsed = json.load(f)
-            config = qmd_config.normalize_config(parsed)
-            # 거절(indexing:false)이면 검색도 skip
-            if config.get("indexing") is False:
-                config["collections"] = []
-            return config
-        except (json.JSONDecodeError, OSError):
-            pass
-
-    # 파일 없음(pending) → 검색 skip (fallback collection 만들지 않음)
-    fallback = qmd_config.normalize_config({})
-    fallback["collections"] = []
-    return fallback
+    return qmd_config.load_project_config(cwd)
 
 def qmd_uri_to_filepath(uri: str) -> str:
     if uri.startswith("qmd://"):

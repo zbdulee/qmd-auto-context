@@ -98,3 +98,50 @@ test('posttool core: --sandbox 인자 → 무출력 exit 0', () => {
   });
   assert.equal(out.toString().trim(), '');
 });
+
+test('posttool: .auto-context.json indexing:false → 빈 출력(skip)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pt-out-'));
+  mkdirSync(join(dir, '04_Manuscript'), { recursive: true });
+  writeFileSync(join(dir, '.auto-context.json'), JSON.stringify({
+    indexing: false,
+    collections: ['story-manuscript'],
+    collectionPaths: { 'story-manuscript': '04_Manuscript' },
+  }));
+  try {
+    const out = execFileSync('python3', ['core/posttool.py'], {
+      input: JSON.stringify({
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Write',
+        tool_input: { file_path: join(dir, '04_Manuscript', 'ep001.md'), content: '충분히 긴 산문 텍스트입니다 indexing false 테스트' },
+        cwd: dir,
+      }),
+      encoding: 'utf8',
+      env: { ...process.env, QMD_QUERY_FIXTURE: 'test/fixtures/daemon-response-ep.json' },
+    });
+    assert.equal(out.trim(), '');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('posttool: .auto-context.json indexing:true + collectionPaths → PostToolUse hint', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pt-acj-'));
+  mkdirSync(join(dir, '04_Manuscript'), { recursive: true });
+  writeFileSync(join(dir, '.auto-context.json'), JSON.stringify({
+    indexing: true,
+    collections: ['story-manuscript'],
+    collectionPaths: { 'story-manuscript': '04_Manuscript' },
+  }));
+  try {
+    const r = posttool({
+      hook_event_name: 'PostToolUse',
+      tool_name: 'Write',
+      tool_input: { file_path: join(dir, '04_Manuscript', 'ep001.md'), content: '충분히 긴 산문 텍스트입니다 도준이 죽었다는 장면' },
+      cwd: dir,
+    });
+    assert.ok(r, '.auto-context.json collectionPaths 기반 story path 인식 실패');
+    assert.equal(r.hookSpecificOutput.hookEventName, 'PostToolUse');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
