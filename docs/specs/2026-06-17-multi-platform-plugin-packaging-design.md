@@ -176,6 +176,7 @@ selection 로그(`QMD_RECALL_LOG`) 등 기존 코어 동작 유지.
 1. ~~디스패처 bash vs python~~ → **결정**: `dirname "$0"` 기반 디스패처(Codex·agy 일치). 언어는 bash polyglot 우선 검토.
 2. ~~백엔드 자동 vs 명시~~ → **결정**: 헬스체크+안내 기본, 자동 기동/설치 opt-in.
 3. ~~yield 제거~~ → 마이그레이션 중복 제거로 흡수, 플러그인 단독 시 제거.
-4. marketplace 호스팅: 이 repo `zbdulee/auto-context` public 공개 여부 (사용자 확인 대기).
+4. ~~marketplace 호스팅 public 여부~~ → **결정**: repo `zbdulee/auto-context`를 **public 공개**.
+   `claude/codex plugin marketplace add zbdulee/auto-context` 기반 배포. agy는 git clone 후 로컬 설치.
 5. ~~agy hooks 참조 방식~~ → **결정**: 루트 `plugin.json` + 루트 `hooks.json`, posttool만(§6).
 6. (신규) agy posttool을 글로벌이 아닌 프로젝트 로컬 `.agents/hooks.json`로만 설치하는 UX — install 안내/자동화 범위.
