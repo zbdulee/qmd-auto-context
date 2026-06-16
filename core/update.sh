@@ -39,13 +39,11 @@ retry() {
   return 1
 }
 
-# preflight는 "위험 경로(risky)"인 기존 컬렉션만 제거한다.
-# pending(미동의)은 사용자가 의도적으로 추가한 컬렉션일 수 있으므로 건드리지 않는다.
 path_refused_by_resolver() {
   local candidate="$1"
   local resolved
   resolved=$(printf '{}' | python3 "$(dirname "$0")/resolve_paths.py" --cwd "$candidate" 2>/dev/null || true)
-  [ "$(echo "$resolved" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("reason"))' 2>/dev/null)" = "risky" ]
+  [ "$(echo "$resolved" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("refused"))' 2>/dev/null)" = "True" ]
 }
 
 preflight_remove_risky() {
@@ -139,16 +137,12 @@ run_resolve_only() {
 }
 
 load_config_json() {
-  local dir="$1"
-  while [ -n "$dir" ] && [ "$dir" != "/" ]; do
-    if [ -f "$dir/.agents/qmd-recall.json" ]; then
-      cat "$dir/.agents/qmd-recall.json"
-      return
-    fi
-    [ "$dir" = "$HOME" ] && break
-    dir="$(dirname "$dir")"
-  done
-  printf '{}'
+  local workdir="$1"
+  if [ -f "$workdir/.agents/qmd-recall.json" ]; then
+    cat "$workdir/.agents/qmd-recall.json"
+  else
+    printf '{}'
+  fi
 }
 
 config_event_enabled() {
@@ -275,56 +269,9 @@ main() {
     echo "qmd previous update failed: $(cat "$STATUS")"
   fi
 
-  # opt-in 게이트: 미설정(pending)·거절(optout)·위험(risky) 폴더는 인덱싱하지 않는다.
-  resolved=$(echo "$config_json" | bash "$0" --resolve-only --cwd "$workdir" 2>/dev/null || echo '{}')
-  reason=$(echo "$resolved" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("reason") or "")' 2>/dev/null)
-  if [ "$reason" = "pending" ]; then
-    suggested=$(echo "$resolved" | python3 -c 'import json,sys; print((json.load(sys.stdin).get("prompt") or {}).get("suggestedRoot",""))' 2>/dev/null)
-    helper="bash $(cd "$(dirname "$0")" && pwd)/update.sh"
-    echo "[qmd] 이 폴더는 아직 검색 인덱스에 등록되지 않았습니다."
-    printf '      인덱싱하려면:    %s --optin %q\n' "$helper" "$suggested"
-    printf '      다시 묻지 않으려면: %s --optout %q\n' "$helper" "$workdir"
-    echo "      사용자에게 인덱싱할지 물어보고, 답에 따라 위 명령 중 하나를 실행하세요."
-    exit 0
-  fi
-  if [ "$reason" = "optout" ] || [ "$reason" = "risky" ]; then
-    exit 0
-  fi
-
   nohup bash "$0" --worker "$workdir" </dev/null >>"$LOG" 2>&1 &
   exit 0
 }
-
-if [ "$1" = "--optout" ]; then
-  target="${2:-$PWD}"
-  python3 "$(dirname "$0")/optin.py" optout "$target"
-  exit 0
-fi
-
-if [ "$1" = "--optin" ]; then
-  target="${2:-$PWD}"
-  # 동의 = 명시 설정 생성(원자적·JSON-safe). 이후 "collections 있음" 경로로 인덱싱+자동갱신.
-  python3 - "$target" <<'PY'
-import json, os, sys, tempfile
-from pathlib import Path
-target = Path(sys.argv[1])
-agents = target / ".agents"
-agents.mkdir(parents=True, exist_ok=True)
-name = target.name.replace(" ", "-")
-dest = agents / "qmd-recall.json"
-fd, tmp = tempfile.mkstemp(dir=str(agents), prefix=".qmd-recall.", suffix=".tmp")
-try:
-    with os.fdopen(fd, "w") as fh:
-        json.dump({"collections": [name]}, fh, ensure_ascii=False)
-    os.replace(tmp, dest)
-except BaseException:
-    try: os.unlink(tmp)
-    except OSError: pass
-    raise
-print(f"[qmd] opt-in 완료: {target} ({name}). 다음 세션부터 인덱싱됩니다.")
-PY
-  exit 0
-fi
 
 # Resolve-only CLI switch
 if [ "$1" = "--resolve-only" ]; then

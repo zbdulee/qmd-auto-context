@@ -4,16 +4,10 @@ import json
 import fnmatch
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import optin
-
-
 def is_risky_path(path_str):
     p = Path(path_str).resolve()
-    if p == Path.home().resolve():          # HOME 자체는 인덱싱 금지
-        return True
     risky_prefixes = [
-        "/", "/Library", "/System", "/private", "/usr",
+        "/", "/Library", "/System", "/private", "/usr", 
         "/bin", "/sbin", "/dev", "/var", "/opt", "/tmp"
     ]
     for prefix in risky_prefixes:
@@ -21,26 +15,12 @@ def is_risky_path(path_str):
             return True
     return False
 
-
 def is_within(path: Path, root: Path) -> bool:
     try:
         path.relative_to(root)
         return True
     except ValueError:
         return False
-
-
-def find_git_root(cwd: Path, home: Path) -> Path:
-    """cwd에서 위로 .git을 찾는다. HOME 위로는 안 올라가고, 못 찾으면 cwd."""
-    if not is_within(cwd, home):
-        return cwd
-    cur = cwd
-    while cur != home and cur != cur.parent:
-        if (cur / ".git").exists():
-            return cur
-        cur = cur.parent
-    return cwd
-
 
 def allowed_roots(config: dict) -> list[Path]:
     roots = config.get("allowRoots", [])
@@ -56,7 +36,6 @@ def allowed_roots(config: dict) -> list[Path]:
             continue
     return resolved
 
-
 def safe_collection_path(cwd: Path, path_str: str, roots: list[Path]) -> bool:
     try:
         candidate = Path(path_str).expanduser()
@@ -67,16 +46,15 @@ def safe_collection_path(cwd: Path, path_str: str, roots: list[Path]) -> bool:
         return False
     return is_within(resolved, cwd) or any(is_within(resolved, root) for root in roots)
 
-
 def resolve_paths(cwd_str, config_json):
     if is_risky_path(cwd_str):
-        return {"refused": True, "reason": "risky", "entries": []}
-
+        return {"refused": True, "entries": []}
+        
     try:
         config = json.loads(config_json) if config_json else {}
     except json.JSONDecodeError:
         config = {}
-
+        
     collections = config.get("collections", [])
     collection_paths = config.get("collectionPaths", {})
     if not isinstance(collections, list):
@@ -85,19 +63,11 @@ def resolve_paths(cwd_str, config_json):
         collection_paths = {}
     cwd = Path(cwd_str).resolve()
     roots = allowed_roots(config)
-
+    
     if not collections:
-        # 동의 없는 폴더: 자동 인덱싱하지 않는다.
-        if optin.get_state(str(cwd)) == "out":
-            return {"refused": True, "reason": "optout", "entries": []}
-        suggested = find_git_root(cwd, Path.home().resolve())
-        return {
-            "refused": True,
-            "reason": "pending",
-            "entries": [],
-            "prompt": {"cwd": str(cwd), "suggestedRoot": str(suggested)},
-        }
-
+        name = Path(cwd_str).name.replace(" ", "-")
+        return {"refused": False, "entries": [{"name": name, "path": "."}]}
+        
     entries = []
     for col in collections:
         matched_path = "."
@@ -109,20 +79,18 @@ def resolve_paths(cwd_str, config_json):
             print(f"skip unsafe collectionPath: {col} -> {matched_path}", file=sys.stderr)
             continue
         entries.append({"name": col, "path": matched_path})
-
+        
     return {"refused": False, "entries": entries}
-
 
 def main():
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--cwd", required=True)
     args = parser.parse_args()
-
+    
     config_json = sys.stdin.read().strip()
     result = resolve_paths(args.cwd, config_json)
     print(json.dumps(result, ensure_ascii=False))
-
 
 if __name__ == "__main__":
     main()
