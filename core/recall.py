@@ -53,9 +53,11 @@ def load_project_config(cwd: str) -> dict:
         except (json.JSONDecodeError, OSError):
             pass
 
-    # Default fallback config
+    # opt-in 게이트 일치: 명시 설정(.agents/qmd-recall.json)이 없는 폴더는 미동의로 본다.
+    # fallback collection 을 만들지 않는다 — 미동의 폴더는 인덱싱도 안 되므로 검색이 무의미하고,
+    # 우연히 동명(basename) collection 이 있으면 무관한 결과가 섞일 수 있다. (resolve_paths 의 pending 과 동일 취지)
     fallback = qmd_config.normalize_config({})
-    fallback["collections"] = [path.name.replace(" ", "-")]
+    fallback["collections"] = []
     return fallback
 
 def qmd_uri_to_filepath(uri: str) -> str:

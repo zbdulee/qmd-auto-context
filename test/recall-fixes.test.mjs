@@ -32,7 +32,7 @@ test('Critical-1: 데몬 부재 시 graceful skip (빠르게 null)', () => {
 
 test('Medium: prefix 하위호환 — 하이픈 컬렉션은 기본 full prefix', () => {
   const r = recall(
-    { prompt: '원오빌 문의 기반 정렬 어떻게 동작해?', cwd: '/tmp/my-project' },
+    { prompt: '원오빌 문의 기반 정렬 어떻게 동작해?', cwd: 'test/fixtures/proj'},
     { QMD_QUERY_FIXTURE: 'test/fixtures/daemon-response-hyphen.json' },
   );
   assert.ok(r);
@@ -42,7 +42,7 @@ test('Medium: prefix 하위호환 — 하이픈 컬렉션은 기본 full prefix'
 
 test('Medium: prefixStyle="tag" 옵션이면 마지막 세그먼트만', () => {
   const r = recall(
-    { prompt: '원오빌 문의 기반 정렬 어떻게 동작해?', cwd: '/tmp/my-project' },
+    { prompt: '원오빌 문의 기반 정렬 어떻게 동작해?', cwd: 'test/fixtures/proj'},
     { QMD_QUERY_FIXTURE: 'test/fixtures/daemon-response-hyphen.json', QMD_PREFIX_STYLE: 'tag' },
   );
   assert.ok(r);

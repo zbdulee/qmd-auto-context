@@ -17,14 +17,14 @@ function runWrapper(action, payload, env = {}) {
 
 test('CLAUDE_HEADLESS=1 → 무출력 exit 0', () => {
   const out = execFileSync('python3', ['adapters/claude/wrapper.py', 'recall'], {
-    input: JSON.stringify({ prompt: '원오빌 문의 정렬 동작', cwd: '/Users/dulee/work/axiom' }),
+    input: JSON.stringify({ prompt: '원오빌 문의 정렬 동작', cwd: 'test/fixtures/proj' }),
     env: { ...process.env, CLAUDE_HEADLESS: '1', QMD_QUERY_FIXTURE: 'test/fixtures/daemon-response.json' },
   });
   assert.equal(out.toString().trim(), '');
 });
 
 test('recall 위임 → engine=claude 라벨 주입', () => {
-  const r = runWrapper('recall', { prompt: '원오빌 문의 정렬 동작', cwd: '/Users/dulee/work/axiom' }, {
+  const r = runWrapper('recall', { prompt: '원오빌 문의 정렬 동작', cwd: 'test/fixtures/proj' }, {
     QMD_QUERY_FIXTURE: 'test/fixtures/daemon-response.json'
   });
   assert.ok(r);
@@ -33,7 +33,7 @@ test('recall 위임 → engine=claude 라벨 주입', () => {
 
 test('CLAUDE_SANDBOX=true → 무출력 exit 0', () => {
   const out = execFileSync('python3', ['adapters/claude/wrapper.py', 'recall'], {
-    input: JSON.stringify({ prompt: '원오빌 문의 정렬 동작', cwd: '/Users/dulee/work/axiom' }),
+    input: JSON.stringify({ prompt: '원오빌 문의 정렬 동작', cwd: 'test/fixtures/proj' }),
     env: { ...process.env, CLAUDE_SANDBOX: 'true', QMD_QUERY_FIXTURE: 'test/fixtures/daemon-response.json' },
   });
   assert.equal(out.toString().trim(), '');
@@ -41,7 +41,7 @@ test('CLAUDE_SANDBOX=true → 무출력 exit 0', () => {
 
 test('claude 어댑터: --sandbox 인자가 들어오면 즉시 우회 → 빈 출력', () => {
   const out = execFileSync('python3', ['adapters/claude/wrapper.py', 'recall', '--sandbox'], {
-    input: JSON.stringify({ prompt: '원오빌 문의 정렬 동작', cwd: '/Users/dulee/work/axiom' }),
+    input: JSON.stringify({ prompt: '원오빌 문의 정렬 동작', cwd: 'test/fixtures/proj' }),
   });
   assert.equal(out.toString().trim(), '');
 });
