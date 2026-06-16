@@ -16,8 +16,9 @@ SIZE=$(stat -f%z "$LOG" 2>/dev/null || echo 0)
 [ "$SIZE" -lt "$MAX_BYTES" ] && exit 0
 
 mv -f "$LOG" "$LOG.1" 2>/dev/null || exit 0
-# KeepAlive 데몬을 kickstart -k 로 재시작 → fd 닫히고 launchd 가 새 LOG 를 연다(sparse 문제 없음).
-if ! launchctl kickstart -k "gui/$(/usr/bin/id -u)/com.qmd-mcp-daemon" 2>/dev/null; then
+# KeepAlive 데몬을 SIGTERM 으로 graceful 재시작 → fd 닫히고 launchd 가 새 LOG 를 연다(sparse 문제 없음).
+# (SIGKILL 강제종료는 SQLite clean close 를 막아 WAL checkpoint 누락 → WAL 누적. update.sh 와 동일 이슈)
+if ! launchctl kill TERM "gui/$(/usr/bin/id -u)/com.qmd-mcp-daemon" 2>/dev/null; then
   # 재시작 실패 시 원복(데몬이 옛 inode=.1 에 계속 쓰므로 로그 연속성 유지)
   mv -f "$LOG.1" "$LOG" 2>/dev/null || true
 fi

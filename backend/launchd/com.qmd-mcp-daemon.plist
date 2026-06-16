@@ -9,7 +9,7 @@
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>@@HOME@@/.config/qmd/qmd-daemon.sh</string>
+        <string>@@HOME@@/.config/qmd/daemon.sh</string>
     </array>
 
     <key>RunAtLoad</key>
@@ -17,6 +17,10 @@
 
     <key>KeepAlive</key>
     <true/>
+
+    <!-- SQLite WAL checkpoint용 graceful shutdown 최대 대기시간 30초 지정 -->
+    <key>ExitTimeOut</key>
+    <integer>30</integer>
 
     <!-- 재기동 폭주 방지 -->
     <key>ThrottleInterval</key>
