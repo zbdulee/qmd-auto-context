@@ -4,12 +4,10 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 
-function resolvePaths(cwd, configJson, optinFile) {
-  // update.sh --resolve-only: qmd 미실행, 컬렉션→경로 매핑 결과만 stdout JSON
-  const env = optinFile !== undefined
-    ? { ...process.env, QMD_OPTIN_FILE: optinFile }
-    : process.env;
-  const out = execFileSync('bash', ['core/update.sh', '--resolve-only', '--cwd', cwd], { input: configJson, env });
+function resolvePaths(cwd, configJson) {
+  // update.sh --resolve-only: qmd 미실행, 컬렉션→경로 매핑 결과만 stdout JSON.
+  // 상태(pending/optout/동의)는 stdin config의 indexing/collections로만 판정(파일/전역 안 읽음).
+  const out = execFileSync('bash', ['core/update.sh', '--resolve-only', '--cwd', cwd], { input: configJson });
   return JSON.parse(out.toString());
 }
 
@@ -26,16 +24,11 @@ test('collectionPaths 매핑 해석 (novel 패턴)', () => {
 });
 
 test('설정 없으면 인덱싱하지 않고 pending', () => {
-  const tmpDir = mkdtempSync(join(process.cwd(), '.tmp-qmd-pending-'));
-  try {
-    const emptyOptinFile = join(tmpDir, 'optin.json');
-    const r = resolvePaths('/Users/dulee/work/axiom', '', emptyOptinFile);
-    assert.equal(r.refused, true);
-    assert.equal(r.reason, 'pending');
-    assert.deepEqual(r.entries, []);
-  } finally {
-    rmSync(tmpDir, { recursive: true, force: true });
-  }
+  // 빈 config(파일 없음) → pending. resolve_paths는 stdin config만 보므로 전역 파일 불필요.
+  const r = resolvePaths('/Users/dulee/work/axiom', '');
+  assert.equal(r.refused, true);
+  assert.equal(r.reason, 'pending');
+  assert.deepEqual(r.entries, []);
 });
 
 test('risky 시스템 경로 거부', () => {
