@@ -151,3 +151,30 @@ test('recall core: --sandbox 인자 → 무출력 exit 0', () => {
   });
   assert.equal(out.toString().trim(), '');
 });
+
+test('.auto-context.json indexing:true → recall 동작', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'qmd-r-'));
+  writeFileSync(join(dir, '.auto-context.json'), JSON.stringify({ indexing: true, collections: ['axiom'] }));
+  try {
+    const r = recall({ prompt: '원오빌 문의 기반 정렬 어떻게 동작해?', cwd: dir });
+    assert.match(r.hookSpecificOutput.additionalContext, /\[axiom\]/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('.auto-context.json indexing:false → recall 빈 출력', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'qmd-rf-'));
+  writeFileSync(join(dir, '.auto-context.json'), JSON.stringify({ indexing: false, collections: ['axiom'] }));
+  try {
+    assert.equal(recall({ prompt: '원오빌 문의 기반 정렬 어떻게 동작해?', cwd: dir }), null);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('레거시 .agents/qmd-recall.json → recall 동작(하위호환)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'qmd-rl-'));
+  mkdirSync(join(dir, '.agents'), { recursive: true });
+  writeFileSync(join(dir, '.agents', 'qmd-recall.json'), JSON.stringify({ collections: ['axiom'] }));
+  try {
+    const r = recall({ prompt: '원오빌 문의 기반 정렬 어떻게 동작해?', cwd: dir });
+    assert.match(r.hookSpecificOutput.additionalContext, /\[axiom\]/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

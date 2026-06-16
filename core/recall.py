@@ -26,36 +26,36 @@ def daemon_alive(daemon_url: str) -> bool:
         return False
 
 def load_project_config(cwd: str) -> dict:
-    # Look for .agents/qmd-recall.json under cwd or its parent directories (global to local search)
     path = Path(cwd).resolve()
+    home = Path.home().resolve()
     config_file = None
-    
-    # Simple check under current directory first
-    target = path / ".agents" / "qmd-recall.json"
-    if target.exists():
-        config_file = target
-    else:
-        # Traverse upwards to find .agents/qmd-recall.json, stop at HOME
-        home = Path.home().resolve()
-        for parent in path.parents:
-            target = parent / ".agents" / "qmd-recall.json"
-            if target.exists():
-                config_file = target
-                break
-            if parent.resolve() == home:
-                break
-                
+    # .auto-context.json 우선, 없으면 레거시 .agents/qmd-recall.json. cwd→부모, HOME 경계.
+    search = [path] + list(path.parents)
+    for d in search:
+        cand = d / ".auto-context.json"
+        legacy = d / ".agents" / "qmd-recall.json"
+        if cand.exists():
+            config_file = cand
+            break
+        if legacy.exists():
+            config_file = legacy
+            break
+        if d.resolve() == home:
+            break
+
     if config_file:
         try:
             with open(config_file, "r", encoding="utf-8") as f:
                 parsed = json.load(f)
-                return qmd_config.normalize_config(parsed)
+            config = qmd_config.normalize_config(parsed)
+            # 거절(indexing:false)이면 검색도 skip
+            if config.get("indexing") is False:
+                config["collections"] = []
+            return config
         except (json.JSONDecodeError, OSError):
             pass
 
-    # opt-in 게이트 일치: 명시 설정(.agents/qmd-recall.json)이 없는 폴더는 미동의로 본다.
-    # fallback collection 을 만들지 않는다 — 미동의 폴더는 인덱싱도 안 되므로 검색이 무의미하고,
-    # 우연히 동명(basename) collection 이 있으면 무관한 결과가 섞일 수 있다. (resolve_paths 의 pending 과 동일 취지)
+    # 파일 없음(pending) → 검색 skip (fallback collection 만들지 않음)
     fallback = qmd_config.normalize_config({})
     fallback["collections"] = []
     return fallback
