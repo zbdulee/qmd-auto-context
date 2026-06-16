@@ -114,6 +114,9 @@ def normalize_config(input_config):
         config["events"] = list(DEFAULT_CONFIG["events"])
 
     val = input_config.get("indexing")
+    if isinstance(val, str):                      # "true"/"false" 문자열만 boolean으로 강제, 그 외는 None
+        low = val.strip().lower()
+        val = True if low == "true" else (False if low == "false" else None)
     config["indexing"] = val if isinstance(val, bool) else None
 
     if "lexicalPatterns" in input_config:
@@ -140,15 +143,15 @@ def load_project_config(cwd):
     from pathlib import Path
     path = Path(cwd).resolve()
     home = Path.home().resolve()
-    # HOME 하위면 부모까지, 아니면 cwd만 검사
-    if _is_within(path, home):
+    # HOME 자체이거나 HOME 밖이면 cwd만; HOME 하위면 HOME까지만 부모 탐색.
+    if path == home or not _is_within(path, home):
+        search = [path]
+    else:
         search = [path]
         for parent in path.parents:
             search.append(parent)
             if parent == home:
                 break
-    else:
-        search = [path]
     config_file = None
     for d in search:
         cand = d / ".auto-context.json"

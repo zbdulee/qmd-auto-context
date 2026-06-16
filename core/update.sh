@@ -312,12 +312,14 @@ mode, target = sys.argv[1], Path(sys.argv[2])
 dest = target / ".auto-context.json"
 legacy = target / ".agents" / "qmd-recall.json"
 base = {}
+used_legacy = False
 for src in (dest, legacy):
     if src.exists():
         try:
             base = json.loads(src.read_text())
             if not isinstance(base, dict): base = {}
         except (OSError, json.JSONDecodeError): base = {}
+        used_legacy = (src == legacy)   # 레거시를 base로 읽었는지(=dest 없었음)
         break
 if mode == "--optin":
     base["indexing"] = True
@@ -337,6 +339,9 @@ except BaseException:
     try: os.unlink(tmp)
     except OSError: pass
     raise
+# 레거시를 base로 승계했으면(=내용이 .auto-context.json에 담김) 중복 방치 않고 백업 후 제거
+if used_legacy and legacy.exists():
+    os.replace(str(legacy), str(legacy) + ".bak-migrated")
 print(msg)
 PY
   exit 0

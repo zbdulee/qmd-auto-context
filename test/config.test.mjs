@@ -47,6 +47,13 @@ test('indexing 필드 passthrough (true/false/없음)', () => {
   assert.equal(norm({ indexing: 'yes' }).indexing, null);
 });
 
+test('indexing 문자열 "true"/"false" 강제 (그 외는 null)', () => {
+  const norm = (input) => JSON.parse(execFileSync('python3', ['core/config.py', '--cwd', '/tmp'], { input: JSON.stringify(input) }).toString());
+  assert.equal(norm({ indexing: 'false' }).indexing, false);   // opt-out 의도 보존
+  assert.equal(norm({ indexing: 'TRUE' }).indexing, true);
+  assert.equal(norm({ indexing: 'garbage' }).indexing, null);
+});
+
 test('config 숫자 타입은 보수적으로 coercion 하고 실패 시 기본값', () => {
   const cfg = loadConfig(JSON.stringify({
     minScore: '0.75',

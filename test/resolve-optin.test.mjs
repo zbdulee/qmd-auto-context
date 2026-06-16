@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, rmSync, realpathSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, realpathSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 
@@ -62,6 +62,21 @@ test('indexing:true 인데 collections 없으면 pending (3경로 일관)', () =
     assert.equal(r.reason, 'pending');
     assert.equal(r.refused, true);
     assert.deepEqual(r.entries, []);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('--optin: 레거시 .agents/qmd-recall.json 승계 후 제거(.bak-migrated)', () => {
+  const dir = homeTemp('legmig');
+  mkdirSync(join(dir, '.agents'), { recursive: true });
+  writeFileSync(join(dir, '.agents', 'qmd-recall.json'), JSON.stringify({ collections: ['old'], skipPaths: ['s'] }));
+  try {
+    execFileSync('bash', ['core/update.sh', '--optin', dir]);
+    const cfg = JSON.parse(readFileSync(join(dir, '.auto-context.json'), 'utf8'));
+    assert.equal(cfg.indexing, true);
+    assert.deepEqual(cfg.collections, ['old']);   // 레거시 collections 승계
+    assert.deepEqual(cfg.skipPaths, ['s']);
+    assert.equal(existsSync(join(dir, '.agents', 'qmd-recall.json')), false);          // 레거시 제거
+    assert.ok(existsSync(join(dir, '.agents', 'qmd-recall.json.bak-migrated')));        // 백업됨
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 

@@ -136,6 +136,10 @@ def main():
     # Load config to get collection paths (.auto-context.json 우선, 레거시 fallback, indexing:false skip)
     config = qmd_config.load_project_config(cwd)
 
+    # 미동의(pending)·거절(indexing:false)이면 collections=[] → recall.py 서브프로세스 띄우기 전에 즉시 종료
+    if not config.get("collections"):
+        return 0
+
     if not qmd_config.event_enabled(config, "postToolUse"):
         return 0
 
