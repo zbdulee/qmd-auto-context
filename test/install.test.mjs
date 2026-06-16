@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, rmSync, mkdtempSync } from 'node:fs';
+import { existsSync, rmSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -48,6 +48,25 @@ test('dry-run: collectionPaths 없는 .agents/qmd-recall.json 마이그레이션
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
+});
+
+test('install 마이그레이션: 레거시 .agents/qmd-recall.json → .auto-context.json(+indexing:true)', () => {
+  const root = mkdtempSync(join(tmpdir(), 'mig-'));
+  const proj = join(root, 'proj');
+  mkdirSync(join(proj, '.agents'), { recursive: true });
+  writeFileSync(join(proj, '.agents', 'qmd-recall.json'),
+    JSON.stringify({ collections: ['proj'], collectionPaths: { '*-x': 'X' } }));
+  try {
+    execFileSync('bash', ['-c', `QMD_MIGRATE_SCAN='${root}' bash install.sh --migrate-only`]);
+    const cfg = JSON.parse(readFileSync(join(proj, '.auto-context.json'), 'utf8'));
+    assert.equal(cfg.indexing, true);
+    assert.deepEqual(cfg.collections, ['proj']);
+    assert.deepEqual(cfg.collectionPaths, { '*-x': 'X' });
+    assert.equal(existsSync(join(proj, '.agents', 'qmd-recall.json')), false); // 레거시 제거됨
+    // 멱등: 다시 돌려도 깨지지 않음
+    execFileSync('bash', ['-c', `QMD_MIGRATE_SCAN='${root}' bash install.sh --migrate-only`]);
+    assert.equal(JSON.parse(readFileSync(join(proj, '.auto-context.json'), 'utf8')).indexing, true);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test('uninstall.sh dry-run 실행 가능', () => {

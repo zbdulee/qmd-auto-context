@@ -3,8 +3,11 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 DRY_RUN=0
+MIGRATE_ONLY=0
 if [[ "${1:-}" == "--dry-run" ]]; then
   DRY_RUN=1
+elif [[ "${1:-}" == "--migrate-only" ]]; then
+  MIGRATE_ONLY=1
 fi
 
 timestamp="$(date +%Y%m%d-%H%M%S)"
@@ -354,6 +357,56 @@ if changed == 0:
 PY
 }
 
+migrate_legacy_to_auto_context() {
+  local scan_root="${QMD_MIGRATE_SCAN:-$HOME/work/novel}"
+  say "레거시 → .auto-context.json 마이그레이션 scan: $scan_root"
+  python3 - "$scan_root" "$DRY_RUN" <<'PY'
+import json, os, sys, tempfile, shutil
+scan_root, dry = sys.argv[1], sys.argv[2] == "1"
+prefix = "[DRY-RUN] " if dry else ""
+if not os.path.isdir(scan_root):
+    print(f"{prefix}.auto-context 마이그레이션: scan root 없음, skip"); sys.exit(0)
+migrated = 0
+for root, _, files in os.walk(scan_root):
+    if os.path.basename(root) != ".agents" or "qmd-recall.json" not in files:
+        continue
+    legacy = os.path.join(root, "qmd-recall.json")
+    proj = os.path.dirname(root)                 # .agents의 부모 = 프로젝트 루트
+    dest = os.path.join(proj, ".auto-context.json")
+    if os.path.exists(dest):                     # 이미 마이그레이션됨 → 멱등 skip
+        continue
+    try:
+        data = json.load(open(legacy, encoding="utf-8"))
+        if not isinstance(data, dict):
+            continue
+    except Exception:
+        continue
+    data.setdefault("indexing", True)
+    if dry:
+        print(f"{prefix}migrate: {legacy} -> {dest}"); migrated += 1; continue
+    fd, tmp = tempfile.mkstemp(dir=proj, prefix=".auto-context.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            json.dump(data, fh, ensure_ascii=False, indent=2)
+        os.replace(tmp, dest)
+    except BaseException:
+        try: os.unlink(tmp)
+        except OSError: pass
+        raise
+    shutil.move(legacy, legacy + ".bak-migrated")   # 레거시 백업 후 제거
+    print(f"migrated: {legacy} -> {dest}")
+    migrated += 1
+if migrated == 0:
+    print(f"{prefix}.auto-context 마이그레이션: 대상 없음")
+PY
+}
+
+if [[ "$MIGRATE_ONLY" == "1" ]]; then
+  migrate_collection_paths
+  migrate_legacy_to_auto_context
+  exit 0
+fi
+
 for platform in "${platforms[@]}"; do
   [[ -z "$platform" ]] && continue
   case "$platform" in
@@ -374,6 +427,7 @@ else
   install_backend
 fi
 migrate_collection_paths
+migrate_legacy_to_auto_context
 
 if [[ "${QMD_INSTALL_SKIP_SELFTEST:-}" == "1" ]]; then
   say "self-test skip: QMD_INSTALL_SKIP_SELFTEST=1"
