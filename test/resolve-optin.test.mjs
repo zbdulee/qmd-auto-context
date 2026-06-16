@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, rmSync, realpathSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdtempSync, mkdirSync, rmSync, realpathSync, writeFileSync, readFileSync } from 'node:fs';
+import { join, basename } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
 
 function repoTemp(prefix) {
@@ -88,5 +88,30 @@ test('명시 설정 있으면 인덱싱(회귀 방지)', () => {
     const r = resolveWith(dir, JSON.stringify({ collections: ['mycol'] }), join(dir, 'optin.json'));
     assert.equal(r.refused, false);
     assert.deepEqual(r.entries, [{ name: 'mycol', path: '.' }]);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('--optout 후 resolve가 optout', () => {
+  const dir = homeTemp('cmdout');
+  const optinFile = join(dir, 'optin.json');
+  const env = { ...process.env, QMD_OPTIN_FILE: optinFile };
+  try {
+    execFileSync('bash', ['core/update.sh', '--optout', dir], { env });
+    const r = resolveWith(dir, '', optinFile);
+    assert.equal(r.reason, 'optout');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('--optin 후 명시 설정 생성 → resolve가 인덱싱', () => {
+  const dir = homeTemp('cmdin');
+  const optinFile = join(dir, 'optin.json');
+  const env = { ...process.env, QMD_OPTIN_FILE: optinFile };
+  try {
+    execFileSync('bash', ['core/update.sh', '--optin', dir], { env });
+    const cfg = readFileSync(join(dir, '.agents', 'qmd-recall.json'), 'utf8');
+    assert.match(cfg, new RegExp(basename(dir)));
+    const r = resolveWith(dir, cfg, optinFile);
+    assert.equal(r.refused, false);
+    assert.equal(r.entries[0].path, '.');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
