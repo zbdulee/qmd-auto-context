@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import fcntl
 import json
 import os
 import sys
@@ -34,19 +35,22 @@ def set_optout(path_str: str) -> None:
     key = str(Path(path_str).resolve())
     f = _optin_file()
     f.parent.mkdir(parents=True, exist_ok=True)
-    data = _load()
-    data[key] = {"state": "out"}
-    fd, tmp = tempfile.mkstemp(dir=str(f.parent), prefix=".optin.", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w") as fh:
-            json.dump(data, fh, ensure_ascii=False, indent=2)
-        os.replace(tmp, f)  # 원자적 교체
-    except BaseException:
+    lock_path = f.parent / (f.name + ".lock")
+    with open(lock_path, "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        data = _load()
+        data[key] = {"state": "out"}
+        fd, tmp = tempfile.mkstemp(dir=str(f.parent), prefix=".optin.", suffix=".tmp")
         try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+            with os.fdopen(fd, "w") as fh:
+                json.dump(data, fh, ensure_ascii=False, indent=2)
+            os.replace(tmp, f)  # 원자적 교체
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
 
 
 def main() -> None:

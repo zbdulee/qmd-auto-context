@@ -115,3 +115,20 @@ test('--optin 후 명시 설정 생성 → resolve가 인덱싱', () => {
     assert.equal(r.entries[0].path, '.');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('--optin: 따옴표 들어간 폴더명도 유효 JSON 생성', () => {
+  const base = join(homedir(), '.tmp-qmd-test');
+  mkdirSync(base, { recursive: true });
+  const dir = realpathSync(mkdtempSync(join(base, 'q-')));
+  const weird = join(dir, 'a"b');
+  mkdirSync(weird);
+  const optinFile = join(dir, 'optin.json');
+  const env = { ...process.env, QMD_OPTIN_FILE: optinFile };
+  try {
+    execFileSync('bash', ['core/update.sh', '--optin', weird], { env });
+    const cfg = readFileSync(join(weird, '.agents', 'qmd-recall.json'), 'utf8');
+    JSON.parse(cfg);  // 유효 JSON이어야 함 (throw 안 함)
+    const r = resolveWith(weird, cfg, optinFile);
+    assert.equal(r.refused, false);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

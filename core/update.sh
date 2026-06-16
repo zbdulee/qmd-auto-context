@@ -139,12 +139,16 @@ run_resolve_only() {
 }
 
 load_config_json() {
-  local workdir="$1"
-  if [ -f "$workdir/.agents/qmd-recall.json" ]; then
-    cat "$workdir/.agents/qmd-recall.json"
-  else
-    printf '{}'
-  fi
+  local dir="$1"
+  while [ -n "$dir" ] && [ "$dir" != "/" ]; do
+    if [ -f "$dir/.agents/qmd-recall.json" ]; then
+      cat "$dir/.agents/qmd-recall.json"
+      return
+    fi
+    [ "$dir" = "$HOME" ] && break
+    dir="$(dirname "$dir")"
+  done
+  printf '{}'
 }
 
 config_event_enabled() {
@@ -278,8 +282,8 @@ main() {
     suggested=$(echo "$resolved" | python3 -c 'import json,sys; print((json.load(sys.stdin).get("prompt") or {}).get("suggestedRoot",""))' 2>/dev/null)
     helper="bash $(cd "$(dirname "$0")" && pwd)/update.sh"
     echo "[qmd] 이 폴더는 아직 검색 인덱스에 등록되지 않았습니다."
-    echo "      인덱싱하려면:    $helper --optin \"$suggested\""
-    echo "      다시 묻지 않으려면: $helper --optout \"$workdir\""
+    printf '      인덱싱하려면:    %s --optin %q\n' "$helper" "$suggested"
+    printf '      다시 묻지 않으려면: %s --optout %q\n' "$helper" "$workdir"
     echo "      사용자에게 인덱싱할지 물어보고, 답에 따라 위 명령 중 하나를 실행하세요."
     exit 0
   fi
@@ -299,11 +303,26 @@ fi
 
 if [ "$1" = "--optin" ]; then
   target="${2:-$PWD}"
-  # 동의 = 명시 설정 생성. 이후 "collections 있음" 경로로 인덱싱 + 자동 갱신된다.
-  mkdir -p "$target/.agents"
-  name="$(basename "$target" | tr ' ' '-')"
-  printf '{"collections":["%s"]}\n' "$name" > "$target/.agents/qmd-recall.json"
-  echo "[qmd] opt-in 완료: $target ($name). 다음 세션부터 인덱싱됩니다."
+  # 동의 = 명시 설정 생성(원자적·JSON-safe). 이후 "collections 있음" 경로로 인덱싱+자동갱신.
+  python3 - "$target" <<'PY'
+import json, os, sys, tempfile
+from pathlib import Path
+target = Path(sys.argv[1])
+agents = target / ".agents"
+agents.mkdir(parents=True, exist_ok=True)
+name = target.name.replace(" ", "-")
+dest = agents / "qmd-recall.json"
+fd, tmp = tempfile.mkstemp(dir=str(agents), prefix=".qmd-recall.", suffix=".tmp")
+try:
+    with os.fdopen(fd, "w") as fh:
+        json.dump({"collections": [name]}, fh, ensure_ascii=False)
+    os.replace(tmp, dest)
+except BaseException:
+    try: os.unlink(tmp)
+    except OSError: pass
+    raise
+print(f"[qmd] opt-in 완료: {target} ({name}). 다음 세션부터 인덱싱됩니다.")
+PY
   exit 0
 fi
 
