@@ -1,0 +1,72 @@
+# qmd auto-context
+
+qmd 기반 자동 컨텍스트 주입(세션 시작 시 인덱스 갱신 + 프롬프트마다 관련 문서 recall + 편집 후 연속성 힌트)을 **Claude Code · Codex · Antigravity(Gemini) 세 플랫폼**에서 동작시키는 플러그인.
+
+흩어져 있던 글로벌/프로젝트 qmd 훅을 단일 리포로 SSOT화했다. 플랫폼 무관 `core/` 1벌 + 플랫폼별 얇은 `adapters/` 구조.
+
+## 구조
+
+```
+core/        recall.py · update.sh · posttool.py · config.py · keywords.py · resolve_paths.py
+adapters/    claude/ · codex/ · gemini/   (wrapper.py + hooks.json)
+backend/     daemon.sh · keepalive.sh · logrotate.sh · launchd/*.plist (@@HOME@@ 템플릿)
+config/      qmd-recall.schema.json
+test/        *.test.mjs (node:test)
+install.sh · uninstall.sh
+```
+
+## 동작
+
+| 훅 | 역할 | Claude | Codex | Gemini |
+|----|------|--------|-------|--------|
+| 세션 시작 | qmd 인덱스 갱신 | `SessionStart` | `SessionStart` | `SessionStart` |
+| 프롬프트 제출 | 관련 문서 recall | `UserPromptSubmit` | `UserPromptSubmit` | `BeforeAgent` |
+| 도구 사용 후 | 연속성 힌트 | `PostToolUse` | `PostToolUse` | `AfterTool` |
+
+어댑터는 stdin `{prompt,cwd}`를 코어에 패스스루하고 engine 라벨/로그 경로/headless·sandbox 체크만 주입한다.
+
+## 설정 (프로젝트 로컬, 선택)
+
+프로젝트 루트의 `.agents/qmd-recall.json` (없으면 cwd 폴더명 단일 컬렉션):
+
+```jsonc
+{
+  "name": "내 프로젝트",
+  "collections": ["proj-manuscript", "proj-plot"],
+  "minScore": 0.8,
+  "collectionPaths": { "proj-manuscript": "04_Manuscript" }, // posttool reader-facing 판별
+  "lexicalPatterns": ["ep"],         // EP/화 번호 exact 검색 (소설 도메인)
+  "prefixStyle": "full",             // "full"(기본) | "tag"(마지막 세그먼트)
+  "skipPaths": [".zb-context"],
+  "topN": 3, "queryTimeout": 5
+}
+```
+
+기존 minimal 스키마(`name`/`collections`/`minScore`)는 무수정 동작한다(신규 필드 부재 시 기본값).
+
+## 설치 / 제거
+
+```bash
+bash install.sh --dry-run    # 변경 계획만 출력 (파일 변경 없음)
+bash install.sh              # 3플랫폼 감지 → .bak-original 백업 → 어댑터 등록 → 백엔드 멱등 → npm test
+bash uninstall.sh            # .bak-original 복원 + 어댑터 제거
+```
+
+install은 멱등하며, 기존 qmd 글로벌 훅을 어댑터로 교체하고 비-qmd 훅은 보존한다. 프로젝트가 자체 `.agents/qmd-recall.json` + 로컬 훅을 가지면 글로벌 어댑터는 양보(이중 실행 방지)한다.
+
+### sandbox
+
+`QMD_SANDBOX=true`/`GEMINI_SANDBOX=true` 또는 `--sandbox` 인자 시 어댑터/코어는 즉시 무출력 종료(격리 환경 데몬 hang 방지).
+
+## 백엔드
+
+`backend/`의 qmd MCP HTTP 데몬(8483) + keepalive + logrotate를 launchd로 상시 운영. install이 `@@HOME@@`를 실제 홈으로 치환해 `~/Library/LaunchAgents`에 배치한다.
+
+## 테스트
+
+```bash
+npm test    # node --test, 결정적 단위/회귀 테스트
+QMD_LIVE=1 node --test test/integration.test.mjs   # 데몬 라이브 스모크
+```
+
+데몬 응답은 `test/fixtures/`로 주입(`QMD_QUERY_FIXTURE`)해 라이브 의존 없이 결정적으로 검증한다.
