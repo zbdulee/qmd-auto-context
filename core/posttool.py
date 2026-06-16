@@ -128,7 +128,7 @@ def main():
         return 0
 
     event_name = payload.get("hook_event_name")
-    if event_name not in (None, "PostToolUse"):
+    if event_name not in (None, "PostToolUse", "AfterTool"):
         return 0
 
     cwd = payload.get("cwd") or os.getcwd()

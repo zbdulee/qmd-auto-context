@@ -79,8 +79,9 @@ if os.path.exists(config_path):
     try:
         with open(config_path, "r", encoding="utf-8") as f:
             data = json.load(f)
-    except json.JSONDecodeError:
-        data = {}
+    except json.JSONDecodeError as exc:
+        print(f"invalid JSON in {config_path}: {exc}", file=sys.stderr)
+        sys.exit(1)
 else:
     data = {}
 
@@ -178,9 +179,11 @@ for hook_name, template_entries in entries:
         current.append(template_entries)
     hooks[hook_name] = current
 
-with open(config_path, "w", encoding="utf-8") as f:
+tmp_path = config_path + ".tmp"
+with open(tmp_path, "w", encoding="utf-8") as f:
     json.dump(data, f, ensure_ascii=False, indent=2)
     f.write("\n")
+os.replace(tmp_path, config_path)
 PY
 }
 

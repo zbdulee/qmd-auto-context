@@ -49,28 +49,38 @@ restore_backup() {
   if [[ -f "$original" ]]; then
     say "$platform restore 복원 original backup: $original -> $config"
     if [[ "$DRY_RUN" != "1" ]]; then
-      cp -p "$original" "$config" || say "$platform restore failed: $original -> $config"
+      cp -p "$original" "$config" || {
+        say "$platform restore failed: $original -> $config"
+        return 1
+      }
     fi
-    return
+    return 0
   fi
 
   latest="$(latest_backup_for "$config")"
   if [[ -n "$latest" ]]; then
     say "$platform restore 복원: $latest -> $config"
     if [[ "$DRY_RUN" != "1" ]]; then
-      cp -p "$latest" "$config" || say "$platform restore failed: $latest -> $config"
+      cp -p "$latest" "$config" || {
+        say "$platform restore failed: $latest -> $config"
+        return 1
+      }
     fi
-    return
+    return 0
   fi
 
   say "$platform restore 복원: no .bak restore candidate"
+  return 1
 }
 
 remove_adapter_hooks() {
   local platform="$1"
   local config="$2"
 
-  restore_backup "$platform" "$config"
+  if restore_backup "$platform" "$config"; then
+    say "$platform remove 제거 adapter hooks skip: restored backup"
+    return
+  fi
   say "$platform remove 제거 adapter hooks from $config"
   if [[ "$DRY_RUN" == "1" || ! -f "$config" ]]; then
     return
@@ -112,6 +122,39 @@ with open(config_path, "w", encoding="utf-8") as f:
 PY
 }
 
+uninstall_backend() {
+  local launch_agents="$HOME/Library/LaunchAgents"
+  local qmd_config="$HOME/.config/qmd"
+  local label
+  local plist
+  local script
+
+  for label in com.qmd-mcp-daemon com.qmd-keepalive com.qmd-logrotate; do
+    plist="$launch_agents/$label.plist"
+    if [[ "$DRY_RUN" == "1" ]]; then
+      say "backend launchctl unload plan: $plist ($label)"
+      say "backend remove launchd plist plan: $plist"
+    else
+      if command -v launchctl >/dev/null 2>&1; then
+        if [[ -f "$plist" ]]; then
+          launchctl unload "$plist" >/dev/null 2>&1 || launchctl bootout "gui/$(id -u)" "$plist" >/dev/null 2>&1 || true
+        else
+          launchctl bootout "gui/$(id -u)/$label" >/dev/null 2>&1 || true
+        fi
+      fi
+      rm -f "$plist"
+    fi
+  done
+
+  for script in daemon.sh keepalive.sh logrotate.sh; do
+    if [[ "$DRY_RUN" == "1" ]]; then
+      say "backend remove .config/qmd script plan: $qmd_config/$script"
+    else
+      rm -f "$qmd_config/$script"
+    fi
+  done
+}
+
 for platform in "${platforms[@]}"; do
   [[ -z "$platform" ]] && continue
   case "$platform" in
@@ -123,3 +166,5 @@ for platform in "${platforms[@]}"; do
       ;;
   esac
 done
+
+uninstall_backend
