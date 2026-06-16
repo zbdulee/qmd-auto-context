@@ -49,6 +49,13 @@
       },
       "default": {}
     },
+    "allowRoots": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": []
+    },
     "prefixStyle": {
       "type": "string",
       "enum": [

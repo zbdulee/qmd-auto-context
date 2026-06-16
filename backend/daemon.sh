@@ -1,4 +1,5 @@
 #!/bin/bash
+# managed-by: qmd-auto-context
 # qmd HTTP MCP 데몬 런처 (LaunchAgent에서 foreground 실행).
 #
 # 배경: 홈 node_modules의 better-sqlite3 네이티브 모듈은 특정 Node ABI(MODULE_VERSION)로만

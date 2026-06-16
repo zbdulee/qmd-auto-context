@@ -46,3 +46,34 @@ test('install: 기존 qmd 훅 제거 + 어댑터 표준 등록 + 비-qmd 훅 보
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+test('uninstall: nested hooks[].command 에 등록된 어댑터도 제거하고 원자적으로 쓴다', () => {
+  const src = readFileSync('uninstall.sh', 'utf8');
+  assert.match(src, /os\.replace/, 'uninstall config write must use tmp + os.replace');
+
+  const home = mkdtempSync(join(tmpdir(), 'qmd-uninstall-nested-'));
+  const bin = join(home, 'bin');
+  try {
+    mkdirSync(join(home, '.claude'), { recursive: true });
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, 'launchctl'), '#!/usr/bin/env sh\nexit 0\n', { mode: 0o755 });
+    writeFileSync(join(home, '.claude', 'settings.json'), JSON.stringify({
+      hooks: {
+        UserPromptSubmit: [
+          { hooks: [{ type: 'command', command: `python3 ${process.cwd()}/adapters/claude/wrapper.py recall` }] },
+          { hooks: [{ type: 'command', command: 'echo keep-me' }] },
+        ],
+      },
+    }));
+
+    execFileSync('bash', ['uninstall.sh'], {
+      env: { ...process.env, HOME: home, PATH: `${bin}:${process.env.PATH}`, QMD_FAKE_PLATFORMS: 'claude' },
+    });
+
+    const d = JSON.parse(readFileSync(join(home, '.claude', 'settings.json'), 'utf8'));
+    const cmds = d.hooks.UserPromptSubmit.flatMap(e => (e.hooks || []).map(h => h.command));
+    assert.deepEqual(cmds, ['echo keep-me']);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});

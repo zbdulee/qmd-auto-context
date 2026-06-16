@@ -26,16 +26,20 @@ def should_yield_to_local_recall(raw_input):
     if not isinstance(cwd, str) or not cwd:
         return False
 
-    hook_file = Path(cwd) / ".gemini" / "settings.json"
-    try:
-        with open(hook_file, "r", encoding="utf-8") as handle:
-            settings = json.load(handle)
-    except (OSError, json.JSONDecodeError, ValueError):
-        return False
+    for filename in ("settings.json", "hooks.json"):
+        hook_file = Path(cwd) / ".gemini" / filename
+        try:
+            with open(hook_file, "r", encoding="utf-8") as handle:
+                settings = json.load(handle)
+        except (OSError, json.JSONDecodeError, ValueError):
+            continue
 
-    hooks = settings.get("hooks", {}) if isinstance(settings, dict) else {}
-    before_agent_hooks = hooks.get("BeforeAgent") if isinstance(hooks, dict) else None
-    return command_mentions_qmd_recall(before_agent_hooks)
+        hooks = settings.get("hooks", {}) if isinstance(settings, dict) else {}
+        if not isinstance(hooks, dict):
+            continue
+        if command_mentions_qmd_recall(hooks.get("BeforeAgent")) or command_mentions_qmd_recall(hooks.get("UserPromptSubmit")):
+            return True
+    return False
 
 def main():
     # If GEMINI_SANDBOX is set or --sandbox option is in sys.argv, exit immediately with no output

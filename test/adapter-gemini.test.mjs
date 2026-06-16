@@ -1,8 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 
 const YIELD_PROJ = resolve('test/fixtures/yield-proj-gemini');
 
@@ -35,6 +36,24 @@ test('gemini 어댑터: cwd 로컬 qmd recall 훅(.gemini/settings.json) 있으�
   assert.equal(r, null);
 });
 
+test('gemini 어댑터: cwd 로컬 qmd recall 훅(.gemini/hooks.json) 있으면 양보', () => {
+  const proj = mkdtempSync(join(tmpdir(), 'qmd-gemini-hooks-yield-'));
+  try {
+    mkdirSync(join(proj, '.gemini'), { recursive: true });
+    writeFileSync(join(proj, '.gemini', 'hooks.json'), JSON.stringify({
+      hooks: {
+        BeforeAgent: [
+          { hooks: [{ type: 'command', command: 'python3 /local/qmd recall' }] },
+        ],
+      },
+    }));
+    const r = run({ prompt: '원오빌 문의 기반 정렬 어떻게 동작해?', cwd: proj });
+    assert.equal(r, null);
+  } finally {
+    rmSync(proj, { recursive: true, force: true });
+  }
+});
+
 test('gemini 어댑터: GEMINI_SANDBOX=true 이면 양보 → 빈 출력', () => {
   const r = run({ prompt: '원오빌 문의 기반 정렬 어떻게 동작해?', cwd: '/Users/dulee/work/axiom' }, { GEMINI_SANDBOX: 'true' });
   assert.equal(r, null);
@@ -47,5 +66,4 @@ test('gemini 어댑터: --sandbox 인자가 들어오면 즉시 우회 → 빈 �
   });
   assert.equal(out.trim(), '');
 });
-
 

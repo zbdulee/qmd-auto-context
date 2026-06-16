@@ -163,9 +163,10 @@ def main():
     
     # Load configuration
     config = load_project_config(cwd)
+    if not qmd_config.event_enabled(config, payload.get("hook_event_name", "UserPromptSubmit")):
+        return 0
     
     # Extract keywords
-    patterns_str = ",".join(config.get("lexicalPatterns", []))
     kw_result_raw = qmd_keywords.extract_keywords(prompt)
     
     # Extract lexical terms
@@ -216,6 +217,7 @@ def main():
                 "collections": collections,
                 "limit": 8,
                 "minScore": 0,
+                "timeout": config.get("queryTimeout", QUERY_TIMEOUT),
                 "rerank": False,
             }
             

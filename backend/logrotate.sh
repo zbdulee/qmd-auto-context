@@ -1,4 +1,5 @@
 #!/bin/bash
+# managed-by: qmd-auto-context
 # qmd 데몬 로그 로테이션.
 # 데몬은 single-threaded이고 로그 fd를 계속 열어두므로 `: > log`(truncate)를 쓰면
 # fd offset이 남아 sparse(앞부분 null) 파일이 된다. 그래서 크기 초과 시에만

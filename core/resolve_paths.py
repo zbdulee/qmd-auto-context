@@ -15,6 +15,37 @@ def is_risky_path(path_str):
             return True
     return False
 
+def is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+def allowed_roots(config: dict) -> list[Path]:
+    roots = config.get("allowRoots", [])
+    if not isinstance(roots, list):
+        return []
+    resolved = []
+    for root in roots:
+        if not isinstance(root, str) or not root:
+            continue
+        try:
+            resolved.append(Path(root).expanduser().resolve())
+        except OSError:
+            continue
+    return resolved
+
+def safe_collection_path(cwd: Path, path_str: str, roots: list[Path]) -> bool:
+    try:
+        candidate = Path(path_str).expanduser()
+        if not candidate.is_absolute():
+            candidate = cwd / candidate
+        resolved = candidate.resolve()
+    except OSError:
+        return False
+    return is_within(resolved, cwd) or any(is_within(resolved, root) for root in roots)
+
 def resolve_paths(cwd_str, config_json):
     if is_risky_path(cwd_str):
         return {"refused": True, "entries": []}
@@ -26,6 +57,12 @@ def resolve_paths(cwd_str, config_json):
         
     collections = config.get("collections", [])
     collection_paths = config.get("collectionPaths", {})
+    if not isinstance(collections, list):
+        collections = []
+    if not isinstance(collection_paths, dict):
+        collection_paths = {}
+    cwd = Path(cwd_str).resolve()
+    roots = allowed_roots(config)
     
     if not collections:
         name = Path(cwd_str).name.replace(" ", "-")
@@ -35,9 +72,12 @@ def resolve_paths(cwd_str, config_json):
     for col in collections:
         matched_path = "."
         for pat, val in collection_paths.items():
-            if fnmatch.fnmatch(col, pat):
+            if isinstance(pat, str) and isinstance(val, str) and fnmatch.fnmatch(col, pat):
                 matched_path = val
                 break
+        if not safe_collection_path(cwd, matched_path, roots):
+            print(f"skip unsafe collectionPath: {col} -> {matched_path}", file=sys.stderr)
+            continue
         entries.append({"name": col, "path": matched_path})
         
     return {"refused": False, "entries": entries}

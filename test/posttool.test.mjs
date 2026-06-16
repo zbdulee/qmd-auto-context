@@ -2,6 +2,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { resolve } from 'node:path';
 
 const PROJ = resolve('test/fixtures/story-proj');
@@ -46,6 +49,31 @@ test('collectionPaths 없는 프로젝트는 보수적으로 skip', () => {
   assert.equal(r, null);
 });
 
+test('events 에 postToolUse 없으면 posttool core skip', () => {
+  const tempDir = mkdtempSync(join(tmpdir(), 'qmd-posttool-events-'));
+  try {
+    mkdirSync(join(tempDir, '.agents'), { recursive: true });
+    mkdirSync(join(tempDir, '04_Manuscript'), { recursive: true });
+    writeFileSync(join(tempDir, '.agents', 'qmd-recall.json'), JSON.stringify({
+      collections: ['story-manuscript'],
+      collectionPaths: { '*-manuscript': '04_Manuscript' },
+      events: ['userPromptSubmit'],
+    }));
+    const out = execFileSync('python3', ['core/posttool.py'], {
+      input: JSON.stringify({
+        hook_event_name: 'PostToolUse',
+        tool_input: { file_path: join(tempDir, '04_Manuscript', 'ep001.md'), content: '원오빌 문의 기반 정렬 내용을 충분히 길게 수정' },
+        cwd: tempDir,
+      }),
+      encoding: 'utf8',
+      env: { ...process.env, QMD_QUERY_FIXTURE: 'test/fixtures/daemon-response.json' },
+    });
+    assert.equal(out.trim(), '');
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test('posttool core: QMD_SANDBOX=true → 무출력 exit 0', () => {
   const out = execFileSync('python3', ['core/posttool.py'], {
     input: JSON.stringify({
@@ -70,4 +98,3 @@ test('posttool core: --sandbox 인자 → 무출력 exit 0', () => {
   });
   assert.equal(out.toString().trim(), '');
 });
-

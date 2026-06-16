@@ -1,4 +1,5 @@
 #!/bin/bash
+# managed-by: qmd-auto-context
 # qmd 데몬 embedding context warm 유지 핑.
 # 데몬은 모델을 오래 살려두지만 embedding context는 idle 시 dispose 되어 재생성(~1-2s) 페널티가 붙는다.
 # 실측상 30초 간격이면 항상 완전 warm(~0.6s) 유지. vec 쿼리여야 embedding 모델을 touch 한다(lex는 BM25라 무의미).

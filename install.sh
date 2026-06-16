@@ -8,6 +8,7 @@ if [[ "${1:-}" == "--dry-run" ]]; then
 fi
 
 timestamp="$(date +%Y%m%d-%H%M%S)"
+MANAGED_MARKER="managed-by: qmd-auto-context"
 
 say() {
   if [[ "$DRY_RUN" == "1" ]]; then
@@ -15,6 +16,27 @@ say() {
   else
     printf '%s\n' "$*"
   fi
+}
+
+has_managed_marker() {
+  local file="$1"
+  [[ -f "$file" ]] && grep -q "$MANAGED_MARKER" "$file"
+}
+
+backup_unmanaged_if_needed() {
+  local dest="$1"
+  if [[ ! -f "$dest" ]] || has_managed_marker "$dest"; then
+    return 0
+  fi
+
+  local backup="${dest}.bak-${timestamp}"
+  local n=1
+  while [[ -e "$backup" ]]; do
+    backup="${dest}.bak-${timestamp}-${n}"
+    n=$((n + 1))
+  done
+  say "backend unmanaged backup: $dest -> $backup"
+  [[ "$DRY_RUN" == "1" ]] || cp -p "$dest" "$backup"
 }
 
 platforms=()
@@ -203,8 +225,10 @@ install_backend() {
     dest="$qmd_config/$script"
     if [[ "$DRY_RUN" == "1" ]]; then
       say "backend copy plan: $REPO_ROOT/backend/$script -> $dest"
+      backup_unmanaged_if_needed "$dest"
     else
       mkdir -p "$qmd_config"
+      backup_unmanaged_if_needed "$dest"
       if [[ ! -f "$dest" ]] || ! cmp -s "$REPO_ROOT/backend/$script" "$dest"; then
         cp "$REPO_ROOT/backend/$script" "$dest"
       fi
@@ -232,6 +256,7 @@ with open(dest, "w", encoding="utf-8") as f:
     f.write(content)
 PY
       local changed=0
+      backup_unmanaged_if_needed "$dest"
       if [[ ! -f "$dest" ]] || ! cmp -s "$tmp" "$dest"; then
         cp "$tmp" "$dest"
         changed=1
@@ -265,9 +290,12 @@ migrate_collection_paths() {
 import json
 import os
 import sys
+import shutil
+from datetime import datetime
 
 scan_root, dry_run = sys.argv[1], sys.argv[2] == "1"
 prefix = "[DRY-RUN] " if dry_run else ""
+timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
 suffix_map = {
     "-manuscript": "04_Manuscript",
     "-plot": "03_Plot",
@@ -308,6 +336,12 @@ for root, _, files in os.walk(scan_root):
     changed += 1
     print(f"{prefix}collectionPaths 마이그레이션 계획: {path} -> {collection_paths}")
     if not dry_run:
+        backup_path = f"{path}.bak-{timestamp}"
+        n = 1
+        while os.path.exists(backup_path):
+            backup_path = f"{path}.bak-{timestamp}-{n}"
+            n += 1
+        shutil.copy2(path, backup_path)
         data["collectionPaths"] = collection_paths
         tmp_path = path + ".tmp"
         with open(tmp_path, "w", encoding="utf-8") as f:

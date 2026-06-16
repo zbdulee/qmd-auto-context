@@ -6,6 +6,7 @@ DRY_RUN=0
 if [[ "${1:-}" == "--dry-run" ]]; then
   DRY_RUN=1
 fi
+MANAGED_MARKER="managed-by: qmd-auto-context"
 
 say() {
   if [[ "$DRY_RUN" == "1" ]]; then
@@ -13,6 +14,11 @@ say() {
   else
     printf '%s\n' "$*"
   fi
+}
+
+has_managed_marker() {
+  local file="$1"
+  [[ -f "$file" ]] && grep -q "$MANAGED_MARKER" "$file"
 }
 
 platforms=()
@@ -103,22 +109,35 @@ if not isinstance(hooks, dict):
     sys.exit(0)
 
 needle = f"/adapters/{platform}/wrapper.py"
+def command_strings(value):
+    if isinstance(value, dict):
+        command = value.get("command")
+        if isinstance(command, str):
+            yield command
+        for item in value.values():
+            yield from command_strings(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from command_strings(item)
+
 for hook_name in list(hooks):
     current = hooks.get(hook_name)
     if not isinstance(current, list):
         continue
     filtered = [
         item for item in current
-        if not (isinstance(item, dict) and needle in str(item.get("command", "")))
+        if not (isinstance(item, dict) and any(needle in command for command in command_strings(item)))
     ]
     if filtered:
         hooks[hook_name] = filtered
     else:
         del hooks[hook_name]
 
-with open(config_path, "w", encoding="utf-8") as f:
+tmp_path = config_path + ".tmp"
+with open(tmp_path, "w", encoding="utf-8") as f:
     json.dump(data, f, ensure_ascii=False, indent=2)
     f.write("\n")
+os.replace(tmp_path, config_path)
 PY
 }
 
@@ -133,24 +152,25 @@ uninstall_backend() {
     plist="$launch_agents/$label.plist"
     if [[ "$DRY_RUN" == "1" ]]; then
       say "backend launchctl unload plan: $plist ($label)"
-      say "backend remove launchd plist plan: $plist"
+      say "backend remove launchd plist plan if managed: $plist"
     else
-      if command -v launchctl >/dev/null 2>&1; then
-        if [[ -f "$plist" ]]; then
+      if [[ -f "$plist" ]] && has_managed_marker "$plist"; then
+        if command -v launchctl >/dev/null 2>&1; then
           launchctl unload "$plist" >/dev/null 2>&1 || launchctl bootout "gui/$(id -u)" "$plist" >/dev/null 2>&1 || true
-        else
-          launchctl bootout "gui/$(id -u)/$label" >/dev/null 2>&1 || true
         fi
+        rm -f "$plist"
       fi
-      rm -f "$plist"
     fi
   done
 
   for script in daemon.sh keepalive.sh logrotate.sh; do
+    local path="$qmd_config/$script"
     if [[ "$DRY_RUN" == "1" ]]; then
-      say "backend remove .config/qmd script plan: $qmd_config/$script"
+      say "backend remove .config/qmd script plan if managed: $path"
     else
-      rm -f "$qmd_config/$script"
+      if has_managed_marker "$path"; then
+        rm -f "$path"
+      fi
     fi
   done
 }

@@ -156,6 +156,9 @@ def main():
     else:
         config = qmd_config.normalize_config({})
 
+    if not qmd_config.event_enabled(config, "postToolUse"):
+        return 0
+
     if not story_paths_touched(payload, cwd, config):
         return 0
 

@@ -136,6 +136,37 @@ run_resolve_only() {
   python3 "$(dirname "$0")/resolve_paths.py" --cwd "$cwd"
 }
 
+load_config_json() {
+  local workdir="$1"
+  if [ -f "$workdir/.agents/qmd-recall.json" ]; then
+    cat "$workdir/.agents/qmd-recall.json"
+  else
+    printf '{}'
+  fi
+}
+
+config_event_enabled() {
+  local event="$1"
+  local config_json="$2"
+  python3 - "$event" "$(dirname "$0")" "$config_json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+event, core_dir, raw = sys.argv[1:4]
+sys.path.insert(0, str(Path(core_dir).resolve()))
+import config as qmd_config
+
+try:
+    parsed = json.loads(raw) if raw else {}
+except json.JSONDecodeError:
+    parsed = {}
+
+normalized = qmd_config.normalize_config(parsed if isinstance(parsed, dict) else {})
+print("yes" if qmd_config.event_enabled(normalized, event) else "no")
+PY
+}
+
 run_update() {
   normalize_qmd_path
   command -v qmd >/dev/null 2>&1 || exit 0
@@ -146,9 +177,11 @@ run_update() {
   log "START: cwd=$workdir"
 
   # 1. read config from .agents/qmd-recall.json if exists
-  local config_json="{}"
-  if [ -f ".agents/qmd-recall.json" ]; then
-    config_json=$(cat ".agents/qmd-recall.json")
+  local config_json
+  config_json=$(load_config_json "$workdir")
+  if [ "$(config_event_enabled sessionStart "$config_json")" != "yes" ]; then
+    log "SKIP: sessionStart disabled by config.events"
+    exit 0
   fi
 
   # 2. Get collections and paths via resolve-only logic
@@ -217,6 +250,11 @@ main() {
   raw=$(cat)
   workdir=$(printf '%s' "$raw" | python3 -c 'import json,sys,os; print((json.load(sys.stdin).get("cwd") or os.getcwd()))' 2>/dev/null)
   [ -z "$workdir" ] && workdir="$PWD"
+
+  config_json=$(load_config_json "$workdir")
+  if [ "$(config_event_enabled sessionStart "$config_json")" != "yes" ]; then
+    exit 0
+  fi
 
   if [ -f "$STATUS" ]; then
     echo "qmd previous update failed: $(cat "$STATUS")"
