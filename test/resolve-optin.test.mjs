@@ -55,6 +55,16 @@ test('HOME → risky', () => {
   assert.equal(r.reason, 'risky');
 });
 
+test('indexing:true 인데 collections 없으면 pending (3경로 일관)', () => {
+  const dir = homeTemp('innocoll');
+  try {
+    const r = resolveWith(dir, JSON.stringify({ indexing: true }));
+    assert.equal(r.reason, 'pending');
+    assert.equal(r.refused, true);
+    assert.deepEqual(r.entries, []);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('--optin → .auto-context.json indexing:true + collections', () => {
   const dir = homeTemp('cmdin');
   try {

@@ -89,8 +89,10 @@ def resolve_paths(cwd_str, config_json):
     if indexing is False:
         return {"refused": True, "reason": "optout", "entries": []}
 
-    # pending: 동의 신호 없음 (빈 config=파일없음; collections 없고 indexing!=true)
-    if not collections and indexing is not True:
+    # pending: 인덱싱할 collection 이 없으면 동의 신호로 보지 않는다.
+    # (indexing:true 라도 collections 가 비면 미완성 설정 → pending. recall/update와 의미 일치:
+    #  collections 없음 = 인덱싱 0 = recall skip = pending. opt-in helper는 항상 collections를 채운다.)
+    if not collections:
         suggested = find_git_root(cwd, Path.home().resolve())
         return {
             "refused": True,

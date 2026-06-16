@@ -141,6 +141,9 @@ run_resolve_only() {
 load_config_json() {
   local dir prev=""
   dir=$(cd "$1" 2>/dev/null && pwd) || dir="$1"
+  # HOME 하위가 아니면 부모로 올라가지 않고 cwd만 검사 (find_git_root와 경계 일치)
+  local under_home=0
+  case "$dir/" in "$HOME"/*) under_home=1 ;; esac
   while [ -n "$dir" ] && [ "$dir" != "/" ] && [ "$dir" != "$prev" ]; do
     if [ -f "$dir/.auto-context.json" ]; then
       cat "$dir/.auto-context.json"; return
@@ -149,6 +152,7 @@ load_config_json() {
       cat "$dir/.agents/qmd-recall.json"; return
     fi
     [ "$dir" = "$HOME" ] && break
+    [ "$under_home" = "0" ] && break
     prev="$dir"
     dir="$(dirname "$dir")"
   done
