@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3 (`core/*.py`), Bash (`core/update.sh`), Node `node --test` + `.mjs` 테스트.
 
-**Spec:** `docs/superpowers/specs/2026-06-16-qmd-optin-indexing-design.md`
+**Spec:** `docs/specs/2026-06-16-qmd-optin-indexing-design.md`
 
 **선행:** 현재 `main` 브랜치다. 실행 시작 시 작업 브랜치(또는 worktree)를 먼저 만든다.
 
