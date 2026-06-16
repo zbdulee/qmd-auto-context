@@ -4,9 +4,6 @@ import json
 import fnmatch
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import optin
-
 
 def is_risky_path(path_str):
     p = Path(path_str).resolve()
@@ -86,10 +83,14 @@ def resolve_paths(cwd_str, config_json):
     cwd = Path(cwd_str).resolve()
     roots = allowed_roots(config)
 
-    if not collections:
-        # 동의 없는 폴더: 자동 인덱싱하지 않는다.
-        if optin.get_state(str(cwd)) == "out":
-            return {"refused": True, "reason": "optout", "entries": []}
+    indexing = config.get("indexing")
+
+    # 거절: 명시 indexing=false
+    if indexing is False:
+        return {"refused": True, "reason": "optout", "entries": []}
+
+    # pending: 동의 신호 없음 (빈 config=파일없음; collections 없고 indexing!=true)
+    if not collections and indexing is not True:
         suggested = find_git_root(cwd, Path.home().resolve())
         return {
             "refused": True,
