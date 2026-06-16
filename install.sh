@@ -361,7 +361,7 @@ migrate_legacy_to_auto_context() {
   local scan_root="${QMD_MIGRATE_SCAN:-$HOME/work/novel}"
   say "레거시 → .auto-context.json 마이그레이션 scan: $scan_root"
   python3 - "$scan_root" "$DRY_RUN" <<'PY'
-import json, os, sys, tempfile, shutil
+import json, os, sys, tempfile, shutil, glob
 scan_root, dry = sys.argv[1], sys.argv[2] == "1"
 prefix = "[DRY-RUN] " if dry else ""
 if not os.path.isdir(scan_root):
@@ -393,7 +393,11 @@ for root, _, files in os.walk(scan_root):
         try: os.unlink(tmp)
         except OSError: pass
         raise
-    shutil.move(legacy, legacy + ".bak-migrated")   # 레거시 백업 후 제거
+    # 레거시 제거. collectionPaths 마이그레이션이 이미 .bak-*(원본)를 남겼으면 중복 백업하지 않는다.
+    if glob.glob(legacy + ".bak-*"):
+        os.remove(legacy)
+    else:
+        shutil.move(legacy, legacy + ".bak-migrated")
     print(f"migrated: {legacy} -> {dest}")
     migrated += 1
 if migrated == 0:

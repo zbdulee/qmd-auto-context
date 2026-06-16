@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, readdirSync } from 'node:fs';
+import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, readdirSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -113,10 +113,15 @@ test('High: collectionPaths 마이그레이션은 파일별 timestamp 백업을 
       },
     });
 
+    // collectionPaths 마이그레이션은 원본 timestamp 백업을 남긴다(안전 속성 유지).
     const backups = readdirSync(agents).filter(name => name.startsWith('qmd-recall.json.bak-'));
-    assert.equal(backups.length, 1, 'timestamp backup missing');
+    assert.equal(backups.length, 1, 'timestamp backup missing (중복 백업 없이 원본 1개)');
     assert.equal(readFileSync(join(agents, backups[0]), 'utf8'), original);
-    assert.deepEqual(JSON.parse(readFileSync(configPath, 'utf8')).collectionPaths, { 'x-manuscript': '04_Manuscript' });
+    // 이후 .auto-context.json 으로 승격된다: collectionPaths 정규화 보존 + indexing:true, 레거시는 제거.
+    const promoted = JSON.parse(readFileSync(join(home, 'novel', 'book', '.auto-context.json'), 'utf8'));
+    assert.deepEqual(promoted.collectionPaths, { 'x-manuscript': '04_Manuscript' });
+    assert.equal(promoted.indexing, true);
+    assert.equal(existsSync(configPath), false, '승격 후 레거시 qmd-recall.json 제거');
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
