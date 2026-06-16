@@ -114,6 +114,30 @@ def log_score_observation(log_path: str, results: list[dict], collections: list[
     except OSError:
         pass
 
+def log_recall_event(log_path: str, reason: str, **fields) -> None:
+    """Append a one-line selection/skip reason to QMD_RECALL_LOG.
+
+    Writes to the log file only (never stdout), and only when QMD_RECALL_LOG
+    is set — so it never touches the model context and is a no-op in normal runs.
+    Lets an operator tell *why* recall produced empty output (event_disabled /
+    no_keywords / no_collections / daemon_unreachable / query_failed /
+    no_results_after_filter / selected).
+    """
+    if not log_path:
+        return
+    payload = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "event": "qmd_recall_selection",
+        "engine": os.environ.get("QMD_ENGINE", "gemini"),
+        "reason": reason,
+    }
+    payload.update(fields)
+    try:
+        with open(log_path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
 def main():
     # If QMD_SANDBOX is set or --sandbox option is in sys.argv, exit immediately with no output
     if os.environ.get("QMD_SANDBOX") or "--sandbox" in sys.argv:
@@ -133,10 +157,14 @@ def main():
         return 0
 
     cwd = payload.get("cwd") or os.getcwd()
-    
+
+    # Read once up front so early-exit paths can record their reason too.
+    log_path = os.environ.get("QMD_RECALL_LOG")
+
     # Load configuration
     config = load_project_config(cwd)
     if not qmd_config.event_enabled(config, payload.get("hook_event_name", "UserPromptSubmit")):
+        log_recall_event(log_path, "event_disabled")
         return 0
     
     # Extract keywords
@@ -157,6 +185,7 @@ def main():
             deduped_lexical_terms.append(term)
             
     if not kw_result_raw and not deduped_lexical_terms:
+        log_recall_event(log_path, "no_keywords")
         return 0
 
     # Query daemon or use fixture
@@ -165,6 +194,7 @@ def main():
     
     collections = config.get("collections", [])
     if not collections:
+        log_recall_event(log_path, "no_collections")
         return 0
 
     if fixture_path:
@@ -173,10 +203,12 @@ def main():
                 fixture_data = json.load(f)
                 results = fixture_data.get("results", [])
         except (OSError, json.JSONDecodeError):
+            log_recall_event(log_path, "fixture_error", fixture=fixture_path)
             return 0
     else:
         daemon_url = os.environ.get("QMD_DAEMON_URL", DEFAULT_DAEMON_URL)
         if not daemon_alive(daemon_url):
+            log_recall_event(log_path, "daemon_unreachable", daemon=daemon_url)
             return 0
         else:
             lexical_query = " ".join(deduped_lexical_terms)
@@ -210,10 +242,10 @@ def main():
                 if not isinstance(results, list):
                     results = []
             except (urllib.error.URLError, OSError, ValueError, json.JSONDecodeError):
+                log_recall_event(log_path, "query_failed", daemon=daemon_url)
                 return 0
 
-    # Log observation if requested
-    log_path = os.environ.get("QMD_RECALL_LOG")
+    # Log raw score observation if requested (log_path read once near the top)
     if log_path:
         log_score_observation(log_path, results, collections)
 
@@ -239,7 +271,9 @@ def main():
         
     filtered_results = []
     min_score = float(config.get("minScore", 0.0))
-    
+    dropped_skip = 0
+    dropped_min_score = 0
+
     for r in results:
         filepath = r.get("file", "")
         # Check skip paths
@@ -249,17 +283,33 @@ def main():
                 should_skip = True
                 break
         if should_skip:
+            dropped_skip += 1
             continue
-            
+
         # Check minScore
         if r.get("score", 0) < min_score:
+            dropped_min_score += 1
             continue
-            
+
         filtered_results.append(r)
 
     # Limit to topN
     top_n = int(config.get("topN", 3))
     final_results = filtered_results[:top_n]
+
+    # Record why recall produced (or withheld) output — file-only, never stdout.
+    log_recall_event(
+        log_path,
+        "selected" if final_results else "no_results_after_filter",
+        candidates=len(results),
+        dropped_skip=dropped_skip,
+        dropped_min_score=dropped_min_score,
+        dropped_top_n=max(0, len(filtered_results) - len(final_results)),
+        selected=len(final_results),
+        min_score=min_score,
+        top_n_limit=top_n,
+        max_score=max((r.get("score", 0) for r in results), default=0),
+    )
     
     if not final_results:
         return 0

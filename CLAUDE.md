@@ -60,4 +60,4 @@ backend/   ← qmd MCP HTTP 데몬(:8483) + keepalive + logrotate (launchd plist
 `docs/issues/`에 사후 분석 기록이 있다. 특히:
 - **데몬은 single-thread (Node).** recall query가 keepalive vec ping이나 다른 query와 겹치면 직렬로 밀려 timeout → 간헐적 빈 출력이 날 수 있다. 코드 버그로 오인하지 말 것. 측정할 때 연속/동시 호출로 데몬을 폭격하면 이 현상이 증폭된다.
 - **`index.sqlite-wal` 비대화 주의.** 대량 임베딩 쓰기(마이그레이션) 후 데몬이 떠 있으면 WAL이 checkpoint 안 되고 수 GB로 누적 → 모든 vec query가 느려진다. 데몬 종료(`launchctl unload`) 시 자동 병합·정리됨. 평상시 검색은 WAL을 거의 안 키운다. (상세: `docs/issues/2026-06-16-qmd-recall-wal-slowdown.md`)
-- **빈 출력은 정상 동작일 수 있다.** 데몬 부재/timeout/결과 0건/sandbox/yield — 모두 의도적으로 무출력 종료한다. 빈 출력 ≠ 버그.
+- **빈 출력은 정상 동작일 수 있다.** 데몬 부재/timeout/결과 0건/sandbox/yield — 모두 의도적으로 무출력 종료한다. 빈 출력 ≠ 버그. **정상인지 버그인지 가르려면 `QMD_RECALL_LOG=<파일>`을 켜고 `qmd_recall_selection` 줄의 `reason`을 보라** (`event_disabled`/`no_keywords`/`no_collections`/`daemon_unreachable`/`query_failed`/`no_results_after_filter`/`selected`). 이 로그는 파일에만 쓰고 stdout(모델 컨텍스트)엔 절대 안 나가며, env가 없으면 no-op다.
