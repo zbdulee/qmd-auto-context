@@ -9,7 +9,7 @@
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>@@HOME@@/.config/qmd/qmd-keepalive.sh</string>
+        <string>@@HOME@@/.config/qmd/keepalive.sh</string>
     </array>
 
     <!-- 30초마다 vec warm 핑으로 embedding context 유지(~0.6s). -->
