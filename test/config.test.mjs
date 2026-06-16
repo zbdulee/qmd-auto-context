@@ -39,6 +39,14 @@ test('빈/깨진 JSON → 전부 기본값', () => {
   assert.deepEqual(cfg.collectionPaths, {});
 });
 
+test('indexing 필드 passthrough (true/false/없음)', () => {
+  const norm = (input) => JSON.parse(execFileSync('python3', ['core/config.py', '--cwd', '/tmp'], { input: JSON.stringify(input) }).toString());
+  assert.equal(norm({ indexing: true }).indexing, true);
+  assert.equal(norm({ indexing: false }).indexing, false);
+  assert.equal(norm({}).indexing, null);
+  assert.equal(norm({ indexing: 'yes' }).indexing, null);
+});
+
 test('config 숫자 타입은 보수적으로 coercion 하고 실패 시 기본값', () => {
   const cfg = loadConfig(JSON.stringify({
     minScore: '0.75',

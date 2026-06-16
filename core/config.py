@@ -17,6 +17,7 @@ DEFAULT_CONFIG = {
     "allowRoots": [],
     "prefixStyle": "full",
     "events": ["sessionStart", "userPromptSubmit", "postToolUse"],
+    "indexing": None,
 }
 
 EVENT_ALIASES = {
@@ -111,6 +112,9 @@ def normalize_config(input_config):
         ]
     else:
         config["events"] = list(DEFAULT_CONFIG["events"])
+
+    val = input_config.get("indexing")
+    config["indexing"] = val if isinstance(val, bool) else None
 
     if "lexicalPatterns" in input_config:
         config["lexicalPatterns"] = string_list(input_config.get("lexicalPatterns"), DEFAULT_CONFIG["lexicalPatterns"])
