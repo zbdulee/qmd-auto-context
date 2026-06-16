@@ -1,0 +1,66 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { readFileSync, existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+// hooks/run-hook <action> <engine> 를 fixture 모드로 실행하고 stdout 반환
+function dispatch(args, payload, env = {}) {
+  return execFileSync('bash', ['hooks/run-hook', ...args], {
+    input: JSON.stringify(payload),
+    encoding: 'utf8',
+    env: { ...process.env, QMD_QUERY_FIXTURE: 'test/fixtures/daemon-response.json', ...env },
+  }).trim();
+}
+
+function selectionEvents(logPath) {
+  if (!existsSync(logPath)) return [];
+  return readFileSync(logPath, 'utf8').trim().split('\n').filter(Boolean)
+    .map((l) => JSON.parse(l)).filter((e) => e.event === 'qmd_recall_selection');
+}
+
+const PROMPT = '원오빌 문의 기반 정렬 어떻게 동작해?';
+
+test('recall claude → additionalContext 생성', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'qmd-disp-'));
+  mkdirSync(join(dir, '.agents'), { recursive: true });
+  writeFileSync(join(dir, '.agents', 'qmd-recall.json'), JSON.stringify({ collections: ['axiom'] }));
+  try {
+    const out = dispatch(['recall', 'claude'], { prompt: PROMPT, cwd: dir });
+    assert.match(JSON.parse(out).hookSpecificOutput.additionalContext, /\[axiom\]/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('engine 라벨이 selection 로그에 기록 (claude/codex/gemini)', () => {
+  for (const engine of ['claude', 'codex', 'gemini']) {
+    const dir = mkdtempSync(join(tmpdir(), `qmd-disp-${engine}-`));
+    mkdirSync(join(dir, '.agents'), { recursive: true });
+    writeFileSync(join(dir, '.agents', 'qmd-recall.json'), JSON.stringify({ collections: ['axiom'] }));
+    const logPath = join(dir, 'r.log');
+    try {
+      dispatch(['recall', engine], { prompt: PROMPT, cwd: dir }, { QMD_RECALL_LOG: logPath });
+      const ev = selectionEvents(logPath);
+      assert.equal(ev[0].engine, engine, `engine=${engine}`);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  }
+});
+
+test('CLAUDE_HEADLESS=1 → 무출력', () => {
+  const out = dispatch(['recall', 'claude'], { prompt: PROMPT, cwd: '/tmp' }, { CLAUDE_HEADLESS: '1' });
+  assert.equal(out, '');
+});
+
+test('--sandbox 인자 → 무출력', () => {
+  const out = dispatch(['recall', 'claude', '--sandbox'], { prompt: PROMPT, cwd: '/tmp' });
+  assert.equal(out, '');
+});
+
+test('CODEX_SANDBOX / GEMINI_SANDBOX → 무출력', () => {
+  assert.equal(dispatch(['recall', 'codex'], { prompt: PROMPT, cwd: '/tmp' }, { CODEX_SANDBOX: '1' }), '');
+  assert.equal(dispatch(['recall', 'gemini'], { prompt: PROMPT, cwd: '/tmp' }, { GEMINI_SANDBOX: '1' }), '');
+});
+
+test('알 수 없는 action → 비정상 종료', () => {
+  assert.throws(() => dispatch(['bogus', 'claude'], { prompt: PROMPT, cwd: '/tmp' }));
+});

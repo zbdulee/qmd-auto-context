@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# qmd auto-context 공통 hook 디스패처.
+# usage: run-hook <action> <engine> [--sandbox]
+#   action: recall | update | posttool
+#   engine: claude | codex | gemini
+# 플러그인 루트는 CLAUDE_PLUGIN_ROOT/PLUGIN_ROOT(있으면) 또는 스크립트 위치(dirname)로 결정.
+set -u
+
+ACTION="${1:-}"
+ENGINE="${2:-claude}"
+
+# 1) 플러그인 루트 결정 — 변수 우선, 없으면 스크립트 위치 기준(hooks/run-hook → 루트)
+ROOT="${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:-}}"
+if [ -z "$ROOT" ]; then
+  ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+fi
+
+# 2) sandbox/headless → 무출력 종료 (정상 동작)
+case " $* " in *" --sandbox "*) exit 0 ;; esac
+[ -n "${QMD_SANDBOX:-}" ] && exit 0
+case "$ENGINE" in
+  claude) { [ "${CLAUDE_HEADLESS:-}" = "1" ] || [ -n "${CLAUDE_SANDBOX:-}" ]; } && exit 0 ;;
+  codex)  [ -n "${CODEX_SANDBOX:-}" ] && exit 0 ;;
+  gemini) [ -n "${GEMINI_SANDBOX:-}" ] && exit 0 ;;
+esac
+
+# 3) engine 라벨 + 로그 경로 기본값
+export QMD_ENGINE="$ENGINE"
+: "${QMD_RECALL_LOG:=/tmp/qmd-${ENGINE}-hook.log}"
+export QMD_RECALL_LOG
+
+# 4) action → core 위임 (stdin/stdout 그대로 패스스루)
+case "$ACTION" in
+  recall)   exec python3 "$ROOT/core/recall.py" ;;
+  update)   exec bash    "$ROOT/core/update.sh" ;;
+  posttool) exec python3 "$ROOT/core/posttool.py" ;;
+  *) echo "run-hook: unknown action '$ACTION'" >&2; exit 1 ;;
+esac
