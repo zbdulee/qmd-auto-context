@@ -137,12 +137,18 @@ run_resolve_only() {
 }
 
 load_config_json() {
-  local workdir="$1"
-  if [ -f "$workdir/.agents/qmd-recall.json" ]; then
-    cat "$workdir/.agents/qmd-recall.json"
-  else
-    printf '{}'
-  fi
+  local dir prev=""
+  dir=$(cd "$1" 2>/dev/null && pwd) || dir="$1"
+  while [ -n "$dir" ] && [ "$dir" != "/" ] && [ "$dir" != "$prev" ]; do
+    if [ -f "$dir/.agents/qmd-recall.json" ]; then
+      cat "$dir/.agents/qmd-recall.json"
+      return
+    fi
+    [ "$dir" = "$HOME" ] && break
+    prev="$dir"
+    dir="$(dirname "$dir")"
+  done
+  printf '{}'
 }
 
 config_event_enabled() {
@@ -186,9 +192,9 @@ run_update() {
 
   # 2. Get collections and paths via resolve-only logic
   local resolved
-  resolved=$(echo "$config_json" | bash "$0" --resolve-only --cwd "$workdir")
-  
-  refused=$(echo "$resolved" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("refused"))' 2>/dev/null)
+  resolved=$(echo "$config_json" | bash "$0" --resolve-only --cwd "$workdir" 2>/dev/null || echo '{"refused":true}')
+
+  refused=$(echo "$resolved" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("refused"))' 2>/dev/null || echo "")
   if [ "$refused" = "True" ]; then
     log "ABORT: resolve-only refused path '$workdir'"
     exit 0

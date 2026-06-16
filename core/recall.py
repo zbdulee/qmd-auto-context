@@ -35,11 +35,14 @@ def load_project_config(cwd: str) -> dict:
     if target.exists():
         config_file = target
     else:
-        # Traverse upwards to find .agents/qmd-recall.json
+        # Traverse upwards to find .agents/qmd-recall.json, stop at HOME
+        home = Path.home().resolve()
         for parent in path.parents:
             target = parent / ".agents" / "qmd-recall.json"
             if target.exists():
                 config_file = target
+                break
+            if parent.resolve() == home:
                 break
                 
     if config_file:
