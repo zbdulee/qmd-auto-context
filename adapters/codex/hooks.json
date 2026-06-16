@@ -1,18 +1,33 @@
 {
   "hooks": {
-    "session_start": [
+    "SessionStart": [
       {
-        "command": "python3 @@REPO_ROOT@@/adapters/codex/wrapper.py update"
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 @@REPO_ROOT@@/adapters/codex/wrapper.py update"
+          }
+        ]
       }
     ],
-    "user_prompt_submit": [
+    "UserPromptSubmit": [
       {
-        "command": "python3 @@REPO_ROOT@@/adapters/codex/wrapper.py recall"
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 @@REPO_ROOT@@/adapters/codex/wrapper.py recall"
+          }
+        ]
       }
     ],
-    "post_tool_use": [
+    "PostToolUse": [
       {
-        "command": "python3 @@REPO_ROOT@@/adapters/codex/wrapper.py posttool"
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 @@REPO_ROOT@@/adapters/codex/wrapper.py posttool"
+          }
+        ]
       }
     ]
   }

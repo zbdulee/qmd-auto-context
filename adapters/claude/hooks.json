@@ -2,17 +2,32 @@
   "hooks": {
     "SessionStart": [
       {
-        "command": "python3 @@REPO_ROOT@@/adapters/claude/wrapper.py update"
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 @@REPO_ROOT@@/adapters/claude/wrapper.py update"
+          }
+        ]
       }
     ],
     "UserPromptSubmit": [
       {
-        "command": "python3 @@REPO_ROOT@@/adapters/claude/wrapper.py recall"
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 @@REPO_ROOT@@/adapters/claude/wrapper.py recall"
+          }
+        ]
       }
     ],
     "PostToolUse": [
       {
-        "command": "python3 @@REPO_ROOT@@/adapters/claude/wrapper.py posttool"
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 @@REPO_ROOT@@/adapters/claude/wrapper.py posttool"
+          }
+        ]
       }
     ]
   }

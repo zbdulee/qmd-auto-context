@@ -113,19 +113,19 @@ if os.path.exists(hooks_json):
 else:
     entries = {
         "claude": [
-            ("SessionStart", [{"command": f"python3 {wrapper} update"}]),
-            ("UserPromptSubmit", [{"command": f"python3 {wrapper} recall"}]),
-            ("PostToolUse", [{"command": f"python3 {wrapper} posttool"}]),
+            ("SessionStart", [{"hooks": [{"type": "command", "command": f"python3 {wrapper} update"}]}]),
+            ("UserPromptSubmit", [{"hooks": [{"type": "command", "command": f"python3 {wrapper} recall"}]}]),
+            ("PostToolUse", [{"hooks": [{"type": "command", "command": f"python3 {wrapper} posttool"}]}]),
         ],
         "codex": [
-            ("session_start", [{"command": f"python3 {wrapper} update"}]),
-            ("user_prompt_submit", [{"command": f"python3 {wrapper} recall"}]),
-            ("post_tool_use", [{"command": f"python3 {wrapper} posttool"}]),
+            ("session_start", [{"hooks": [{"type": "command", "command": f"python3 {wrapper} update"}]}]),
+            ("user_prompt_submit", [{"hooks": [{"type": "command", "command": f"python3 {wrapper} recall"}]}]),
+            ("post_tool_use", [{"hooks": [{"type": "command", "command": f"python3 {wrapper} posttool"}]}]),
         ],
         "gemini": [
-            ("SessionStart", [{"command": f"python3 {wrapper} update"}]),
-            ("BeforeAgent", [{"command": f"python3 {wrapper} recall"}]),
-            ("AfterTool", [{"command": f"python3 {wrapper} posttool", "matcher": "write_file|replace"}]),
+            ("SessionStart", [{"hooks": [{"type": "command", "command": f"python3 {wrapper} update"}]}]),
+            ("BeforeAgent", [{"hooks": [{"type": "command", "command": f"python3 {wrapper} recall"}]}]),
+            ("AfterTool", [{"matcher": "write_file|replace", "hooks": [{"type": "command", "command": f"python3 {wrapper} posttool"}]}]),
         ],
     }[platform]
 
@@ -135,13 +135,42 @@ if not isinstance(hooks, dict):
     data["hooks"] = hooks
 
 needle = f"/adapters/{platform}/wrapper.py"
+def command_strings(value):
+    if isinstance(value, dict):
+        command = value.get("command")
+        if isinstance(command, str):
+            yield command
+        for item in value.values():
+            yield from command_strings(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from command_strings(item)
+
+def is_legacy_qmd_entry(item):
+    return any(
+        "qmd" in command.lower() and "auto-context" not in command.lower()
+        for command in command_strings(item)
+    )
+
+def is_auto_context_adapter_entry(item):
+    return any(needle in command for command in command_strings(item))
+
+for hook_name, current in list(hooks.items()):
+    if not isinstance(current, list):
+        hooks[hook_name] = []
+        continue
+    hooks[hook_name] = [
+        item for item in current
+        if not (isinstance(item, dict) and is_legacy_qmd_entry(item))
+    ]
+
 for hook_name, template_entries in entries:
     current = hooks.get(hook_name, [])
     if not isinstance(current, list):
         current = []
     current = [
         item for item in current
-        if not (isinstance(item, dict) and needle in str(item.get("command", "")))
+        if not (isinstance(item, dict) and is_auto_context_adapter_entry(item))
     ]
     if isinstance(template_entries, list):
         current.extend(item for item in template_entries if isinstance(item, dict))
@@ -302,9 +331,15 @@ for platform in "${platforms[@]}"; do
   esac
 done
 
-install_backend
+if [[ "${QMD_INSTALL_SKIP_BACKEND:-}" == "1" ]]; then
+  say "backend install skip: QMD_INSTALL_SKIP_BACKEND=1"
+else
+  install_backend
+fi
 migrate_collection_paths
 
-if [[ "$DRY_RUN" != "1" ]]; then
+if [[ "${QMD_INSTALL_SKIP_SELFTEST:-}" == "1" ]]; then
+  say "self-test skip: QMD_INSTALL_SKIP_SELFTEST=1"
+elif [[ "$DRY_RUN" != "1" ]]; then
   (cd "$REPO_ROOT" && npm test)
 fi

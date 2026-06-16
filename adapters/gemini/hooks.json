@@ -2,18 +2,33 @@
   "hooks": {
     "SessionStart": [
       {
-        "command": "python3 @@REPO_ROOT@@/adapters/gemini/wrapper.py update"
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 @@REPO_ROOT@@/adapters/gemini/wrapper.py update"
+          }
+        ]
       }
     ],
     "BeforeAgent": [
       {
-        "command": "python3 @@REPO_ROOT@@/adapters/gemini/wrapper.py recall"
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 @@REPO_ROOT@@/adapters/gemini/wrapper.py recall"
+          }
+        ]
       }
     ],
     "AfterTool": [
       {
-        "command": "python3 @@REPO_ROOT@@/adapters/gemini/wrapper.py posttool",
-        "matcher": "write_file|replace"
+        "matcher": "write_file|replace",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 @@REPO_ROOT@@/adapters/gemini/wrapper.py posttool"
+          }
+        ]
       }
     ]
   }
