@@ -57,3 +57,17 @@ test("sandbox → 무동작", () => {
   });
   assert.equal(existsSync(q), false);
 });
+
+test("postToolUse 이벤트 비활성화 → 큐 미생성", () => {
+  const dir = mkdtempSync(join(tmpdir(), "qproj-"));
+  mkdirSync(join(dir, "04_Manuscript"), { recursive: true });
+  writeFileSync(join(dir, ".auto-context.json"), JSON.stringify({
+    collections: ["x-manuscript"], indexing: true,
+    collectionPaths: { "x-manuscript": "04_Manuscript" },
+    events: ["sessionStart", "userPromptSubmit"],
+  }));
+  const q = join(mkdtempSync(join(tmpdir(), "q-")), "queue");
+  enqueue(dir, { hook_event_name: "PostToolUse", cwd: dir,
+    tool_input: { file_path: join(dir, "04_Manuscript", "ep1.md") } }, q);
+  assert.equal(existsSync(q), false);
+});
