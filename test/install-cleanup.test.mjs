@@ -6,7 +6,54 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-test('install: 기존 qmd 훅 제거 + 어댑터 표준 등록 + 비-qmd 훅 보존', () => {
+test('install.sh: codex 글로벌 adapters hook 제거, 비-qmd 보존', () => {
+  const home = mkdtempSync(join(tmpdir(), 'qmd-home-'));
+  try {
+    const codexDir = join(home, '.codex');
+    execFileSync('mkdir', ['-p', codexDir]);
+    writeFileSync(join(codexDir, 'hooks.json'), JSON.stringify({
+      hooks: {
+        SessionStart: [
+          { matcher: 'startup', hooks: [{ type: 'command', command: 'python3 ~/.codex/hooks/keep.py' }] },
+          { hooks: [{ type: 'command', command: `python3 ${process.cwd()}/adapters/codex/wrapper.py update` }] },
+        ],
+      },
+    }));
+    execFileSync('bash', ['install.sh', '--migrate-only'], {
+      encoding: 'utf8',
+      env: { ...process.env, HOME: home, QMD_FAKE_PLATFORMS: 'codex',
+             QMD_INSTALL_SKIP_BACKEND: '1', QMD_INSTALL_SKIP_SELFTEST: '1', QMD_CLEANUP_ONLY: '1' },
+    });
+    const after = JSON.parse(readFileSync(join(codexDir, 'hooks.json'), 'utf8'));
+    const cmds = JSON.stringify(after);
+    assert.ok(cmds.includes('keep.py'), '비-qmd hook 보존');
+    assert.ok(!cmds.includes('adapters/codex/wrapper.py'), 'adapters hook 제거됨');
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('install.sh: codex hooks.json이 깨진 JSON이면 덮지 않고 abort/skip', () => {
+  const home = mkdtempSync(join(tmpdir(), 'qmd-home-'));
+  try {
+    const codexDir = join(home, '.codex');
+    execFileSync('mkdir', ['-p', codexDir]);
+    const broken = '{ "hooks": { invalid';
+    writeFileSync(join(codexDir, 'hooks.json'), broken);
+    try {
+      execFileSync('bash', ['install.sh', '--migrate-only'], {
+        encoding: 'utf8',
+        env: { ...process.env, HOME: home, QMD_FAKE_PLATFORMS: 'codex',
+               QMD_INSTALL_SKIP_BACKEND: '1', QMD_INSTALL_SKIP_SELFTEST: '1', QMD_CLEANUP_ONLY: '1' },
+      });
+    } catch { /* abort 종료여도 OK */ }
+    assert.equal(readFileSync(join(codexDir, 'hooks.json'), 'utf8'), broken, '깨진 파일 원본 보존(덮지 않음)');
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('install: 레거시 qmd 훅 제거 + 비-qmd 훅 보존 (Plan B: 등록 없음)', () => {
   const home = mkdtempSync(join(tmpdir(), 'qmd-cleanup-'));
   try {
     mkdirSync(join(home, '.claude'), { recursive: true });
@@ -21,6 +68,7 @@ test('install: 기존 qmd 훅 제거 + 어댑터 표준 등록 + 비-qmd 훅 보
     }));
 
     execFileSync('bash', ['install.sh'], {
+      encoding: 'utf8',
       env: {
         ...process.env, HOME: home,
         QMD_FAKE_PLATFORMS: 'claude',
@@ -34,12 +82,10 @@ test('install: 기존 qmd 훅 제거 + 어댑터 표준 등록 + 비-qmd 훅 보
     const ups = d.hooks.UserPromptSubmit;
     const cmds = ups.flatMap(e => (e.hooks || []).map(h => h.command));
 
-    // 1) 기존 qmd 훅 제거 (SSOT 대체)
+    // 1) 기존 qmd 훅 제거 (레거시 cleanup)
     assert.ok(!cmds.some(c => c.includes('qmd-recall-on-prompt')), '기존 qmd 훅이 제거되지 않음');
-    // 2) 어댑터 등록 + 표준 구조(hooks 배열)
-    const autoEntry = ups.find(e => (e.hooks || []).some(h => (h.command || '').includes('auto-context')));
-    assert.ok(autoEntry, '어댑터가 표준 hooks 배열 구조로 등록되지 않음');
-    assert.ok(cmds.some(c => c.includes('auto-context') && c.includes('recall')), 'recall 어댑터 미등록');
+    // 2) Plan B: install.sh는 더 이상 어댑터를 등록하지 않음 (plugins/ 경로가 담당)
+    assert.ok(!cmds.some(c => c.includes('auto-context')), 'Plan B: install.sh가 어댑터를 등록하면 안 됨');
     // 3) 비-qmd 훅 보존
     assert.ok(cmds.some(c => c.includes('keep-me')), '무관한 기존 훅이 보존되지 않음');
   } finally {

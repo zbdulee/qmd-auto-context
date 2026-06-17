@@ -77,90 +77,73 @@ backup_if_qmd_related() {
   fi
 }
 
-register_hooks() {
+cleanup_legacy_global_hooks() {
   local platform="$1"
   local config="$2"
-  local wrapper="$REPO_ROOT/adapters/$platform/wrapper.py"
-  local hooks_json="$REPO_ROOT/adapters/$platform/hooks.json"
 
-  if [[ -f "$hooks_json" ]]; then
-    say "$platform hook register: $hooks_json"
-  else
-    say "$platform hook register: python3 $wrapper"
-  fi
+  say "$platform legacy hook cleanup: $config"
   if [[ "$DRY_RUN" == "1" ]]; then
     return
   fi
 
-  mkdir -p "$(dirname "$config")"
-  python3 - "$platform" "$config" "$wrapper" "$hooks_json" "$REPO_ROOT" <<'PY'
+  # codex: CODEX_HOME 기반 경로 계산
+  local codex_home="${CODEX_HOME:-$HOME/.codex}"
+
+  # 정리 대상 경로 목록 (platform별)
+  local paths_to_clean=()
+  if [[ "$platform" == "gemini" ]]; then
+    paths_to_clean=(
+      "$HOME/.gemini/settings.json"
+      "$HOME/.gemini/antigravity-cli/settings.json"
+    )
+  elif [[ "$platform" == "codex" ]]; then
+    paths_to_clean=(
+      "$codex_home/hooks.json"
+    )
+    # codex config.toml inline [hooks] 경고 출력 (자동 편집 안 함 — repo-local/profile도 동일)
+    local config_toml="$codex_home/config.toml"
+    if [[ -f "$config_toml" ]] && grep -q '^\[hooks\]' "$config_toml" 2>/dev/null; then
+      say "WARNING: $config_toml 에 inline [hooks] 섹션 발견. managed marker 있으면 수동 확인 필요."
+    fi
+    # profile *.config.toml 경고
+    for profile_toml in "$codex_home"/*.config.toml; do
+      [[ -f "$profile_toml" ]] && grep -q '^\[hooks\]' "$profile_toml" 2>/dev/null \
+        && say "WARNING: profile config with [hooks]: $profile_toml — 수동 확인 필요."
+    done
+    # repo-local .codex/ 경고
+    if [[ -f "$PWD/.codex/hooks.json" ]] || ([[ -f "$PWD/.codex/config.toml" ]] && grep -q '^\[hooks\]' "$PWD/.codex/config.toml" 2>/dev/null); then
+      say "WARNING: repo-local .codex/ hook 설정 발견 ($PWD/.codex) — 자동 편집 안 함, 수동 확인 필요."
+    fi
+  else
+    paths_to_clean=("$config")
+  fi
+
+  for target_config in "${paths_to_clean[@]}"; do
+    [[ -f "$target_config" ]] || continue
+    python3 - "$platform" "$target_config" <<'PY'
 import json
 import os
 import sys
 
-platform, config_path, wrapper, hooks_json, repo_root = sys.argv[1:6]
+platform, config_path = sys.argv[1], sys.argv[2]
 
-if os.path.exists(config_path):
-    try:
-        with open(config_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except json.JSONDecodeError as exc:
-        print(f"invalid JSON in {config_path}: {exc}", file=sys.stderr)
-        sys.exit(1)
-else:
-    data = {}
+try:
+    with open(config_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+except json.JSONDecodeError as exc:
+    print(f"invalid JSON in {config_path}: {exc}", file=sys.stderr)
+    sys.exit(1)
 
 if not isinstance(data, dict):
-    data = {}
+    print(f"skip: {config_path} is not a JSON object", file=sys.stderr)
+    sys.exit(0)
 
-def expand_paths(value):
-    if isinstance(value, str):
-        value = value.replace("@@REPO_ROOT@@", repo_root)
-        for prefix in ("adapters/", "./adapters/"):
-            target = prefix[2:] if prefix.startswith("./") else prefix
-            absolute = os.path.join(repo_root, target)
-            if value.startswith(prefix):
-                value = absolute + value[len(prefix):]
-            value = value.replace(f" {prefix}", f" {absolute}")
-        return value
-    if isinstance(value, list):
-        return [expand_paths(item) for item in value]
-    if isinstance(value, dict):
-        return {key: expand_paths(item) for key, item in value.items()}
-    return value
-
-if os.path.exists(hooks_json):
-    with open(hooks_json, "r", encoding="utf-8") as f:
-        template_data = json.load(f)
-    template_hooks = template_data.get("hooks", {})
-    if not isinstance(template_hooks, dict):
-        template_hooks = {}
-    entries = list(expand_paths(template_hooks).items())
-else:
-    entries = {
-        "claude": [
-            ("SessionStart", [{"hooks": [{"type": "command", "command": f"python3 {wrapper} update"}]}]),
-            ("UserPromptSubmit", [{"hooks": [{"type": "command", "command": f"python3 {wrapper} recall"}]}]),
-            ("PostToolUse", [{"hooks": [{"type": "command", "command": f"python3 {wrapper} posttool"}]}]),
-        ],
-        "codex": [
-            ("session_start", [{"hooks": [{"type": "command", "command": f"python3 {wrapper} update"}]}]),
-            ("user_prompt_submit", [{"hooks": [{"type": "command", "command": f"python3 {wrapper} recall"}]}]),
-            ("post_tool_use", [{"hooks": [{"type": "command", "command": f"python3 {wrapper} posttool"}]}]),
-        ],
-        "gemini": [
-            ("SessionStart", [{"hooks": [{"type": "command", "command": f"python3 {wrapper} update"}]}]),
-            ("BeforeAgent", [{"hooks": [{"type": "command", "command": f"python3 {wrapper} recall"}]}]),
-            ("AfterTool", [{"matcher": "write_file|replace", "hooks": [{"type": "command", "command": f"python3 {wrapper} posttool"}]}]),
-        ],
-    }[platform]
-
-hooks = data.setdefault("hooks", {})
+hooks = data.get("hooks", {})
 if not isinstance(hooks, dict):
-    hooks = {}
-    data["hooks"] = hooks
+    sys.exit(0)
 
 needle = f"/adapters/{platform}/wrapper.py"
+
 def command_strings(value):
     if isinstance(value, dict):
         command = value.get("command")
@@ -181,28 +164,24 @@ def is_legacy_qmd_entry(item):
 def is_auto_context_adapter_entry(item):
     return any(needle in command for command in command_strings(item))
 
+changed = False
 for hook_name, current in list(hooks.items()):
     if not isinstance(current, list):
-        hooks[hook_name] = []
         continue
-    hooks[hook_name] = [
-        item for item in current
-        if not (isinstance(item, dict) and is_legacy_qmd_entry(item))
+    filtered = [
+        it for it in current
+        if not (isinstance(it, dict)
+                and (is_legacy_qmd_entry(it) or is_auto_context_adapter_entry(it)))
     ]
+    if len(filtered) != len(current):
+        changed = True
+    if filtered:
+        hooks[hook_name] = filtered
+    else:
+        del hooks[hook_name]
 
-for hook_name, template_entries in entries:
-    current = hooks.get(hook_name, [])
-    if not isinstance(current, list):
-        current = []
-    current = [
-        item for item in current
-        if not (isinstance(item, dict) and is_auto_context_adapter_entry(item))
-    ]
-    if isinstance(template_entries, list):
-        current.extend(item for item in template_entries if isinstance(item, dict))
-    elif isinstance(template_entries, dict):
-        current.append(template_entries)
-    hooks[hook_name] = current
+if not changed:
+    sys.exit(0)
 
 tmp_path = config_path + ".tmp"
 with open(tmp_path, "w", encoding="utf-8") as f:
@@ -210,6 +189,7 @@ with open(tmp_path, "w", encoding="utf-8") as f:
     f.write("\n")
 os.replace(tmp_path, config_path)
 PY
+  done
 }
 
 install_backend() {
@@ -406,6 +386,22 @@ PY
 }
 
 if [[ "$MIGRATE_ONLY" == "1" ]]; then
+  if [[ "${QMD_CLEANUP_ONLY:-}" == "1" ]]; then
+    # 백엔드/마이그레이션 없이 레거시 글로벌 hook 정리만 수행
+    for platform in "${platforms[@]}"; do
+      [[ -z "$platform" ]] && continue
+      case "$platform" in
+        claude|codex|gemini)
+          config="$(config_path_for "$platform")"
+          cleanup_legacy_global_hooks "$platform" "$config"
+          ;;
+        *)
+          say "unknown platform skip: $platform"
+          ;;
+      esac
+    done
+    exit 0
+  fi
   migrate_collection_paths
   migrate_legacy_to_auto_context
   exit 0
@@ -417,7 +413,7 @@ for platform in "${platforms[@]}"; do
     claude|codex|gemini)
       config="$(config_path_for "$platform")"
       backup_if_qmd_related "$platform" "$config"
-      register_hooks "$platform" "$config"
+      cleanup_legacy_global_hooks "$platform" "$config"
       ;;
     *)
       say "unknown platform skip: $platform"
