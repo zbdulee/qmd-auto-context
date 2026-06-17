@@ -208,7 +208,7 @@ install_backend() {
   local script
   local dest
 
-  for script in daemon.sh keepalive.sh logrotate.sh; do
+  for script in daemon.sh keepalive.sh logrotate.sh index_worker.sh; do
     dest="$qmd_config/$script"
     if [[ "$DRY_RUN" == "1" ]]; then
       say "backend copy plan: $REPO_ROOT/backend/$script -> $dest"
