@@ -9,10 +9,16 @@ set -u
 ACTION="${1:-}"
 ENGINE="${2:-claude}"
 
+# 인자 없이 호출 시 usage 안내
+if [ -z "$ACTION" ]; then
+  echo "usage: run-hook <recall|update|posttool> <claude|codex|gemini>" >&2
+  exit 1
+fi
+
 # 1) 플러그인 루트 결정 — 변수 우선, 없으면 스크립트 위치 기준(hooks/run-hook → 루트)
 ROOT="${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:-}}"
 if [ -z "$ROOT" ]; then
-  ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+  ROOT="$(cd "$(dirname "$0")/.." && pwd)" || { echo "run-hook: cannot resolve plugin root" >&2; exit 1; }
 fi
 
 # 2) sandbox/headless → 무출력 종료 (정상 동작)

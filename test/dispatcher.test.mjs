@@ -41,6 +41,7 @@ test('engine 라벨이 selection 로그에 기록 (claude/codex/gemini)', () => 
     try {
       dispatch(['recall', engine], { prompt: PROMPT, cwd: dir }, { QMD_RECALL_LOG: logPath });
       const ev = selectionEvents(logPath);
+      assert.ok(ev.length > 0, 'no selection events');
       assert.equal(ev[0].engine, engine, `engine=${engine}`);
     } finally { rmSync(dir, { recursive: true, force: true }); }
   }
@@ -59,6 +60,26 @@ test('--sandbox 인자 → 무출력', () => {
 test('CODEX_SANDBOX / GEMINI_SANDBOX → 무출력', () => {
   assert.equal(dispatch(['recall', 'codex'], { prompt: PROMPT, cwd: '/tmp' }, { CODEX_SANDBOX: '1' }), '');
   assert.equal(dispatch(['recall', 'gemini'], { prompt: PROMPT, cwd: '/tmp' }, { GEMINI_SANDBOX: '1' }), '');
+});
+
+test('QMD_SANDBOX=1 → 무출력 (cross-engine 공통 가드)', () => {
+  assert.equal(dispatch(['recall', 'claude'], { prompt: PROMPT, cwd: '/tmp' }, { QMD_SANDBOX: '1' }), '');
+});
+
+test('posttool action → 비-스토리 입력에서 graceful 종료', () => {
+  // collectionPaths 없는 config + 비-스토리 경로 → posttool이 빈 출력으로 graceful 종료
+  const dir = mkdtempSync(join(tmpdir(), 'qmd-posttool-'));
+  mkdirSync(join(dir, '.agents'), { recursive: true });
+  writeFileSync(join(dir, '.agents', 'qmd-recall.json'), JSON.stringify({ collections: ['axiom'] }));
+  try {
+    assert.doesNotThrow(() =>
+      dispatch(['posttool', 'claude'], {
+        hook_event_name: 'PostToolUse',
+        cwd: dir,
+        tool_input: { file_path: '/tmp/unrelated.txt', content: 'some unrelated content for testing' },
+      })
+    );
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('알 수 없는 action → 비정상 종료', () => {
