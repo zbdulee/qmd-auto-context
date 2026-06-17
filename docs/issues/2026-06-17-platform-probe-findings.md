@@ -60,6 +60,8 @@ agy --dangerously-skip-permissions -p "create a file called test.txt containing 
 
 **결론**: agy(antigravity) 1.0.8에서 posttool 이벤트명은 **`PostToolUse`**. `AfterTool`은 지원하지 않거나 이 버전에서 발동하지 않음.
 
+> **근거**: 시도 1의 raw 로그는 본 문서에 상세 기록되지 않으나, 이 결론은 이후 시도 2~4에서 `PostToolUse` 이벤트가 반복 발동하고 `AfterTool`은 발동하지 않는 관찰(§시도 2, 3, 4)로 간접 뒷받침된다.
+
 > 참고: 기존 `adapters/gemini/EVENT-MAP.md`(2026-06-15 실측)에는 `AfterTool`로 기록돼 있었으나, 이번 실측에서 `PostToolUse`로 확정됨. agy 버전 업데이트(또는 버전별 차이) 가능성 있음.
 
 ### 시도 2 — stdin 구조 및 환경변수 확인
@@ -121,7 +123,7 @@ agy --dangerously-skip-permissions -p "edit test.txt append ' final' to its cont
 
 **관찰**: 로그에 `MATCHED tool: replace_file_content` + `MATCHED tool: write_to_file` 기록됨. matcher가 두 도구 모두에서 정상 발동 확인.
 
-> 주의: `toolCall: null` 케이스도 matcher 통과(agy matcher가 null toolCall을 필터하지 않음). 따라서 hook 내부에서 `toolCall` null 체크가 필요하다.
+> **주의 — 미검증 가설**: `toolCall: null`인 PostToolUse도 matcher 통과할 **가능성**이 제기되었다. 본 실측에서는 정상 toolCall(즉, `toolCall.name = "write_to_file"` 또는 `"replace_file_content"`)에서의 matcher 발동(`MATCHED tool: ...`)만 직접 입증되었으며, `toolCall: null` 상태에서 실제로 hook이 실행되었다는 직접 로그 증거는 없다. 이 null 통과 가능성은 후속 Task(posttool.py 구현)에서 `core/posttool.py`의 null 방어 로직 추가 및 검증으로 처리되어야 한다.
 
 ### 주요 차이 — EVENT-MAP.md(2026-06-15) vs 이번 실측(2026-06-17)
 
