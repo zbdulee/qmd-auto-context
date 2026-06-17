@@ -1,0 +1,16 @@
+{
+  "name": "qmd-auto-context-marketplace",
+  "description": "qmd 기반 자동 컨텍스트 주입 플러그인 marketplace",
+  "owner": { "name": "zbdulee" },
+  "plugins": [
+    {
+      "name": "qmd-auto-context",
+      "description": "qmd 기반 자동 컨텍스트 주입 — recall/update/posttool hooks",
+      "version": "0.2.0",
+      "category": "Productivity",
+      "source": { "source": "url", "url": "https://github.com/zbdulee/auto-context" },
+      "policy": { "installation": "manual", "authentication": "none" },
+      "author": { "name": "zbdulee" }
+    }
+  ]
+}
