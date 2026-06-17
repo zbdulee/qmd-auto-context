@@ -18,3 +18,17 @@ test('Claude hooks.json — 3 이벤트 + run-hook 호출', () => {
   assert.match(cmd, /\$\{CLAUDE_PLUGIN_ROOT\}/);
   assert.match(h.PostToolUse[0].matcher, /Edit\|Write\|MultiEdit\|NotebookEdit/);
 });
+
+test('Codex 매니페스트 — hooks 경로 명시 + interface', () => {
+  const m = read('.codex-plugin/plugin.json');
+  assert.equal(m.name, 'qmd-auto-context');
+  assert.equal(m.hooks, './hooks/hooks-codex.json');
+  assert.ok(m.interface && m.interface.displayName);
+});
+
+test('Codex hooks-codex.json — PLUGIN_ROOT 사용', () => {
+  const h = read('hooks/hooks-codex.json').hooks;
+  const cmd = h.UserPromptSubmit[0].hooks[0].command;
+  assert.match(cmd, /run-hook" recall codex/);
+  assert.match(cmd, /\$\{PLUGIN_ROOT\}/);
+});
