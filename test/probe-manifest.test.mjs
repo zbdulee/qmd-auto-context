@@ -25,7 +25,7 @@ test('codex marketplace.json: git source 객체 + policy + category 스키마', 
   const p = m.plugins.find(x => x.name === 'qmd-auto-context');
   assert.ok(p, 'qmd-auto-context plugin 항목');
   assert.equal(p.source.source, 'url', 'source.source는 url');
-  assert.equal(p.source.url, 'https://github.com/zbdulee/auto-context', 'source.url은 repo URL');
+  assert.equal(p.source.url, 'https://github.com/zbdulee/qmd-auto-context', 'source.url은 repo URL');
   assert.equal(p.policy.installation, 'AVAILABLE', 'policy.installation은 AVAILABLE');
   assert.equal(p.policy.authentication, 'ON_INSTALL', 'policy.authentication은 ON_INSTALL');
   assert.equal(p.category, 'Productivity', 'category는 Productivity');

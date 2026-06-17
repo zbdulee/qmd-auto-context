@@ -212,8 +212,8 @@ Expected: FAIL (파일 없음)
   "description": "qmd 기반 자동 컨텍스트 주입 — 프롬프트마다 관련 문서 검색·주입(recall), 세션 시작 시 인덱스 갱신(update), 편집 후 연속성 힌트(posttool)",
   "version": "0.2.0",
   "author": { "name": "zbdulee" },
-  "homepage": "https://github.com/zbdulee/auto-context",
-  "repository": "https://github.com/zbdulee/auto-context",
+  "homepage": "https://github.com/zbdulee/qmd-auto-context",
+  "repository": "https://github.com/zbdulee/qmd-auto-context",
   "license": "MIT",
   "keywords": ["qmd", "context", "recall", "hooks", "rag"]
 }
@@ -287,8 +287,8 @@ Expected: FAIL (Codex 파일 없음)
   "version": "0.2.0",
   "description": "qmd 기반 자동 컨텍스트 주입 — recall/update/posttool hooks",
   "author": { "name": "zbdulee", "url": "https://github.com/zbdulee" },
-  "homepage": "https://github.com/zbdulee/auto-context",
-  "repository": "https://github.com/zbdulee/auto-context",
+  "homepage": "https://github.com/zbdulee/qmd-auto-context",
+  "repository": "https://github.com/zbdulee/qmd-auto-context",
   "license": "MIT",
   "keywords": ["qmd", "context", "recall", "hooks", "rag"],
   "hooks": "./hooks/hooks-codex.json",
