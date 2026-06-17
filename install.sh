@@ -8,6 +8,10 @@ if [[ "${1:-}" == "--dry-run" ]]; then
   DRY_RUN=1
 elif [[ "${1:-}" == "--migrate-only" ]]; then
   MIGRATE_ONLY=1
+elif [[ "${1:-}" == "--agy-local" ]]; then
+  target="${2:-$PWD}"
+  python3 "$REPO_ROOT/core/agy_local_install.py" "$target" "$REPO_ROOT"
+  exit 0
 fi
 
 timestamp="$(date +%Y%m%d-%H%M%S)"
