@@ -89,21 +89,18 @@ def extract_text(payload: dict) -> str:
     text = "\n".join(chunk for chunk in chunks if chunk.strip())
     return text[:MAX_TEXT_CHARS]
 
-def story_paths_touched(payload: dict, cwd: str, config: dict) -> bool:
+def edited_paths(payload: dict) -> list[str]:
     tool_input = payload.get("tool_input")
     if not isinstance(tool_input, dict):
-        return False
-
+        return []
     paths = []
     for key in ("file_path", "path"):
         value = tool_input.get(key)
         if isinstance(value, str):
             paths.append(value)
-
     patch = tool_input.get("patch")
     if isinstance(patch, str):
         paths.extend(paths_from_patch(patch))
-
     edits = tool_input.get("edits")
     if isinstance(edits, list):
         for edit in edits:
@@ -111,8 +108,10 @@ def story_paths_touched(payload: dict, cwd: str, config: dict) -> bool:
                 value = edit.get("file_path") or edit.get("path")
                 if isinstance(value, str):
                     paths.append(value)
+    return paths
 
-    return any(is_story_path(p, cwd, config) for p in paths)
+def story_paths_touched(payload: dict, cwd: str, config: dict) -> bool:
+    return any(is_story_path(p, cwd, config) for p in edited_paths(payload))
 
 def main():
     # If QMD_SANDBOX is set or --sandbox option is in sys.argv, exit immediately with no output
