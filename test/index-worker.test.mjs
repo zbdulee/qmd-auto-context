@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, chmodSync, mkdirSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, chmodSync, mkdirSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -123,6 +123,28 @@ test("새 임베딩 0 → reload 스킵", () => {
   assert.equal(existsSync(rlog), false);
 });
 
+// (pid) lock 획득 후 pid 파일 생성, 종료 후 lock dir 정리 검증
+test("정상 종료 시 lock dir과 pid 파일이 모두 제거된다", () => {
+  const d = mkdtempSync(join(tmpdir(), "wk-"));
+  const log = join(d, "calls.log");
+  const stub = makeStubQmd(d, log);
+  const proj = join(d, "proj"); mkdirSync(join(proj, "04_M"), { recursive: true });
+  const q = join(d, "queue");
+  writeFileSync(q, `x\t${join(proj, "04_M")}\n`);
+  const wl = join(d, "wlock.d");
+  const ul = join(d, "ulock.d");
+  const el = join(d, "elock.d");
+  execFileSync("bash", ["backend/index_worker.sh"], { encoding: "utf8", env: {
+    ...process.env, QMD_DIRTY_QUEUE: q, QMD_FAKE_QMD: stub,
+    QMD_INDEX_WORKER_LOCKDIR: wl, QMD_WRITER_LOCKDIR: ul, QMD_EMBED_LOCKDIR: el,
+    QMD_NO_RELOAD: "1",
+  }});
+  // 정상 완료 후 세 lock dir 모두 제거돼야 한다
+  assert.equal(existsSync(wl), false, "WORKER_LOCK dir should be removed");
+  assert.equal(existsSync(ul), false, "WRITER_LOCK dir should be removed");
+  assert.equal(existsSync(el), false, "EMBED_LOCK dir should be removed");
+});
+
 // (B) embed lock 테스트
 test("EMBED_LOCK 잡혀 있으면 embed 스킵 + 큐 복원", () => {
   const d = mkdtempSync(join(tmpdir(), "wk-"));
@@ -130,7 +152,9 @@ test("EMBED_LOCK 잡혀 있으면 embed 스킵 + 큐 복원", () => {
   const stub = makeStubQmd(d, log);
   const proj = join(d, "proj"); mkdirSync(join(proj, "04_M"), { recursive: true });
   const q = join(d, "queue"); writeFileSync(q, `x\t${join(proj, "04_M")}\n`);
-  const elock = join(d, "el.d"); mkdirSync(elock); // embed lock 미리 잡아둠
+  const elock = join(d, "el.d"); mkdirSync(elock);
+  // pid 파일에 살아있는 pid(현재 Node 프로세스) 기록 → worker가 stale 오판하지 않도록
+  writeFileSync(join(elock, "pid"), String(process.pid));
   execFileSync("bash", ["backend/index_worker.sh"], { encoding: "utf8", env: {
     ...process.env, QMD_DIRTY_QUEUE: q, QMD_FAKE_QMD: stub,
     QMD_INDEX_WORKER_LOCKDIR: join(d, "wl.d"), QMD_WRITER_LOCKDIR: join(d, "ul.d"),

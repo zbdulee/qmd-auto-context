@@ -7,7 +7,7 @@ QUEUE="${QMD_DIRTY_QUEUE:-$HOME/.config/qmd/dirty-queue}"
 WORKER_LOCK="${QMD_INDEX_WORKER_LOCKDIR:-/tmp/qmd-index-worker.lock.d}"
 WRITER_LOCK="${QMD_WRITER_LOCKDIR:-/tmp/qmd-update.lock.d}"
 EMBED_LOCK="${QMD_EMBED_LOCKDIR:-/tmp/qmd-embed.lock.d}"
-LOG="${QMD_RECALL_LOG:-/tmp/qmd-hook.log}"
+LOG="${QMD_RECALL_LOG:-/tmp/qmd-index-worker.log}"
 QMD="${QMD_FAKE_QMD:-qmd}"
 LAUNCHCTL="${QMD_FAKE_LAUNCHCTL:-launchctl}"
 DAEMON_PORT="${QMD_DAEMON_PORT:-8483}"
@@ -37,11 +37,12 @@ unset BUN_INSTALL; export PATH
 # single-flight
 if ! mkdir "$WORKER_LOCK" 2>/dev/null; then
   if [ -n "$(find "$WORKER_LOCK" -maxdepth 0 -mmin +10 2>/dev/null)" ]; then
-    rmdir "$WORKER_LOCK" 2>/dev/null || true
+    rm -f "$WORKER_LOCK/pid" 2>/dev/null; rmdir "$WORKER_LOCK" 2>/dev/null || true
   fi
   exit 0
 fi
-trap 'rmdir "$WORKER_LOCK" 2>/dev/null || true' EXIT
+echo "$$" > "$WORKER_LOCK/pid" 2>/dev/null || true
+trap 'rm -f "$WORKER_LOCK/pid" 2>/dev/null; rmdir "$WORKER_LOCK" 2>/dev/null || true' EXIT
 
 # 큐 스냅샷(원자적으로 비우고 처리 — 처리 중 새 enqueue는 다음 tick)
 SNAP="$(mktemp)"
@@ -65,7 +66,8 @@ if ! mkdir "$WRITER_LOCK" 2>/dev/null; then
   for e in "${ENTRIES[@]}"; do printf '%s\n' "$e" >>"$QUEUE"; done
   exit 0
 fi
-trap 'rmdir "$WRITER_LOCK" 2>/dev/null || true; rmdir "$WORKER_LOCK" 2>/dev/null || true' EXIT
+echo "$$" > "$WRITER_LOCK/pid" 2>/dev/null || true
+trap 'rm -f "$WRITER_LOCK/pid" 2>/dev/null; rmdir "$WRITER_LOCK" 2>/dev/null || true; rm -f "$WORKER_LOCK/pid" 2>/dev/null; rmdir "$WORKER_LOCK" 2>/dev/null || true' EXIT
 
 added=0
 for e in "${ENTRIES[@]}"; do
@@ -79,16 +81,18 @@ done
 "$QMD" update >>"$LOG" 2>&1 || { log "update failed"; exit 0; }
 
 # embed lock 획득 (update.sh 백그라운드 embed와 동시 실행 방지)
-# stale 방어: 10분 이상 묵은 lock은 회수
-if [ -n "$(find "$EMBED_LOCK" -maxdepth 0 -mmin +10 2>/dev/null)" ]; then
-  rmdir "$EMBED_LOCK" 2>/dev/null || true
+# stale 방어: pid liveness 체크 (update.sh 프로토콜과 대칭)
+if [ -d "$EMBED_LOCK" ]; then
+  epid="$(cat "$EMBED_LOCK/pid" 2>/dev/null || true)"
+  { [ -z "$epid" ] || ! kill -0 "$epid" 2>/dev/null; } && { rm -f "$EMBED_LOCK/pid" 2>/dev/null; rmdir "$EMBED_LOCK" 2>/dev/null || true; }
 fi
 if ! mkdir "$EMBED_LOCK" 2>/dev/null; then
   log "embed lock busy — requeue & defer"
   for e in "${ENTRIES[@]}"; do printf '%s\n' "$e" >>"$QUEUE"; done
   exit 0
 fi
-trap 'rmdir "$EMBED_LOCK" 2>/dev/null || true; rmdir "$WRITER_LOCK" 2>/dev/null || true; rmdir "$WORKER_LOCK" 2>/dev/null || true' EXIT
+echo "$$" > "$EMBED_LOCK/pid" 2>/dev/null || true
+trap 'rm -f "$EMBED_LOCK/pid" 2>/dev/null; rmdir "$EMBED_LOCK" 2>/dev/null || true; rm -f "$WRITER_LOCK/pid" 2>/dev/null; rmdir "$WRITER_LOCK" 2>/dev/null || true; rm -f "$WORKER_LOCK/pid" 2>/dev/null; rmdir "$WORKER_LOCK" 2>/dev/null || true' EXIT
 
 # embed (전체 incremental). 출력에서 새 임베딩 수 파싱.
 EMBED_OUT="$("$QMD" embed 2>&1)"; printf '%s\n' "$EMBED_OUT" >>"$LOG"
