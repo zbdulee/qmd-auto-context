@@ -51,14 +51,14 @@ if [[ -n "${QMD_FAKE_PLATFORMS:-}" ]]; then
   IFS=',' read -r -a platforms <<< "$QMD_FAKE_PLATFORMS"
 else
   [[ -d "$HOME/.claude" ]] && platforms+=("claude")
-  [[ -d "$HOME/.codex" ]] && platforms+=("codex")
+  [[ -d "${CODEX_HOME:-$HOME/.codex}" ]] && platforms+=("codex")
   [[ -d "$HOME/.gemini" ]] && platforms+=("gemini")
 fi
 
 config_path_for() {
   case "$1" in
     claude) printf '%s/.claude/settings.json\n' "$HOME" ;;
-    codex) printf '%s/.codex/hooks.json\n' "$HOME" ;;
+    codex) printf '%s/hooks.json\n' "${CODEX_HOME:-$HOME/.codex}" ;;
     gemini) printf '%s/.gemini/settings.json\n' "$HOME" ;;
     *) return 1 ;;
   esac

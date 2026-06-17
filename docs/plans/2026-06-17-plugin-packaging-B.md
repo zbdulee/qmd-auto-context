@@ -183,7 +183,7 @@ Expected: FAIL — ENOENT (파일 없음).
       "version": "0.2.0",
       "category": "Productivity",
       "source": { "source": "url", "url": "https://github.com/zbdulee/auto-context" },
-      "policy": { "installation": "manual", "authentication": "none" },
+      "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" },
       "author": { "name": "zbdulee" }
     }
   ]

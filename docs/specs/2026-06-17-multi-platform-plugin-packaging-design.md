@@ -181,8 +181,7 @@ selection 로그(`QMD_RECALL_LOG`) 등 기존 코어 동작 유지.
 - 기존 `install.sh`의 **글로벌 hook 직접 등록 제거**(claude settings.json / codex hooks.json /
   gemini settings.json). `uninstall.sh`의 SSOT 제거 로직 재사용.
 - **글로벌 hook ↔ 플러그인 hook 중복 감지/제거 절차** 필수. 봐야 할 곳(2차 리뷰 확장):
-  - **codex**: `~/.codex/hooks.json` **+ `~/.codex/config.toml`의 inline `[hooks]`** (codex는 글로벌/프로젝트/플러그인
-    hook을 **대체가 아니라 병합** 실행 → 양쪽 다 제거해야 중복 안 남음).
+  - **codex**: `~/.codex/hooks.json`은 제거, `~/.codex/config.toml`의 inline `[hooks]`는 **경고만** (우리가 등록하지 않는 영역이라 사용자 소유로 간주 — 자동 편집 안 함, 2026-06-17 결정).
   - **agy**: 레거시 `~/.gemini/settings.json` **+ `~/.gemini/antigravity-cli/settings.json`**(실측 확인 — install.sh:58은 전자만 앎).
   - claude: `~/.claude/settings.json`.
 - agy posttool은 **프로젝트 로컬 `.agents/hooks.json` 병합 설치**(덮어쓰기 금지) — atomic write(tmp+os.replace),
