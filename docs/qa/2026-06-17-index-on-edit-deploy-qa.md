@@ -14,30 +14,32 @@
 
 ---
 
-## Phase 0 — 버전 bump & 사전 점검
-- [ ] P0-1: `.claude-plugin/plugin.json` version 0.2.0 → 0.3.0
-- [ ] P0-2: `.codex-plugin/plugin.json` version 0.2.0 → 0.3.0
-- [ ] P0-3: `.claude-plugin/marketplace.json` 버전(있으면) 0.3.0 동기화
-- [ ] P0-4: 커밋 + push (main)
-- [ ] P0-5: `bash install.sh --dry-run` 검토 — index_worker.sh 복사 + com.qmd-index-worker.plist load 계획이 나오는지 (파일 변경 없음 확인)
+## Phase 0 — 버전 bump & 사전 점검 ✅
+- [x] P0-1: `.claude-plugin/plugin.json` 0.3.0 (description에 index 추가)
+- [x] P0-2: `.codex-plugin/plugin.json` 0.3.0 (description/interface index 반영)
+- [x] P0-3: `.claude-plugin/marketplace.json` 0.3.0 동기화
+- [x] P0-4: 커밋+push `d24e1e5` (main)
+- [x] P0-5: dry-run 확인 — `index_worker.sh → ~/.config/qmd/` 복사 + `com.qmd-index-worker.plist → ~/Library/LaunchAgents/` load 계획 정상. 마이그레이션 no changes.
 
-## Phase 1 — 설치 (backend)
-- [ ] P1-1: `bash install.sh` 실행 (3플랫폼 감지 → 백업 → 백엔드 → npm test)
-  - 기대: index_worker.sh가 ~/.config/qmd/로 복사, com.qmd-index-worker.plist가 ~/Library/LaunchAgents/에 배치 + launchctl load, self-test(npm test) pass
-- [ ] P1-2: 멱등성 — `bash install.sh` 재실행 시 "already loaded/cmp 동일" 등 변경 없음
+## Phase 1 — 설치 (backend) ✅
+- [x] P1-1: `bash install.sh` — index_worker.sh 복사 + plist 배치/load + self-test 145 pass, exit 0
+- [x] P1-2: 멱등 — 기존 daemon/keepalive/logrotate "already loaded skip"(install.sh 멱등 동작 확인)
 
-## Phase 2 — 설치 검증
-- [ ] P2-1: `~/.config/qmd/index_worker.sh` 존재 + 내용이 backend/index_worker.sh와 동일(cmp)
-- [ ] P2-2: `launchctl list | grep com.qmd-index-worker` — 로드됨
-- [ ] P2-3: plist StartInterval=60, ProgramArguments가 ~/.config/qmd/index_worker.sh
-- [ ] P2-4: (claude/codex 캐시 0.3.0 갱신은 marketplace 재설치 후 — Phase 5)
+## Phase 2 — 설치 검증 ✅
+- [x] P2-1: `~/.config/qmd/index_worker.sh` 존재 + cmp 동일
+- [x] P2-2: `launchctl list` → com.qmd-index-worker 로드됨
+- [x] P2-3: plist StartInterval=60, ProgramArguments `/Users/dulee/.config/qmd/index_worker.sh`(@@HOME@@ 치환됨)
+- [ ] P2-4: claude/codex 캐시 0.3.0 (Phase 5)
 
-## Phase 3 — enqueue 동작 (게이팅)
+## Phase 3 — enqueue 동작 (게이팅) ✅
 샌드박스 격리(QMD_DIRTY_QUEUE=임시)로 부작용 없이 검증.
-- [ ] P3-1: story-path(collectionPaths 내부) 편집 payload → 임시 큐에 `<collection>\t<abs_path>` 적재
-- [ ] P3-2: 비-story 편집 → 큐 미생성
-- [ ] P3-3: collections 빈(pending/optout) → 큐 미생성
-- [ ] P3-4: QMD_SANDBOX → 무동작
+- [x] P3-1: 잔상 manuscript 편집 → 임시 큐에 `jangsang-manuscript\t.../04_Manuscript` 적재(실 config longest-prefix)
+- [x] P3-2: README(비-story) → 큐 미생성
+- [x] P3-3: (단위테스트 커버 — collections 빈 시 미생성)
+- [x] P3-4: QMD_SANDBOX → 무동작
+
+## 🔴 P6에서 발견한 실환경 버그 (BUG-1)
+worker `backend/index_worker.sh`: `"$QMD" collection add ... && added=1` 가 **기존 컬렉션**("already exists", exit≠0)에서 added=0 → `[ added = 0 ] && exit 0`으로 update/embed 스킵. 큐는 이미 truncate돼 편집분 유실. update.sh는 retry에서 "already exists"를 성공 처리하나 worker엔 누락. stub qmd(항상 성공) 단위테스트로는 미검출. → fix 필요(아래 fix 브랜치).
 
 ## Phase 4 — worker 동작 (stub/실데몬)
 - [ ] P4-1: 임시 큐에 항목 넣고 worker 수동 실행(QMD_FAKE_QMD/임시 lock) → collection add/update/embed 호출 + 큐 비움

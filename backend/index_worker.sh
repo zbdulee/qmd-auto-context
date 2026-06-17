@@ -74,7 +74,12 @@ for e in "${ENTRIES[@]}"; do
   name="${e%%	*}"; path="${e#*	}"
   [ -n "$name" ] && [ -n "$path" ] || continue
   if [ ! -d "$path" ]; then log "skip missing dir: $name -> $path"; continue; fi
-  "$QMD" collection add "$path" --name "$name" >>"$LOG" 2>&1 && added=1
+  if out=$("$QMD" collection add "$path" --name "$name" 2>&1); then
+    added=1
+  elif printf '%s' "$out" | grep -qi "already exists"; then
+    added=1
+  fi
+  printf '%s\n' "$out" >>"$LOG"
 done
 [ "$added" = 0 ] && exit 0
 
