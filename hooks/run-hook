@@ -11,7 +11,7 @@ ENGINE="${2:-claude}"
 
 # 인자 없이 호출 시 usage 안내
 if [ -z "$ACTION" ]; then
-  echo "usage: run-hook <recall|update|posttool> <claude|codex|gemini>" >&2
+  echo "usage: run-hook <recall|update|posttool|index> <claude|codex|gemini>" >&2
   exit 1
 fi
 
@@ -40,5 +40,6 @@ case "$ACTION" in
   recall)   exec python3 "$ROOT/core/recall.py" ;;
   update)   exec bash    "$ROOT/core/update.sh" ;;
   posttool) exec python3 "$ROOT/core/posttool.py" ;;
+  index)    exec python3 "$ROOT/core/index_enqueue.py" ;;
   *) echo "run-hook: unknown action '$ACTION'" >&2; exit 1 ;;
 esac

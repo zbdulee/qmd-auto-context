@@ -85,3 +85,10 @@ test('posttool action → 비-스토리 입력에서 graceful 종료', () => {
 test('알 수 없는 action → 비정상 종료', () => {
   assert.throws(() => dispatch(['bogus', 'claude'], { prompt: PROMPT, cwd: '/tmp' }));
 });
+
+test('run-hook index → index_enqueue.py 위임 (sandbox 무출력)', () => {
+  const out = execFileSync('bash', ['hooks/run-hook', 'index', 'claude', '--sandbox'], {
+    input: '{}', encoding: 'utf8',
+  });
+  assert.equal(out, '');
+});

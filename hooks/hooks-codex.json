@@ -8,7 +8,10 @@
     ],
     "PostToolUse": [
       { "matcher": "apply_patch|Edit|Write",
-        "hooks": [ { "type": "command", "command": "\"${PLUGIN_ROOT}/hooks/run-hook\" posttool codex" } ] }
+        "hooks": [
+          { "type": "command", "command": "\"${PLUGIN_ROOT}/hooks/run-hook\" posttool codex" },
+          { "type": "command", "command": "\"${PLUGIN_ROOT}/hooks/run-hook\" index codex" }
+        ] }
     ]
   }
 }
