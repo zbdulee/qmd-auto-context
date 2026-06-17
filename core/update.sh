@@ -313,6 +313,10 @@ main() {
     exit 0
   fi
 
+  # 헬스체크: config·reason 검사 통과 후, fork 직전 1회 실행 (main() 호출에서만).
+  # --resolve-only 내부 재귀호출(--cwd 포함)과 --worker 경로에서는 실행 안 됨.
+  qmd_healthcheck
+
   nohup bash "$0" --worker "$workdir" </dev/null >>"$LOG" 2>&1 &
   exit 0
 }
