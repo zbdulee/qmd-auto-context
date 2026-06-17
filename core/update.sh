@@ -17,6 +17,20 @@ LOG="/tmp/qmd-hook.log"
 LOCKDIR="/tmp/qmd-update.lock.d"
 STATUS="/tmp/qmd-update-status.txt"
 
+# SessionStart 헬스체크: 데몬 포트 확인. 기본은 안내만, QMD_AUTO_KICKSTART=1이면 기동 시도.
+qmd_healthcheck() {
+  local port="${QMD_HEALTHCHECK_PORT:-8483}"
+  if curl -sf -m 1 "http://127.0.0.1:${port}/health" >/dev/null 2>&1; then
+    return 0
+  fi
+  # 안내는 stderr(JSON 파싱 경로 보호). 자동기동 opt-in 시만 stdout에 언급.
+  echo "[qmd] 데몬 미응답(:${port}). 기동: launchctl kickstart gui/$(id -u)/com.qmd-mcp-daemon" >&2
+  if [[ "${QMD_AUTO_KICKSTART:-}" == "1" ]]; then
+    echo "[qmd] kickstart 실행 (QMD_AUTO_KICKSTART=1)"
+    command -v launchctl >/dev/null 2>&1 && launchctl kickstart "gui/$(id -u)/com.qmd-mcp-daemon" >/dev/null 2>&1 || true
+  fi
+}
+
 log() {
   printf "[%s] %s\n" "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >>"$LOG" 2>&1 || true
 }
@@ -353,6 +367,9 @@ if [ "$1" = "--resolve-only" ]; then
   cwd="$PWD"
   if [ "$1" = "--cwd" ]; then
     cwd="$2"
+  else
+    # 외부(직접) 호출만 헬스체크 실행. 내부 subprocess 호출(--cwd 포함)은 skip(JSON 파싱 보호).
+    qmd_healthcheck
   fi
   run_resolve_only "$cwd"
   exit 0
