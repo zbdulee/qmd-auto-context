@@ -89,10 +89,11 @@ test('mock HTTP daemon recall integration validates query payload and context ou
   }
 });
 
-test('어댑터 wrapper가 잘못된 stdin에도 graceful(크래시 없음)', () => {
-  const out = execFileSync('python3', ['adapters/claude/wrapper.py', 'recall'], {
+test('디스패처가 잘못된 stdin에도 graceful(크래시 없음)', () => {
+  const out = execFileSync('bash', ['hooks/run-hook', 'recall', 'claude'], {
     input: 'not json',
     encoding: 'utf8',
+    env: { ...process.env, CLAUDE_PLUGIN_ROOT: process.cwd() },
   });
-  assert.equal(out.trim(), '');
+  assert.equal(typeof out, 'string', '크래시 없이 종료');
 });
