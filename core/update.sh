@@ -45,6 +45,10 @@ retry() {
       LAST_OUT="$output"
       return 0
     fi
+    if printf '%s' "$output" | grep -qi "already exists"; then
+      LAST_OUT="$output"
+      return 0
+    fi
     log "RETRY ($count/$max) failed: $* - error: $output"
     sleep 1
   done

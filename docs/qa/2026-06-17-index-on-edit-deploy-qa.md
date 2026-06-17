@@ -39,7 +39,11 @@
 - [x] P3-4: QMD_SANDBOX → 무동작
 
 ## 🔴 P6에서 발견한 실환경 버그 (BUG-1)
-worker `backend/index_worker.sh`: `"$QMD" collection add ... && added=1` 가 **기존 컬렉션**("already exists", exit≠0)에서 added=0 → `[ added = 0 ] && exit 0`으로 update/embed 스킵. 큐는 이미 truncate돼 편집분 유실. update.sh는 retry에서 "already exists"를 성공 처리하나 worker엔 누락. stub qmd(항상 성공) 단위테스트로는 미검출. → fix 필요(아래 fix 브랜치).
+worker `backend/index_worker.sh`: `"$QMD" collection add ... && added=1` 가 **기존 컬렉션**("already exists", exit≠0)에서 added=0 → `[ added = 0 ] && exit 0`으로 update/embed 스킵. 큐는 이미 truncate돼 편집분 유실. stub qmd(항상 성공) 단위테스트로는 미검출. → fix 브랜치 `fix/worker-existing-collection`.
+- BUG-1 fix: commit `6c56ee5` — worker collection add를 already-exists(exit1) 성공 처리. 9/9 + 회귀 146 pass.
+
+## 🔴 BUG-2 (BUG-1 fix 중 파생 발견 — 기존 버그, index-on-edit 무관)
+`core/update.sh`의 `retry()`(38-54)는 exit code만 본다(already-exists 미처리). `retry qmd collection add`(243)가 **기존 컬렉션이면 exit1로 3회 실패 → collections_ok=0 → qmd update/embed 스킵**. 즉 **SessionStart 자동 인덱싱이 첫 등록 후엔 기존 컬렉션을 재인덱싱 안 함**(원래 있던 버그). (자체훅 novel-qmd-session-update.sh의 retry는 already-exists 처리가 있어 무관했음.) → 같은 브랜치에서 fix.
 
 ## Phase 4 — worker 동작 (stub/실데몬)
 - [ ] P4-1: 임시 큐에 항목 넣고 worker 수동 실행(QMD_FAKE_QMD/임시 lock) → collection add/update/embed 호출 + 큐 비움

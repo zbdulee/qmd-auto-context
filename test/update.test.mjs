@@ -102,3 +102,53 @@ test('update core: --sandbox 인자 → 무출력 exit 0', () => {
   const out = execFileSync('bash', ['core/update.sh', '--sandbox']);
   assert.equal(out.toString().trim(), '');
 });
+
+// BUG-2 regression: collection add가 "already exists" + exit 1 반환해도 update/embed는 실행돼야 함
+test('update core: collection add already-exists exit 1도 update 실행 (BUG-2)', () => {
+  const work = repoTemp('qmd-update-already-exists');
+  const bin = join(work, 'bin');
+  const fakeHome = join(work, 'fakehome');
+  const qmdLog = join(work, 'qmd.log');
+  const LOCKDIR = '/tmp/qmd-update.lock.d';
+  // 혹시 남은 lock 정리 (cleanup)
+  try { rmSync(LOCKDIR, { recursive: true, force: true }); } catch (_) {}
+  try {
+    mkdirSync(join(work, '.agents'), { recursive: true });
+    mkdirSync(bin, { recursive: true });
+    mkdirSync(fakeHome, { recursive: true });
+    // indexing: true + collections: ['x'] → resolve-only가 entry를 반환하도록
+    writeFileSync(join(work, '.agents', 'qmd-recall.json'), JSON.stringify({
+      indexing: true,
+      collections: ['x'],
+    }));
+    // stub qmd: collection list/show → exit 0 (빈 출력); collection add → "already exists" + exit 1;
+    // update/embed → exit 0, 로그 기록
+    writeFileSync(join(bin, 'qmd'), [
+      '#!/usr/bin/env sh',
+      `log="${qmdLog}"`,
+      'echo "$@" >> "$log"',
+      'case "$1 $2" in',
+      '  "collection list") exit 0 ;;',
+      '  "collection show") exit 0 ;;',
+      '  "collection add") echo "Collection \'x\' already exists" >&2; exit 1 ;;',
+      '  *) exit 0 ;;',
+      'esac',
+    ].join('\n'), { mode: 0o755 });
+
+    execFileSync('bash', [join(process.cwd(), 'core', 'update.sh'), '--worker', work], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH}`,
+        HOME: fakeHome,           // normalize_qmd_path가 ~/.bun/bin 등을 PATH에 추가 못 하도록
+        QMD_INSTALL_SKIP_BACKEND: '1',
+      },
+    });
+
+    const log = readFileSync(qmdLog, 'utf8');
+    assert.ok(log.includes('update'), `qmd update가 호출돼야 하는데 qmd.log 내용: ${log}`);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+    try { rmSync(LOCKDIR, { recursive: true, force: true }); } catch (_) {}
+  }
+});
