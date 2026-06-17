@@ -31,4 +31,5 @@ test('Codex hooks-codex.json — PLUGIN_ROOT 사용', () => {
   const cmd = h.UserPromptSubmit[0].hooks[0].command;
   assert.match(cmd, /run-hook" recall codex/);
   assert.match(cmd, /\$\{PLUGIN_ROOT\}/);
+  assert.match(h.PostToolUse[0].matcher, /Edit\|Write\|MultiEdit\|NotebookEdit/);
 });
