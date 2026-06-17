@@ -28,11 +28,12 @@ bash uninstall.sh                           # 복원/제거
 
 ## 아키텍처 (큰 그림)
 
-**3층 구조: 플랫폼 무관 코어 1벌 + 얇은 어댑터 + launchd 백엔드.**
+**3층 구조: 플랫폼 무관 코어 1벌 + 얇은 어댑터(또는 hooks 디스패처) + launchd 백엔드.**
 
 ```
 core/      ← 모든 로직. 플랫폼/도메인 무관. stdin {prompt,cwd} → stdout 훅 JSON
-adapters/  ← claude|codex|gemini 각 wrapper.py + hooks.json. 코어로 패스스루만
+adapters/  ← claude|codex|gemini 각 wrapper.py + hooks.json. 코어로 패스스루만 (현행)
+hooks/     ← run-hook 단일 디스패처 + hooks.json/hooks-codex.json (Plan A, adapters 통합)
 backend/   ← qmd MCP HTTP 데몬(:8483) + keepalive + logrotate (launchd plist)
 ```
 
@@ -43,7 +44,15 @@ backend/   ← qmd MCP HTTP 데몬(:8483) + keepalive + logrotate (launchd plist
 - `config.py` — `.agents/qmd-recall.json` 로드 + 기본값 병합. 숫자 필드(minScore/topN/queryTimeout) 보수적 coercion, 실패 시 기본값. legacy novel 컬렉션명(`*-manuscript`/`*-plot`)은 `lexicalPatterns:["ep"]` 자동 활성화.
 - `resolve_paths.py` — collectionPaths→경로 매핑 + risky path / allowRoots traversal 검증.
 
+### hooks (`hooks/`) — 플러그인 패키징 (Plan A 도입)
+- `run-hook` — 공통 디스패처(bash). 호출: `run-hook <action> <engine>` (action: recall|update|posttool, engine: claude|codex|gemini). `dirname "$0"`로 플러그인 루트를 찾고(env `CLAUDE_PLUGIN_ROOT`/`PLUGIN_ROOT` 있으면 우선), engine 라벨(`QMD_ENGINE`)·sandbox/headless 가드 후 `core/<script>`로 stdin 패스스루 위임한다. **기존 `adapters/{claude,codex,gemini}/wrapper.py` 3벌을 단일 디스패처로 통합**한 것.
+- `hooks.json` — Claude hooks (`${CLAUDE_PLUGIN_ROOT}`). `hooks-codex.json` — Codex hooks (`${PLUGIN_ROOT}`). 이벤트명 차이(claude/codex `UserPromptSubmit`/`PostToolUse` vs agy `BeforeAgent`/`AfterTool`)로 플랫폼별로 나뉜다.
+- 매니페스트: `.claude-plugin/plugin.json`, `.codex-plugin/plugin.json`(+`interface`, `hooks` 경로 명시).
+- agy posttool 지원·install 마이그레이션·marketplace 배포는 **Plan B** 예정.
+
 ### 어댑터 (`adapters/<platform>/`)
+> **마이그레이션 중**: 어댑터의 wrapper.py 로직은 `hooks/run-hook` 디스패처로 통합되었다(Plan A). `adapters/` 디렉토리 자체의 제거와 install.sh 전환은 Plan B에서 진행한다. 아래는 현행(install.sh가 여전히 참조) 설명이다.
+
 각 `wrapper.py`는 **코어로 패스스루만** 한다 — engine 라벨(`QMD_ENGINE`)·로그 경로(`QMD_RECALL_LOG`)·headless/sandbox 체크만 주입하고 stdin을 그대로 코어에 넘긴다. 로직을 어댑터에 넣지 말 것.
 - **이벤트 매핑**: recall은 claude/codex `UserPromptSubmit` vs gemini `BeforeAgent`; posttool은 `PostToolUse` vs gemini `AfterTool`. Codex 이벤트명은 PascalCase(`SessionStart`)다.
 - **yield 메커니즘 (이중 실행 방지)**: `should_yield_to_local_recall()`이 cwd의 로컬 훅 설정(claude=`.claude/settings.json`, codex=`.codex/hooks.json`, gemini=`.gemini/{settings,hooks}.json`)을 보고 "qmd"+"recall"을 언급하는 훅이 있으면 글로벌 어댑터는 양보(무출력 종료)한다. 프로젝트가 자체 recall 훅을 가질 때 글로벌과 중복 실행되는 걸 막는 핵심 로직.
