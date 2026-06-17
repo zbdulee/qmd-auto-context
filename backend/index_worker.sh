@@ -9,8 +9,21 @@ WRITER_LOCK="${QMD_WRITER_LOCKDIR:-/tmp/qmd-update.lock.d}"
 EMBED_LOCK="${QMD_EMBED_LOCKDIR:-/tmp/qmd-embed.lock.d}"
 LOG="${QMD_RECALL_LOG:-/tmp/qmd-hook.log}"
 QMD="${QMD_FAKE_QMD:-qmd}"
+LAUNCHCTL="${QMD_FAKE_LAUNCHCTL:-launchctl}"
+DAEMON_PORT="${QMD_DAEMON_PORT:-8483}"
 
 log() { printf '[%s] index-worker: %s\n' "$(date '+%H:%M:%S')" "$*" >>"$LOG" 2>&1 || true; }
+
+reload_daemon() {
+  command -v "$LAUNCHCTL" >/dev/null 2>&1 || return 0
+  "$LAUNCHCTL" kill TERM "gui/$(id -u)/com.qmd-mcp-daemon" >>"$LOG" 2>&1 || return 0
+  log "daemon SIGTERM reload (new embeddings)"
+  [ -n "${QMD_HEALTH_SKIP:-}" ] && return 0
+  for _ in $(seq 1 30); do
+    curl -sf -m 1 "http://127.0.0.1:${DAEMON_PORT}/health" >/dev/null 2>&1 && break
+    sleep 0.5
+  done
+}
 
 [ -n "${QMD_SANDBOX:-}" ] && exit 0
 [ -f "$QUEUE" ] || exit 0
@@ -35,7 +48,7 @@ SNAP="$(mktemp)"
 {
   exec 9<"$QUEUE"; flock 9
   cat "$QUEUE" >"$SNAP"; : >"$QUEUE"
-  flock -u 9
+  flock -u 9; exec 9<&-
 } 2>/dev/null
 
 # dedupe (name\tpath) — bash 3.2 호환 (mapfile 미사용)
@@ -65,13 +78,25 @@ done
 
 "$QMD" update >>"$LOG" 2>&1 || { log "update failed"; exit 0; }
 
+# embed lock 획득 (update.sh 백그라운드 embed와 동시 실행 방지)
+# stale 방어: 10분 이상 묵은 lock은 회수
+if [ -n "$(find "$EMBED_LOCK" -maxdepth 0 -mmin +10 2>/dev/null)" ]; then
+  rmdir "$EMBED_LOCK" 2>/dev/null || true
+fi
+if ! mkdir "$EMBED_LOCK" 2>/dev/null; then
+  log "embed lock busy — requeue & defer"
+  for e in "${ENTRIES[@]}"; do printf '%s\n' "$e" >>"$QUEUE"; done
+  exit 0
+fi
+trap 'rmdir "$EMBED_LOCK" 2>/dev/null || true; rmdir "$WRITER_LOCK" 2>/dev/null || true; rmdir "$WORKER_LOCK" 2>/dev/null || true' EXIT
+
 # embed (전체 incremental). 출력에서 새 임베딩 수 파싱.
 EMBED_OUT="$("$QMD" embed 2>&1)"; printf '%s\n' "$EMBED_OUT" >>"$LOG"
 NEW=$(printf '%s' "$EMBED_OUT" | grep -oE 'Embedded [0-9]+ chunks' | grep -oE '[0-9]+' | head -1)
 NEW="${NEW:-0}"
 
-# reload: 새 임베딩이 있을 때만 (Task 5에서 구현; 여기선 가드)
+# reload: 새 임베딩이 있을 때만
 if [ "$NEW" -gt 0 ] && [ -z "${QMD_NO_RELOAD:-}" ]; then
-  reload_daemon   # Task 5에서 정의
+  reload_daemon
 fi
 exit 0

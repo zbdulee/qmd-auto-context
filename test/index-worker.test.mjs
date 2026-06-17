@@ -83,3 +83,60 @@ test("single-flight: 이미 lock이면 즉시 종료(큐 보존)", () => {
   assert.equal(existsSync(log), false);      // qmd 미호출
   assert.match(readFileSync(q, "utf8"), /04_M/); // 큐 보존
 });
+
+// (A) reload 테스트
+test("새 임베딩>0 → reload 호출(kill TERM)", () => {
+  const d = mkdtempSync(join(tmpdir(), "wk-"));
+  const log = join(d, "calls.log");
+  const rlog = join(d, "reload.log");
+  const stub = makeStubQmd(d, log); // embed가 "Embedded 3 chunks" 출력
+  const lc = join(d, "launchctl");
+  writeFileSync(lc, `#!/bin/bash\necho "$@" >> "${rlog}"\n`); chmodSync(lc, 0o755);
+  const proj = join(d, "proj"); mkdirSync(join(proj, "04_M"), { recursive: true });
+  const q = join(d, "queue"); writeFileSync(q, `x\t${join(proj, "04_M")}\n`);
+  execFileSync("bash", ["backend/index_worker.sh"], { encoding: "utf8", env: {
+    ...process.env, QMD_DIRTY_QUEUE: q, QMD_FAKE_QMD: stub, QMD_FAKE_LAUNCHCTL: lc,
+    QMD_INDEX_WORKER_LOCKDIR: join(d, "wl.d"), QMD_WRITER_LOCKDIR: join(d, "ul.d"),
+    QMD_EMBED_LOCKDIR: join(d, "el.d"),
+    QMD_HEALTH_SKIP: "1",
+  }});
+  assert.match(readFileSync(rlog, "utf8"), /kill TERM/);
+});
+
+test("새 임베딩 0 → reload 스킵", () => {
+  const d = mkdtempSync(join(tmpdir(), "wk-"));
+  const log = join(d, "calls.log");
+  const rlog = join(d, "reload.log");
+  // embed가 0 chunks
+  const stub = join(d, "qmd");
+  writeFileSync(stub, `#!/bin/bash\necho "$@" >> "${log}"\n[ "$1" = embed ] && echo "Embedded 0 chunks from 0 documents in 0s"\n[ "$1" = update ] && echo "All collections updated."\n`);
+  chmodSync(stub, 0o755);
+  const lc = join(d, "launchctl"); writeFileSync(lc, `#!/bin/bash\necho "$@" >> "${rlog}"\n`); chmodSync(lc, 0o755);
+  const proj = join(d, "proj"); mkdirSync(join(proj, "04_M"), { recursive: true });
+  const q = join(d, "queue"); writeFileSync(q, `x\t${join(proj, "04_M")}\n`);
+  execFileSync("bash", ["backend/index_worker.sh"], { encoding: "utf8", env: {
+    ...process.env, QMD_DIRTY_QUEUE: q, QMD_FAKE_QMD: stub, QMD_FAKE_LAUNCHCTL: lc,
+    QMD_INDEX_WORKER_LOCKDIR: join(d, "wl.d"), QMD_WRITER_LOCKDIR: join(d, "ul.d"),
+    QMD_EMBED_LOCKDIR: join(d, "el.d"),
+    QMD_HEALTH_SKIP: "1",
+  }});
+  assert.equal(existsSync(rlog), false);
+});
+
+// (B) embed lock 테스트
+test("EMBED_LOCK 잡혀 있으면 embed 스킵 + 큐 복원", () => {
+  const d = mkdtempSync(join(tmpdir(), "wk-"));
+  const log = join(d, "calls.log");
+  const stub = makeStubQmd(d, log);
+  const proj = join(d, "proj"); mkdirSync(join(proj, "04_M"), { recursive: true });
+  const q = join(d, "queue"); writeFileSync(q, `x\t${join(proj, "04_M")}\n`);
+  const elock = join(d, "el.d"); mkdirSync(elock); // embed lock 미리 잡아둠
+  execFileSync("bash", ["backend/index_worker.sh"], { encoding: "utf8", env: {
+    ...process.env, QMD_DIRTY_QUEUE: q, QMD_FAKE_QMD: stub,
+    QMD_INDEX_WORKER_LOCKDIR: join(d, "wl.d"), QMD_WRITER_LOCKDIR: join(d, "ul.d"),
+    QMD_EMBED_LOCKDIR: elock, QMD_NO_RELOAD: "1",
+  }});
+  const calls = readFileSync(log, "utf8");
+  assert.doesNotMatch(calls, /embed/); // embed 미호출
+  assert.match(readFileSync(q, "utf8"), /04_M/); // 큐 복원
+});
