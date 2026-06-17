@@ -32,7 +32,7 @@ test('agy_local_install: 멱등 — 2회 실행해도 중복 없음', () => {
   execFileSync('python3', ['core/agy_local_install.py', proj, process.cwd()], { encoding: 'utf8' });
   const h = JSON.parse(readFileSync(join(proj, '.agents', 'hooks.json'), 'utf8'));
   const ev = Object.keys(h.hooks)[0];
-  assert.equal(h.hooks[ev].length, 1, 'posttool 항목 1개만');
+  assert.equal(h.hooks[ev].length, 1, 'qmd 항목 1개만(중복 없음)');
 });
 
 test('agy_local_install: 멱등 × 비-qmd 보존 — PostToolUse에 비-qmd hook 있을 때 2회 실행', () => {

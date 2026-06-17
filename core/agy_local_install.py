@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""agy 프로젝트 로컬 .agents/hooks.json에 qmd posttool hook을 병합 설치(멱등, 원자적)."""
+"""agy 프로젝트 로컬 .agents/hooks.json에 qmd posttool+index hook을 병합 설치(멱등, 원자적)."""
 import json
 import os
 import sys
@@ -49,7 +49,7 @@ def main():
         json.dump(data, f, ensure_ascii=False, indent=2)
         f.write("\n")
     os.replace(tmp, path)
-    print(f"agy posttool 설치: {path}")
+    print(f"agy posttool+index 설치: {path}")
     print("주의: .agents/hooks.json은 프로젝트 루트에서 agy 실행 시에만 발동. "
           ".gitignore 등록을 권장(공유 원치 않으면).")
 
