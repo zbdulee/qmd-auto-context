@@ -93,6 +93,49 @@ test('install: 레거시 qmd 훅 제거 + 비-qmd 훅 보존 (Plan B: 등록 없
   }
 });
 
+test('uninstall.sh: 글로벌 adapters hook 제거', () => {
+  const home = mkdtempSync(join(tmpdir(), 'qmd-home-'));
+  const codexDir = join(home, '.codex');
+  execFileSync('mkdir', ['-p', codexDir]);
+  writeFileSync(join(codexDir, 'hooks.json'), JSON.stringify({
+    hooks: { SessionStart: [{ hooks: [{ type: 'command',
+      command: `python3 ${process.cwd()}/adapters/codex/wrapper.py update` }] }] },
+  }));
+  execFileSync('bash', ['uninstall.sh'], {
+    encoding: 'utf8',
+    env: { ...process.env, HOME: home, QMD_FAKE_PLATFORMS: 'codex' },
+  });
+  const after = readFileSync(join(codexDir, 'hooks.json'), 'utf8');
+  assert.ok(!after.includes('adapters/codex/wrapper.py'), 'adapters hook 제거됨');
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('uninstall.sh: legacy qmd hook 제거 + 비-qmd 보존', () => {
+  const home = mkdtempSync(join(tmpdir(), 'qmd-uninstall-legacy-'));
+  const claudeDir = join(home, '.claude');
+  mkdirSync(claudeDir, { recursive: true });
+  const bin = join(home, 'bin');
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(join(bin, 'launchctl'), '#!/usr/bin/env sh\nexit 0\n', { mode: 0o755 });
+  writeFileSync(join(claudeDir, 'settings.json'), JSON.stringify({
+    hooks: {
+      UserPromptSubmit: [
+        { hooks: [{ type: 'command', command: 'bash -c "cat | python3 ~/.claude/scripts/qmd-recall-on-prompt.py"' }] },
+        { hooks: [{ type: 'command', command: 'echo keep-me' }] },
+      ],
+    },
+  }));
+  execFileSync('bash', ['uninstall.sh'], {
+    encoding: 'utf8',
+    env: { ...process.env, HOME: home, PATH: `${bin}:${process.env.PATH}`, QMD_FAKE_PLATFORMS: 'claude' },
+  });
+  const after = JSON.parse(readFileSync(join(claudeDir, 'settings.json'), 'utf8'));
+  const cmds = (after.hooks?.UserPromptSubmit ?? []).flatMap(e => (e.hooks || []).map(h => h.command));
+  assert.ok(!cmds.some(c => c.includes('qmd-recall-on-prompt')), 'legacy qmd hook 제거됨');
+  assert.ok(cmds.some(c => c.includes('keep-me')), '비-qmd hook 보존됨');
+  rmSync(home, { recursive: true, force: true });
+});
+
 test('uninstall: nested hooks[].command 에 등록된 어댑터도 제거하고 원자적으로 쓴다', () => {
   const src = readFileSync('uninstall.sh', 'utf8');
   assert.match(src, /os\.replace/, 'uninstall config write must use tmp + os.replace');

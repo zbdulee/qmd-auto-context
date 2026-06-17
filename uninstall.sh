@@ -98,17 +98,23 @@ import os
 import sys
 
 platform, config_path = sys.argv[1:3]
-with open(config_path, "r", encoding="utf-8") as f:
-    try:
+
+try:
+    with open(config_path, "r", encoding="utf-8") as f:
         data = json.load(f)
-    except json.JSONDecodeError:
-        sys.exit(0)
+except json.JSONDecodeError as exc:
+    print(f"invalid JSON in {config_path}: {exc}", file=sys.stderr)
+    sys.exit(0)
+
+if not isinstance(data, dict):
+    sys.exit(0)
 
 hooks = data.get("hooks")
 if not isinstance(hooks, dict):
     sys.exit(0)
 
 needle = f"/adapters/{platform}/wrapper.py"
+
 def command_strings(value):
     if isinstance(value, dict):
         command = value.get("command")
@@ -120,18 +126,34 @@ def command_strings(value):
         for item in value:
             yield from command_strings(item)
 
+def is_legacy_qmd_entry(item):
+    return any(
+        "qmd" in command.lower() and "auto-context" not in command.lower()
+        for command in command_strings(item)
+    )
+
+def is_auto_context_adapter_entry(item):
+    return any(needle in command for command in command_strings(item))
+
+changed = False
 for hook_name in list(hooks):
     current = hooks.get(hook_name)
     if not isinstance(current, list):
         continue
     filtered = [
-        item for item in current
-        if not (isinstance(item, dict) and any(needle in command for command in command_strings(item)))
+        it for it in current
+        if not (isinstance(it, dict)
+                and (is_legacy_qmd_entry(it) or is_auto_context_adapter_entry(it)))
     ]
+    if len(filtered) != len(current):
+        changed = True
     if filtered:
         hooks[hook_name] = filtered
     else:
         del hooks[hook_name]
+
+if not changed:
+    sys.exit(0)
 
 tmp_path = config_path + ".tmp"
 with open(tmp_path, "w", encoding="utf-8") as f:
