@@ -1,5 +1,5 @@
-// install이 등록할 hooks.json 이 각 플랫폼 표준 구조인지 검증.
-// Claude/Codex/Gemini 모두 이벤트 entry 는 hooks 배열 + {type:'command', command}.
+// 배포할 hooks/*.json 이 각 플랫폼 표준 구조인지 검증.
+// Claude/Codex 이벤트 entry 는 hooks 배열 + {type:'command', command}.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -19,25 +19,20 @@ function assertStandardHooks(file) {
   }
 }
 
-test('claude hooks.json 표준 구조', () => assertStandardHooks('adapters/claude/hooks.json'));
-test('codex hooks.json 표준 구조', () => assertStandardHooks('adapters/codex/hooks.json'));
-test('gemini hooks.json 표준 구조', () => assertStandardHooks('adapters/gemini/hooks.json'));
+test('claude hooks.json 표준 구조', () => assertStandardHooks('hooks/hooks.json'));
+test('codex hooks-codex.json 표준 구조', () => assertStandardHooks('hooks/hooks-codex.json'));
 
-// 공식 스펙 이벤트명 (developers.openai.com/codex/hooks, code.claude.com/docs/hooks, geminicli.com/docs/hooks)
+// 공식 스펙 이벤트명 (developers.openai.com/codex/hooks, code.claude.com/docs/hooks)
 function events(file) {
   return Object.keys(JSON.parse(readFileSync(file, 'utf8')).hooks || {});
 }
 
 test('claude 이벤트명: SessionStart/UserPromptSubmit/PostToolUse', () => {
-  assert.deepEqual(events('adapters/claude/hooks.json').sort(), ['PostToolUse', 'SessionStart', 'UserPromptSubmit']);
+  assert.deepEqual(events('hooks/hooks.json').sort(), ['PostToolUse', 'SessionStart', 'UserPromptSubmit']);
 });
 
 test('codex 이벤트명: PascalCase (공식 — snake_case 아님)', () => {
-  const e = events('adapters/codex/hooks.json');
+  const e = events('hooks/hooks-codex.json');
   assert.deepEqual(e.sort(), ['PostToolUse', 'SessionStart', 'UserPromptSubmit']);
   assert.ok(!e.includes('session_start'), 'snake_case는 Codex가 인식 못함');
-});
-
-test('gemini 이벤트명: SessionStart/BeforeAgent/AfterTool', () => {
-  assert.deepEqual(events('adapters/gemini/hooks.json').sort(), ['AfterTool', 'BeforeAgent', 'SessionStart']);
 });
