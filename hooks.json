@@ -1,0 +1,12 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "write_to_file|replace_file_content",
+        "hooks": [
+          { "type": "command", "command": "\"$CLAUDE_PLUGIN_ROOT/hooks/run-hook\" posttool gemini" }
+        ]
+      }
+    ]
+  }
+}

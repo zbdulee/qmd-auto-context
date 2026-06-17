@@ -30,3 +30,27 @@ test('codex marketplace.json: git source 객체 + policy + category 스키마', 
   assert.equal(p.policy.authentication, 'none', 'policy.authentication은 none');
   assert.equal(p.category, 'Productivity', 'category는 Productivity');
 });
+
+// Task 3: agy 루트 plugin.json + hooks.json
+test('agy 루트 plugin.json: name qmd-auto-context', () => {
+  const p = JSON.parse(readFileSync('plugin.json', 'utf8'));
+  assert.equal(p.name, 'qmd-auto-context');
+});
+
+test('agy 루트 hooks.json: posttool 이벤트만 (recall/update 없음)', () => {
+  const h = JSON.parse(readFileSync('hooks.json', 'utf8'));
+  const events = Object.keys(h.hooks);
+  // Task 1 확정: PostToolUse 단일 이벤트 (agy 1.0.8 실측)
+  assert.equal(events.length, 1, 'posttool 단일 이벤트');
+  assert.equal(events[0], 'PostToolUse', 'PostToolUse 이벤트명 (agy 1.0.8 실측 확정)');
+  assert.ok(!events.includes('SessionStart'), 'update 미지원');
+  assert.ok(!events.includes('BeforeAgent') && !events.includes('UserPromptSubmit'), 'recall 미지원');
+  const ev = h.hooks[events[0]][0];
+  assert.match(ev.hooks[0].command, /run-hook" posttool gemini/, '디스패처 posttool gemini 위임');
+});
+
+test('agy 루트 hooks.json: PostToolUse matcher = write_to_file|replace_file_content', () => {
+  const h = JSON.parse(readFileSync('hooks.json', 'utf8'));
+  const ev = h.hooks['PostToolUse'][0];
+  assert.equal(ev.matcher, 'write_to_file|replace_file_content', 'Task 1 실측 확정 matcher');
+});
