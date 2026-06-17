@@ -7,7 +7,7 @@
       { "hooks": [ { "type": "command", "command": "\"${PLUGIN_ROOT}/hooks/run-hook\" recall codex" } ] }
     ],
     "PostToolUse": [
-      { "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+      { "matcher": "apply_patch|Edit|Write",
         "hooks": [ { "type": "command", "command": "\"${PLUGIN_ROOT}/hooks/run-hook\" posttool codex" } ] }
     ]
   }

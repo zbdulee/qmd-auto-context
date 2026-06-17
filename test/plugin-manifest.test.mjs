@@ -31,5 +31,7 @@ test('Codex hooks-codex.json — PLUGIN_ROOT 사용', () => {
   const cmd = h.UserPromptSubmit[0].hooks[0].command;
   assert.match(cmd, /run-hook" recall codex/);
   assert.match(cmd, /\$\{PLUGIN_ROOT\}/);
-  assert.match(h.PostToolUse[0].matcher, /Edit\|Write\|MultiEdit\|NotebookEdit/);
+  const m = h.PostToolUse[0].matcher;
+  assert.match(m, /apply_patch/, 'codex 편집 tool 이름 포함');
+  assert.ok(!/MultiEdit|NotebookEdit/.test(m), 'Claude 전용 이름 제거');
 });
