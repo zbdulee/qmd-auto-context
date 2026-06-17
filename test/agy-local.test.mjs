@@ -49,3 +49,11 @@ test('agy_local_install: 멱등 × 비-qmd 보존 — PostToolUse에 비-qmd hoo
   const qmdCount = hooks.filter(it => JSON.stringify(it).includes('run-hook')).length;
   assert.equal(qmdCount, 1, 'qmd posttool 항목 정확히 1개');
 });
+
+test('agy_local_install: PostToolUse에 index enqueue도 등록', () => {
+  const proj = mkdtempSync(join(tmpdir(), 'qmd-proj-'));
+  execFileSync('python3', ['core/agy_local_install.py', proj, process.cwd()], { encoding: 'utf8' });
+  const hooks = JSON.parse(readFileSync(join(proj, '.agents', 'hooks.json'), 'utf8'));
+  const cmds = JSON.stringify(hooks.hooks.PostToolUse);
+  assert.match(cmds, /run-hook.*index gemini/);
+});

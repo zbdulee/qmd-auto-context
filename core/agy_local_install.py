@@ -28,8 +28,12 @@ def main():
         data["hooks"] = {}
     hooks = data["hooks"]
 
-    command = f'"{plugin_root}/hooks/run-hook" posttool gemini'
-    entry = {"matcher": MATCHER, "hooks": [{"type": "command", "command": command}]}
+    command_posttool = f'"{plugin_root}/hooks/run-hook" posttool gemini'
+    command_index = f'"{plugin_root}/hooks/run-hook" index gemini'
+    entry = {"matcher": MATCHER, "hooks": [
+        {"type": "command", "command": command_posttool},
+        {"type": "command", "command": command_index},
+    ]}
 
     current = hooks.get(EVENT, [])
     if not isinstance(current, list):
