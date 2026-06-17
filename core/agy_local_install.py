@@ -24,10 +24,9 @@ def main():
             sys.exit(1)
     if not isinstance(data, dict):
         data = {}
-    hooks = data.setdefault("hooks", {})
-    if not isinstance(hooks, dict):
-        hooks = {}
-        data["hooks"] = hooks
+    if not isinstance(data.get("hooks"), dict):
+        data["hooks"] = {}
+    hooks = data["hooks"]
 
     command = f'"{plugin_root}/hooks/run-hook" posttool gemini'
     entry = {"matcher": MATCHER, "hooks": [{"type": "command", "command": command}]}
