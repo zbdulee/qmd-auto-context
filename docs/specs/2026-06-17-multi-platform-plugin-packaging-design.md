@@ -180,3 +180,4 @@ selection 로그(`QMD_RECALL_LOG`) 등 기존 코어 동작 유지.
    `claude/codex plugin marketplace add zbdulee/auto-context` 기반 배포. agy는 git clone 후 로컬 설치.
 5. ~~agy hooks 참조 방식~~ → **결정**: 루트 `plugin.json` + 루트 `hooks.json`, posttool만(§6).
 6. (신규) agy posttool을 글로벌이 아닌 프로젝트 로컬 `.agents/hooks.json`로만 설치하는 UX — install 안내/자동화 범위.
+7. **(신규, Plan A codex 실측 발견)** codex marketplace는 root 아래 **`plugins/<name>/` 서브디렉토리** 레이아웃을 기대한다(`.agents/plugins/marketplace.json`의 `source: {source:"local", path:"./plugins/<name>"}`). Plan A의 "repo 루트 = plugin"(`source.path: "./"`) 구조는 `codex plugin add` 시 `plugin not found in marketplace`로 인식 실패. **Plan B 배포 설계 시 디렉토리 레이아웃을 codex marketplace 규약에 맞춰 재고**해야 한다(예: `plugins/qmd-auto-context/`에 매니페스트·hooks를 두거나, 빌드로 marketplace용 레이아웃 생성). claude marketplace(`.claude-plugin/marketplace.json`)도 동일 제약인지 함께 확인 필요. — hook 동작 자체(run-hook→core)는 Task 4 스모크로 검증됨; 막힌 건 marketplace 포장 단계뿐.
