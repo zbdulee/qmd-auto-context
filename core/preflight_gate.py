@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import config as qmd_config
 import resolve_paths as rp
 
-GATED_TOOLS = {"Edit", "Write", "apply_patch", "MultiEdit"}
+GATED_TOOLS = {"Edit", "Write", "apply_patch", "MultiEdit", "NotebookEdit"}
 SKIP_TTL_SECONDS = 2 * 60 * 60  # 2시간
 
 

@@ -27,12 +27,44 @@ function events(file) {
   return Object.keys(JSON.parse(readFileSync(file, 'utf8')).hooks || {});
 }
 
-test('claude 이벤트명: SessionStart/UserPromptSubmit/PostToolUse', () => {
-  assert.deepEqual(events('hooks/hooks.json').sort(), ['PostToolUse', 'SessionStart', 'UserPromptSubmit']);
+test('claude 이벤트명: SessionStart/UserPromptSubmit/PreToolUse/PostToolUse', () => {
+  assert.deepEqual(events('hooks/hooks.json').sort(), ['PostToolUse', 'PreToolUse', 'SessionStart', 'UserPromptSubmit']);
 });
 
 test('codex 이벤트명: PascalCase (공식 — snake_case 아님)', () => {
   const e = events('hooks/hooks-codex.json');
-  assert.deepEqual(e.sort(), ['PostToolUse', 'SessionStart', 'UserPromptSubmit']);
+  assert.deepEqual(e.sort(), ['PostToolUse', 'PreToolUse', 'SessionStart', 'UserPromptSubmit']);
   assert.ok(!e.includes('session_start'), 'snake_case는 Codex가 인식 못함');
+});
+
+test('claude hooks.json PreToolUse gate 등록 확인', () => {
+  const data = JSON.parse(readFileSync('hooks/hooks.json', 'utf8'));
+  const pre = data.hooks['PreToolUse'];
+  assert.ok(Array.isArray(pre) && pre.length > 0, 'PreToolUse 항목 없음');
+  const entry = pre[0];
+  assert.equal(entry.matcher, 'Edit|Write|MultiEdit|NotebookEdit', 'matcher 불일치');
+  assert.ok(entry.hooks.some(h => h.command && h.command.includes('gate claude')), 'gate claude command 없음');
+});
+
+test('codex hooks-codex.json PreToolUse gate 등록 확인', () => {
+  const data = JSON.parse(readFileSync('hooks/hooks-codex.json', 'utf8'));
+  const pre = data.hooks['PreToolUse'];
+  assert.ok(Array.isArray(pre) && pre.length > 0, 'PreToolUse 항목 없음');
+  const entry = pre[0];
+  assert.equal(entry.matcher, 'apply_patch|Edit|Write', 'matcher 불일치');
+  assert.ok(entry.hooks.some(h => h.command && h.command.includes('gate codex')), 'gate codex command 없음');
+});
+
+test('claude PreToolUse matcher = PostToolUse matcher (우회 방지)', () => {
+  const data = JSON.parse(readFileSync('hooks/hooks.json', 'utf8'));
+  const preMatcher = data.hooks['PreToolUse'][0].matcher;
+  const postMatcher = data.hooks['PostToolUse'][0].matcher;
+  assert.equal(preMatcher, postMatcher, 'PreToolUse/PostToolUse matcher 불일치 — 우회 가능');
+});
+
+test('codex PreToolUse matcher = PostToolUse matcher (우회 방지)', () => {
+  const data = JSON.parse(readFileSync('hooks/hooks-codex.json', 'utf8'));
+  const preMatcher = data.hooks['PreToolUse'][0].matcher;
+  const postMatcher = data.hooks['PostToolUse'][0].matcher;
+  assert.equal(preMatcher, postMatcher, 'PreToolUse/PostToolUse matcher 불일치 — 우회 가능');
 });

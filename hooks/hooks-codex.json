@@ -6,6 +6,12 @@
     "UserPromptSubmit": [
       { "hooks": [ { "type": "command", "command": "\"${PLUGIN_ROOT}/hooks/run-hook\" recall codex" } ] }
     ],
+    "PreToolUse": [
+      { "matcher": "apply_patch|Edit|Write",
+        "hooks": [
+          { "type": "command", "command": "\"${PLUGIN_ROOT}/hooks/run-hook\" gate codex" }
+        ] }
+    ],
     "PostToolUse": [
       { "matcher": "apply_patch|Edit|Write",
         "hooks": [
