@@ -1,0 +1,35 @@
+core/sync.py
+  h_42d950683aaaea 8,59-97,99,103-109,218
+skills/hint/SKILL.md
+  h_42d950683aaaea 3
+skills/hint/agents/openai.yaml
+  h_42d950683aaaea 1-4
+skills/hint/scripts/hint.sh
+  h_42d950683aaaea 7-10,16-22
+skills/query/SKILL.md
+  h_42d950683aaaea 3
+skills/query/agents/openai.yaml
+  h_42d950683aaaea 1-4
+skills/query/scripts/query.sh
+  h_42d950683aaaea 9
+skills/sync/SKILL.md
+  h_42d950683aaaea 3,25
+skills/sync/agents/openai.yaml
+  h_42d950683aaaea 1-4
+skills/update/SKILL.md
+  h_42d950683aaaea 3
+skills/update/agents/openai.yaml
+  h_42d950683aaaea 1-4
+test/sync.test.mjs
+  h_42d950683aaaea 221-260
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "27d251de7e1b38eed4672dee7bc3a46c0fc5c479",
+  "prompts": {},
+  "humans": {
+    "h_42d950683aaaea": {
+      "author": "dulee@zigbang.com"
+    }
+  }
+}
