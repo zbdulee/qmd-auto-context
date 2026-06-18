@@ -1,0 +1,17 @@
+skills/hint/SKILL.md
+  h_42d950683aaaea 1-26
+skills/hint/scripts/hint.sh
+  h_42d950683aaaea 1-19
+test/hint-skill.test.mjs
+  h_42d950683aaaea 1-57
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "1a9413d3605f83cbcb00b31b66ea9bcb3fcfa805",
+  "prompts": {},
+  "humans": {
+    "h_42d950683aaaea": {
+      "author": "dulee@zigbang.com"
+    }
+  }
+}
