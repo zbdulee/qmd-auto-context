@@ -1,0 +1,13 @@
+.gitignore
+  h_42d950683aaaea 2
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "428df6cfcb76f6dacfe4b69359d042a5fb67627d",
+  "prompts": {},
+  "humans": {
+    "h_42d950683aaaea": {
+      "author": "dulee@zigbang.com"
+    }
+  }
+}
