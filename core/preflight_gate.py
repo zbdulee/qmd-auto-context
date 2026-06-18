@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
+import hashlib
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -9,6 +11,7 @@ import config as qmd_config
 import resolve_paths as rp
 
 GATED_TOOLS = {"Edit", "Write", "apply_patch", "MultiEdit"}
+SKIP_TTL_SECONDS = 2 * 60 * 60  # 2시간
 
 
 def is_sandbox():
@@ -17,8 +20,24 @@ def is_sandbox():
 
 
 def has_skip_marker(cwd, payload):
-    """Task 7에서 실제 구현. 이 Task에서는 항상 False 반환(stub)."""
-    return False
+    """skip 마커 파일 존재 + TTL 확인. TTL 만료 시 lazy unlink 후 False 반환."""
+    real_cwd = os.path.realpath(cwd)
+    h = hashlib.sha256(real_cwd.encode()).hexdigest()
+    marker = Path.home() / ".config" / "qmd" / "skip" / h
+    if not marker.exists():
+        return False
+    try:
+        mtime = marker.stat().st_mtime
+    except OSError:
+        return False
+    if time.time() - mtime > SKIP_TTL_SECONDS:
+        # lazy expire: TTL 지난 마커 unlink
+        try:
+            marker.unlink()
+        except OSError:
+            pass
+        return False
+    return True
 
 
 def main():

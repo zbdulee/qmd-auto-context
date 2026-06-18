@@ -334,6 +334,24 @@ main() {
   exit 0
 }
 
+if [ "$1" = "--skip" ]; then
+  shift
+  target="${1:-$PWD}"
+  python3 - "$target" <<'PY'
+import hashlib, os, sys, pathlib, time
+
+target = sys.argv[1]
+real = os.path.realpath(target)
+h = hashlib.sha256(real.encode()).hexdigest()
+skip_dir = pathlib.Path.home() / ".config" / "qmd" / "skip"
+skip_dir.mkdir(parents=True, exist_ok=True)
+marker = skip_dir / h
+marker.touch()
+print(f"[qmd] skip 마커 생성: {marker} (TTL 2h). 이번 세션에서 '{real}'의 gate deny가 해제됩니다.")
+PY
+  exit 0
+fi
+
 if [ "$1" = "--recommend" ]; then
   shift
   json_flag=""
