@@ -1,6 +1,6 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Codex and other coding agents when working with code in this repository. (Claude Code reads `CLAUDE.md`, which carries the same content.)
 
 qmd 기반 자동 컨텍스트 주입 훅을 **Claude Code · Codex · Antigravity(Gemini)** 세 플랫폼에서 동작시키는 플러그인. 사용자 안내는 `README.md` 참고. 이 문서는 코드 작업 시 알아야 할 구조·명령·함정에 집중한다.
 
