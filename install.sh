@@ -3,11 +3,11 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 DRY_RUN=0
-MIGRATE_ONLY=0
+CLEANUP_ONLY=0
 if [[ "${1:-}" == "--dry-run" ]]; then
   DRY_RUN=1
-elif [[ "${1:-}" == "--migrate-only" ]]; then
-  MIGRATE_ONLY=1
+elif [[ "${1:-}" == "--cleanup-only" ]]; then
+  CLEANUP_ONLY=1
 elif [[ "${1:-}" == "--agy-local" ]]; then
   target="${2:-$PWD}"
   python3 "$REPO_ROOT/core/agy_local_install.py" "$target" "$REPO_ROOT"
@@ -270,144 +270,21 @@ PY
   done
 }
 
-migrate_collection_paths() {
-  local scan_root="${QMD_MIGRATE_SCAN:-$HOME/work/novel}"
-  say "collectionPaths 마이그레이션 scan: $scan_root"
-  python3 - "$scan_root" "$DRY_RUN" <<'PY'
-import json
-import os
-import sys
-import shutil
-from datetime import datetime
 
-scan_root, dry_run = sys.argv[1], sys.argv[2] == "1"
-prefix = "[DRY-RUN] " if dry_run else ""
-timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-suffix_map = {
-    "-manuscript": "04_Manuscript",
-    "-plot": "03_Plot",
-    "-settings": "01_Settings",
-    "-sessions": ".nova/06_Sessions",
-}
-
-if not os.path.isdir(scan_root):
-    print(f"{prefix}collectionPaths 마이그레이션: scan root not found, skip")
-    sys.exit(0)
-
-changed = 0
-for root, _, files in os.walk(scan_root):
-    if "qmd-recall.json" not in files or os.path.basename(root) != ".agents":
-        continue
-    path = os.path.join(root, "qmd-recall.json")
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception as exc:
-        print(f"{prefix}collectionPaths migrate skip invalid JSON: {path}: {exc}")
-        continue
-    if "collectionPaths" in data:
-        continue
-    collections = data.get("collections", [])
-    if not isinstance(collections, list):
-        collections = []
-    collection_paths = {}
-    for collection in collections:
-        if not isinstance(collection, str):
-            continue
-        for suffix, target in suffix_map.items():
-            if collection.endswith(suffix):
-                collection_paths[collection] = target
-                break
-    if not collection_paths:
-        continue
-    changed += 1
-    print(f"{prefix}collectionPaths 마이그레이션 계획: {path} -> {collection_paths}")
-    if not dry_run:
-        backup_path = f"{path}.bak-{timestamp}"
-        n = 1
-        while os.path.exists(backup_path):
-            backup_path = f"{path}.bak-{timestamp}-{n}"
-            n += 1
-        shutil.copy2(path, backup_path)
-        data["collectionPaths"] = collection_paths
-        tmp_path = path + ".tmp"
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-            f.write("\n")
-        os.replace(tmp_path, path)
-
-if changed == 0:
-    print(f"{prefix}collectionPaths 마이그레이션: no changes needed")
-PY
-}
-
-migrate_legacy_to_auto_context() {
-  local scan_root="${QMD_MIGRATE_SCAN:-$HOME/work/novel}"
-  say "레거시 → .auto-context.json 마이그레이션 scan: $scan_root"
-  python3 - "$scan_root" "$DRY_RUN" <<'PY'
-import json, os, sys, tempfile, shutil, glob
-scan_root, dry = sys.argv[1], sys.argv[2] == "1"
-prefix = "[DRY-RUN] " if dry else ""
-if not os.path.isdir(scan_root):
-    print(f"{prefix}.auto-context 마이그레이션: scan root 없음, skip"); sys.exit(0)
-migrated = 0
-for root, _, files in os.walk(scan_root):
-    if os.path.basename(root) != ".agents" or "qmd-recall.json" not in files:
-        continue
-    legacy = os.path.join(root, "qmd-recall.json")
-    proj = os.path.dirname(root)                 # .agents의 부모 = 프로젝트 루트
-    dest = os.path.join(proj, ".auto-context.json")
-    if os.path.exists(dest):                     # 이미 마이그레이션됨 → 멱등 skip
-        continue
-    try:
-        data = json.load(open(legacy, encoding="utf-8"))
-        if not isinstance(data, dict):
-            continue
-    except Exception:
-        continue
-    data.setdefault("indexing", True)
-    if dry:
-        print(f"{prefix}migrate: {legacy} -> {dest}"); migrated += 1; continue
-    fd, tmp = tempfile.mkstemp(dir=proj, prefix=".auto-context.", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w") as fh:
-            json.dump(data, fh, ensure_ascii=False, indent=2)
-        os.replace(tmp, dest)
-    except BaseException:
-        try: os.unlink(tmp)
-        except OSError: pass
-        raise
-    # 레거시 제거. collectionPaths 마이그레이션이 이미 .bak-*(원본)를 남겼으면 중복 백업하지 않는다.
-    if glob.glob(legacy + ".bak-*"):
-        os.remove(legacy)
-    else:
-        shutil.move(legacy, legacy + ".bak-migrated")
-    print(f"migrated: {legacy} -> {dest}")
-    migrated += 1
-if migrated == 0:
-    print(f"{prefix}.auto-context 마이그레이션: 대상 없음")
-PY
-}
-
-if [[ "$MIGRATE_ONLY" == "1" ]]; then
-  if [[ "${QMD_CLEANUP_ONLY:-}" == "1" ]]; then
-    # 백엔드/마이그레이션 없이 레거시 글로벌 hook 정리만 수행
-    for platform in "${platforms[@]}"; do
-      [[ -z "$platform" ]] && continue
-      case "$platform" in
-        claude|codex|gemini)
-          config="$(config_path_for "$platform")"
-          cleanup_legacy_global_hooks "$platform" "$config"
-          ;;
-        *)
-          say "unknown platform skip: $platform"
-          ;;
-      esac
-    done
-    exit 0
-  fi
-  migrate_collection_paths
-  migrate_legacy_to_auto_context
+if [[ "$CLEANUP_ONLY" == "1" ]]; then
+  # 백엔드 없이 레거시 글로벌 hook 정리만 수행
+  for platform in "${platforms[@]}"; do
+    [[ -z "$platform" ]] && continue
+    case "$platform" in
+      claude|codex|gemini)
+        config="$(config_path_for "$platform")"
+        cleanup_legacy_global_hooks "$platform" "$config"
+        ;;
+      *)
+        say "unknown platform skip: $platform"
+        ;;
+    esac
+  done
   exit 0
 fi
 
@@ -430,8 +307,6 @@ if [[ "${QMD_INSTALL_SKIP_BACKEND:-}" == "1" ]]; then
 else
   install_backend
 fi
-migrate_collection_paths
-migrate_legacy_to_auto_context
 
 if [[ "${QMD_INSTALL_SKIP_SELFTEST:-}" == "1" ]]; then
   say "self-test skip: QMD_INSTALL_SKIP_SELFTEST=1"

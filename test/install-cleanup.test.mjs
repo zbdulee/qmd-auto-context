@@ -1,4 +1,4 @@
-// install 이 기존 qmd user 훅을 제거하고 어댑터(표준구조)로 교체하는지 (SSOT 대체) 격리 검증
+// install 이 기존 qmd user 훅 + 구 adapters 엔트리를 제거(cleanup)하는지 격리 검증 (Plan B: 등록은 marketplace가 담당)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -19,10 +19,10 @@ test('install.sh: codex 글로벌 adapters hook 제거, 비-qmd 보존', () => {
         ],
       },
     }));
-    execFileSync('bash', ['install.sh', '--migrate-only'], {
+    execFileSync('bash', ['install.sh', '--cleanup-only'], {
       encoding: 'utf8',
       env: { ...process.env, HOME: home, QMD_FAKE_PLATFORMS: 'codex',
-             QMD_INSTALL_SKIP_BACKEND: '1', QMD_INSTALL_SKIP_SELFTEST: '1', QMD_CLEANUP_ONLY: '1' },
+             QMD_INSTALL_SKIP_BACKEND: '1', QMD_INSTALL_SKIP_SELFTEST: '1' },
     });
     const after = JSON.parse(readFileSync(join(codexDir, 'hooks.json'), 'utf8'));
     const cmds = JSON.stringify(after);
@@ -41,10 +41,10 @@ test('install.sh: codex hooks.json이 깨진 JSON이면 덮지 않고 abort/skip
     const broken = '{ "hooks": { invalid';
     writeFileSync(join(codexDir, 'hooks.json'), broken);
     try {
-      execFileSync('bash', ['install.sh', '--migrate-only'], {
+      execFileSync('bash', ['install.sh', '--cleanup-only'], {
         encoding: 'utf8',
         env: { ...process.env, HOME: home, QMD_FAKE_PLATFORMS: 'codex',
-               QMD_INSTALL_SKIP_BACKEND: '1', QMD_INSTALL_SKIP_SELFTEST: '1', QMD_CLEANUP_ONLY: '1' },
+               QMD_INSTALL_SKIP_BACKEND: '1', QMD_INSTALL_SKIP_SELFTEST: '1' },
       });
     } catch { /* abort 종료여도 OK */ }
     assert.equal(readFileSync(join(codexDir, 'hooks.json'), 'utf8'), broken, '깨진 파일 원본 보존(덮지 않음)');
@@ -74,7 +74,6 @@ test('install: 레거시 qmd 훅 제거 + 비-qmd 훅 보존 (Plan B: 등록 없
         QMD_FAKE_PLATFORMS: 'claude',
         QMD_INSTALL_SKIP_BACKEND: '1',
         QMD_INSTALL_SKIP_SELFTEST: '1',
-        QMD_MIGRATE_SCAN: join(home, 'no-such-dir'),
       },
     });
 

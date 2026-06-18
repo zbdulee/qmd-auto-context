@@ -36,39 +36,6 @@ test('dry-run은 실제 파일을 생성하지 않음', () => {
   }
 });
 
-test('dry-run: collectionPaths 없는 .agents/qmd-recall.json 마이그레이션 계획 출력', () => {
-  const home = mkdtempSync(join(tmpdir(), 'qmd-inst-'));
-  try {
-    // novel-스타일 프로젝트(collectionPaths 없음)를 QMD_MIGRATE_SCAN 으로 지정
-    const projDir = join(home, 'novelproj');
-    execFileSync('mkdir', ['-p', join(projDir, '.agents')]);
-    execFileSync('bash', ['-c', `printf '%s' '{"name":"n","collections":["x-manuscript"],"minScore":0.8}' > ${join(projDir, '.agents', 'qmd-recall.json')}`]);
-    const out = dryRun(home, { QMD_MIGRATE_SCAN: projDir });
-    assert.match(out, /collectionPaths|마이그레이션|migrate/i);
-  } finally {
-    rmSync(home, { recursive: true, force: true });
-  }
-});
-
-test('install 마이그레이션: 레거시 .agents/qmd-recall.json → .auto-context.json(+indexing:true)', () => {
-  const root = mkdtempSync(join(tmpdir(), 'mig-'));
-  const proj = join(root, 'proj');
-  mkdirSync(join(proj, '.agents'), { recursive: true });
-  writeFileSync(join(proj, '.agents', 'qmd-recall.json'),
-    JSON.stringify({ collections: ['proj'], collectionPaths: { '*-x': 'X' } }));
-  try {
-    execFileSync('bash', ['-c', `QMD_MIGRATE_SCAN='${root}' bash install.sh --migrate-only`]);
-    const cfg = JSON.parse(readFileSync(join(proj, '.auto-context.json'), 'utf8'));
-    assert.equal(cfg.indexing, true);
-    assert.deepEqual(cfg.collections, ['proj']);
-    assert.deepEqual(cfg.collectionPaths, { '*-x': 'X' });
-    assert.equal(existsSync(join(proj, '.agents', 'qmd-recall.json')), false); // 레거시 제거됨
-    // 멱등: 다시 돌려도 깨지지 않음
-    execFileSync('bash', ['-c', `QMD_MIGRATE_SCAN='${root}' bash install.sh --migrate-only`]);
-    assert.equal(JSON.parse(readFileSync(join(proj, '.auto-context.json'), 'utf8')).indexing, true);
-  } finally { rmSync(root, { recursive: true, force: true }); }
-});
-
 test('uninstall.sh dry-run 실행 가능', () => {
   const home = mkdtempSync(join(tmpdir(), 'qmd-inst-'));
   try {
