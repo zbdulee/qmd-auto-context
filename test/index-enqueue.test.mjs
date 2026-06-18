@@ -71,3 +71,17 @@ test("postToolUse 이벤트 비활성화 → 큐 미생성", () => {
     tool_input: { file_path: join(dir, "04_Manuscript", "ep1.md") } }, q);
   assert.equal(existsSync(q), false);
 });
+
+test("shared dirty_queue writer uses sorted two-column lines", () => {
+  const q = join(mkdtempSync(join(tmpdir(), "q-")), "queue");
+  execFileSync("python3", ["-c", `
+import sys
+sys.path.insert(0, "core")
+import dirty_queue
+dirty_queue.enqueue_collections({"z": "/tmp/z", "a": "/tmp/a"})
+`], {
+    encoding: "utf8",
+    env: { ...process.env, QMD_DIRTY_QUEUE: q },
+  });
+  assert.equal(readFileSync(q, "utf8"), "a\t/tmp/a\nz\t/tmp/z\n");
+});

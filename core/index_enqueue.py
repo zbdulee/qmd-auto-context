@@ -2,31 +2,21 @@
 import sys
 import os
 import json
-import fcntl
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.resolve()))
 import config as qmd_config
+import dirty_queue
 import posttool
 from collection_match import select_collections
 
 
 def queue_path():
-    return Path(os.environ.get("QMD_DIRTY_QUEUE",
-                               str(Path.home() / ".config" / "qmd" / "dirty-queue")))
+    return dirty_queue.queue_path()
 
 
 def enqueue(selected):
-    q = queue_path()
-    q.parent.mkdir(parents=True, exist_ok=True)
-    lines = [f"{name}\t{path}\n" for name, path in selected.items()]
-    # flock은 fd가 필요하므로 open 후 획득이 정상(advisory lock). open(a) 자체의
-    # O_APPEND write는 POSIX atomic이라 동시 append도 줄이 섞이지 않으며, flock은
-    # writelines 다중 라인 묶음의 원자성을 advisory로 보강한다.
-    with open(q, "a", encoding="utf-8") as f:
-        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-        f.writelines(lines)
-        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+    dirty_queue.enqueue_collections(selected)
 
 
 def main():
