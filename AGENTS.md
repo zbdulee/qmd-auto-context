@@ -21,7 +21,6 @@ bash uninstall.sh                           # 복원/제거
 bash skills/sync/scripts/sync.sh <프로젝트>  # 수동 CUD sync: snapshot 비교 → dirty queue enqueue
 bash skills/query/scripts/query.sh <프로젝트> "<질문>"  # 수동 recall query(core/recall.py 경유)
 bash skills/update/scripts/update.sh <프로젝트>  # 수동 SessionStart update(core/update.sh 경유)
-bash skills/hint/scripts/hint.sh <프로젝트> <파일>  # 수동 PostToolUse hint(core/posttool.py 경유)
 
 bash core/update.sh --recommend [<경로>]              # 추천 확인 (read-only, 파일 변경 없음)
 bash core/update.sh --recommend --json [<경로>]       # 추천 결과를 JSON으로 출력
@@ -66,7 +65,7 @@ backend/   ← qmd MCP HTTP 데몬(:8483) + keepalive + logrotate + index worker
 - `sync` — agent-facing 수동 동기화 workflow. wrapper가 플러그인 루트를 찾아 `core/sync.py --json`을 실행한다. 자동 hook이 아니며 사용자가 sync/resync를 요청할 때만 쓴다.
 - `query` — hook recall과 동일한 `core/recall.py` 경로를 수동 실행한다. qmd 데몬 직접 호출을 중복 구현하지 말 것.
 - `update` — SessionStart update와 동일한 `core/update.sh` 경로를 수동 실행한다. qmd 인덱스 갱신 요청에는 이 skill을 쓴다.
-- `hint` — PostToolUse posttool과 동일한 `core/posttool.py` 경로를 수동 실행한다. 특정 편집 파일 기준 연속성 힌트를 요청할 때 쓴다.
+- `hint`에 해당하는 skill은 만들지 않는다. PostToolUse posttool은 편집 직후 자동 실행되는 hook-only 연속성 힌트다.
 - `gate`에 해당하는 skill은 만들지 않는다. gate는 pending 프로젝트 편집 차단용 내부 안전장치다.
 
 > **dogfooding**: 이 저장소 자체의 `.auto-context.json`(`docs/current`·`docs/plans` 대상)으로 gate·추천·인덱싱을 실사용 중이다.

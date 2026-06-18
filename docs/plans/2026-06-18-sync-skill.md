@@ -2,9 +2,11 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Add user-facing `sync`, `query`, `update`, and `hint` skills: `sync` detects missed create/update/delete file changes from `.auto-context.json` collection paths and enqueues affected qmd collections for refresh; `query` reuses the existing recall hook path for manual qmd context lookup; `update` exposes the existing session-start index update path for manual use; `hint` exposes the existing post-edit continuation hint path for a specific file.
+**Goal:** Add user-facing `sync`, `query`, and `update` skills: `sync` detects missed create/update/delete file changes from `.auto-context.json` collection paths and enqueues affected qmd collections for refresh; `query` reuses the existing recall hook path for manual qmd context lookup; `update` exposes the existing session-start index update path for manual use. Post-edit continuation hints remain hook-only through `PostToolUse` and are not exposed as a manual skill.
 
-**Architecture:** Keep this separate from the delete-handling plan. Skills are thin workflow surfaces. Deterministic CUD detection lives in `core/sync.py`; manual querying reuses `core/recall.py`, the same codepath used by the `UserPromptSubmit` hook; manual update reuses `core/update.sh`, the same path used by `SessionStart`; manual hints reuse `core/posttool.py`, the same path used by `PostToolUse`. Wrapper scripts under `skills/*/scripts/` resolve the plugin root so the skills work from arbitrary project directories.
+**Architecture:** Keep this separate from the delete-handling plan. Skills are thin workflow surfaces. Deterministic CUD detection lives in `core/sync.py`; manual querying reuses `core/recall.py`, the same codepath used by the `UserPromptSubmit` hook; manual update reuses `core/update.sh`, the same path used by `SessionStart`. `core/posttool.py` remains a hook-only path for `PostToolUse`. Wrapper scripts under `skills/*/scripts/` resolve the plugin root so the skills work from arbitrary project directories.
+
+**Direction update (2026-06-18):** The initially planned `hint` manual skill was removed. It duplicated an automatic hook workflow and made a hook-only continuity hint look like a user action. Keep `posttool` behavior in hooks; expose only `sync`, `query`, and `update` as manual skills.
 
 **Tech Stack:** Python 3 standard library, Bash 3.2, Node `node:test`, existing `.auto-context.json` config loader, existing dirty queue and launchd worker.
 
@@ -32,7 +34,7 @@ Hook-to-skill parity:
 |-------------|-------|-------|
 | `recall` (`UserPromptSubmit`) | `query` | Manual recall through `core/recall.py`. |
 | `update` (`SessionStart`) | `update` | Manual index update through `core/update.sh`. |
-| `posttool` (`PostToolUse`) | `hint` | Manual continuation hint for a specific edited file through `core/posttool.py`. |
+| `posttool` (`PostToolUse`) | none | Hook-only continuation hint through `core/posttool.py`. |
 | `index` (`PostToolUse`) | `sync` | Manual missed CUD recovery; broader than a single tool event. |
 | `gate` (`PreToolUse`) | none | Internal safety hook; not a user-facing skill. |
 
@@ -434,7 +436,7 @@ Add a short section under automatic indexing:
 - `sync`: `.auto-context.json`의 `collectionPaths`를 스캔해 snapshot 기반 CUD를 dirty queue에 넣는다.
 - `query`: `UserPromptSubmit` recall과 같은 `core/recall.py` 경로를 수동 실행한다.
 - `update`: `SessionStart` update와 같은 `core/update.sh` 경로를 수동 실행한다.
-- `hint`: `PostToolUse` posttool과 같은 `core/posttool.py` 경로를 수동 실행한다.
+- `posttool`: `PostToolUse` hook-only 경로로 유지한다. 별도 `hint` skill은 노출하지 않는다.
 ```
 
 **Step 2: Update agent docs**
@@ -442,7 +444,8 @@ Add a short section under automatic indexing:
 Add operational notes:
 
 - `sync` is manual or skill-driven, not an automatic hook.
-- `query`, `update`, and `hint` are manual wrappers over existing hook code paths.
+- `query` and `update` are manual wrappers over existing hook code paths.
+- `posttool` remains hook-only; do not expose it as a manual `hint` skill.
 - CUD detection is snapshot based using `mtime_ns + size`.
 - State lives under `~/.config/qmd/sync-state`.
 - `skipPaths` must not suppress sync/delete cleanup.
@@ -654,101 +657,11 @@ git add skills/update/SKILL.md skills/update/scripts/update.sh test/update-skill
 git commit -m "feat: add update skill"
 ```
 
-## Task 8: Add `hint` Skill
+## Task 8: ~~Add `hint` Skill~~ Superseded
 
-**Files:**
-- Create: `skills/hint/SKILL.md`
-- Create: `skills/hint/scripts/hint.sh`
-- Test: `test/hint-skill.test.mjs`
+**Status:** Superseded by the 2026-06-18 direction update. Do not create a manual `hint` skill. `core/posttool.py` remains covered by hook tests as the automatic `PostToolUse` continuation hint path.
 
-**Step 1: Write skill/wrapper tests**
-
-Add tests that verify:
-
-- `skills/hint/SKILL.md` exists;
-- YAML frontmatter has `name: hint`;
-- description mentions qmd, posttool, and PostToolUse;
-- body mentions `core/posttool.py` and edited file path;
-- `skills/hint/scripts/hint.sh` resolves plugin root relative to the skill directory;
-- wrapper supports an explicit cwd and file path.
-
-**Step 2: Create wrapper script**
-
-Create `skills/hint/scripts/hint.sh`:
-
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-
-SKILL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-PLUGIN_ROOT="$(cd "$SKILL_DIR/../.." && pwd)"
-TARGET_CWD="${1:-$PWD}"
-FILE_PATH="${2:-}"
-
-if [ -z "$FILE_PATH" ]; then
-  echo "usage: hint.sh <cwd> <file-path>" >&2
-  exit 2
-fi
-
-python3 "$PLUGIN_ROOT/core/posttool.py" <<JSON
-{"hook_event_name":"PostToolUse","cwd":$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$TARGET_CWD"),"tool_input":{"file_path":$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$FILE_PATH")}}
-JSON
-```
-
-This deliberately uses `core/posttool.py` rather than duplicating hint logic.
-
-**Step 3: Create skill**
-
-Create a concise skill:
-
-```markdown
----
-name: hint
-description: Use when the user asks for a qmd posttool continuation hint for a specific edited file, using the same PostToolUse behavior as hooks.
----
-
-# Hint
-
-Run a manual qmd post-edit continuation hint for one file.
-
-## Workflow
-
-1. Confirm the target cwd and edited file path.
-2. Resolve the qmd-auto-context plugin root.
-3. Run:
-
-   ```bash
-   bash "$PLUGIN_ROOT/skills/hint/scripts/hint.sh" "$PWD" "/path/to/file.md"
-   ```
-
-4. Report the returned hint or say that posttool returned no hint.
-
-## Safety
-
-- Do not bypass `.auto-context.json` opt-in.
-- Preserve empty output as a valid no-hint state.
-```
-
-Keep the skill body short. Do not include a README or auxiliary docs.
-
-**Step 4: Add wrapper smoke test**
-
-Use `QMD_QUERY_FIXTURE=test/fixtures/daemon-response.json` and a temporary project with `.auto-context.json` and a collection file path to verify the wrapper can call posttool. Empty output is valid for non-story paths; for story paths with fixture, assert hook JSON is produced.
-
-Run:
-
-```bash
-node --test test/hint-skill.test.mjs
-```
-
-Expected: PASS.
-
-**Step 5: Commit**
-
-```bash
-git add skills/hint/SKILL.md skills/hint/scripts/hint.sh test/hint-skill.test.mjs
-git commit -m "feat: add hint skill"
-```
+No files should be created for this task.
 
 ## Task 9: End-to-End Verification
 
@@ -760,7 +673,7 @@ git commit -m "feat: add hint skill"
 Run:
 
 ```bash
-node --test test/sync.test.mjs test/sync-skill.test.mjs test/query-skill.test.mjs test/update-skill.test.mjs test/hint-skill.test.mjs test/index-enqueue.test.mjs
+node --test test/sync.test.mjs test/sync-skill.test.mjs test/query-skill.test.mjs test/update-skill.test.mjs test/manual-skills.test.mjs test/index-enqueue.test.mjs
 ```
 
 Expected: PASS.
@@ -829,6 +742,6 @@ git commit -m "test: verify qmd sync skill"
 - `node --test test/sync-skill.test.mjs`
 - `node --test test/query-skill.test.mjs`
 - `node --test test/update-skill.test.mjs`
-- `node --test test/hint-skill.test.mjs`
+- `node --test test/manual-skills.test.mjs`
 - `npm test`
 - Manual isolated sync smoke from Task 6

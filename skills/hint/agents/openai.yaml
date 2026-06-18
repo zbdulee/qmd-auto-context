@@ -1,4 +1,0 @@
-interface:
-  display_name: "qmd Hint"
-  short_description: "Run manual post-edit continuity hints"
-  default_prompt: "Use $hint to get a qmd continuation hint for an edited file."
