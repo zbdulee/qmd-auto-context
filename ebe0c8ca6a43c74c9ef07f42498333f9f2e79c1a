@@ -1,0 +1,33 @@
+.agents/plugins/marketplace.json
+  h_42d950683aaaea 8-9
+.claude-plugin/marketplace.json
+  h_42d950683aaaea 8-9
+.claude-plugin/plugin.json
+  h_42d950683aaaea 3-4
+.codex-plugin/plugin.json
+  h_42d950683aaaea 3-4
+AGENTS.md
+  h_42d950683aaaea 68
+CLAUDE.md
+  h_42d950683aaaea 68
+README.md
+  h_42d950683aaaea 12,145-146
+docs/plans/2026-06-18-sync-skill.md
+  h_42d950683aaaea 5,7-9,37,439,447-448,660,662,664,676,745
+package.json
+  h_42d950683aaaea 3
+plugin.json
+  h_42d950683aaaea 3
+test/manual-skills.test.mjs
+  h_42d950683aaaea 1-30
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "ebe0c8ca6a43c74c9ef07f42498333f9f2e79c1a",
+  "prompts": {},
+  "humans": {
+    "h_42d950683aaaea": {
+      "author": "dulee@zigbang.com"
+    }
+  }
+}
