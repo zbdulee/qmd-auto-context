@@ -1,4 +1,5 @@
 node_modules/
+.worktrees
 *.bak
 *.bak-*
 .DS_Store
