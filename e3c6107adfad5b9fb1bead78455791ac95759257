@@ -1,0 +1,17 @@
+skills/query/SKILL.md
+  h_42d950683aaaea 1-27
+skills/query/scripts/query.sh
+  h_42d950683aaaea 1-16
+test/query-skill.test.mjs
+  h_42d950683aaaea 1-52
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "e3c6107adfad5b9fb1bead78455791ac95759257",
+  "prompts": {},
+  "humans": {
+    "h_42d950683aaaea": {
+      "author": "dulee@zigbang.com"
+    }
+  }
+}
