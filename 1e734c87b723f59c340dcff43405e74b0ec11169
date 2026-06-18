@@ -1,0 +1,17 @@
+skills/sync/SKILL.md
+  h_42d950683aaaea 1-27
+skills/sync/scripts/sync.sh
+  h_42d950683aaaea 1-9
+test/sync-skill.test.mjs
+  h_42d950683aaaea 1-29
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "1e734c87b723f59c340dcff43405e74b0ec11169",
+  "prompts": {},
+  "humans": {
+    "h_42d950683aaaea": {
+      "author": "dulee@zigbang.com"
+    }
+  }
+}
