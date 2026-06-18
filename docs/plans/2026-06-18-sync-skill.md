@@ -770,7 +770,9 @@ Expected: PASS.
 Run:
 
 ```bash
-tmp="$(mktemp -d)"
+base="$HOME/.tmp-qmd-sync-smoke"
+mkdir -p "$base"
+tmp="$(mktemp -d "$base/proj-XXXXXX")"
 state="$(mktemp -d)"
 queue="$tmp/dirty-queue"
 mkdir -p "$tmp/docs"
@@ -791,6 +793,8 @@ Expected:
 - second run reports no changes and appends no new queue line;
 - delete run reports `deleted:1` and queues `sync-smoke`;
 - queue lines use the existing two-column protocol.
+
+Use a HOME-child temp project, not `/tmp`, because `resolve_paths.py` intentionally treats `/tmp` and `/private/var` as risky paths.
 
 **Step 3: Final status**
 
