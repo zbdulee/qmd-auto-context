@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # qmd auto-context 공통 hook 디스패처.
 # usage: run-hook <action> <engine> [--sandbox]
-#   action: recall | update | posttool
+#   action: recall | update | posttool | index
 #   engine: claude | codex | gemini
 # 플러그인 루트는 CLAUDE_PLUGIN_ROOT/PLUGIN_ROOT(있으면) 또는 스크립트 위치(dirname)로 결정.
 set -u

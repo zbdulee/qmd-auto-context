@@ -2,14 +2,14 @@
 
 qmd 기반 자동 컨텍스트 주입(세션 시작 시 인덱스 갱신 + 프롬프트마다 관련 문서 recall + 편집 후 연속성 힌트)을 **Claude Code · Codex · Antigravity(Gemini) 세 플랫폼**에서 동작시키는 플러그인.
 
-흩어져 있던 글로벌/프로젝트 qmd 훅을 단일 리포로 SSOT화했다. 플랫폼 무관 `core/` 1벌 + 플랫폼별 얇은 `adapters/` 구조.
+흩어져 있던 글로벌/프로젝트 qmd 훅을 단일 리포로 SSOT화했다. 플랫폼 무관 `core/` 1벌 + `hooks/run-hook` 단일 디스패처 구조.
 
 ## 구조
 
 ```
-core/        recall.py · update.sh · posttool.py · config.py · keywords.py · resolve_paths.py
-adapters/    claude/ · codex/ · gemini/   (wrapper.py + hooks.json)
-backend/     daemon.sh · keepalive.sh · logrotate.sh · launchd/*.plist (@@HOME@@ 템플릿)
+core/        recall.py · update.sh · posttool.py · index_enqueue.py · config.py · keywords.py · resolve_paths.py · collection_match.py
+hooks/       run-hook (단일 디스패처) · hooks.json · hooks-codex.json
+backend/     daemon.sh · keepalive.sh · logrotate.sh · index_worker.sh · launchd/*.plist (@@HOME@@ 템플릿)
 config/      qmd-recall.schema.json
 test/        *.test.mjs (node:test)
 install.sh · uninstall.sh
@@ -23,7 +23,7 @@ install.sh · uninstall.sh
 | 프롬프트 제출 | 관련 문서 recall | `UserPromptSubmit` | `UserPromptSubmit` | `BeforeAgent` |
 | 도구 사용 후 | 연속성 힌트 | `PostToolUse` | `PostToolUse` | `AfterTool` |
 
-어댑터는 stdin `{prompt,cwd}`를 코어에 패스스루하고 engine 라벨/로그 경로/headless·sandbox 체크만 주입한다.
+`hooks/run-hook` 단일 디스패처가 모든 플랫폼의 훅 진입점이다. 디스패처는 engine 라벨/로그 경로/sandbox 가드 후 `core/<script>`로 stdin을 패스스루한다.
 
 ## 설정 / opt-in (프로젝트 로컬)
 

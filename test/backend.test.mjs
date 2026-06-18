@@ -21,5 +21,6 @@ test('com.qmd-index-worker.plist 존재 + StartInterval', () => {
   const p = readFileSync('backend/launchd/com.qmd-index-worker.plist', 'utf8');
   assert.match(p, /<string>com\.qmd-index-worker<\/string>/);
   assert.match(p, /StartInterval/);
+  assert.match(p, /RunAtLoad/);
   assert.match(p, /managed-by: qmd-auto-context/);
 });
