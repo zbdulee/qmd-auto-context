@@ -1,0 +1,19 @@
+AGENTS.md
+  h_42d950683aaaea 21-25,58,60,65-71
+CLAUDE.md
+  h_42d950683aaaea 21-25,58,60,65-71
+README.md
+  h_42d950683aaaea 10,12,135-178
+docs/plans/2026-06-18-sync-skill.md
+  h_42d950683aaaea 1-830
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "328f1f0805d512dde673fb6443723b8113807e9d",
+  "prompts": {},
+  "humans": {
+    "h_42d950683aaaea": {
+      "author": "dulee@zigbang.com"
+    }
+  }
+}
