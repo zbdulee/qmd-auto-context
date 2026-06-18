@@ -334,7 +334,55 @@ if [ "$1" = "--recommend" ]; then
 fi
 
 if [ "$1" = "--optin" ] || [ "$1" = "--optout" ]; then
-  mode="$1"; target="${2:-$PWD}"
+  mode="$1"; shift
+  # --optin --recommended <path> 모드 감지
+  if [ "$mode" = "--optin" ] && [ "$1" = "--recommended" ]; then
+    shift
+    target="${1:-$PWD}"
+    python3 - "$target" "$(dirname "$0")" <<'PY'
+import json, os, sys, tempfile, subprocess
+from pathlib import Path
+target = Path(sys.argv[1])
+core_dir = sys.argv[2]
+dest = target / ".auto-context.json"
+legacy = target / ".agents" / "qmd-recall.json"
+# 기존 config 존재 시 미덮음
+if dest.exists() or legacy.exists():
+    existing = dest if dest.exists() else legacy
+    print(f"[qmd] --optin --recommended: {existing} 이(가) 이미 존재합니다. 덮어쓰지 않습니다.", file=sys.stderr)
+    sys.exit(1)
+# recommend_config.py 호출
+result = subprocess.run(
+    [sys.executable, str(Path(core_dir) / "recommend_config.py"), "--cwd", str(target), "--json"],
+    capture_output=True, text=True
+)
+if result.returncode != 0:
+    print(f"[qmd] recommend_config.py 실패: {result.stderr.strip()}", file=sys.stderr)
+    sys.exit(1)
+try:
+    rec = json.loads(result.stdout)
+except json.JSONDecodeError as e:
+    print(f"[qmd] recommend_config.py JSON 파싱 실패: {e}", file=sys.stderr)
+    sys.exit(1)
+if not rec.get("available"):
+    print("[qmd] 추천 가능한 경로를 찾지 못했습니다. --optin 또는 .auto-context.json 직접 작성을 쓰세요.", file=sys.stderr)
+    sys.exit(1)
+config = rec["config"]
+target.mkdir(parents=True, exist_ok=True)
+fd, tmp = tempfile.mkstemp(dir=str(target), prefix=".auto-context.", suffix=".tmp")
+try:
+    with os.fdopen(fd, "w") as fh:
+        json.dump(config, fh, ensure_ascii=False, indent=2)
+    os.replace(tmp, dest)
+except BaseException:
+    try: os.unlink(tmp)
+    except OSError: pass
+    raise
+print(f"[qmd] --optin --recommended 완료: {dest} ({config.get('collections')}). 다음 세션부터 인덱싱됩니다.")
+PY
+    exit 0
+  fi
+  target="${1:-$PWD}"
   python3 - "$mode" "$target" <<'PY'
 import json, os, sys, tempfile
 from pathlib import Path

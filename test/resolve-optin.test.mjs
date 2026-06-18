@@ -118,3 +118,24 @@ test('--recommend --json: 미기록, 추천 출력', () => {
     assert.equal(existsSync(join(dir, '.auto-context.json')), false);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('--optin --recommended: 추천 config 기록', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'qmd-recin-'));
+  mkdirSync(join(dir, 'docs/current'), { recursive: true });
+  try {
+    execFileSync('bash', ['core/update.sh', '--optin', '--recommended', dir]);
+    const cfg = JSON.parse(readFileSync(join(dir, '.auto-context.json'), 'utf8'));
+    assert.equal(cfg.indexing, true);
+    assert.ok(cfg.collections.length >= 1);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('--optin --recommended: 기존 config 미덮음', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'qmd-recex-'));
+  mkdirSync(join(dir, 'docs/current'), { recursive: true });
+  writeFileSync(join(dir, '.auto-context.json'), JSON.stringify({ indexing: true, collections: ['keep'] }));
+  try {
+    assert.throws(() => execFileSync('bash', ['core/update.sh', '--optin', '--recommended', dir]));
+    assert.deepEqual(JSON.parse(readFileSync(join(dir, '.auto-context.json'), 'utf8')).collections, ['keep']);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
