@@ -1,0 +1,15 @@
+core/config.py
+  h_42d950683aaaea 140-141,170-174,179-189
+test/config.test.mjs
+  h_42d950683aaaea 4-6,13-26,93-160
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "315d534ff75279f0c4e4d364f2c5d358f4bea754",
+  "prompts": {},
+  "humans": {
+    "h_42d950683aaaea": {
+      "author": "dulee@zigbang.com"
+    }
+  }
+}
