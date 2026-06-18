@@ -165,6 +165,34 @@ test("EMBED_LOCK 잡혀 있으면 embed 스킵 + 큐 복원", () => {
   assert.match(readFileSync(q, "utf8"), /04_M/); // 큐 복원
 });
 
+// (C) delete-triggered reload — 새 임베딩 0이지만 update에서 N removed → reload 필요
+test("삭제-only update (0 새 임베딩, 1 removed) → reload 호출", () => {
+  const d = mkdtempSync(join(tmpdir(), "wk-"));
+  const log = join(d, "calls.log");
+  const rlog = join(d, "reload.log");
+  // embed: 0 chunks (no new embeddings), update: reports 1 removed
+  const stub = join(d, "qmd");
+  writeFileSync(stub, `#!/bin/bash
+echo "$@" >> "${log}"
+case "$1" in
+  embed) echo "Embedded 0 chunks from 0 documents in 0s" ;;
+  update) echo "Indexed: 0 new, 0 updated, 0 unchanged, 1 removed" ;;
+esac
+`);
+  chmodSync(stub, 0o755);
+  const lc = join(d, "launchctl"); writeFileSync(lc, `#!/bin/bash\necho "$@" >> "${rlog}"\n`); chmodSync(lc, 0o755);
+  const proj = join(d, "proj"); mkdirSync(join(proj, "04_M"), { recursive: true });
+  const q = join(d, "queue"); writeFileSync(q, `x\t${join(proj, "04_M")}\n`);
+  execFileSync("bash", ["backend/index_worker.sh"], { encoding: "utf8", env: {
+    ...process.env, QMD_DIRTY_QUEUE: q, QMD_FAKE_QMD: stub, QMD_FAKE_LAUNCHCTL: lc,
+    QMD_INDEX_WORKER_LOCKDIR: join(d, "wl.d"), QMD_WRITER_LOCKDIR: join(d, "ul.d"),
+    QMD_EMBED_LOCKDIR: join(d, "el.d"),
+    QMD_HEALTH_SKIP: "1",
+  }});
+  // reload가 발생했어야 한다 (kill TERM)
+  assert.match(readFileSync(rlog, "utf8"), /kill TERM/);
+});
+
 // BUG-1 regression: collection add가 "already exists"로 exit 1 반환해도 update/embed가 호출돼야 한다.
 test("collection add already-exists(exit 1) → update/embed 여전히 호출됨", () => {
   const d = mkdtempSync(join(tmpdir(), "wk-"));

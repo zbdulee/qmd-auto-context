@@ -17,7 +17,7 @@ log() { printf '[%s] index-worker: %s\n' "$(date '+%H:%M:%S')" "$*" >>"$LOG" 2>&
 reload_daemon() {
   command -v "$LAUNCHCTL" >/dev/null 2>&1 || return 0
   "$LAUNCHCTL" kill TERM "gui/$(id -u)/com.qmd-mcp-daemon" >>"$LOG" 2>&1 || return 0
-  log "daemon SIGTERM reload (new embeddings)"
+  log "daemon SIGTERM reload (index changed)"
   [ -n "${QMD_HEALTH_SKIP:-}" ] && return 0
   for _ in $(seq 1 30); do
     curl -sf -m 1 "http://127.0.0.1:${DAEMON_PORT}/health" >/dev/null 2>&1 && break
@@ -83,7 +83,10 @@ for e in "${ENTRIES[@]}"; do
 done
 [ "$added" = 0 ] && exit 0
 
-"$QMD" update >>"$LOG" 2>&1 || { log "update failed"; exit 0; }
+if ! UPDATE_OUT="$("$QMD" update 2>&1)"; then
+  printf '%s\n' "$UPDATE_OUT" >>"$LOG"; log "update failed"; exit 0
+fi
+printf '%s\n' "$UPDATE_OUT" >>"$LOG"
 
 # embed lock 획득 (update.sh 백그라운드 embed와 동시 실행 방지)
 # stale 방어: pid liveness 체크 (update.sh 프로토콜과 대칭)
@@ -103,9 +106,11 @@ trap 'rm -f "$EMBED_LOCK/pid" 2>/dev/null; rmdir "$EMBED_LOCK" 2>/dev/null || tr
 EMBED_OUT="$("$QMD" embed 2>&1)"; printf '%s\n' "$EMBED_OUT" >>"$LOG"
 NEW=$(printf '%s' "$EMBED_OUT" | grep -oE 'Embedded [0-9]+ chunks' | grep -oE '[0-9]+' | head -1)
 NEW="${NEW:-0}"
+REMOVED=$(printf '%s' "$UPDATE_OUT" | grep -oE '[1-9][0-9]* removed' | grep -oE '^[0-9]+' | head -1)
+REMOVED="${REMOVED:-0}"
 
-# reload: 새 임베딩이 있을 때만
-if [ "$NEW" -gt 0 ] && [ -z "${QMD_NO_RELOAD:-}" ]; then
+# reload: 새 임베딩이 있거나 삭제된 항목이 있을 때
+if { [ "$NEW" -gt 0 ] || [ "$REMOVED" -gt 0 ]; } && [ -z "${QMD_NO_RELOAD:-}" ]; then
   reload_daemon
 fi
 exit 0
