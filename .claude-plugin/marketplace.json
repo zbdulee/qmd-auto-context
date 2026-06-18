@@ -6,7 +6,7 @@
     {
       "name": "qmd-auto-context",
       "description": "qmd 기반 자동 컨텍스트 주입 — recall/update/posttool/index hooks",
-      "version": "0.4.0",
+      "version": "0.4.1",
       "source": "./",
       "author": { "name": "zbdulee" }
     }
