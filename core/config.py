@@ -137,9 +137,8 @@ def _is_within(path, root):
         return False
 
 
-def load_project_config(cwd):
-    """cwd→부모(HOME 경계)로 .auto-context.json 우선, 없으면 레거시 .agents/qmd-recall.json 탐색.
-    indexing:false 면 collections=[] (검색/인덱싱 skip). 못 찾으면 빈 설정(collections=[])."""
+def find_project_config(cwd):
+    """cwd→부모(HOME 경계)로 project config를 찾고 normalized config와 위치를 반환한다."""
     from pathlib import Path
     path = Path(cwd).resolve()
     home = Path.home().resolve()
@@ -168,12 +167,26 @@ def load_project_config(cwd):
                 config = normalize_config(json.load(f))
             if config.get("indexing") is False:
                 config["collections"] = []
-            return config
+            return {
+                "config": config,
+                "configPath": str(config_file),
+                "projectRoot": str(config_file.parent.parent if config_file.name == "qmd-recall.json" else config_file.parent),
+            }
         except (json.JSONDecodeError, OSError):
             pass
     fallback = normalize_config({})
     fallback["collections"] = []
-    return fallback
+    return {
+        "config": fallback,
+        "configPath": None,
+        "projectRoot": str(path),
+    }
+
+
+def load_project_config(cwd):
+    """cwd→부모(HOME 경계)로 .auto-context.json 우선, 없으면 레거시 .agents/qmd-recall.json 탐색.
+    indexing:false 면 collections=[] (검색/인덱싱 skip). 못 찾으면 빈 설정(collections=[])."""
+    return find_project_config(cwd)["config"]
 
 
 def main():

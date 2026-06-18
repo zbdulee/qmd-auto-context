@@ -1,9 +1,26 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 function loadConfig(json, cwd = '/tmp/x') {
   const out = execFileSync('python3', ['core/config.py', '--cwd', cwd], { input: json });
+  return JSON.parse(out);
+}
+
+function findProjectConfig(cwd, env = {}) {
+  const code = `
+import json
+import config
+result = config.find_project_config(${JSON.stringify(cwd)})
+print(json.dumps(result, ensure_ascii=False))
+`;
+  const out = execFileSync('python3', ['-c', code], {
+    encoding: 'utf8',
+    env: { ...process.env, PYTHONPATH: 'core', ...env },
+  });
   return JSON.parse(out);
 }
 
@@ -72,4 +89,72 @@ test('config 숫자 타입은 보수적으로 coercion 하고 실패 시 기본�
   assert.equal(fallback.minScore, 0.0);
   assert.equal(fallback.topN, 3);
   assert.equal(fallback.queryTimeout, 5);
+});
+
+test('find_project_config: cwd .auto-context.json root/path 반환', () => {
+  const home = mkdtempSync(join(tmpdir(), 'qmd-cfg-home-'));
+  const dir = join(home, 'proj');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, '.auto-context.json'), JSON.stringify({
+    indexing: true,
+    collections: ['story'],
+  }));
+  try {
+    const result = findProjectConfig(dir, { HOME: home });
+    assert.equal(result.projectRoot, realpathSync(dir));
+    assert.equal(result.configPath, join(realpathSync(dir), '.auto-context.json'));
+    assert.deepEqual(result.config.collections, ['story']);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('find_project_config: parent .auto-context.json found from child cwd', () => {
+  const home = mkdtempSync(join(tmpdir(), 'qmd-cfg-home-'));
+  const dir = join(home, 'proj');
+  const child = join(dir, 'docs', 'nested');
+  mkdirSync(child, { recursive: true });
+  writeFileSync(join(dir, '.auto-context.json'), JSON.stringify({
+    indexing: true,
+    collections: ['parent'],
+  }));
+  try {
+    const result = findProjectConfig(child, { HOME: home });
+    assert.equal(result.projectRoot, realpathSync(dir));
+    assert.equal(result.configPath, join(realpathSync(dir), '.auto-context.json'));
+    assert.deepEqual(result.config.collections, ['parent']);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('find_project_config: legacy .agents/qmd-recall.json still works', () => {
+  const home = mkdtempSync(join(tmpdir(), 'qmd-cfg-home-'));
+  const dir = join(home, 'proj');
+  mkdirSync(join(dir, '.agents'), { recursive: true });
+  writeFileSync(join(dir, '.agents', 'qmd-recall.json'), JSON.stringify({
+    collections: ['legacy'],
+  }));
+  try {
+    const result = findProjectConfig(dir, { HOME: home });
+    assert.equal(result.projectRoot, realpathSync(dir));
+    assert.equal(result.configPath, join(realpathSync(dir), '.agents', 'qmd-recall.json'));
+    assert.deepEqual(result.config.collections, ['legacy']);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('find_project_config: no config returns null path and cwd root', () => {
+  const home = mkdtempSync(join(tmpdir(), 'qmd-cfg-home-'));
+  const dir = join(home, 'proj');
+  mkdirSync(dir, { recursive: true });
+  try {
+    const result = findProjectConfig(dir, { HOME: home });
+    assert.equal(result.projectRoot, realpathSync(dir));
+    assert.equal(result.configPath, null);
+    assert.deepEqual(result.config.collections, []);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
 });
