@@ -1,0 +1,15 @@
+core/sync.py
+  h_42d950683aaaea 114-115
+test/sync.test.mjs
+  h_42d950683aaaea 10,262-287
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "ce2cad773346c81bae16fa894716adb070feb7a9",
+  "prompts": {},
+  "humans": {
+    "h_42d950683aaaea": {
+      "author": "dulee@zigbang.com"
+    }
+  }
+}
