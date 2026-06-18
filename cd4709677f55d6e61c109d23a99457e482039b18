@@ -1,0 +1,15 @@
+backend/index_worker.sh
+  h_42d950683aaaea 20,86-89,109-110,112-113
+test/index-worker.test.mjs
+  h_42d950683aaaea 168-195
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "cd4709677f55d6e61c109d23a99457e482039b18",
+  "prompts": {},
+  "humans": {
+    "h_42d950683aaaea": {
+      "author": "dulee@zigbang.com"
+    }
+  }
+}
