@@ -325,6 +325,14 @@ main() {
   exit 0
 }
 
+if [ "$1" = "--recommend" ]; then
+  shift
+  json_flag=""
+  if [ "$1" = "--json" ]; then json_flag="--json"; shift; fi
+  target="${1:-$PWD}"
+  exec python3 "$(dirname "$0")/recommend_config.py" --cwd "$target" $json_flag
+fi
+
 if [ "$1" = "--optin" ] || [ "$1" = "--optout" ]; then
   mode="$1"; target="${2:-$PWD}"
   python3 - "$mode" "$target" <<'PY'

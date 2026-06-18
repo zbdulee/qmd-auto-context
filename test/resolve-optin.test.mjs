@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, rmSync, realpathSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 
 function homeTemp(prefix) {
   const base = join(homedir(), '.tmp-qmd-test');
@@ -105,5 +105,16 @@ test('--optin 따옴표 폴더명도 유효 JSON', () => {
   try {
     execFileSync('bash', ['core/update.sh', '--optin', weird]);
     JSON.parse(readFileSync(join(weird, '.auto-context.json'), 'utf8'));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('--recommend --json: 미기록, 추천 출력', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'qmd-rec-cli-'));
+  mkdirSync(join(dir, 'docs/current'), { recursive: true });
+  try {
+    const out = execFileSync('bash', ['core/update.sh', '--recommend', '--json', dir], { encoding: 'utf8' });
+    const r = JSON.parse(out);
+    assert.equal(r.available, true);
+    assert.equal(existsSync(join(dir, '.auto-context.json')), false);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
