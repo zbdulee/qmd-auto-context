@@ -306,11 +306,20 @@ main() {
   reason=$(echo "$resolved" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("reason") or "")' 2>/dev/null || echo "")
   if [ "$reason" = "pending" ]; then
     suggested=$(echo "$resolved" | python3 -c 'import json,sys; print((json.load(sys.stdin).get("prompt") or {}).get("suggestedRoot",""))' 2>/dev/null || echo "")
+    [ -z "$suggested" ] && suggested="$workdir"
     helper="bash $(cd "$(dirname "$0")" && pwd)/update.sh"
-    echo "[qmd] 이 폴더는 아직 검색 인덱스에 등록되지 않았습니다."
-    printf '      인덱싱하려면:    %s --optin %q\n' "$helper" "$suggested"
-    printf '      다시 묻지 않으려면: %s --optout %q\n' "$helper" "$workdir"
-    echo "      사용자에게 인덱싱할지 물어보고, 답에 따라 위 명령 중 하나를 실행하세요."
+    # pending_guide: 미설정 프로젝트 안내 메시지 (Task 8의 deny reason과 명령 세트 공유 위해 함수화)
+    pending_guide() {
+      local h="$1" s="$2" w="$3"
+      echo "[qmd] 이 폴더는 아직 검색 인덱스에 등록되지 않았습니다."
+      echo "      다음 중 하나를 선택하세요:"
+      printf '  1) 추천 확인:       %s --recommend %q\n'        "$h" "$w"
+      printf '  2) 추천 즉시 적용:  %s --optin --recommended %q\n' "$h" "$s"
+      printf '  3) 직접 작성:       %q/.auto-context.json 파일을 작성한 뒤 다음 세션에 자동 적용\n' "$w"
+      printf '  4) 거절:            %s --optout %q\n'            "$h" "$w"
+      printf '  5) 이번만 건너뜀:  %s --skip %q\n'              "$h" "$w"
+    }
+    pending_guide "$helper" "$suggested" "$workdir"
     exit 0
   fi
   if [ "$reason" = "optout" ] || [ "$reason" = "risky" ]; then

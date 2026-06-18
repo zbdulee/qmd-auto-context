@@ -104,6 +104,35 @@ test('update core: --sandbox 인자 → 무출력 exit 0', () => {
 });
 
 // BUG-2 regression: collection add가 "already exists" + exit 1 반환해도 update/embed는 실행돼야 함
+test('pending: 안내 메시지에 --recommend/--optin --recommended/.auto-context.json/--optout/--skip 5개 포함', () => {
+  // pending 폴더(config 없음)를 stdin으로 전달해 main() 경로의 pending 분기를 실행.
+  // qmd, curl 등 외부 명령이 없어도 pending 분기는 메시지만 출력하고 종료하므로 PATH stub 불필요.
+  const work = repoTemp('qmd-pending-msg');
+  try {
+    // pending 폴더: .auto-context.json 없음. qmd stub도 최소한만 — pending 분기에서 qmd 호출 안 함.
+    const bin = join(work, 'bin');
+    mkdirSync(bin, { recursive: true });
+    // curl stub (healthcheck 억제)
+    writeFileSync(join(bin, 'curl'), '#!/usr/bin/env sh\nexit 1\n', { mode: 0o755 });
+    // qmd stub (혹시 qmd collection list 같은 게 호출되더라도 exit 0)
+    writeFileSync(join(bin, 'qmd'), '#!/usr/bin/env sh\nexit 0\n', { mode: 0o755 });
+
+    const out = execFileSync('bash', [join(process.cwd(), 'core', 'update.sh')], {
+      encoding: 'utf8',
+      input: JSON.stringify({ cwd: work }),
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+    });
+
+    assert.ok(out.includes('--recommend'), `--recommend 없음: ${out}`);
+    assert.ok(out.includes('--optin --recommended'), `--optin --recommended 없음: ${out}`);
+    assert.ok(out.includes('.auto-context.json'), `.auto-context.json 없음: ${out}`);
+    assert.ok(out.includes('--optout'), `--optout 없음: ${out}`);
+    assert.ok(out.includes('--skip'), `--skip 없음: ${out}`);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
 test('update core: collection add already-exists exit 1도 update 실행 (BUG-2)', () => {
   const work = repoTemp('qmd-update-already-exists');
   const bin = join(work, 'bin');
