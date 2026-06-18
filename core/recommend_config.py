@@ -2,7 +2,6 @@
 import argparse
 import json
 import os
-import re
 from pathlib import Path
 
 # (path, reason, suffix, narrow)  narrow=True면 무조건 채택, False면 크기 가드 적용

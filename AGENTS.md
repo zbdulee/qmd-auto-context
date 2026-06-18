@@ -21,7 +21,7 @@ bash uninstall.sh                           # 복원/제거
 bash core/update.sh --recommend [<경로>]              # 추천 확인 (read-only, 파일 변경 없음)
 bash core/update.sh --recommend --json [<경로>]       # 추천 결과를 JSON으로 출력
 bash core/update.sh --optin --recommended [<경로>]    # 추천 적용 → .auto-context.json 원자 생성
-bash core/update.sh --skip [<경로>]                   # 이번 세션만 gate 통과 마커 생성 (TTL 2h)
+bash core/update.sh --skip [<경로>]                   # 이 프로젝트 임시 gate 통과 마커 (TTL 2h, cwd 단위)
 ```
 
 테스트/설치를 격리 검증할 때 쓰는 env 가드 (테스트 코드가 이걸로 부작용을 막는다):

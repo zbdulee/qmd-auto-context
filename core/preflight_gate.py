@@ -19,7 +19,7 @@ def is_sandbox():
                 or os.environ.get("CODEX_SANDBOX") or os.environ.get("CLAUDE_HEADLESS") == "1")
 
 
-def has_skip_marker(cwd, payload):
+def has_skip_marker(cwd):
     """skip 마커 파일 존재 + TTL 확인. TTL 만료 시 lazy unlink 후 False 반환."""
     real_cwd = os.path.realpath(cwd)
     h = hashlib.sha256(real_cwd.encode()).hexdigest()
@@ -58,7 +58,7 @@ def main():
     # pending이 아니면(동의/거절/risky/정상) 통과. pending이어도 skip이면 통과.
     if reason != "pending":
         return 0
-    if has_skip_marker(cwd, payload):   # Task 7에서 구현
+    if has_skip_marker(cwd):
         return 0
     hint = " (collections가 비어 pending입니다)" if not config.get("collections") else ""
     msg = (f"⛔ qmd-auto-context: 이 프로젝트는 인덱싱 미설정(pending){hint}이라 편집이 보류됩니다. "

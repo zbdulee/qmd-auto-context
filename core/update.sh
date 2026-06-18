@@ -317,7 +317,7 @@ main() {
       printf '  2) 추천 즉시 적용:  %s --optin --recommended %q\n' "$h" "$s"
       printf '  3) 직접 작성:       %q/.auto-context.json 파일을 작성한 뒤 다음 세션에 자동 적용\n' "$w"
       printf '  4) 거절:            %s --optout %q\n'            "$h" "$w"
-      printf '  5) 이번만 건너뜀:  %s --skip %q\n'              "$h" "$w"
+      printf '  5) 임시 건너뜀(2h):  %s --skip %q\n'              "$h" "$w"
     }
     pending_guide "$helper" "$suggested" "$workdir"
     exit 0
@@ -338,7 +338,7 @@ if [ "$1" = "--skip" ]; then
   shift
   target="${1:-$PWD}"
   python3 - "$target" <<'PY'
-import hashlib, os, sys, pathlib, time
+import hashlib, os, sys, pathlib
 
 target = sys.argv[1]
 real = os.path.realpath(target)
