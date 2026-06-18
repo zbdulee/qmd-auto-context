@@ -18,6 +18,11 @@ bash install.sh --cleanup-only              # 레거시 글로벌 훅 정리만 
 bash install.sh --agy-local <프로젝트>        # Gemini(agy): 프로젝트 .agents/hooks.json에 PostToolUse(posttool+index) 등록
 bash uninstall.sh                           # 복원/제거
 
+bash skills/sync/scripts/sync.sh <프로젝트>  # 수동 CUD sync: snapshot 비교 → dirty queue enqueue
+bash skills/query/scripts/query.sh <프로젝트> "<질문>"  # 수동 recall query(core/recall.py 경유)
+bash skills/update/scripts/update.sh <프로젝트>  # 수동 SessionStart update(core/update.sh 경유)
+bash skills/hint/scripts/hint.sh <프로젝트> <파일>  # 수동 PostToolUse hint(core/posttool.py 경유)
+
 bash core/update.sh --recommend [<경로>]              # 추천 확인 (read-only, 파일 변경 없음)
 bash core/update.sh --recommend --json [<경로>]       # 추천 결과를 JSON으로 출력
 bash core/update.sh --optin --recommended [<경로>]    # 추천 적용 → .auto-context.json 원자 생성
@@ -50,10 +55,19 @@ backend/   ← qmd MCP HTTP 데몬(:8483) + keepalive + logrotate + index worker
 - `posttool.py` — 편집 후 연속성 힌트. `is_story_path`는 config의 `collectionPaths`로 판별(하드코딩 없음). 이벤트명 `PostToolUse`(claude/codex)와 `AfterTool`(gemini) **둘 다** 수용. 내부적으로 recall.py를 subprocess로 위임.
 - `config.py` — `.auto-context.json`(없으면 레거시 `.agents/qmd-recall.json`) 로드 + 기본값 병합. 숫자 필드(minScore/topN/queryTimeout) 보수적 coercion, 실패 시 기본값. legacy novel 컬렉션명(`*-manuscript`/`*-plot`)은 `lexicalPatterns:["ep"]` 자동 활성화.
 - `resolve_paths.py` — collectionPaths→경로 매핑 + risky path / allowRoots traversal 검증.
+- `dirty_queue.py` — 기존 dirty 큐(`~/.config/qmd/dirty-queue`) append SSOT. `<collection-name>\t<collection-path>` 2컬럼 프로토콜 유지.
 - `index_enqueue.py` — PostToolUse hook. config 게이팅(collections 미설정/indexing:false/event 비활성/collectionPaths 밖) 후 편집 파일이 속한 (컬렉션명, 절대경로)를 dirty 큐에 원자 append. stdout 무출력.
+- `sync.py` — 수동/skill 기반 missed CUD 복구. `.auto-context.json`의 `collectionPaths`를 snapshot(`mtime_ns + size`)과 비교해 변경된 collection만 dirty 큐에 append한다. `skipPaths`는 recall 필터라 sync/delete cleanup에는 적용하지 않는다.
 - `collection_match.py` — 편집 경로 → collectionPaths longest-prefix 컬렉션 선정. 복수 컬렉션 지원, 컬렉션 밖 편집은 빈 결과.
 - `recommend_config.py` — `--recommend`용 추천 생성. read-only(`.auto-context.json` 쓰지 않음). `docs/current`·`docs/plans`·`docs` 등 좁은 경로를 탐색해 크기 가드(200파일/5MB) 통과 경로만 추천. `{available, config}` JSON 출력. 쓰기는 `--optin`/`--optin --recommended`에서만.
 - `preflight_gate.py` — PreToolUse hook. pending 프로젝트에서 Edit/Write/apply_patch 등 편집 도구를 deny로 차단(Claude·Codex). sandbox·skip 마커·pending 아닌 상태면 즉시 통과.
+
+### skills (`skills/`)
+- `sync` — agent-facing 수동 동기화 workflow. wrapper가 플러그인 루트를 찾아 `core/sync.py --json`을 실행한다. 자동 hook이 아니며 사용자가 sync/resync를 요청할 때만 쓴다.
+- `query` — hook recall과 동일한 `core/recall.py` 경로를 수동 실행한다. qmd 데몬 직접 호출을 중복 구현하지 말 것.
+- `update` — SessionStart update와 동일한 `core/update.sh` 경로를 수동 실행한다. qmd 인덱스 갱신 요청에는 이 skill을 쓴다.
+- `hint` — PostToolUse posttool과 동일한 `core/posttool.py` 경로를 수동 실행한다. 특정 편집 파일 기준 연속성 힌트를 요청할 때 쓴다.
+- `gate`에 해당하는 skill은 만들지 않는다. gate는 pending 프로젝트 편집 차단용 내부 안전장치다.
 
 > **dogfooding**: 이 저장소 자체의 `.auto-context.json`(`docs/current`·`docs/plans` 대상)으로 gate·추천·인덱싱을 실사용 중이다.
 
