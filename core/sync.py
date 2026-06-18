@@ -111,7 +111,8 @@ def acquire_lock():
         with open(lock / "pid", "w", encoding="utf-8") as handle:
             handle.write(str(os.getpid()))
     except OSError:
-        pass
+        release_lock(lock)
+        return None
     return lock
 
 

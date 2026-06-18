@@ -7,6 +7,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -253,6 +254,32 @@ test("stale lock from dead pid is removed and sync proceeds", () => {
     assert.deepEqual(result.collectionsQueued, ["story"]);
     assert.deepEqual(queueLines(envInfo), [`story\t${join(dir, "docs")}`]);
     assert.equal(existsSync(join(envInfo.base, "lock.d")), false);
+  } finally {
+    rmSync(envInfo.base, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("pid-less fresh lock stays busy, but old pid-less lock is recovered", () => {
+  const envInfo = makeEnv();
+  envInfo.env.QMD_SYNC_LOCK_STALE_SECONDS = "1";
+  const dir = makeProject();
+  mkdirSync(join(dir, "docs"), { recursive: true });
+  writeConfig(dir, ["story"], { story: "docs" });
+  writeFileSync(join(dir, "docs", "a.md"), "a\n");
+  const lockDir = join(envInfo.base, "lock.d");
+  mkdirSync(lockDir);
+  try {
+    const busy = runSync(dir, envInfo);
+    assert.equal(busy.reason, "sync_busy");
+    assert.equal(existsSync(lockDir), true);
+
+    const old = new Date(Date.now() - 2000);
+    utimesSync(lockDir, old, old);
+    const recovered = runSync(dir, envInfo);
+    assert.equal(recovered.reason, "synced");
+    assert.deepEqual(recovered.collectionsQueued, ["story"]);
+    assert.equal(existsSync(lockDir), false);
   } finally {
     rmSync(envInfo.base, { recursive: true, force: true });
     rmSync(dir, { recursive: true, force: true });
