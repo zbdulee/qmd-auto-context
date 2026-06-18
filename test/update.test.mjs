@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { homedir } from 'node:os';
 
 function resolvePaths(cwd, configJson) {
   // update.sh --resolve-only: qmd 미실행, 컬렉션→경로 매핑 결과만 stdout JSON.
@@ -12,7 +13,11 @@ function resolvePaths(cwd, configJson) {
 }
 
 function repoTemp(prefix) {
-  return mkdtempSync(join(process.cwd(), `.tmp-${prefix}-`));
+  // HOME 하위(~/.cache)에 생성: repo 루트의 .auto-context.json(dogfooding)을 부모 상속하지
+  // 않도록 repo 밖에 둔다. tmpdir(/private/tmp)는 risky_path라 resolve_paths가 risky를 반환하므로 쓰지 않는다.
+  const base = join(homedir(), '.cache');
+  mkdirSync(base, { recursive: true });
+  return mkdtempSync(join(base, `qmd-test-${prefix}-`));
 }
 
 test('collectionPaths 매핑 해석 (novel 패턴)', () => {
