@@ -1,0 +1,23 @@
+.agents/plugins/marketplace.json
+  h_42d950683aaaea 8-9
+.claude-plugin/marketplace.json
+  h_42d950683aaaea 8-9
+.claude-plugin/plugin.json
+  h_42d950683aaaea 3-4
+.codex-plugin/plugin.json
+  h_42d950683aaaea 3-4,13
+package.json
+  h_42d950683aaaea 3
+plugin.json
+  h_42d950683aaaea 3
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "dd25e8fe629eb4475f016b872c6721ad66ad04a2",
+  "prompts": {},
+  "humans": {
+    "h_42d950683aaaea": {
+      "author": "dulee@zigbang.com"
+    }
+  }
+}
