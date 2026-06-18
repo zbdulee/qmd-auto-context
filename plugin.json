@@ -1,6 +1,6 @@
 {
   "name": "qmd-auto-context",
-  "version": "0.2.0",
+  "version": "0.5.0",
   "description": "qmd 기반 자동 컨텍스트 주입 — agy는 posttool(편집 후 연속성 힌트)만 지원. agy가 hook에 CLAUDE_PLUGIN_ROOT 환경변수를 제공하지 않으므로, 실질 설치는 Task 7의 프로젝트 로컬 .agents/hooks.json(install.sh가 절대경로로 치환)을 통해 이루어진다.",
   "author": { "name": "zbdulee" },
   "homepage": "https://github.com/zbdulee/qmd-auto-context",
