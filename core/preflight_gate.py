@@ -41,7 +41,7 @@ def main():
         return 0
     if has_skip_marker(cwd, payload):   # Task 7에서 구현
         return 0
-    hint = " (collections가 비어 pending입니다)" if config.get("collections") == [] and config.get("indexing") else ""
+    hint = " (collections가 비어 pending입니다)" if not config.get("collections") else ""
     msg = (f"⛔ qmd-auto-context: 이 프로젝트는 인덱싱 미설정(pending){hint}이라 편집이 보류됩니다. "
            f"사용자에게 묻고 'update.sh --recommend {cwd}'로 추천 확인 후 "
            f"--optin --recommended (또는 --optin/--optout/--skip)를 실행하세요. Read·검색은 허용됩니다.")

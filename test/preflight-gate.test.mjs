@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, mkdirSync as mkdirSyncFs } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 
@@ -17,7 +17,7 @@ function gate(payload, env = {}) {
   return execFileSync('python3', ['core/preflight_gate.py'], {
     input: JSON.stringify(payload), encoding: 'utf8',
     env: { ...process.env, ...env },
-    cwd: '/Users/dulee/work/qmd-auto-context',
+    cwd: process.cwd(),
   });
 }
 
