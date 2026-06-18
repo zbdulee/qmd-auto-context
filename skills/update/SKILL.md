@@ -1,6 +1,6 @@
 ---
 name: update
-description: Use when the user asks to manually run qmd auto-context indexing/update for a project using the same SessionStart hook behavior and .auto-context.json rules.
+description: Use when the user asks to manually run qmd auto-context update, indexing refresh, or SessionStart-style project refresh using .auto-context.json rules.
 ---
 
 # Update

@@ -1,6 +1,6 @@
 ---
 name: hint
-description: Use when the user asks for a qmd posttool continuation hint for a specific edited file, using the same PostToolUse hook behavior.
+description: Use when the user asks for a qmd posttool continuation hint, edit continuity hint, or manual PostToolUse-style hint for a specific edited file.
 ---
 
 # Hint

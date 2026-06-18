@@ -4,10 +4,9 @@ set -euo pipefail
 SKILL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PLUGIN_ROOT="$(cd "$SKILL_DIR/../.." && pwd)"
 TARGET_CWD="${1:-$PWD}"
-QUERY_TEXT="${2:-}"
 
 if [ "$#" -gt 0 ]; then shift; fi
-if [ "$#" -gt 0 ]; then shift; fi
+QUERY_TEXT="$*"
 if [ -z "$QUERY_TEXT" ]; then
   QUERY_TEXT="$(cat)"
 fi

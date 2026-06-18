@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.resolve()))
@@ -55,12 +56,57 @@ def write_state_atomic(path, snapshot):
     os.replace(tmp, path)
 
 
+def lock_path():
+    return Path(os.environ.get("QMD_SYNC_LOCKDIR", "/tmp/qmd-sync.lock.d"))
+
+
+def stale_lock_seconds():
+    try:
+        return max(1, int(os.environ.get("QMD_SYNC_LOCK_STALE_SECONDS", "3600")))
+    except ValueError:
+        return 3600
+
+
+def pid_is_running(pid):
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
+def lock_is_stale(lock):
+    pid_file = lock / "pid"
+    try:
+        raw_pid = pid_file.read_text(encoding="utf-8").strip()
+        pid = int(raw_pid)
+    except (OSError, ValueError):
+        try:
+            age = time.time() - lock.stat().st_mtime
+        except OSError:
+            return False
+        return age >= stale_lock_seconds()
+    return not pid_is_running(pid)
+
+
 def acquire_lock():
-    lock = Path(os.environ.get("QMD_SYNC_LOCKDIR", "/tmp/qmd-sync.lock.d"))
+    lock = lock_path()
     try:
         os.mkdir(lock)
     except FileExistsError:
-        return None
+        if not lock_is_stale(lock):
+            return None
+        release_lock(lock)
+        try:
+            os.mkdir(lock)
+        except FileExistsError:
+            return None
     try:
         with open(lock / "pid", "w", encoding="utf-8") as handle:
             handle.write(str(os.getpid()))
@@ -169,7 +215,7 @@ def run(cwd, *, json_output=False, dry_run=False, baseline_only=False):
 
     lock = acquire_lock()
     if lock is None:
-        emit_json(json_output, {"ok": True, "reason": "sync_busy"})
+        emit_json(json_output, {"ok": True, "reason": "sync_busy", "lockPath": str(lock_path())})
         return 0
 
     try:

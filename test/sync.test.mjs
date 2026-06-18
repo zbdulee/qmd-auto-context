@@ -218,3 +218,43 @@ test("QMD_SANDBOX exits with no output and no side effects", () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("active lock reports sync_busy without removing lock", () => {
+  const envInfo = makeEnv();
+  const dir = makeProject();
+  mkdirSync(join(dir, "docs"), { recursive: true });
+  writeConfig(dir, ["story"], { story: "docs" });
+  writeFileSync(join(dir, "docs", "a.md"), "a\n");
+  mkdirSync(join(envInfo.base, "lock.d"));
+  writeFileSync(join(envInfo.base, "lock.d", "pid"), String(process.pid));
+  try {
+    const result = runSync(dir, envInfo);
+    assert.equal(result.reason, "sync_busy");
+    assert.equal(result.lockPath, join(envInfo.base, "lock.d"));
+    assert.equal(existsSync(join(envInfo.base, "lock.d")), true);
+    assert.equal(existsSync(envInfo.queue), false);
+  } finally {
+    rmSync(envInfo.base, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("stale lock from dead pid is removed and sync proceeds", () => {
+  const envInfo = makeEnv();
+  const dir = makeProject();
+  mkdirSync(join(dir, "docs"), { recursive: true });
+  writeConfig(dir, ["story"], { story: "docs" });
+  writeFileSync(join(dir, "docs", "a.md"), "a\n");
+  mkdirSync(join(envInfo.base, "lock.d"));
+  writeFileSync(join(envInfo.base, "lock.d", "pid"), "99999999");
+  try {
+    const result = runSync(dir, envInfo);
+    assert.equal(result.reason, "synced");
+    assert.deepEqual(result.collectionsQueued, ["story"]);
+    assert.deepEqual(queueLines(envInfo), [`story\t${join(dir, "docs")}`]);
+    assert.equal(existsSync(join(envInfo.base, "lock.d")), false);
+  } finally {
+    rmSync(envInfo.base, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -1,0 +1,4 @@
+interface:
+  display_name: "qmd Query"
+  short_description: "Run manual qmd context recall"
+  default_prompt: "Use $query to search qmd auto-context for this project."

@@ -1,6 +1,6 @@
 ---
 name: query
-description: Use when the user asks to query qmd auto-context manually or look up related context using the same recall hook behavior as .auto-context.json.
+description: Use when the user asks to query, search, recall, or look up qmd auto-context manually using the same recall hook behavior and .auto-context.json opt-in rules.
 ---
 
 # Query

@@ -1,0 +1,4 @@
+interface:
+  display_name: "qmd Update"
+  short_description: "Run manual qmd index refresh"
+  default_prompt: "Use $update to refresh qmd auto-context indexing for this project."
