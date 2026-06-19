@@ -27,6 +27,9 @@ test("query skill metadata and wrapper contract", () => {
   const wrapper = readFileSync("skills/query/scripts/query.sh", "utf8");
   assert.match(wrapper, /SKILL_DIR=.*dirname/);
   assert.match(wrapper, /PLUGIN_ROOT/);
+  assert.match(wrapper, /QMD_BACKEND_MANAGER/);
+  assert.match(wrapper, /check-qmd --manual/);
+  assert.match(wrapper, /ensure --wait/);
   assert.match(wrapper, /core\/recall\.py/);
   assert.ok((statSync("skills/query/scripts/query.sh").mode & 0o111) !== 0, "wrapper must be executable");
 });
@@ -35,18 +38,22 @@ test("query wrapper uses recall fixture and returns hook context", () => {
   const base = join(homedir(), ".tmp-qmd-query-skill");
   mkdirSync(base, { recursive: true });
   const dir = mkdtempSync(join(base, "proj-"));
-  writeFileSync(join(dir, ".auto-context.json"), JSON.stringify({
-    indexing: true,
-    collections: ["axiom"],
-  }));
-  try {
-    const out = execFileSync("bash", ["skills/query/scripts/query.sh", dir, "원오빌 문의 기반 정렬 어떻게 동작해?"], {
-      encoding: "utf8",
-      env: { ...process.env, QMD_QUERY_FIXTURE: "test/fixtures/daemon-response.json" },
-    });
-    const parsed = JSON.parse(out);
-    assert.match(parsed.hookSpecificOutput.additionalContext, /\[axiom\]/);
-  } finally {
+    writeFileSync(join(dir, ".auto-context.json"), JSON.stringify({
+      indexing: true,
+      collections: ["axiom"],
+    }));
+    const managerLog = join(dir, "manager.log");
+    const manager = join(dir, "manager.sh");
+    writeFileSync(manager, `#!/usr/bin/env bash\necho "$@" >> "${managerLog}"\n`, { mode: 0o755 });
+    try {
+      const out = execFileSync("bash", ["skills/query/scripts/query.sh", dir, "원오빌 문의 기반 정렬 어떻게 동작해?"], {
+        encoding: "utf8",
+        env: { ...process.env, QMD_QUERY_FIXTURE: "test/fixtures/daemon-response.json", QMD_BACKEND_MANAGER: manager },
+      });
+      const parsed = JSON.parse(out);
+      assert.match(parsed.hookSpecificOutput.additionalContext, /\[axiom\]/);
+      assert.equal(readFileSync(managerLog, "utf8"), "check-qmd --manual\nensure --wait\n");
+    } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });

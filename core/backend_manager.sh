@@ -22,10 +22,24 @@ log() {
 }
 
 normalize_path() {
-  [ -d "$HOME/.bun/bin" ] && PATH="$HOME/.bun/bin:$PATH"
   local fnm_node_bin
-  fnm_node_bin=$(ls -d "$HOME/.local/share/fnm/node-versions"/v*/installation/bin 2>/dev/null | sort | tail -1)
+  fnm_node_bin=$(python3 - "$HOME/.local/share/fnm/node-versions" <<'PY' 2>/dev/null || true
+import re
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+candidates = []
+for path in root.glob("v*/installation/bin"):
+    match = re.match(r"^v(\d+)\.(\d+)\.(\d+)$", path.parent.parent.name)
+    if match:
+        candidates.append((tuple(int(x) for x in match.groups()), path))
+if candidates:
+    print(max(candidates)[1])
+PY
+)
   [ -n "$fnm_node_bin" ] && PATH="$fnm_node_bin:$PATH"
+  [ -d "$HOME/.bun/bin" ] && PATH="$HOME/.bun/bin:$PATH"
   export PATH
 }
 
@@ -206,8 +220,10 @@ kick_index() {
     if [ -n "$(find "$KICK_LOCK" -maxdepth 0 -mmin +10 2>/dev/null)" ]; then
       rm -f "$KICK_LOCK/pid" 2>/dev/null || true
       rmdir "$KICK_LOCK" 2>/dev/null || true
+      mkdir "$KICK_LOCK" 2>/dev/null || return 0
+    else
+      return 0
     fi
-    return 0
   fi
   (
     trap 'rm -f "$KICK_LOCK/pid" 2>/dev/null; rmdir "$KICK_LOCK" 2>/dev/null || true' EXIT

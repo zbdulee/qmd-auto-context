@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import {
   existsSync,
   mkdtempSync,
@@ -23,6 +23,12 @@ function makeFakeQmd(home, version = "2.5.3") {
   const bin = join(home, ".bun", "bin");
   mkdirSync(bin, { recursive: true });
   writeFileSync(join(bin, "qmd"), `#!/usr/bin/env sh\necho qmd ${version}\n`, { mode: 0o755 });
+}
+
+function makeFakeFNMQmd(home, nodeVersion, qmdVersion = "2.5.3") {
+  const bin = join(home, ".local", "share", "fnm", "node-versions", nodeVersion, "installation", "bin");
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(join(bin, "qmd"), `#!/usr/bin/env sh\necho qmd ${qmdVersion}\n`, { mode: 0o755 });
 }
 
 test("health exits cleanly and prints nothing when daemon is down", () => {
@@ -66,6 +72,40 @@ test("check-qmd finds qmd through HOME .bun path normalization", () => {
   const home = mkdtempSync(join(tmpdir(), "qmd-path-"));
   try {
     makeFakeQmd(home);
+    const result = run(["check-qmd", "--manual"], {
+      HOME: home,
+      PATH: "/usr/bin:/bin",
+      QMD_BACKEND_STATE_DIR: home,
+    });
+    assert.equal(result.status, 0);
+    assert.equal(result.stdout, "");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("check-qmd prefers .bun qmd over older fnm qmd", () => {
+  const home = mkdtempSync(join(tmpdir(), "qmd-path-order-"));
+  try {
+    makeFakeQmd(home, "2.5.3");
+    makeFakeFNMQmd(home, "v99.0.0", "1.0.0");
+    const result = run(["check-qmd", "--manual"], {
+      HOME: home,
+      PATH: "/usr/bin:/bin",
+      QMD_BACKEND_STATE_DIR: home,
+    });
+    assert.equal(result.status, 0);
+    assert.equal(result.stdout, "");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("check-qmd chooses highest semantic fnm version", () => {
+  const home = mkdtempSync(join(tmpdir(), "qmd-fnm-sort-"));
+  try {
+    makeFakeFNMQmd(home, "v9.0.0", "1.0.0");
+    makeFakeFNMQmd(home, "v20.0.0", "2.5.3");
     const result = run(["check-qmd", "--manual"], {
       HOME: home,
       PATH: "/usr/bin:/bin",
@@ -123,6 +163,32 @@ test("kick-index starts one-shot worker through a silent background kick", () =>
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
     }
     assert.ok(existsSync(marker), "worker was not kicked");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("kick-index recovers stale kick lock and starts worker in the same call", () => {
+  const home = mkdtempSync(join(tmpdir(), "qmd-manager-stale-"));
+  try {
+    const worker = join(home, "worker.sh");
+    const marker = join(home, "worker-ran");
+    const lock = join(home, "index-kick.lock.d");
+    mkdirSync(lock);
+    execFileSync("/usr/bin/touch", ["-t", "200001010000", lock]);
+    writeFileSync(worker, `#!/usr/bin/env bash\necho ran > "${marker}"\n`, { mode: 0o755 });
+    const result = run(["kick-index"], {
+      HOME: home,
+      QMD_BACKEND_STATE_DIR: home,
+      QMD_WORKER_KICK_LOCKDIR: lock,
+      QMD_INDEX_WORKER_SCRIPT: worker,
+      QMD_BACKEND_LOG: join(home, "backend.log"),
+    });
+    assert.equal(result.status, 0);
+    for (let i = 0; i < 20 && !existsSync(marker); i++) {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+    }
+    assert.ok(existsSync(marker), "worker was not kicked after stale lock recovery");
   } finally {
     rmSync(home, { recursive: true, force: true });
   }

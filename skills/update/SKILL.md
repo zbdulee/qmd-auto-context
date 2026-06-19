@@ -21,11 +21,14 @@ Run the qmd auto-context update path manually for the current project.
    bash "$ROOT/skills/update/scripts/update.sh" "$PWD"
    ```
 
-4. Report whether update ran, skipped, or was blocked by missing config/qmd.
+4. If qmd is missing or unsupported, report the wrapper's pinned install guidance.
+5. Report whether update ran, skipped, or was blocked by missing config/qmd.
 
 ## Safety
 
 - Do not bypass `.auto-context.json` opt-in.
+- Do not auto-install qmd. The wrapper checks the plugin-tested qmd version and prints install guidance when needed.
 - Prefer `sync` when the user specifically asks to detect missed filesystem CUD events.
 - Preserve empty output as a valid graceful no-op state.
+- The wrapper ensures, warms, and rotates the plugin-managed backend before update.
 - The deterministic implementation path is `core/update.sh`, same as the hook.

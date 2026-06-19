@@ -3,12 +3,18 @@ set -euo pipefail
 
 SKILL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PLUGIN_ROOT="$(cd "$SKILL_DIR/../.." && pwd)"
+QMD_BACKEND_MANAGER="${QMD_BACKEND_MANAGER:-$PLUGIN_ROOT/core/backend_manager.sh}"
 TARGET_CWD="${1:-$PWD}"
 
 if [ "$#" -gt 0 ]; then shift; fi
 QUERY_TEXT="$*"
 if [ -z "$QUERY_TEXT" ]; then
   QUERY_TEXT="$(cat)"
+fi
+
+if [ -z "${QMD_SANDBOX:-}" ]; then
+  bash "$QMD_BACKEND_MANAGER" check-qmd --manual
+  bash "$QMD_BACKEND_MANAGER" ensure --wait >/dev/null 2>&1 || true
 fi
 
 payload="$(python3 -c 'import json,sys; print(json.dumps({"hook_event_name":"UserPromptSubmit","prompt":sys.argv[2],"cwd":sys.argv[1]}, ensure_ascii=False))' "$TARGET_CWD" "$QUERY_TEXT")"

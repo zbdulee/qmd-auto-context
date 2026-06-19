@@ -28,6 +28,11 @@ test("update skill metadata and wrapper contract", () => {
   const wrapper = readFileSync("skills/update/scripts/update.sh", "utf8");
   assert.match(wrapper, /SKILL_DIR=.*dirname/);
   assert.match(wrapper, /PLUGIN_ROOT/);
+  assert.match(wrapper, /QMD_BACKEND_MANAGER/);
+  assert.match(wrapper, /check-qmd --manual/);
+  assert.match(wrapper, /ensure --wait/);
+  assert.match(wrapper, /warm/);
+  assert.match(wrapper, /rotate/);
   assert.match(wrapper, /core\/update\.sh/);
   assert.match(wrapper, /cd "\$TARGET_CWD"/);
   assert.ok((statSync("skills/update/scripts/update.sh").mode & 0o111) !== 0, "wrapper must be executable");

@@ -23,6 +23,9 @@ test("sync skill metadata and wrapper contract", () => {
   const wrapper = readFileSync("skills/sync/scripts/sync.sh", "utf8");
   assert.match(wrapper, /SKILL_DIR=.*dirname/);
   assert.match(wrapper, /PLUGIN_ROOT/);
+  assert.match(wrapper, /QMD_BACKEND_MANAGER/);
+  assert.match(wrapper, /check-qmd --manual/);
+  assert.match(wrapper, /kick-index/);
   assert.match(wrapper, /core\/sync\.py/);
   assert.match(wrapper, /--cwd "\$TARGET_CWD" --json/);
   assert.ok((statSync("skills/sync/scripts/sync.sh").mode & 0o111) !== 0, "wrapper must be executable");

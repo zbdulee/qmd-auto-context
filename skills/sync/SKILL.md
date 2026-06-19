@@ -22,13 +22,16 @@ Run qmd auto-context filesystem sync for the current project.
    bash "$ROOT/skills/sync/scripts/sync.sh" "$PWD" [--dry-run] [--baseline-only]
    ```
 
-3. Report created/updated/deleted counts and queued collections.
-4. Do not run qmd delete commands. The worker handles `qmd update`.
+3. If qmd is missing or unsupported, report the wrapper's pinned install guidance.
+4. Report created/updated/deleted counts and queued collections.
+5. Do not run qmd delete commands. The worker handles `qmd update`.
 
 ## Safety
 
 - If no `.auto-context.json` or collections are configured, report no-op.
+- Do not auto-install qmd. The wrapper checks the plugin-tested qmd version and prints install guidance when needed.
 - If sync is busy, report the returned `lockPath`; stale dead-PID locks are recovered automatically.
 - If the user only wants inspection, pass `--dry-run`.
 - If initializing state without queueing work, pass `--baseline-only`.
+- After a real sync, the wrapper kicks the plugin-managed index worker asynchronously.
 - The deterministic implementation lives in `core/sync.py`.
