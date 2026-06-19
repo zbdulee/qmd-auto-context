@@ -56,8 +56,15 @@ case "$ACTION" in
     exec python3 "${QMD_CORE_POSTTOOL_SCRIPT:-$ROOT/core/posttool.py}"
     ;;
   index)
-    tmp="$(mktemp)"
-    cat >"$tmp"
+    tmp="$(mktemp 2>/dev/null || true)"
+    if [ -z "$tmp" ]; then
+      cat >/dev/null 2>&1 || true
+      exit 0
+    fi
+    if ! cat >"$tmp" 2>/dev/null; then
+      rm -f "$tmp"
+      exit 0
+    fi
     python3 "${QMD_CORE_INDEX_SCRIPT:-$ROOT/core/index_enqueue.py}" <"$tmp" >/dev/null 2>&1 || true
     rm -f "$tmp"
     bash "$MANAGER" kick-index >/dev/null 2>&1 || true

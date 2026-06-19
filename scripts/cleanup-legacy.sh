@@ -173,7 +173,7 @@ cleanup_platform() {
 
   local target_config
   for target_config in "${paths_to_clean[@]}"; do
-    cleanup_hook_file "$platform" "$target_config"
+    cleanup_hook_file "$platform" "$target_config" || say "WARNING: failed to cleanup $target_config; continuing"
   done
 }
 

@@ -136,8 +136,13 @@ start_daemon() {
   check_qmd >/dev/null 2>&1 || return 0
   health && return 0
   if ! mkdir "$START_LOCK" 2>/dev/null; then
-    wait_health || true
-    return 0
+    if [ -n "$(find "$START_LOCK" -maxdepth 0 -mmin +10 2>/dev/null)" ]; then
+      rmdir "$START_LOCK" 2>/dev/null || true
+      mkdir "$START_LOCK" 2>/dev/null || { wait_health || true; return 0; }
+    else
+      wait_health || true
+      return 0
+    fi
   fi
   local pid
   pid="$(read_pid)"

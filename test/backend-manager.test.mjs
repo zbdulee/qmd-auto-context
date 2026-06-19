@@ -174,6 +174,37 @@ test("concurrent start calls do not double-start a transitioning daemon", () => 
   }
 });
 
+test("start recovers stale start lock and starts daemon", () => {
+  const home = mkdtempSync(join(tmpdir(), "qmd-start-stale-"));
+  try {
+    makeFakeQmd(home);
+    const lock = join(home, "daemon-start.lock.d");
+    const daemon = join(home, "daemon.sh");
+    const marker = join(home, "daemon-started");
+    mkdirSync(lock);
+    execFileSync("/usr/bin/touch", ["-t", "200001010000", lock]);
+    writeFileSync(daemon, `#!/usr/bin/env bash\necho started > "${marker}"\nsleep 0.1\n`, { mode: 0o755 });
+
+    const result = run(["start"], {
+      HOME: home,
+      PATH: "/usr/bin:/bin",
+      QMD_BACKEND_STATE_DIR: home,
+      QMD_DAEMON_START_LOCKDIR: lock,
+      QMD_DAEMON_PID: join(home, "daemon.pid"),
+      QMD_DAEMON_SCRIPT: daemon,
+      QMD_DAEMON_PORT: "1",
+    });
+
+    assert.equal(result.status, 0);
+    for (let i = 0; i < 20 && !existsSync(marker); i++) {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+    }
+    assert.ok(existsSync(marker), "daemon was not started after stale lock recovery");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("kick-index starts one-shot worker through a silent background kick", () => {
   const home = mkdtempSync(join(tmpdir(), "qmd-manager-"));
   try {

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -84,6 +84,36 @@ test("index action enqueues through core then kicks async worker", () => {
     assert.equal(out, "");
     assert.equal(readFileSync(stdinLog, "utf8"), payload);
     assert.equal(readFileSync(managerLog, "utf8"), "kick-index\n");
+  } finally {
+    rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("index action stays silent if mktemp fails", () => {
+  const d = mkdtempSync(join(tmpdir(), "qmd-runhook-mktemp-"));
+  try {
+    const managerLog = join(d, "manager.log");
+    const stdinLog = join(d, "stdin.json");
+    makeExecutable(join(d, "manager.sh"), `#!/usr/bin/env bash\necho "$@" >> "${managerLog}"\n`);
+    makeExecutable(join(d, "index_enqueue.py"), `#!/usr/bin/env python3\nimport sys\nopen("${stdinLog}", "w").write(sys.stdin.read())\n`);
+    makeExecutable(join(d, "mktemp"), "#!/usr/bin/env bash\necho mktemp failed >&2\nexit 1\n");
+
+    const result = spawnSync("/bin/bash", ["hooks/run-hook", "index", "codex"], {
+      input: "{}",
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${d}:${process.env.PATH}`,
+        QMD_BACKEND_MANAGER: join(d, "manager.sh"),
+        QMD_CORE_INDEX_SCRIPT: join(d, "index_enqueue.py"),
+      },
+    });
+
+    assert.equal(result.status, 0);
+    assert.equal(result.stdout, "");
+    assert.equal(result.stderr, "");
+    assert.equal(existsSync(stdinLog), false);
+    assert.equal(existsSync(managerLog), false);
   } finally {
     rmSync(d, { recursive: true, force: true });
   }
