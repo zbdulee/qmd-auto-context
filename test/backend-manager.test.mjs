@@ -159,6 +159,24 @@ test("legacy cleanup removes only managed launchd and script files", () => {
   }
 });
 
+test("ensure does not remove legacy launchd files unless cleanup is opted in", () => {
+  const home = mkdtempSync(join(tmpdir(), "qmd-no-cleanup-"));
+  try {
+    const launchAgents = join(home, "Library", "LaunchAgents");
+    mkdirSync(launchAgents, { recursive: true });
+    writeFileSync(join(launchAgents, "com.qmd-mcp-daemon.plist"), "<!-- managed-by: qmd-auto-context -->\n");
+    const result = run(["ensure"], {
+      HOME: home,
+      PATH: "/usr/bin:/bin",
+      QMD_BACKEND_STATE_DIR: home,
+    });
+    assert.equal(result.status, 0);
+    assert.equal(existsSync(join(launchAgents, "com.qmd-mcp-daemon.plist")), true);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("manager source verifies pid command ownership before reuse or TERM", () => {
   const src = readFileSync("core/backend_manager.sh", "utf8");
   assert.match(src, /pid_is_daemon\(\)/);

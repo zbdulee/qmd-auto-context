@@ -35,12 +35,34 @@ export QMD_ENGINE="$ENGINE"
 : "${QMD_RECALL_LOG:=/tmp/qmd-${ENGINE}-hook.log}"
 export QMD_RECALL_LOG
 
-# 4) action → core 위임 (stdin/stdout 그대로 패스스루)
+# 4) action → backend lifecycle + core 위임
+MANAGER="${QMD_BACKEND_MANAGER:-$ROOT/core/backend_manager.sh}"
+
 case "$ACTION" in
-  recall)   exec python3 "$ROOT/core/recall.py" ;;
-  update)   exec bash    "$ROOT/core/update.sh" ;;
-  posttool) exec python3 "$ROOT/core/posttool.py" ;;
-  index)    exec python3 "$ROOT/core/index_enqueue.py" ;;
+  recall)
+    if [ -z "${QMD_QUERY_FIXTURE:-}" ]; then
+      bash "$MANAGER" ensure >/dev/null 2>&1 &
+    fi
+    exec python3 "${QMD_CORE_RECALL_SCRIPT:-$ROOT/core/recall.py}"
+    ;;
+  update)
+    bash "$MANAGER" ensure --wait >/dev/null 2>&1 || true
+    bash "$MANAGER" warm >/dev/null 2>&1 || true
+    bash "$MANAGER" rotate >/dev/null 2>&1 || true
+    QMD_BACKEND_MANAGER="$MANAGER" exec bash "${QMD_CORE_UPDATE_SCRIPT:-$ROOT/core/update.sh}"
+    ;;
+  posttool)
+    bash "$MANAGER" ensure --wait >/dev/null 2>&1 || true
+    exec python3 "${QMD_CORE_POSTTOOL_SCRIPT:-$ROOT/core/posttool.py}"
+    ;;
+  index)
+    tmp="$(mktemp)"
+    cat >"$tmp"
+    python3 "${QMD_CORE_INDEX_SCRIPT:-$ROOT/core/index_enqueue.py}" <"$tmp" >/dev/null 2>&1 || true
+    rm -f "$tmp"
+    bash "$MANAGER" kick-index >/dev/null 2>&1 || true
+    exit 0
+    ;;
   gate)     exec python3 "$ROOT/core/preflight_gate.py" ;;
   *) echo "run-hook: unknown action '$ACTION'" >&2; exit 1 ;;
 esac

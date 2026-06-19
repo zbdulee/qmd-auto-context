@@ -19,7 +19,7 @@
 ## Runtime Contract
 
 - No persistent LaunchAgents are required after this migration.
-- Existing managed LaunchAgents are legacy. Runtime cleanup may remove only files containing `managed-by: qmd-auto-context`.
+- Existing managed LaunchAgents are legacy. Cleanup may remove only files containing `managed-by: qmd-auto-context`, but automatic cleanup must be opt-in (`QMD_CLEANUP_LEGACY=1`) or an explicit `cleanup-legacy` command, not an incidental recall/posttool hook side effect.
 - The plugin does not vendor qmd itself. It owns qmd dependency detection and user guidance.
 - If `qmd` is missing, hooks stay silent and manual skills print an install instruction.
 - If `qmd` is installed but outside the supported version range, hooks stay silent and manual skills print an upgrade instruction.
@@ -373,7 +373,7 @@ wait_health() {
 }
 
 ensure() {
-  cleanup_legacy >/dev/null 2>&1 || true
+  [ "${QMD_CLEANUP_LEGACY:-}" = "1" ] && cleanup_legacy >/dev/null 2>&1 || true
   check_qmd >/dev/null 2>&1 || return 0
   start_daemon
   if [ "${1:-}" = "--wait" ]; then
@@ -819,7 +819,7 @@ Replace install backend tests in `test/install-safety.test.mjs` with:
 
 - `install.sh` no longer copies backend scripts to `~/.config/qmd`.
 - `install.sh` no longer writes `~/Library/LaunchAgents/com.qmd-*.plist`.
-- legacy cleanup removes only managed marker files.
+- legacy cleanup removes only managed marker files when explicitly requested.
 - unmanaged user files are preserved.
 
 Delete or rewrite `test/backend.test.mjs` plist tests. New invariant: backend scripts do not hardcode `/Users/dulee`, and manager exists/executable.
@@ -864,7 +864,7 @@ In `README.md`, replace install section with:
 - AGY: run project-local hook registration only.
 - Backend lifecycle: automatic from hooks/skills.
 - qmd CLI dependency: plugin checks for a tested qmd version and guides the user to install/upgrade it; hooks never auto-install packages.
-- Legacy cleanup: automatic best-effort for managed LaunchAgents.
+- Legacy cleanup: explicit best-effort cleanup for managed LaunchAgents. Do not remove LaunchAgents as a surprise side effect of ordinary recall/posttool hooks.
 
 In `AGENTS.md` and `CLAUDE.md`, replace launchd backend architecture with plugin-managed backend lifecycle.
 
@@ -1082,7 +1082,7 @@ If working on a feature branch, merge to `main` only after tests and Claude/AGY 
 - No product documentation tells users to run `install.sh` or `uninstall.sh`.
 - Missing or unsupported qmd produces install/upgrade guidance in manual skills, while hooks remain silent.
 - qmd version policy is plugin-managed and pinned to the tested compatible range, not registry `latest`.
-- Existing managed LaunchAgents are cleaned up or ignored safely without touching unmanaged files.
+- Existing managed LaunchAgents are cleaned up only by explicit cleanup/opt-in or ignored safely without touching unmanaged files.
 - Hooks remain silent except for intentional recall context.
 - Manual skills diagnose and ensure backend readiness.
 - Dirty queue changes are still processed after PostToolUse and manual sync.

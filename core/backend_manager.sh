@@ -157,7 +157,7 @@ cleanup_legacy() {
 }
 
 ensure() {
-  cleanup_legacy >/dev/null 2>&1 || true
+  [ "${QMD_CLEANUP_LEGACY:-}" = "1" ] && cleanup_legacy >/dev/null 2>&1 || true
   check_qmd >/dev/null 2>&1 || return 0
   start_daemon
   if [ "${1:-}" = "--wait" ]; then
