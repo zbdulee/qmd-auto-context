@@ -175,7 +175,6 @@ test('update core: collection add already-exists exit 1도 update 실행 (BUG-2)
         ...process.env,
         PATH: `${bin}:${process.env.PATH}`,
         HOME: fakeHome,           // normalize_qmd_path가 ~/.bun/bin 등을 PATH에 추가 못 하도록
-        QMD_INSTALL_SKIP_BACKEND: '1',
       },
     });
 

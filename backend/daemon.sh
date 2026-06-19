@@ -1,6 +1,6 @@
 #!/bin/bash
 # managed-by: qmd-auto-context
-# qmd HTTP MCP 데몬 런처 (LaunchAgent에서 foreground 실행).
+# qmd HTTP MCP 데몬 런처 (plugin runtime manager에서 foreground 실행).
 #
 # 배경: 홈 node_modules의 better-sqlite3 네이티브 모듈은 특정 Node ABI(MODULE_VERSION)로만
 # 빌드돼 있어, 맞지 않는 node로 qmd를 실행하면 `ERR_DLOPEN_FAILED`로 즉사한다.
@@ -8,7 +8,7 @@
 # 버전을 하드코딩하지 않고(=CLAUDE.md 원칙) 후보 node들로 better-sqlite3 native load를 probe 하여
 # ABI가 맞는 첫 node를 런타임에 선택한다.
 #
-# foreground(`mcp --http`, --daemon 아님)로 실행해야 launchd KeepAlive가 프로세스를 추적/재기동한다.
+# foreground(`mcp --http`, --daemon 아님)로 실행해야 manager가 프로세스를 추적/재기동한다.
 set -euo pipefail
 
 export PATH="$HOME/.bun/bin:$PATH"
@@ -17,13 +17,13 @@ PORT="${QMD_DAEMON_PORT:-8483}"
 FNM_ROOT="$HOME/.local/share/fnm/node-versions"
 
 # qmd 의 bin/qmd 런처는 dist/cli/qmd.js 를 child 로 spawn 한다(2단 프로세스).
-# 그러면 launchd KeepAlive 가 런처(직속 자식)만 감시하고 실제 서버(손자)가 죽어도 복구를 보장 못 한다.
-# 런처를 따라가 dist/cli/qmd.js 를 직접 exec 하여 single 프로세스로 만든다(launchd 가 서버를 직접 감시).
+# 그러면 manager가 런처(직속 자식)만 감시하고 실제 서버(손자)가 죽어도 복구를 보장 못 한다.
+# 런처를 따라가 dist/cli/qmd.js 를 직접 exec 하여 single 프로세스로 만든다(manager가 서버를 직접 감시).
 QMD_REAL="$(realpath "$QMD_BIN" 2>/dev/null || readlink -f "$QMD_BIN" 2>/dev/null || echo "$QMD_BIN")"
 QMD_ENTRY="$(dirname "$(dirname "$QMD_REAL")")/dist/cli/qmd.js"
 if [ ! -f "$QMD_ENTRY" ]; then
   # dist 진입점을 못 찾으면 런처로 폴백하는데, 이러면 런처가 child 를 spawn 해 2단 프로세스가 되어
-  # launchd KeepAlive 가 실제 서버를 감시 못 한다. 조용히 넘어가지 않고 경고를 남긴다.
+  # manager가 실제 서버를 감시 못 한다. 조용히 넘어가지 않고 경고를 남긴다.
   echo "[qmd-daemon] WARN: dist/cli/qmd.js 없음($QMD_ENTRY). 런처로 폴백 — 2단 프로세스가 되어 KeepAlive 신뢰성 저하." >&2
   QMD_ENTRY="$QMD_BIN"
 fi
@@ -61,6 +61,6 @@ else
   exit 1
 fi
 
-# KeepAlive LaunchAgent 의 직접 자식이므로 stdout/stderr 는 plist StandardOutPath 로 간다.
+# manager가 nohup으로 실행하므로 stdout/stderr는 manager가 지정한 daemon log로 간다.
 echo "[qmd-daemon] starting: node=$(command -v node) entry=$QMD_ENTRY port=$PORT" >&2
 exec node "$QMD_ENTRY" mcp --http --port "$PORT"

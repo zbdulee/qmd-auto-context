@@ -792,33 +792,31 @@ git commit -m "feat: ensure backend from manual qmd skills"
 ### Task 6: Retire Product `install.sh` / `uninstall.sh` Path
 
 **Files:**
-- Modify or delete: `install.sh`
-- Modify or delete: `uninstall.sh`
+- Delete: `install.sh`
+- Delete: `uninstall.sh`
+- Add: `scripts/agy-local-hook-install.sh`
+- Add: `scripts/cleanup-legacy.sh`
 - Modify: `README.md`
 - Modify: `AGENTS.md`
 - Modify: `CLAUDE.md`
 - Modify: tests that currently assert installer behavior
 
-**Step 1: Decide exact file treatment**
+**Step 1: File treatment**
 
-Preferred implementation:
-
-- Keep `install.sh` and `uninstall.sh` only if needed for developer migration, but make them non-product compatibility wrappers that print a deprecation message and call `core/backend_manager.sh cleanup-legacy`.
+- Remove product `install.sh` / `uninstall.sh` entirely.
+- Create `scripts/agy-local-hook-install.sh` as the only AGY project-local hook registration entrypoint.
+- Create `scripts/cleanup-legacy.sh` as the explicit best-effort legacy cleanup entrypoint.
 - Remove documentation that tells users to run `bash install.sh` or `bash uninstall.sh`.
-- Keep `install.sh --agy-local <project>` only if AGY still lacks marketplace install. If retained, rename in docs conceptually to "AGY local hook registration", not backend install.
-
-If renaming is acceptable in implementation, prefer a follow-up file:
-
-- Create `scripts/agy-local-hook-install.sh`
-- Move `core/agy_local_install.py` caller there.
-- Leave `install.sh --agy-local` as a deprecated shim for one release.
+- Delete `backend/launchd/*.plist`; launchd files are legacy runtime artifacts only and cleanup is marker-gated.
 
 **Step 2: Update tests**
 
-Replace install backend tests in `test/install-safety.test.mjs` with:
+Replace installer/backend tests with:
 
-- `install.sh` no longer copies backend scripts to `~/.config/qmd`.
-- `install.sh` no longer writes `~/Library/LaunchAgents/com.qmd-*.plist`.
+- `install.sh` and `uninstall.sh` are absent.
+- `scripts/agy-local-hook-install.sh` registers AGY `posttool` and `index` hooks.
+- `scripts/cleanup-legacy.sh --dry-run` creates no files.
+- `scripts/cleanup-legacy.sh` preserves non-qmd hooks and invalid JSON content.
 - legacy cleanup removes only managed marker files when explicitly requested.
 - unmanaged user files are preserved.
 
@@ -829,32 +827,24 @@ Delete or rewrite `test/backend.test.mjs` plist tests. New invariant: backend sc
 Run:
 
 ```bash
-node --test test/install-safety.test.mjs test/backend.test.mjs
+node --test test/install.test.mjs test/install-cleanup.test.mjs test/install-safety.test.mjs test/backend.test.mjs
 ```
 
 Expected: FAIL until docs/scripts/tests are aligned.
 
-**Step 4: Implement deprecation**
+**Step 4: Implement replacement scripts**
 
-If keeping shim behavior, `install.sh` top-level behavior should be:
+`scripts/agy-local-hook-install.sh` should only call `core/agy_local_install.py <project> <repo-root>`.
 
-```bash
-echo "qmd-auto-context: install.sh is deprecated. Plugin install manages runtime backend automatically." >&2
-if [ "${1:-}" = "--agy-local" ]; then
-  python3 "$REPO_ROOT/core/agy_local_install.py" "$2" "$REPO_ROOT"
-  exit 0
-fi
-bash "$REPO_ROOT/core/backend_manager.sh" cleanup-legacy
-```
+`scripts/cleanup-legacy.sh` should:
 
-`uninstall.sh` should only:
+- remove old global qmd/adapters hooks while preserving unrelated hooks,
+- abort without overwriting invalid JSON,
+- use tmp + `os.replace` for JSON writes,
+- remove only backend scripts/plists carrying `managed-by: qmd-auto-context`,
+- support `--dry-run`.
 
-```bash
-echo "qmd-auto-context: uninstall.sh is deprecated. Remove the plugin; runtime state is best-effort cleaned." >&2
-bash "$REPO_ROOT/core/backend_manager.sh" cleanup-legacy
-```
-
-No backend copy, no LaunchAgent load, no global hook registration.
+No backend copy, no LaunchAgent load, no implicit global hook registration.
 
 **Step 5: Update docs**
 
@@ -873,7 +863,7 @@ In `AGENTS.md` and `CLAUDE.md`, replace launchd backend architecture with plugin
 Run:
 
 ```bash
-node --test test/install-safety.test.mjs test/backend.test.mjs
+node --test test/install.test.mjs test/install-cleanup.test.mjs test/install-safety.test.mjs test/backend.test.mjs
 ```
 
 Expected: PASS.
@@ -881,7 +871,8 @@ Expected: PASS.
 **Step 7: Commit**
 
 ```bash
-git add install.sh uninstall.sh README.md AGENTS.md CLAUDE.md test/install-safety.test.mjs test/backend.test.mjs
+git add README.md AGENTS.md CLAUDE.md scripts test/install.test.mjs test/install-cleanup.test.mjs test/install-safety.test.mjs test/backend.test.mjs
+git add -u install.sh uninstall.sh backend/launchd
 git commit -m "chore: retire launchd installer product path"
 ```
 
