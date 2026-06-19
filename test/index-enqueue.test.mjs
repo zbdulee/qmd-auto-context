@@ -31,6 +31,38 @@ test("연결된 폴더 story-path 편집 → 큐에 적재", () => {
   assert.match(lines[0], /^x-manuscript\t.*04_Manuscript$/);
 });
 
+test("agy TargetFile payload → 큐에 적재", () => {
+  const proj = setupProj(["x-manuscript"]);
+  const q = join(mkdtempSync(join(tmpdir(), "q-")), "queue");
+  enqueue(proj, {
+    hook_event_name: "PostToolUse",
+    tool_name: "write_to_file",
+    cwd: proj,
+    tool_input: { TargetFile: join(proj, "04_Manuscript", "ep1.md") },
+  }, q);
+  const lines = readFileSync(q, "utf8").trim().split("\n");
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /^x-manuscript\t.*04_Manuscript$/);
+});
+
+test("agy ReplacementChunks payload → 큐에 적재", () => {
+  const proj = setupProj(["x-manuscript"]);
+  const q = join(mkdtempSync(join(tmpdir(), "q-")), "queue");
+  enqueue(proj, {
+    hook_event_name: "PostToolUse",
+    tool_name: "multi_replace_file_content",
+    cwd: proj,
+    tool_input: {
+      ReplacementChunks: [
+        { TargetFile: join(proj, "04_Manuscript", "ep1.md"), ReplacementContent: "충분히 긴 수정 텍스트" },
+      ],
+    },
+  }, q);
+  const lines = readFileSync(q, "utf8").trim().split("\n");
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /^x-manuscript\t.*04_Manuscript$/);
+});
+
 test("collections 빈(pending) → 큐 미생성", () => {
   const proj = setupProj([], false); // indexing:false → collections=[]
   const q = join(mkdtempSync(join(tmpdir(), "q-")), "queue");

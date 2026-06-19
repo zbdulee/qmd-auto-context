@@ -9,8 +9,6 @@ WRITER_LOCK="${QMD_WRITER_LOCKDIR:-/tmp/qmd-update.lock.d}"
 EMBED_LOCK="${QMD_EMBED_LOCKDIR:-/tmp/qmd-embed.lock.d}"
 LOG="${QMD_RECALL_LOG:-/tmp/qmd-index-worker.log}"
 QMD="${QMD_FAKE_QMD:-qmd}"
-LAUNCHCTL="${QMD_FAKE_LAUNCHCTL:-launchctl}"
-DAEMON_PORT="${QMD_DAEMON_PORT:-8483}"
 
 log() { printf '[%s] index-worker: %s\n' "$(date '+%H:%M:%S')" "$*" >>"$LOG" 2>&1 || true; }
 
@@ -19,14 +17,7 @@ reload_daemon() {
     "$QMD_BACKEND_MANAGER" reload >>"$LOG" 2>&1 || return 0
     return 0
   fi
-  command -v "$LAUNCHCTL" >/dev/null 2>&1 || return 0
-  "$LAUNCHCTL" kill TERM "gui/$(id -u)/com.qmd-mcp-daemon" >>"$LOG" 2>&1 || return 0
-  log "daemon SIGTERM reload (index changed)"
-  [ -n "${QMD_HEALTH_SKIP:-}" ] && return 0
-  for _ in $(seq 1 30); do
-    curl -sf -m 1 "http://127.0.0.1:${DAEMON_PORT}/health" >/dev/null 2>&1 && break
-    sleep 0.5
-  done
+  log "reload skipped: QMD_BACKEND_MANAGER unavailable"
 }
 
 [ -n "${QMD_SANDBOX:-}" ] && exit 0

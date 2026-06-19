@@ -69,7 +69,15 @@ def extract_text(payload: dict) -> str:
         return ""
 
     chunks = []
-    for key in ("content", "new_string", "command"):
+    for key in (
+        "content",
+        "new_string",
+        "command",
+        "CodeContent",
+        "ReplacementContent",
+        "Content",
+        "NewString",
+    ):
         value = tool_input.get(key)
         if isinstance(value, str):
             chunks.append(value)
@@ -86,6 +94,14 @@ def extract_text(payload: dict) -> str:
                 if isinstance(value, str):
                     chunks.append(value)
 
+    replacements = tool_input.get("Replacements") or tool_input.get("ReplacementChunks")
+    if isinstance(replacements, list):
+        for edit in replacements:
+            if isinstance(edit, dict):
+                value = edit.get("ReplacementContent") or edit.get("CodeContent") or edit.get("Content")
+                if isinstance(value, str):
+                    chunks.append(value)
+
     text = "\n".join(chunk for chunk in chunks if chunk.strip())
     return text[:MAX_TEXT_CHARS]
 
@@ -94,7 +110,7 @@ def edited_paths(payload: dict) -> list[str]:
     if not isinstance(tool_input, dict):
         return []
     paths = []
-    for key in ("file_path", "path"):
+    for key in ("file_path", "path", "TargetFile", "FilePath", "Path"):
         value = tool_input.get(key)
         if isinstance(value, str):
             paths.append(value)
@@ -106,6 +122,13 @@ def edited_paths(payload: dict) -> list[str]:
         for edit in edits:
             if isinstance(edit, dict):
                 value = edit.get("file_path") or edit.get("path")
+                if isinstance(value, str):
+                    paths.append(value)
+    replacements = tool_input.get("Replacements") or tool_input.get("ReplacementChunks")
+    if isinstance(replacements, list):
+        for edit in replacements:
+            if isinstance(edit, dict):
+                value = edit.get("TargetFile") or edit.get("FilePath") or edit.get("Path")
                 if isinstance(value, str):
                     paths.append(value)
     return paths

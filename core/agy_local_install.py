@@ -5,7 +5,7 @@ import os
 import sys
 
 EVENT = "PostToolUse"                          # Task 1 라이브 실측 확정값 (AfterTool은 발동 안 함)
-MATCHER = "write_to_file|replace_file_content" # Task 1 확정 matcher
+MATCHER = "write_to_file|replace_file_content|multi_replace_file_content"
 MARKER = "run-hook"                            # qmd 디스패처 식별자
 
 def main():

@@ -17,18 +17,14 @@ LOG="/tmp/qmd-hook.log"
 LOCKDIR="/tmp/qmd-update.lock.d"
 STATUS="/tmp/qmd-update-status.txt"
 
-# SessionStart 헬스체크: 데몬 포트 확인. 기본은 안내만, QMD_AUTO_KICKSTART=1이면 기동 시도.
+# SessionStart 헬스체크: 데몬 포트 확인. 데몬 기동은 plugin-managed backend manager가 담당한다.
 qmd_healthcheck() {
   local port="${QMD_HEALTHCHECK_PORT:-8483}"
   if curl -sf -m 1 "http://127.0.0.1:${port}/health" >/dev/null 2>&1; then
     return 0
   fi
-  # 안내는 stderr(JSON 파싱 경로 보호). 자동기동 opt-in 시만 stdout에 언급.
-  echo "[qmd] 데몬 미응답(:${port}). 기동: launchctl kickstart gui/$(id -u)/com.qmd-mcp-daemon" >&2
-  if [[ "${QMD_AUTO_KICKSTART:-}" == "1" ]]; then
-    echo "[qmd] kickstart 실행 (QMD_AUTO_KICKSTART=1)"
-    command -v launchctl >/dev/null 2>&1 && launchctl kickstart "gui/$(id -u)/com.qmd-mcp-daemon" >/dev/null 2>&1 || true
-  fi
+  # 안내는 stderr(JSON 파싱 경로 보호). core/update.sh는 launchd를 직접 제어하지 않는다.
+  echo "[qmd] 데몬 미응답(:${port}). backend manager가 준비되지 않았으면 이번 update는 건너뜁니다." >&2
 }
 
 log() {
@@ -252,7 +248,7 @@ run_update() {
     rm -f "$STATUS"
     log "END rc=0"
     
-    EMBED_LOCK="/tmp/qmd-embed.lock.d"
+    EMBED_LOCK="${QMD_EMBED_LOCKDIR:-/tmp/qmd-embed.lock.d}"
     if [ -d "$EMBED_LOCK" ]; then
       epid="$(cat "$EMBED_LOCK/pid" 2>/dev/null || true)"
       { [ -z "$epid" ] || ! kill -0 "$epid" 2>/dev/null; } && rm -rf "$EMBED_LOCK" 2>/dev/null
@@ -270,13 +266,8 @@ run_update() {
           # SIGKILL 강제종료는 clean close 차단 → WAL checkpoint 누락 → vec query 저하.
           if [ -n "${QMD_BACKEND_MANAGER:-}" ] && [ -x "$QMD_BACKEND_MANAGER" ]; then
             "$QMD_BACKEND_MANAGER" reload >> "$LOG" 2>&1 || true
-          elif launchctl kill TERM "gui/$(id -u)/com.qmd-mcp-daemon" 2>/dev/null; then
-            printf "[%s] EMBED->daemon SIGTERM restart (clean WAL checkpoint)\n" "$(date +%H:%M:%S)" >> "$LOG"
-            # respawn 후 /health ready 까지 bounded 대기(최대 ~15s). 실패해도 로그만, hook 진행.
-            for _ in {1..30}; do
-              curl -sf -m 1 "http://127.0.0.1:$QMD_DAEMON_PORT/health" >/dev/null 2>&1 && break
-              sleep 0.5
-            done
+          else
+            printf "[%s] EMBED reload skipped: QMD_BACKEND_MANAGER unavailable\n" "$(date +%H:%M:%S)" >> "$LOG"
           fi
         fi
       ' >/dev/null 2>&1 &

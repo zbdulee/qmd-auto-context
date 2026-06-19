@@ -74,7 +74,7 @@ backend/   ← qmd MCP HTTP 데몬(:8483) launcher + keepalive/logrotate/index w
 > 구 `adapters/{claude,codex,gemini}/wrapper.py` 3벌은 제거되고 `hooks/run-hook` 단일 디스패처로 완전 통합됐다. 모든 플랫폼의 훅은 이 디스패처를 통한다 — 어댑터 레이어는 더 이상 없다.
 
 - `run-hook` — 공통 디스패처(bash). 호출: `run-hook <action> <engine>` (action: recall|update|posttool|index, engine: claude|codex|gemini). `dirname "$0"`로 플러그인 루트를 찾고(env `CLAUDE_PLUGIN_ROOT`/`PLUGIN_ROOT` 있으면 우선), engine 라벨(`QMD_ENGINE`)·sandbox/headless 가드 후 backend manager ensure/kick와 `core/<script>` stdin 패스스루를 수행한다. **도메인 로직은 core/가 SSOT.**
-- `hooks.json` — Claude hooks (`${CLAUDE_PLUGIN_ROOT}`). `hooks-codex.json` — Codex hooks (`${PLUGIN_ROOT}`). 이벤트명 차이(claude/codex `UserPromptSubmit`/`PostToolUse` vs agy `PostToolUse` matcher `write_to_file|replace_file_content`, AfterTool은 실측상 미발동)로 플랫폼별로 나뉜다.
+- `hooks.json` — Claude hooks (`${CLAUDE_PLUGIN_ROOT}`). `hooks-codex.json` — Codex hooks (`${PLUGIN_ROOT}`). 이벤트명 차이(claude/codex `UserPromptSubmit`/`PostToolUse` vs agy `PostToolUse` matcher `write_to_file|replace_file_content|multi_replace_file_content`, AfterTool은 실측상 미발동)로 플랫폼별로 나뉜다.
 - `hooks.json`은 **표준 구조** `{hooks:[{type:"command",command}]}`를 따라야 한다. 비표준 구조면 호스트(Claude/Codex)가 훅을 인식 못 함.
 - 매니페스트: `.claude-plugin/plugin.json`, `.codex-plugin/plugin.json`(+`interface`, `hooks` 경로 명시).
 

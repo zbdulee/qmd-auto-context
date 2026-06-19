@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 
 test('claude marketplace.json: source ./ + qmd-auto-context plugin', () => {
   const m = JSON.parse(readFileSync('.claude-plugin/marketplace.json', 'utf8'));
@@ -15,6 +15,7 @@ test('codex marketplace.json: qmd-auto-context plugin 항목', () => {
   assert.ok(Array.isArray(m.plugins), 'plugins 배열 존재');
   const p = m.plugins.find(x => x.name === 'qmd-auto-context');
   assert.ok(p, 'qmd-auto-context plugin 항목');
+  assert.equal(p.version, '0.6.0', 'codex marketplace version');
 });
 
 // codex manifest는 단순 source:"./"가 아니라 git 배포용 source 객체 + policy + category를
@@ -31,26 +32,18 @@ test('codex marketplace.json: git source 객체 + policy + category 스키마', 
   assert.equal(p.category, 'Productivity', 'category는 Productivity');
 });
 
-// Task 3: agy 루트 plugin.json + hooks.json
+// AGY는 marketplace/root hooks manifest가 아니라 프로젝트 로컬 installer가 제품 경로다.
 test('agy 루트 plugin.json: name qmd-auto-context', () => {
   const p = JSON.parse(readFileSync('plugin.json', 'utf8'));
   assert.equal(p.name, 'qmd-auto-context');
+  assert.equal(p.version, '0.6.0');
+  assert.doesNotMatch(p.description, /Task \d|install\.sh|uninstall\.sh/);
 });
 
-test('agy 루트 hooks.json: posttool 이벤트만 (recall/update 없음)', () => {
-  const h = JSON.parse(readFileSync('hooks.json', 'utf8'));
-  const events = Object.keys(h.hooks);
-  // Task 1 확정: PostToolUse 단일 이벤트 (agy 1.0.8 실측)
-  assert.equal(events.length, 1, 'posttool 단일 이벤트');
-  assert.equal(events[0], 'PostToolUse', 'PostToolUse 이벤트명 (agy 1.0.8 실측 확정)');
-  assert.ok(!events.includes('SessionStart'), 'update 미지원');
-  assert.ok(!events.includes('BeforeAgent') && !events.includes('UserPromptSubmit'), 'recall 미지원');
-  const ev = h.hooks[events[0]][0];
-  assert.match(ev.hooks[0].command, /run-hook" posttool gemini/, '디스패처 posttool gemini 위임');
-});
-
-test('agy 루트 hooks.json: PostToolUse matcher = write_to_file|replace_file_content', () => {
-  const h = JSON.parse(readFileSync('hooks.json', 'utf8'));
-  const ev = h.hooks['PostToolUse'][0];
-  assert.equal(ev.matcher, 'write_to_file|replace_file_content', 'Task 1 실측 확정 matcher');
+test('agy 루트 hooks.json은 제공하지 않고 local installer가 절대경로 hook을 생성한다', () => {
+  assert.equal(existsSync('hooks.json'), false);
+  const installer = readFileSync('core/agy_local_install.py', 'utf8');
+  assert.match(installer, /write_to_file\|replace_file_content\|multi_replace_file_content/);
+  assert.match(installer, /run-hook" posttool gemini/);
+  assert.match(installer, /run-hook" index gemini/);
 });

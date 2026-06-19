@@ -25,7 +25,7 @@ elif [ -n "${QMD_DAEMON_PID:-}" ] && [ -f "$QMD_DAEMON_PID" ]; then
   if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
     kill -TERM "$pid" 2>/dev/null || mv -f "$LOG.1" "$LOG" 2>/dev/null || true
   fi
-elif ! launchctl kill TERM "gui/$(/usr/bin/id -u)/com.qmd-mcp-daemon" 2>/dev/null; then
+else
   # 재시작 실패 시 원복(데몬이 옛 inode=.1 에 계속 쓰므로 로그 연속성 유지)
   mv -f "$LOG.1" "$LOG" 2>/dev/null || true
 fi

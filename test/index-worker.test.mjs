@@ -18,6 +18,13 @@ esac
   return stub;
 }
 
+function makeStubManager(dir, logFile) {
+  const manager = join(dir, "manager.sh");
+  writeFileSync(manager, `#!/bin/bash\necho "$@" >> "${logFile}"\n`);
+  chmodSync(manager, 0o755);
+  return manager;
+}
+
 test("큐 drain → collection add/update/embed 호출 + 큐 비움", () => {
   const d = mkdtempSync(join(tmpdir(), "wk-"));
   const log = join(d, "calls.log");
@@ -28,7 +35,8 @@ test("큐 drain → collection add/update/embed 호출 + 큐 비움", () => {
   execFileSync("bash", ["backend/index_worker.sh"], { encoding: "utf8", env: {
     ...process.env, QMD_DIRTY_QUEUE: q, QMD_FAKE_QMD: stub,
     QMD_INDEX_WORKER_LOCKDIR: join(d, "wlock.d"),
-    QMD_WRITER_LOCKDIR: join(d, "ulock.d"), QMD_NO_RELOAD: "1",
+    QMD_WRITER_LOCKDIR: join(d, "ulock.d"), QMD_EMBED_LOCKDIR: join(d, "elock.d"),
+    QMD_NO_RELOAD: "1",
   }});
   const calls = readFileSync(log, "utf8");
   assert.match(calls, /collection add .*04_M --name x-manuscript/);
@@ -47,7 +55,8 @@ test("중복 큐 항목 dedupe", () => {
   execFileSync("bash", ["backend/index_worker.sh"], { encoding: "utf8", env: {
     ...process.env, QMD_DIRTY_QUEUE: q, QMD_FAKE_QMD: stub,
     QMD_INDEX_WORKER_LOCKDIR: join(d, "wlock.d"),
-    QMD_WRITER_LOCKDIR: join(d, "ulock.d"), QMD_NO_RELOAD: "1",
+    QMD_WRITER_LOCKDIR: join(d, "ulock.d"), QMD_EMBED_LOCKDIR: join(d, "elock.d"),
+    QMD_NO_RELOAD: "1",
   }});
   const addCount = (readFileSync(log, "utf8").match(/collection add/g) || []).length;
   assert.equal(addCount, 1);
@@ -62,7 +71,8 @@ test("존재하지 않는 경로 skip", () => {
   execFileSync("bash", ["backend/index_worker.sh"], { encoding: "utf8", env: {
     ...process.env, QMD_DIRTY_QUEUE: q, QMD_FAKE_QMD: stub,
     QMD_INDEX_WORKER_LOCKDIR: join(d, "wlock.d"),
-    QMD_WRITER_LOCKDIR: join(d, "ulock.d"), QMD_NO_RELOAD: "1",
+    QMD_WRITER_LOCKDIR: join(d, "ulock.d"), QMD_EMBED_LOCKDIR: join(d, "elock.d"),
+    QMD_NO_RELOAD: "1",
   }});
   const logContent = existsSync(log) ? readFileSync(log, "utf8") : "";
   assert.doesNotMatch(logContent, /collection add/);
@@ -85,22 +95,22 @@ test("single-flight: 이미 lock이면 즉시 종료(큐 보존)", () => {
 });
 
 // (A) reload 테스트
-test("새 임베딩>0 → reload 호출(kill TERM)", () => {
+test("새 임베딩>0 → backend manager reload 호출", () => {
   const d = mkdtempSync(join(tmpdir(), "wk-"));
   const log = join(d, "calls.log");
   const rlog = join(d, "reload.log");
   const stub = makeStubQmd(d, log); // embed가 "Embedded 3 chunks" 출력
-  const lc = join(d, "launchctl");
-  writeFileSync(lc, `#!/bin/bash\necho "$@" >> "${rlog}"\n`); chmodSync(lc, 0o755);
+  const manager = makeStubManager(d, rlog);
   const proj = join(d, "proj"); mkdirSync(join(proj, "04_M"), { recursive: true });
   const q = join(d, "queue"); writeFileSync(q, `x\t${join(proj, "04_M")}\n`);
   execFileSync("bash", ["backend/index_worker.sh"], { encoding: "utf8", env: {
-    ...process.env, QMD_DIRTY_QUEUE: q, QMD_FAKE_QMD: stub, QMD_FAKE_LAUNCHCTL: lc,
+    ...process.env, QMD_DIRTY_QUEUE: q, QMD_FAKE_QMD: stub,
+    QMD_BACKEND_MANAGER: manager,
     QMD_INDEX_WORKER_LOCKDIR: join(d, "wl.d"), QMD_WRITER_LOCKDIR: join(d, "ul.d"),
     QMD_EMBED_LOCKDIR: join(d, "el.d"),
     QMD_HEALTH_SKIP: "1",
   }});
-  assert.match(readFileSync(rlog, "utf8"), /kill TERM/);
+  assert.match(readFileSync(rlog, "utf8"), /^reload$/m);
 });
 
 test("새 임베딩 0 → reload 스킵", () => {
@@ -111,11 +121,12 @@ test("새 임베딩 0 → reload 스킵", () => {
   const stub = join(d, "qmd");
   writeFileSync(stub, `#!/bin/bash\necho "$@" >> "${log}"\n[ "$1" = embed ] && echo "Embedded 0 chunks from 0 documents in 0s"\n[ "$1" = update ] && echo "All collections updated."\n`);
   chmodSync(stub, 0o755);
-  const lc = join(d, "launchctl"); writeFileSync(lc, `#!/bin/bash\necho "$@" >> "${rlog}"\n`); chmodSync(lc, 0o755);
+  const manager = makeStubManager(d, rlog);
   const proj = join(d, "proj"); mkdirSync(join(proj, "04_M"), { recursive: true });
   const q = join(d, "queue"); writeFileSync(q, `x\t${join(proj, "04_M")}\n`);
   execFileSync("bash", ["backend/index_worker.sh"], { encoding: "utf8", env: {
-    ...process.env, QMD_DIRTY_QUEUE: q, QMD_FAKE_QMD: stub, QMD_FAKE_LAUNCHCTL: lc,
+    ...process.env, QMD_DIRTY_QUEUE: q, QMD_FAKE_QMD: stub,
+    QMD_BACKEND_MANAGER: manager,
     QMD_INDEX_WORKER_LOCKDIR: join(d, "wl.d"), QMD_WRITER_LOCKDIR: join(d, "ul.d"),
     QMD_EMBED_LOCKDIR: join(d, "el.d"),
     QMD_HEALTH_SKIP: "1",
@@ -166,7 +177,7 @@ test("EMBED_LOCK 잡혀 있으면 embed 스킵 + 큐 복원", () => {
 });
 
 // (C) delete-triggered reload — 새 임베딩 0이지만 update에서 N removed → reload 필요
-test("삭제-only update (0 새 임베딩, 1 removed) → reload 호출", () => {
+test("삭제-only update (0 새 임베딩, 1 removed) → backend manager reload 호출", () => {
   const d = mkdtempSync(join(tmpdir(), "wk-"));
   const log = join(d, "calls.log");
   const rlog = join(d, "reload.log");
@@ -180,17 +191,18 @@ case "$1" in
 esac
 `);
   chmodSync(stub, 0o755);
-  const lc = join(d, "launchctl"); writeFileSync(lc, `#!/bin/bash\necho "$@" >> "${rlog}"\n`); chmodSync(lc, 0o755);
+  const manager = makeStubManager(d, rlog);
   const proj = join(d, "proj"); mkdirSync(join(proj, "04_M"), { recursive: true });
   const q = join(d, "queue"); writeFileSync(q, `x\t${join(proj, "04_M")}\n`);
   execFileSync("bash", ["backend/index_worker.sh"], { encoding: "utf8", env: {
-    ...process.env, QMD_DIRTY_QUEUE: q, QMD_FAKE_QMD: stub, QMD_FAKE_LAUNCHCTL: lc,
+    ...process.env, QMD_DIRTY_QUEUE: q, QMD_FAKE_QMD: stub,
+    QMD_BACKEND_MANAGER: manager,
     QMD_INDEX_WORKER_LOCKDIR: join(d, "wl.d"), QMD_WRITER_LOCKDIR: join(d, "ul.d"),
     QMD_EMBED_LOCKDIR: join(d, "el.d"),
     QMD_HEALTH_SKIP: "1",
   }});
-  // reload가 발생했어야 한다 (kill TERM)
-  assert.match(readFileSync(rlog, "utf8"), /kill TERM/);
+  // reload가 발생했어야 한다
+  assert.match(readFileSync(rlog, "utf8"), /^reload$/m);
 });
 
 // BUG-1 regression: collection add가 "already exists"로 exit 1 반환해도 update/embed가 호출돼야 한다.
@@ -214,7 +226,8 @@ esac
   execFileSync("bash", ["backend/index_worker.sh"], { encoding: "utf8", env: {
     ...process.env, QMD_DIRTY_QUEUE: q, QMD_FAKE_QMD: stub,
     QMD_INDEX_WORKER_LOCKDIR: join(d, "wlock.d"),
-    QMD_WRITER_LOCKDIR: join(d, "ulock.d"), QMD_NO_RELOAD: "1",
+    QMD_WRITER_LOCKDIR: join(d, "ulock.d"), QMD_EMBED_LOCKDIR: join(d, "elock.d"),
+    QMD_NO_RELOAD: "1",
   }});
   const calls = readFileSync(log, "utf8");
   assert.match(calls, /collection add/);   // collection add 호출됨

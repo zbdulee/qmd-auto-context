@@ -892,7 +892,7 @@ git commit -m "chore: retire launchd installer product path"
 Current AGY local install registers only:
 
 - `PostToolUse`
-- matcher `write_to_file|replace_file_content`
+- matcher `write_to_file|replace_file_content|multi_replace_file_content`
 - `posttool` and `index`
 
 This means AGY has no automatic `SessionStart` ensure path. Therefore AGY runtime backend is triggered by:
@@ -1031,7 +1031,7 @@ Bump patch version in all plugin metadata:
 - `.claude-plugin/marketplace.json`
 - `.agents/plugins/marketplace.json`
 
-Expected new version: choose the next patch after current `0.5.1`, unless breaking marketplace behavior requires minor.
+Expected release version for this plan: `0.6.0`.
 
 **Step 7: Final verification**
 

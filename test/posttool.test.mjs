@@ -29,6 +29,52 @@ test('산문 파일(collectionPaths 경로) Write → PostToolUse hint', () => {
   assert.equal(r.hookSpecificOutput.hookEventName, 'PostToolUse');
 });
 
+test('agy write_to_file TargetFile/CodeContent → PostToolUse hint', () => {
+  const r = posttool({
+    hook_event_name: 'PostToolUse',
+    tool_name: 'write_to_file',
+    tool_input: {
+      TargetFile: `${PROJ}/04_Manuscript/ep004-상가-음식.md`,
+      CodeContent: '4화에 대해서 집필. 도준이 죽었다는 문장을 확인한다.',
+    },
+    cwd: PROJ,
+  });
+  assert.ok(r);
+  assert.equal(r.hookSpecificOutput.hookEventName, 'PostToolUse');
+});
+
+test('agy replace_file_content TargetFile/ReplacementContent → PostToolUse hint', () => {
+  const r = posttool({
+    hook_event_name: 'PostToolUse',
+    tool_name: 'replace_file_content',
+    tool_input: {
+      TargetFile: `${PROJ}/04_Manuscript/ep004-상가-음식.md`,
+      ReplacementContent: '4화 수정. 도준이 죽었다는 문장을 다시 확인한다.',
+    },
+    cwd: PROJ,
+  });
+  assert.ok(r);
+  assert.equal(r.hookSpecificOutput.hookEventName, 'PostToolUse');
+});
+
+test('agy multi_replace_file_content ReplacementChunks → PostToolUse hint', () => {
+  const r = posttool({
+    hook_event_name: 'PostToolUse',
+    tool_name: 'multi_replace_file_content',
+    tool_input: {
+      ReplacementChunks: [
+        {
+          TargetFile: `${PROJ}/04_Manuscript/ep004-상가-음식.md`,
+          ReplacementContent: '4화 수정. 도준이 죽었다는 문장을 다시 확인한다.',
+        },
+      ],
+    },
+    cwd: PROJ,
+  });
+  assert.ok(r);
+  assert.equal(r.hookSpecificOutput.hookEventName, 'PostToolUse');
+});
+
 test('비-산문 파일은 skip → 빈 출력', () => {
   const r = posttool({
     hook_event_name: 'PostToolUse',

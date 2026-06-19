@@ -1,6 +1,6 @@
 # qmd auto-context
 
-qmd 기반 자동 컨텍스트 주입(세션 시작 시 인덱스 갱신 + 프롬프트마다 관련 문서 recall + 편집 후 연속성 힌트)을 **Claude Code · Codex · Antigravity(Gemini) 세 플랫폼**에서 동작시키는 플러그인.
+qmd 기반 자동 컨텍스트 주입 플러그인. **Claude Code · Codex**에서는 세션 시작 인덱스 갱신, 프롬프트별 관련 문서 recall, 편집 후 연속성 힌트와 자동 인덱싱을 제공한다. **Antigravity(Gemini)** 는 프로젝트 로컬 훅으로 편집 후 연속성 힌트와 자동 인덱싱만 지원한다.
 
 흩어져 있던 글로벌/프로젝트 qmd 훅을 단일 리포로 SSOT화했다. 플랫폼 무관 `core/` 1벌 + `hooks/run-hook` 단일 디스패처 구조.
 
@@ -23,11 +23,11 @@ test/        *.test.mjs (node:test)
 | 프롬프트 제출 | 관련 문서 recall (`recall.py`) | `UserPromptSubmit` | `UserPromptSubmit` | — |
 | 편집 후 | 연속성 힌트 (`posttool.py`) + 자동 인덱싱 enqueue (`index_enqueue.py`) | `PostToolUse` | `PostToolUse` | `PostToolUse` |
 
-`hooks/run-hook <action> <engine>` 단일 디스패처가 모든 플랫폼의 훅 진입점이다(action: recall/update/posttool/index). engine 라벨/로그 경로/sandbox 가드 후 `core/backend_manager.sh`로 qmd backend를 ensure/kick하고 `core/<script>`로 stdin을 패스스루한다.
+`hooks/run-hook <action> <engine>` 단일 디스패처가 모든 플랫폼의 훅 진입점이다(action: recall/update/posttool/index/gate). engine 라벨/로그 경로/sandbox 가드 후 `core/backend_manager.sh`로 qmd backend를 ensure/kick하고 `core/<script>`로 stdin을 패스스루한다.
 
 Claude·Codex는 marketplace 플러그인으로 세 이벤트를 모두 받는다.
 
-> ⚠️ **Gemini(agy)는 실험적(experimental) 지원이다.** marketplace를 지원하지 않아 `scripts/agy-local-hook-install.sh <프로젝트>`로 `.agents/hooks.json`에 `PostToolUse`(posttool+index)만 등록한다 — 즉 **편집 후 연속성 힌트(posttool, recall 위임)+자동 인덱싱(index)만** 동작하고, 세션 인덱스 갱신(`update`)·프롬프트 단위 recall(`UserPromptSubmit`)은 아직 없다(`AfterTool` 미발동으로 `PostToolUse` matcher `write_to_file|replace_file_content` 사용). backend는 동일한 plugin runtime manager가 ensure/kick한다. **프롬프트 recall·세션 update 등 완전 지원은 향후 제공 예정.**
+> ⚠️ **Gemini(agy)는 실험적(experimental) 지원이다.** marketplace를 지원하지 않아 `scripts/agy-local-hook-install.sh <프로젝트>`로 `.agents/hooks.json`에 `PostToolUse`(posttool+index)만 등록한다 — 즉 **편집 후 연속성 힌트(posttool, recall 위임)+자동 인덱싱(index)만** 동작하고, 세션 인덱스 갱신(`update`)·프롬프트 단위 recall(`UserPromptSubmit`)은 아직 없다(`AfterTool` 미발동으로 `PostToolUse` matcher `write_to_file|replace_file_content|multi_replace_file_content` 사용). backend는 동일한 plugin runtime manager가 ensure/kick한다. **프롬프트 recall·세션 update 등 완전 지원은 향후 제공 예정.**
 
 ### 흐름도
 
