@@ -48,7 +48,8 @@ cleanup_hook_file() {
   say "$platform legacy hook cleanup: $config_path"
   [[ "$DRY_RUN" == "1" ]] && return 0
 
-  python3 - "$platform" "$config_path" <<'PY'
+  local status=0
+  python3 - "$platform" "$config_path" <<'PY' || status=$?
 import json
 import os
 import sys
@@ -60,7 +61,7 @@ try:
         data = json.load(f)
 except json.JSONDecodeError as exc:
     print(f"invalid JSON in {config_path}: {exc}", file=sys.stderr)
-    sys.exit(1)
+    sys.exit(3)
 
 if not isinstance(data, dict):
     sys.exit(0)
@@ -82,11 +83,19 @@ def command_strings(value):
         for item in value:
             yield from command_strings(item)
 
+LEGACY_QMD_PATTERNS = (
+    "qmd-recall-on-prompt.py",
+    "qmd-session-update",
+    "qmd-index",
+    "qmd-posttool",
+    ".claude/scripts/qmd-",
+    ".codex/hooks/qmd-",
+    ".gemini/scripts/qmd-",
+    ".gemini/hooks/qmd-",
+)
+
 def is_legacy_qmd_entry(item):
-    return any(
-        "qmd" in command.lower() and "auto-context" not in command.lower()
-        for command in command_strings(item)
-    )
+    return any(pattern in command for command in command_strings(item) for pattern in LEGACY_QMD_PATTERNS)
 
 def is_auto_context_adapter_entry(item):
     return any(needle in command for command in command_strings(item))
@@ -118,6 +127,11 @@ with open(tmp_path, "w", encoding="utf-8") as f:
     f.write("\n")
 os.replace(tmp_path, config_path)
 PY
+  if [[ "$status" == "3" ]]; then
+    say "WARNING: invalid JSON preserved, skipped cleanup for $config_path"
+    return 0
+  fi
+  return "$status"
 }
 
 cleanup_platform() {
@@ -147,6 +161,9 @@ cleanup_platform() {
         "$HOME/.gemini/settings.json"
         "$HOME/.gemini/antigravity-cli/settings.json"
       )
+      if [[ -f "$PWD/.agents/hooks.json" ]]; then
+        say "WARNING: project-local AGY hooks found at $PWD/.agents/hooks.json; remove project-local hooks manually if desired."
+      fi
       ;;
     *)
       say "unknown platform skip: $platform"

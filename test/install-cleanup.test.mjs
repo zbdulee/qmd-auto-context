@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -36,20 +36,51 @@ test('cleanup-legacy: codex 글로벌 adapters hook 제거, 비-qmd 보존', () 
   }
 });
 
-test('cleanup-legacy: codex hooks.json이 깨진 JSON이면 덮지 않고 abort', () => {
+test('cleanup-legacy: codex hooks.json이 깨진 JSON이면 덮지 않고 backend cleanup은 계속한다', () => {
   const home = mkdtempSync(join(tmpdir(), 'qmd-home-'));
   try {
     const codexDir = join(home, '.codex');
+    const launchAgents = join(home, 'Library', 'LaunchAgents');
     mkdirSync(codexDir, { recursive: true });
+    mkdirSync(launchAgents, { recursive: true });
     const broken = '{ "hooks": { invalid';
     writeFileSync(join(codexDir, 'hooks.json'), broken);
-    assert.throws(() => {
-      execFileSync('bash', [CLEANUP], {
-        encoding: 'utf8',
-        env: { ...process.env, HOME: home, QMD_FAKE_PLATFORMS: 'codex' },
-      });
+    writeFileSync(join(launchAgents, 'com.qmd-mcp-daemon.plist'), '<!-- managed-by: qmd-auto-context -->\n');
+
+    execFileSync('bash', [CLEANUP], {
+      encoding: 'utf8',
+      env: { ...process.env, HOME: home, QMD_FAKE_PLATFORMS: 'codex' },
     });
+
     assert.equal(readFileSync(join(codexDir, 'hooks.json'), 'utf8'), broken, '깨진 파일 원본 보존');
+    assert.equal(existsSync(join(launchAgents, 'com.qmd-mcp-daemon.plist')), false, 'backend cleanup은 계속 수행');
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('cleanup-legacy: 사용자 커스텀 qmd hook은 보존한다', () => {
+  const home = mkdtempSync(join(tmpdir(), 'qmd-custom-hook-'));
+  try {
+    mkdirSync(join(home, '.claude'), { recursive: true });
+    writeFileSync(join(home, '.claude', 'settings.json'), JSON.stringify({
+      hooks: {
+        UserPromptSubmit: [
+          { hooks: [{ type: 'command', command: 'qmd collection update my-notes' }] },
+          { hooks: [{ type: 'command', command: 'bash ~/.claude/scripts/qmd-recall-on-prompt.py' }] },
+        ],
+      },
+    }));
+
+    execFileSync('bash', [CLEANUP], {
+      encoding: 'utf8',
+      env: { ...process.env, HOME: home, QMD_FAKE_PLATFORMS: 'claude' },
+    });
+
+    const after = JSON.parse(readFileSync(join(home, '.claude', 'settings.json'), 'utf8'));
+    const cmds = after.hooks.UserPromptSubmit.flatMap(e => (e.hooks || []).map(h => h.command));
+    assert.ok(cmds.includes('qmd collection update my-notes'), 'custom qmd hook should remain');
+    assert.ok(!cmds.some(c => c.includes('qmd-recall-on-prompt.py')), 'known legacy qmd hook should be removed');
   } finally {
     rmSync(home, { recursive: true, force: true });
   }

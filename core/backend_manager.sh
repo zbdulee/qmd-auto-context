@@ -12,6 +12,7 @@ KEEPALIVE_SCRIPT="${QMD_KEEPALIVE_SCRIPT:-$ROOT/backend/keepalive.sh}"
 LOGROTATE_SCRIPT="${QMD_LOGROTATE_SCRIPT:-$ROOT/backend/logrotate.sh}"
 INDEX_WORKER_SCRIPT="${QMD_INDEX_WORKER_SCRIPT:-$ROOT/backend/index_worker.sh}"
 KICK_LOCK="${QMD_WORKER_KICK_LOCKDIR:-$STATE_DIR/index-kick.lock.d}"
+START_LOCK="${QMD_DAEMON_START_LOCKDIR:-$STATE_DIR/daemon-start.lock.d}"
 REQUIRED_QMD_VERSION="${QMD_REQUIRED_VERSION:-2.5.3}"
 SUPPORTED_QMD_MAJOR="${QMD_SUPPORTED_MAJOR:-2}"
 
@@ -117,6 +118,16 @@ pid_is_daemon() {
   printf '%s' "$cmd" | grep -q -- "--port $PORT" || return 1
 }
 
+pid_is_starting_daemon() {
+  local pid="$1"
+  local cmd
+  pid_alive "$pid" || return 1
+  cmd="$(pid_command "$pid")"
+  printf '%s' "$cmd" | grep -q "bash $DAEMON_SCRIPT" && return 0
+  printf '%s' "$cmd" | grep -q "backend/daemon.sh" && return 0
+  return 1
+}
+
 read_pid() {
   cat "$PID_FILE" 2>/dev/null || true
 }
@@ -124,15 +135,21 @@ read_pid() {
 start_daemon() {
   check_qmd >/dev/null 2>&1 || return 0
   health && return 0
+  if ! mkdir "$START_LOCK" 2>/dev/null; then
+    wait_health || true
+    return 0
+  fi
   local pid
   pid="$(read_pid)"
-  if pid_is_daemon "$pid"; then
+  if pid_is_daemon "$pid" || pid_is_starting_daemon "$pid"; then
+    rmdir "$START_LOCK" 2>/dev/null || true
     return 0
   fi
   rm -f "$PID_FILE" 2>/dev/null || true
   QMD_DAEMON_PORT="$PORT" nohup bash "$DAEMON_SCRIPT" >>"$DAEMON_LOG" 2>&1 &
   echo "$!" >"$PID_FILE" 2>/dev/null || true
   log "daemon start pid=$!"
+  rmdir "$START_LOCK" 2>/dev/null || true
 }
 
 wait_health() {

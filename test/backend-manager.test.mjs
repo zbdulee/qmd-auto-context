@@ -145,6 +145,35 @@ test("start ignores a live pid file that is not the qmd daemon", () => {
   }
 });
 
+test("concurrent start calls do not double-start a transitioning daemon", () => {
+  const home = mkdtempSync(join(tmpdir(), "qmd-start-race-"));
+  try {
+    makeFakeQmd(home);
+    const daemon = join(home, "daemon.sh");
+    const starts = join(home, "starts.log");
+    writeFileSync(daemon, `#!/usr/bin/env bash\necho start >> "${starts}"\nsleep 1\n`, { mode: 0o755 });
+
+    execFileSync("/bin/bash", ["-c", "core/backend_manager.sh start & core/backend_manager.sh start & wait"], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        HOME: home,
+        PATH: "/usr/bin:/bin",
+        QMD_BACKEND_STATE_DIR: home,
+        QMD_DAEMON_PID: join(home, "daemon.pid"),
+        QMD_DAEMON_SCRIPT: daemon,
+        QMD_DAEMON_PORT: "1",
+        QMD_DAEMON_READY_ATTEMPTS: "2",
+      },
+    });
+
+    const count = existsSync(starts) ? readFileSync(starts, "utf8").trim().split("\n").filter(Boolean).length : 0;
+    assert.equal(count, 1);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("kick-index starts one-shot worker through a silent background kick", () => {
   const home = mkdtempSync(join(tmpdir(), "qmd-manager-"));
   try {
