@@ -261,15 +261,16 @@ run_update() {
     if ! mkdir "$EMBED_LOCK" 2>/dev/null; then
       log "EMBED: already running, skip"
     else
-      LOG="$LOG" EMBED_LOCK="$EMBED_LOCK" QMD_DAEMON_PORT="${QMD_DAEMON_PORT:-8483}" nohup bash -c '
+      LOG="$LOG" EMBED_LOCK="$EMBED_LOCK" QMD_DAEMON_PORT="${QMD_DAEMON_PORT:-8483}" QMD_BACKEND_MANAGER="${QMD_BACKEND_MANAGER:-}" nohup bash -c '
         echo "$$" > "$EMBED_LOCK/pid" 2>/dev/null || true
         trap "rm -f \"$EMBED_LOCK/pid\" 2>/dev/null; rmdir \"$EMBED_LOCK\" 2>/dev/null" EXIT
         out=$(qmd embed 2>&1); printf "%s\n" "$out" >> "$LOG"
         if printf "%s" "$out" | grep -qiE "embedded|chunks"; then
           # SIGTERM 으로 graceful shutdown 유도 → 데몬이 SQLite clean close 하며 WAL checkpoint.
-          # KeepAlive=true plist 가 자동 respawn. (SIGKILL 강제종료는 clean close 차단 →
-          # WAL checkpoint 누락 → embed 로 팽창한 WAL 이 잔존·누적 → vec query 20s 로 저하)
-          if launchctl kill TERM "gui/$(id -u)/com.qmd-mcp-daemon" 2>/dev/null; then
+          # SIGKILL 강제종료는 clean close 차단 → WAL checkpoint 누락 → vec query 저하.
+          if [ -n "${QMD_BACKEND_MANAGER:-}" ] && [ -x "$QMD_BACKEND_MANAGER" ]; then
+            "$QMD_BACKEND_MANAGER" reload >> "$LOG" 2>&1 || true
+          elif launchctl kill TERM "gui/$(id -u)/com.qmd-mcp-daemon" 2>/dev/null; then
             printf "[%s] EMBED->daemon SIGTERM restart (clean WAL checkpoint)\n" "$(date +%H:%M:%S)" >> "$LOG"
             # respawn 후 /health ready 까지 bounded 대기(최대 ~15s). 실패해도 로그만, hook 진행.
             for _ in {1..30}; do

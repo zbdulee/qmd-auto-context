@@ -15,6 +15,10 @@ DAEMON_PORT="${QMD_DAEMON_PORT:-8483}"
 log() { printf '[%s] index-worker: %s\n' "$(date '+%H:%M:%S')" "$*" >>"$LOG" 2>&1 || true; }
 
 reload_daemon() {
+  if [ -n "${QMD_BACKEND_MANAGER:-}" ] && [ -x "$QMD_BACKEND_MANAGER" ]; then
+    "$QMD_BACKEND_MANAGER" reload >>"$LOG" 2>&1 || return 0
+    return 0
+  fi
   command -v "$LAUNCHCTL" >/dev/null 2>&1 || return 0
   "$LAUNCHCTL" kill TERM "gui/$(id -u)/com.qmd-mcp-daemon" >>"$LOG" 2>&1 || return 0
   log "daemon SIGTERM reload (index changed)"
