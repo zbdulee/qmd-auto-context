@@ -31,8 +31,13 @@ case "$ENGINE" in
 esac
 
 # 3) engine 라벨 + 로그 경로 기본값
+# 기본 로그는 유저 격리 경로($HOME/.cache/qmd, backend_manager의 MANAGER_LOG/DAEMON_LOG와 동일 베이스).
+# 예측가능한 /tmp 경로는 멀티유저 symlink 선점 클래스 문제라 기본값에서 제거한다.
+# QMD_RECALL_LOG override는 반드시 유지(테스트가 주입한다).
 export QMD_ENGINE="$ENGINE"
-: "${QMD_RECALL_LOG:=/tmp/qmd-${ENGINE}-hook.log}"
+_QMD_HOOK_LOG_DIR="${QMD_CACHE_DIR:-$HOME/.cache/qmd}"
+mkdir -p "$_QMD_HOOK_LOG_DIR" 2>/dev/null || true
+: "${QMD_RECALL_LOG:=$_QMD_HOOK_LOG_DIR/qmd-${ENGINE}-hook.log}"
 export QMD_RECALL_LOG
 
 # 4) action → backend lifecycle + core 위임

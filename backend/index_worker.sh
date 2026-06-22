@@ -17,10 +17,42 @@ QUEUE="${QMD_DIRTY_QUEUE:-$HOME/.config/qmd/dirty-queue}"
 WORKER_LOCK="${QMD_INDEX_WORKER_LOCKDIR:-$_QMD_LOCK_BASE/qmd-index-worker.lock.d}"
 WRITER_LOCK="${QMD_WRITER_LOCKDIR:-$_QMD_LOCK_BASE/qmd-update.lock.d}"
 EMBED_LOCK="${QMD_EMBED_LOCKDIR:-$_QMD_LOCK_BASE/qmd-embed.lock.d}"
-LOG="${QMD_RECALL_LOG:-$_QMD_CACHE_DIR/index-worker.log}"
+# index-worker 동작 로그는 recall 로그(QMD_RECALL_LOG)와 분리한다.
+# run-hook이 모든 action에 QMD_RECALL_LOG를 export하므로, 그걸 상속하면
+# kick-index 경로에서 worker 로그가 recall 로그 파일로 강제 합쳐진다(그리고 과거엔 /tmp).
+# 전용 QMD_INDEX_WORKER_LOG override만 받고, 기본은 유저 격리 캐시 경로.
+LOG="${QMD_INDEX_WORKER_LOG:-$_QMD_CACHE_DIR/index-worker.log}"
 QMD="${QMD_FAKE_QMD:-qmd}"
 
 log() { printf '[%s] index-worker: %s\n' "$(date '+%H:%M:%S')" "$*" >>"$LOG" 2>&1 || true; }
+
+# requeue: 락 밖 직접 append 대신 dirty_queue.py / snapshot과 동일한 fcntl.flock(LOCK_EX)로
+# 큐 파일 자신에 append해 동시 enqueue와 상호배제한다. 엔트리는 argv로 전달(stdin은
+# python -c 스크립트가 차지하지 않으므로 argv가 안전). bash 3.2 호환.
+# python 실패 시에도 큐 엔트리를 유실하지 않도록 셸 append로 fallback한다.
+_REQUEUE_PY='
+import fcntl, os, sys
+queue = os.environ["QMD_QUEUE"]
+entries = [e for e in sys.argv[1:] if e]
+if entries:
+    # append + LOCK_EX 로 enqueue(dirty_queue.py) 및 snapshot truncate와 동일 락으로 직렬화.
+    with open(queue, "a", encoding="utf-8") as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        try:
+            for e in entries:
+                f.write(e + "\n")
+        finally:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+'
+requeue() {
+  [ "$#" -gt 0 ] || return 0
+  if QMD_QUEUE="$QUEUE" python3 -c "$_REQUEUE_PY" "$@" 2>/dev/null; then
+    return 0
+  fi
+  # fallback (무유실 우선): 락 없이라도 큐에 복원한다.
+  log "requeue: python fcntl append failed — fallback to shell append"
+  for e in "$@"; do printf '%s\n' "$e" >>"$QUEUE"; done
+}
 
 reload_daemon() {
   if [ -n "${QMD_BACKEND_MANAGER:-}" ] && [ -x "$QMD_BACKEND_MANAGER" ]; then
@@ -82,7 +114,7 @@ rm -f "$SNAP"
 # writer lock (update.sh와 공유) — busy면 큐 복원 후 종료
 if ! mkdir "$WRITER_LOCK" 2>/dev/null; then
   log "writer lock busy — requeue & defer"
-  for e in "${ENTRIES[@]}"; do printf '%s\n' "$e" >>"$QUEUE"; done
+  requeue "${ENTRIES[@]}"
   exit 0
 fi
 echo "$$" > "$WRITER_LOCK/pid" 2>/dev/null || true
@@ -115,7 +147,7 @@ if [ -d "$EMBED_LOCK" ]; then
 fi
 if ! mkdir "$EMBED_LOCK" 2>/dev/null; then
   log "embed lock busy — requeue & defer"
-  for e in "${ENTRIES[@]}"; do printf '%s\n' "$e" >>"$QUEUE"; done
+  requeue "${ENTRIES[@]}"
   exit 0
 fi
 echo "$$" > "$EMBED_LOCK/pid" 2>/dev/null || true

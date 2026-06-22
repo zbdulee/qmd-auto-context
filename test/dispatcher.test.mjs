@@ -47,6 +47,39 @@ test('engine 라벨이 selection 로그에 기록 (claude/codex/gemini)', () => 
   }
 });
 
+// BUG-D regression: QMD_RECALL_LOG override가 없으면 hook 기본 로그가 /tmp가 아니라
+// 유저 격리 캐시 경로($HOME/.cache/qmd, QMD_CACHE_DIR override)여야 한다.
+test('BUG-D: QMD_RECALL_LOG 미지정 시 기본 로그는 /tmp가 아닌 캐시 경로', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'qmd-disp-log-'));
+  mkdirSync(join(dir, '.agents'), { recursive: true });
+  writeFileSync(join(dir, '.agents', 'qmd-recall.json'), JSON.stringify({ collections: ['sample'] }));
+  const cacheDir = join(dir, 'cache');
+  const env = { ...process.env, QMD_CACHE_DIR: cacheDir };
+  delete env.QMD_RECALL_LOG;
+  try {
+    execFileSync('bash', ['hooks/run-hook', 'recall', 'claude'], {
+      input: JSON.stringify({ prompt: PROMPT, cwd: dir }),
+      encoding: 'utf8',
+      env: { ...env, QMD_QUERY_FIXTURE: 'test/fixtures/daemon-response.json' },
+    });
+    // recall이 selection을 기본 로그(캐시 경로)에 기록했어야 한다.
+    assert.equal(existsSync(join(cacheDir, 'qmd-claude-hook.log')), true,
+      '기본 recall 로그가 캐시 경로에 생성돼야 함(/tmp 아님)');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// BUG-D regression: QMD_RECALL_LOG override는 반드시 존중돼야 한다(기존 동작 보존).
+test('BUG-D: QMD_RECALL_LOG override가 존중된다', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'qmd-disp-logov-'));
+  mkdirSync(join(dir, '.agents'), { recursive: true });
+  writeFileSync(join(dir, '.agents', 'qmd-recall.json'), JSON.stringify({ collections: ['sample'] }));
+  const logPath = join(dir, 'custom.log');
+  try {
+    dispatch(['recall', 'claude'], { prompt: PROMPT, cwd: dir }, { QMD_CACHE_DIR: join(dir, 'cache'), QMD_RECALL_LOG: logPath });
+    assert.equal(existsSync(logPath), true, 'override 경로에 로그가 기록돼야 함');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('CLAUDE_HEADLESS=1 → 무출력', () => {
   const out = dispatch(['recall', 'claude'], { prompt: PROMPT, cwd: '/tmp' }, { CLAUDE_HEADLESS: '1' });
   assert.equal(out, '');

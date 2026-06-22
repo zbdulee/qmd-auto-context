@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, chmodSync, mkdirSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -264,6 +264,88 @@ print(",".join(order))
   } finally {
     execFileSync("rm", ["-rf", d]);
   }
+});
+
+// BUG-C regression: writer lock busy 시 requeue가 셸 리디렉션이 아니라 dirty_queue.py/snapshot과
+// 동일한 fcntl.flock(LOCK_EX)로 큐에 append 하는지 검증. 외부에서 큐의 fcntl 락을 잡고 있으면
+// requeue는 그 락이 풀릴 때까지 블록돼야 한다(락 미사용이면 즉시 append하고 끝난다).
+test("BUG-C: writer lock busy requeue가 fcntl LOCK_EX 하에 직렬화된다(외부 락 동안 블록)", () => {
+  const d = mkdtempSync(join(tmpdir(), "wk-req-"));
+  const stub = makeStubQmd(d, join(d, "calls.log"));
+  const proj = join(d, "proj"); mkdirSync(join(proj, "04_M"), { recursive: true });
+  const q = join(d, "queue");
+  writeFileSync(q, `x\t${join(proj, "04_M")}\n`);
+  const wlock = join(d, "ulock.d"); mkdirSync(wlock); // writer lock 선점 → requeue 경로 강제
+
+  // 외부 holder: 큐 파일의 fcntl LOCK_EX를 ~0.6s 잡고 있다가 푼다.
+  const holderScript = `
+import fcntl, time
+with open(${JSON.stringify(q)}, "r+", encoding="utf-8") as f:
+    fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+    time.sleep(0.6)
+    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+`;
+  const holder = spawn("python3", ["-c", holderScript]);
+  // holder가 락을 잡을 시간을 준다.
+  execFileSync("python3", ["-c", "import time; time.sleep(0.2)"]);
+
+  const t0 = Date.now();
+  execFileSync("bash", ["backend/index_worker.sh"], { encoding: "utf8", env: {
+    ...process.env, QMD_DIRTY_QUEUE: q, QMD_FAKE_QMD: stub,
+    QMD_INDEX_WORKER_LOCKDIR: join(d, "wlock.d"),
+    QMD_WRITER_LOCKDIR: wlock, QMD_EMBED_LOCKDIR: join(d, "elock.d"),
+    QMD_NO_RELOAD: "1",
+  }});
+  const elapsed = Date.now() - t0;
+  holder.kill();
+
+  // 락이 동작했다면 requeue append는 holder unlock(~0.6s - 0.2s) 이후에 끝났어야 한다.
+  assert.ok(elapsed >= 250, `requeue가 외부 fcntl 락 동안 블록되지 않았다(elapsed=${elapsed}ms) — 락 미사용 의심`);
+  assert.match(readFileSync(q, "utf8"), /04_M/); // 큐 복원(무유실)
+});
+
+// BUG-D regression: index-worker 동작 로그는 QMD_RECALL_LOG를 상속하지 않고 전용
+// QMD_INDEX_WORKER_LOG / $HOME(QMD_CACHE_DIR) 캐시 경로를 쓴다. recall 로그와 분리.
+test("BUG-D: index-worker는 QMD_RECALL_LOG가 아닌 전용 로그 경로를 쓴다", () => {
+  const d = mkdtempSync(join(tmpdir(), "wk-log-"));
+  const stub = makeStubQmd(d, join(d, "calls.log"));
+  const proj = join(d, "proj"); mkdirSync(join(proj, "04_M"), { recursive: true });
+  const q = join(d, "queue"); writeFileSync(q, `x\t${join(proj, "04_M")}\n`);
+  const recallLog = join(d, "recall.log");      // run-hook이 export하는 recall 로그(주입 시뮬)
+  const workerLog = join(d, "worker.log");       // 전용 worker 로그
+  const cacheDir = join(d, "cache"); mkdirSync(cacheDir);
+  execFileSync("bash", ["backend/index_worker.sh"], { encoding: "utf8", env: {
+    ...process.env, QMD_DIRTY_QUEUE: q, QMD_FAKE_QMD: stub,
+    QMD_INDEX_WORKER_LOCKDIR: join(d, "wl.d"), QMD_WRITER_LOCKDIR: join(d, "ul.d"),
+    QMD_EMBED_LOCKDIR: join(d, "el.d"), QMD_NO_RELOAD: "1",
+    QMD_RECALL_LOG: recallLog, QMD_INDEX_WORKER_LOG: workerLog, QMD_CACHE_DIR: cacheDir,
+  }});
+  // worker 동작 로그(qmd 출력 등)는 전용 로그로 가고 recall 로그는 건드리지 않는다.
+  assert.equal(existsSync(workerLog), true, "전용 worker 로그가 생성돼야 함");
+  assert.ok(readFileSync(workerLog, "utf8").length > 0, "worker 로그에 내용이 있어야 함");
+  assert.equal(existsSync(recallLog), false, "recall 로그(QMD_RECALL_LOG)는 worker가 건드리면 안 됨");
+});
+
+// BUG-D regression: QMD_INDEX_WORKER_LOG / QMD_RECALL_LOG 둘 다 없으면 기본 로그가
+// /tmp가 아니라 $HOME/.cache/qmd(QMD_CACHE_DIR override) 하위여야 한다.
+test("BUG-D: 기본 worker 로그는 /tmp가 아닌 캐시 경로", () => {
+  const d = mkdtempSync(join(tmpdir(), "wk-defaultlog-"));
+  const stub = makeStubQmd(d, join(d, "calls.log"));
+  const proj = join(d, "proj"); mkdirSync(join(proj, "04_M"), { recursive: true });
+  const q = join(d, "queue"); writeFileSync(q, `x\t${join(proj, "04_M")}\n`);
+  const cacheDir = join(d, "cache");
+  const env = {
+    ...process.env, QMD_DIRTY_QUEUE: q, QMD_FAKE_QMD: stub,
+    QMD_INDEX_WORKER_LOCKDIR: join(d, "wl.d"), QMD_WRITER_LOCKDIR: join(d, "ul.d"),
+    QMD_EMBED_LOCKDIR: join(d, "el.d"), QMD_NO_RELOAD: "1",
+    QMD_CACHE_DIR: cacheDir,
+  };
+  delete env.QMD_RECALL_LOG;
+  delete env.QMD_INDEX_WORKER_LOG;
+  execFileSync("bash", ["backend/index_worker.sh"], { encoding: "utf8", env });
+  // 기본 로그는 QMD_CACHE_DIR(=$HOME/.cache/qmd 대용) 하위 index-worker.log 여야 한다.
+  assert.equal(existsSync(join(cacheDir, "index-worker.log")), true,
+    "기본 worker 로그가 캐시 경로에 생성돼야 함(/tmp 아님)");
 });
 
 // BUG-1 regression: collection add가 "already exists"로 exit 1 반환해도 update/embed가 호출돼야 한다.
