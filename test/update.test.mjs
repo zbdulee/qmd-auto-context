@@ -20,17 +20,17 @@ function repoTemp(prefix) {
   return mkdtempSync(join(base, `qmd-test-${prefix}-`));
 }
 
-test('collectionPaths 매핑 해석 (novel 패턴)', () => {
-  const r = resolvePaths('/Users/dulee/work/novel/귀신은 약효가 돌 때 보인다', JSON.stringify({
-    collections: ['yakbbal-manuscript', 'yakbbal-plot'],
+test('collectionPaths 매핑 해석 (story 패턴)', () => {
+  const r = resolvePaths('/Users/example/work/novel/my-novel', JSON.stringify({
+    collections: ['story-manuscript', 'story-plot'],
     collectionPaths: { '*-manuscript': '04_Manuscript', '*-plot': '03_Plot' },
   }));
-  assert.ok(r.entries.some(e => e.name === 'yakbbal-manuscript' && e.path.endsWith('04_Manuscript')));
+  assert.ok(r.entries.some(e => e.name === 'story-manuscript' && e.path.endsWith('04_Manuscript')));
 });
 
 test('설정 없으면 인덱싱하지 않고 pending', () => {
   // 빈 config(파일 없음) → pending. resolve_paths는 stdin config만 보므로 전역 파일 불필요.
-  const r = resolvePaths('/Users/dulee/work/axiom', '');
+  const r = resolvePaths('/Users/example/work/sample', '');
   assert.equal(r.refused, true);
   assert.equal(r.reason, 'pending');
   assert.deepEqual(r.entries, []);

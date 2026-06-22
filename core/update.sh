@@ -13,9 +13,17 @@ for arg in "$@"; do
 done
 
 
-LOG="/tmp/qmd-hook.log"
-LOCKDIR="/tmp/qmd-update.lock.d"
-STATUS="/tmp/qmd-update-status.txt"
+# 유저 격리 경로(멀티유저 /tmp symlink 선점 방지). backend_manager.sh와 통일.
+# 로그/status는 $HOME/.cache/qmd/, 락은 user-private 디렉토리.
+# 모든 경로는 QMD_* env override 유지(테스트 주입).
+_QMD_UID="$(/usr/bin/id -un 2>/dev/null || id -u 2>/dev/null || echo qmd)"
+_QMD_LOCK_BASE="${QMD_LOCK_BASE:-${TMPDIR:-/tmp}/qmd-auto-context-locks-${_QMD_UID}}"
+_QMD_CACHE_DIR="${QMD_CACHE_DIR:-$HOME/.cache/qmd}"
+mkdir -p "$_QMD_CACHE_DIR" "$_QMD_LOCK_BASE" 2>/dev/null || true
+LOG="${QMD_HOOK_LOG:-$_QMD_CACHE_DIR/hook.log}"
+# WRITER 락: index_worker.sh의 WRITER_LOCK(QMD_WRITER_LOCKDIR)과 기본값 공유 → 직렬화.
+LOCKDIR="${QMD_WRITER_LOCKDIR:-$_QMD_LOCK_BASE/qmd-update.lock.d}"
+STATUS="${QMD_UPDATE_STATUS:-$_QMD_CACHE_DIR/update-status.txt}"
 
 # SessionStart 헬스체크: 데몬 포트 확인. 데몬 기동은 plugin-managed backend manager가 담당한다.
 qmd_healthcheck() {
@@ -248,10 +256,13 @@ run_update() {
     rm -f "$STATUS"
     log "END rc=0"
     
-    EMBED_LOCK="${QMD_EMBED_LOCKDIR:-/tmp/qmd-embed.lock.d}"
+    # EMBED 락: index_worker.sh의 EMBED_LOCK(QMD_EMBED_LOCKDIR)과 기본값 공유 → 직렬화.
+    EMBED_LOCK="${QMD_EMBED_LOCKDIR:-$_QMD_LOCK_BASE/qmd-embed.lock.d}"
     if [ -d "$EMBED_LOCK" ]; then
       epid="$(cat "$EMBED_LOCK/pid" 2>/dev/null || true)"
-      { [ -z "$epid" ] || ! kill -0 "$epid" 2>/dev/null; } && rm -rf "$EMBED_LOCK" 2>/dev/null
+      # stale 정리: rm -rf 대신 우리 락 구조(pid 파일만)에 맞춰 unlink 후 rmdir.
+      # 예상 밖 내용이 있으면 rmdir 실패로 보호된다(env override 재귀 삭제 위험 제거).
+      { [ -z "$epid" ] || ! kill -0 "$epid" 2>/dev/null; } && { rm -f "$EMBED_LOCK/pid" 2>/dev/null; rmdir "$EMBED_LOCK" 2>/dev/null || true; }
     fi
     
     if ! mkdir "$EMBED_LOCK" 2>/dev/null; then

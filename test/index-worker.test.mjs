@@ -205,6 +205,67 @@ esac
   assert.match(readFileSync(rlog, "utf8"), /^reload$/m);
 });
 
+// BUG-4 regression: macOS엔 flock(1)이 없다. 큐 스냅샷/truncate가 python fcntl.flock으로
+// 동작해 dirty_queue.py(enqueue)와 실제로 직렬화되는지(락 무동작이 아닌지) 검증.
+test("BUG-4: 큐 스냅샷이 flock(1) 없이 python fcntl로 정확히 drain한다", () => {
+  const d = mkdtempSync(join(tmpdir(), "wk-"));
+  const log = join(d, "calls.log");
+  const stub = makeStubQmd(d, log);
+  const proj = join(d, "proj"); mkdirSync(join(proj, "04_M"), { recursive: true });
+  const q = join(d, "queue");
+  // 여러 줄 + 공백 줄 포함 → snapshot 후 큐는 완전히 비워져야 한다.
+  writeFileSync(q, `a\t${join(proj, "04_M")}\nb\t${join(proj, "04_M")}\n`);
+  execFileSync("bash", ["backend/index_worker.sh"], { encoding: "utf8", env: {
+    ...process.env, QMD_DIRTY_QUEUE: q, QMD_FAKE_QMD: stub,
+    QMD_INDEX_WORKER_LOCKDIR: join(d, "wlock.d"),
+    QMD_WRITER_LOCKDIR: join(d, "ulock.d"), QMD_EMBED_LOCKDIR: join(d, "elock.d"),
+    QMD_NO_RELOAD: "1",
+  }});
+  assert.equal(readFileSync(q, "utf8").trim(), "", "큐가 fcntl 락 하에 정확히 비워져야 함");
+  const calls = readFileSync(log, "utf8");
+  assert.match(calls, /collection add .* --name a/);
+  assert.match(calls, /collection add .* --name b/);
+});
+
+// BUG-4 락 상호배제: index_worker의 fcntl LOCK_EX가 유지되는 동안 dirty_queue.py enqueue가
+// 블록되는지(같은 락 메커니즘) 직접 검증. flock(1) 무동작이었다면 락이 안 걸려 동시 진행됨.
+test("BUG-4: fcntl LOCK_EX가 동일 큐에 대한 enqueue를 실제로 직렬화한다", () => {
+  const d = mkdtempSync(join(tmpdir(), "wk-lock-"));
+  const q = join(d, "queue");
+  writeFileSync(q, "seed\t/x\n");
+  // 한 프로세스가 LOCK_EX를 0.4s 잡고, 그 사이 다른 프로세스가 append+LOCK_EX 시도.
+  // 락이 동작하면 두 번째 write는 첫 번째 unlock 이후에만 일어나 순서가 보장된다.
+  const script = `
+import fcntl, os, sys, time, threading
+q = ${JSON.stringify(q)}
+order = []
+def holder():
+    with open(q, "r+", encoding="utf-8") as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        order.append("hold-start")
+        time.sleep(0.4)
+        order.append("hold-end")
+        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+def writer():
+    time.sleep(0.1)
+    with open(q, "a", encoding="utf-8") as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        order.append("write")
+        f.write("late\\tx\\n")
+        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+t1 = threading.Thread(target=holder); t2 = threading.Thread(target=writer)
+t1.start(); t2.start(); t1.join(); t2.join()
+print(",".join(order))
+`;
+  try {
+    const out = execFileSync("python3", ["-c", script], { encoding: "utf8" }).trim();
+    // write는 반드시 hold-end 이후 (락이 동작했다는 증거)
+    assert.equal(out, "hold-start,hold-end,write", `락 직렬화 실패: ${out}`);
+  } finally {
+    execFileSync("rm", ["-rf", d]);
+  }
+});
+
 // BUG-1 regression: collection add가 "already exists"로 exit 1 반환해도 update/embed가 호출돼야 한다.
 test("collection add already-exists(exit 1) → update/embed 여전히 호출됨", () => {
   const d = mkdtempSync(join(tmpdir(), "wk-"));

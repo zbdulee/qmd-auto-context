@@ -1,8 +1,10 @@
 {
   "name": "qmd-auto-context",
   "version": "0.6.0",
-  "description": "qmd 기반 자동 컨텍스트 주입 — Claude/Codex는 marketplace 플러그인으로 동작하고, Gemini(agy)는 프로젝트 로컬 .agents/hooks.json에 posttool+index 훅을 등록해 사용한다.",
-  "author": { "name": "zbdulee" },
+  "description": "qmd 기반 자동 컨텍스트 주입 — recall/update/posttool/index hooks + sync/query/update manual skills",
+  "author": { "name": "zbdulee", "url": "https://github.com/zbdulee" },
   "homepage": "https://github.com/zbdulee/qmd-auto-context",
-  "license": "MIT"
+  "repository": "https://github.com/zbdulee/qmd-auto-context",
+  "license": "MIT",
+  "keywords": ["qmd", "context", "recall", "hooks", "rag"]
 }

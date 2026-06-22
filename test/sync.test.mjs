@@ -260,6 +260,30 @@ test("stale lock from dead pid is removed and sync proceeds", () => {
   }
 });
 
+test("stale lock with unexpected content is not recursively deleted", () => {
+  const envInfo = makeEnv();
+  const dir = makeProject();
+  mkdirSync(join(dir, "docs"), { recursive: true });
+  writeConfig(dir, ["story"], { story: "docs" });
+  writeFileSync(join(dir, "docs", "a.md"), "a\n");
+  const lockDir = join(envInfo.base, "lock.d");
+  mkdirSync(lockDir);
+  // stale pid (dead) so release path triggers, plus an unexpected precious file.
+  writeFileSync(join(lockDir, "pid"), "99999999");
+  writeFileSync(join(lockDir, "precious.txt"), "do not delete\n");
+  try {
+    const result = runSync(dir, envInfo);
+    // Lock dir cannot be rmdir'd because it still holds precious.txt → sync stays busy.
+    assert.equal(result.reason, "sync_busy");
+    // The unexpected content survives — no recursive delete.
+    assert.equal(existsSync(join(lockDir, "precious.txt")), true);
+    assert.equal(readFileSync(join(lockDir, "precious.txt"), "utf8"), "do not delete\n");
+  } finally {
+    rmSync(envInfo.base, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("pid-less fresh lock stays busy, but old pid-less lock is recovered", () => {
   const envInfo = makeEnv();
   envInfo.env.QMD_SYNC_LOCK_STALE_SECONDS = "1";

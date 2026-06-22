@@ -39,7 +39,7 @@
 
 Current evidence on 2026-06-19:
 
-- Local explicit binary: `/Users/dulee/.bun/bin/qmd --version` reports `qmd 2.5.3`.
+- Local explicit binary: `~/.bun/bin/qmd --version` reports `qmd 2.5.3`.
 - npm registry: `npm view @tobilu/qmd version --silent` reports `2.5.3`.
 
 Policy:
@@ -820,7 +820,7 @@ Replace installer/backend tests with:
 - legacy cleanup removes only managed marker files when explicitly requested.
 - unmanaged user files are preserved.
 
-Delete or rewrite `test/backend.test.mjs` plist tests. New invariant: backend scripts do not hardcode `/Users/dulee`, and manager exists/executable.
+Delete or rewrite `test/backend.test.mjs` plist tests. New invariant: backend scripts do not hardcode a per-user home path (`/Users/<user>`), and manager exists/executable.
 
 **Step 3: Run failing tests**
 

@@ -263,11 +263,11 @@ def main():
     # Sort by score descending
     results = sorted(results, key=lambda r: r.get("score", 0), reverse=True)
     
-    # Filter based on skipPaths and default .zb-context
+    # Filter based on skipPaths and default .auto-context-ignore
     skip_paths = config.get("skipPaths", [])
-    # Always include .zb-context in skip list
-    if ".zb-context" not in skip_paths:
-        skip_paths.append(".zb-context")
+    # Always include .auto-context-ignore in skip list
+    if ".auto-context-ignore" not in skip_paths:
+        skip_paths.append(".auto-context-ignore")
         
     filtered_results = []
     min_score = float(config.get("minScore", 0.0))

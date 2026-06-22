@@ -8,8 +8,8 @@ function kw(prompt, patterns = []) {
 }
 
 test('stopwords 제거 + 한국어 어간', () => {
-  const r = kw('원오빌 문의 기반 정렬은 어떻게 동작하나요');
-  assert.ok(r.keywords.includes('문의') || r.keywords.includes('정렬'));
+  const r = kw('검색 결과 기반 정렬은 어떻게 동작하나요');
+  assert.ok(r.keywords.includes('검색') || r.keywords.includes('정렬'));
   assert.ok(!r.keywords.includes('어떻게'));   // stopword
 });
 

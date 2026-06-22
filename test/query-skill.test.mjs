@@ -40,18 +40,18 @@ test("query wrapper uses recall fixture and returns hook context", () => {
   const dir = mkdtempSync(join(base, "proj-"));
     writeFileSync(join(dir, ".auto-context.json"), JSON.stringify({
       indexing: true,
-      collections: ["axiom"],
+      collections: ["sample"],
     }));
     const managerLog = join(dir, "manager.log");
     const manager = join(dir, "manager.sh");
     writeFileSync(manager, `#!/usr/bin/env bash\necho "$@" >> "${managerLog}"\n`, { mode: 0o755 });
     try {
-      const out = execFileSync("bash", ["skills/query/scripts/query.sh", dir, "원오빌 문의 기반 정렬 어떻게 동작해?"], {
+      const out = execFileSync("bash", ["skills/query/scripts/query.sh", dir, "검색 결과 정렬은 어떻게 동작해?"], {
         encoding: "utf8",
         env: { ...process.env, QMD_QUERY_FIXTURE: "test/fixtures/daemon-response.json", QMD_BACKEND_MANAGER: manager },
       });
       const parsed = JSON.parse(out);
-      assert.match(parsed.hookSpecificOutput.additionalContext, /\[axiom\]/);
+      assert.match(parsed.hookSpecificOutput.additionalContext, /\[sample\]/);
       assert.equal(readFileSync(managerLog, "utf8"), "check-qmd --manual\nensure --wait\n");
     } finally {
     rmSync(dir, { recursive: true, force: true });

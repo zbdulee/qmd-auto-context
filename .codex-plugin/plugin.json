@@ -12,6 +12,6 @@
     "displayName": "qmd auto-context",
     "shortDescription": "자동 컨텍스트 주입 hooks + manual qmd skills",
     "category": "Productivity",
-    "capabilities": ["Read"]
+    "capabilities": ["Read", "Write"]
   }
 }

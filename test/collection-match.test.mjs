@@ -34,3 +34,19 @@ test("컬렉션 밖 편집은 빈 결과", () => {
   const r = run("/proj", ["/proj/README.md"], cfg);
   assert.deepEqual(r, {});
 });
+
+test("cwd 밖 절대경로 collectionPath는 선택 제외 (safe boundary)", () => {
+  const cfg = { collectionPaths: { "leak": "/Users/example/Documents" } };
+  const r = run("/proj", ["/Users/example/Documents/secret.md"], cfg);
+  assert.deepEqual(r, {});
+});
+
+test("allowRoots 안의 절대경로 collectionPath는 선택됨", () => {
+  const cfg = {
+    collectionPaths: { "shared": "/Users/example/Documents" },
+    allowRoots: ["/Users/example/Documents"],
+  };
+  const r = run("/proj", ["/Users/example/Documents/secret.md"], cfg);
+  assert.deepEqual(Object.keys(r), ["shared"]);
+  assert.equal(r["shared"], "/Users/example/Documents");
+});

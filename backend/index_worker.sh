@@ -3,11 +3,21 @@
 # bash 3.2 호환 (macOS /bin/bash)
 set -u
 
+# sandbox는 어떤 부작용(mkdir 포함)도 없이 즉시 무출력 종료.
+[ -n "${QMD_SANDBOX:-}" ] && exit 0
+
+# 유저 격리 경로(멀티유저 /tmp symlink 선점 방지). update.sh와 락 기본값을 통일.
+# WRITER_LOCK/EMBED_LOCK 기본값은 update.sh와 반드시 동일해야 직렬화가 유지된다.
+_QMD_UID="$(/usr/bin/id -un 2>/dev/null || id -u 2>/dev/null || echo qmd)"
+_QMD_LOCK_BASE="${QMD_LOCK_BASE:-${TMPDIR:-/tmp}/qmd-auto-context-locks-${_QMD_UID}}"
+_QMD_CACHE_DIR="${QMD_CACHE_DIR:-$HOME/.cache/qmd}"
+mkdir -p "$_QMD_CACHE_DIR" "$_QMD_LOCK_BASE" 2>/dev/null || true
+
 QUEUE="${QMD_DIRTY_QUEUE:-$HOME/.config/qmd/dirty-queue}"
-WORKER_LOCK="${QMD_INDEX_WORKER_LOCKDIR:-/tmp/qmd-index-worker.lock.d}"
-WRITER_LOCK="${QMD_WRITER_LOCKDIR:-/tmp/qmd-update.lock.d}"
-EMBED_LOCK="${QMD_EMBED_LOCKDIR:-/tmp/qmd-embed.lock.d}"
-LOG="${QMD_RECALL_LOG:-/tmp/qmd-index-worker.log}"
+WORKER_LOCK="${QMD_INDEX_WORKER_LOCKDIR:-$_QMD_LOCK_BASE/qmd-index-worker.lock.d}"
+WRITER_LOCK="${QMD_WRITER_LOCKDIR:-$_QMD_LOCK_BASE/qmd-update.lock.d}"
+EMBED_LOCK="${QMD_EMBED_LOCKDIR:-$_QMD_LOCK_BASE/qmd-embed.lock.d}"
+LOG="${QMD_RECALL_LOG:-$_QMD_CACHE_DIR/index-worker.log}"
 QMD="${QMD_FAKE_QMD:-qmd}"
 
 log() { printf '[%s] index-worker: %s\n' "$(date '+%H:%M:%S')" "$*" >>"$LOG" 2>&1 || true; }
@@ -20,7 +30,6 @@ reload_daemon() {
   log "reload skipped: QMD_BACKEND_MANAGER unavailable"
 }
 
-[ -n "${QMD_SANDBOX:-}" ] && exit 0
 [ -f "$QUEUE" ] || exit 0
 
 # PATH 보정 (비대화형 hook 환경; update.sh와 동일)
@@ -39,13 +48,28 @@ fi
 echo "$$" > "$WORKER_LOCK/pid" 2>/dev/null || true
 trap 'rm -f "$WORKER_LOCK/pid" 2>/dev/null; rmdir "$WORKER_LOCK" 2>/dev/null || true' EXIT
 
-# 큐 스냅샷(원자적으로 비우고 처리 — 처리 중 새 enqueue는 다음 tick)
+# 큐 스냅샷(원자적으로 비우고 처리 — 처리 중 새 enqueue는 다음 tick).
+# macOS엔 flock(1) 명령이 없다. core/dirty_queue.py(enqueue)와 동일한 python fcntl.flock으로
+# 락을 잡아야 실제로 상호배제된다. flock(1)에 의존하지 않는다(cross-platform).
 SNAP="$(mktemp)"
-{
-  exec 9<"$QUEUE"; flock 9
-  cat "$QUEUE" >"$SNAP"; : >"$QUEUE"
-  flock -u 9; exec 9<&-
-} 2>/dev/null
+QMD_QUEUE="$QUEUE" QMD_SNAP="$SNAP" python3 - <<'PY' 2>/dev/null || true
+import fcntl
+import os
+
+queue = os.environ["QMD_QUEUE"]
+snap = os.environ["QMD_SNAP"]
+# r+ 로 열어 enqueue(append + LOCK_EX)와 직렬화. snapshot 후 truncate.
+with open(queue, "r+", encoding="utf-8") as f:
+    fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+    try:
+        data = f.read()
+        with open(snap, "w", encoding="utf-8") as s:
+            s.write(data)
+        f.seek(0)
+        f.truncate()
+    finally:
+        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+PY
 
 # dedupe (name\tpath) — bash 3.2 호환 (mapfile 미사용)
 ENTRIES=()

@@ -20,15 +20,15 @@ function selectionEvents(logPath) {
     .map((l) => JSON.parse(l)).filter((e) => e.event === 'qmd_recall_selection');
 }
 
-const PROMPT = '원오빌 문의 기반 정렬 어떻게 동작해?';
+const PROMPT = '검색 결과 정렬은 어떻게 동작해?';
 
 test('recall claude → additionalContext 생성', () => {
   const dir = mkdtempSync(join(tmpdir(), 'qmd-disp-'));
   mkdirSync(join(dir, '.agents'), { recursive: true });
-  writeFileSync(join(dir, '.agents', 'qmd-recall.json'), JSON.stringify({ collections: ['axiom'] }));
+  writeFileSync(join(dir, '.agents', 'qmd-recall.json'), JSON.stringify({ collections: ['sample'] }));
   try {
     const out = dispatch(['recall', 'claude'], { prompt: PROMPT, cwd: dir });
-    assert.match(JSON.parse(out).hookSpecificOutput.additionalContext, /\[axiom\]/);
+    assert.match(JSON.parse(out).hookSpecificOutput.additionalContext, /\[sample\]/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -36,7 +36,7 @@ test('engine 라벨이 selection 로그에 기록 (claude/codex/gemini)', () => 
   for (const engine of ['claude', 'codex', 'gemini']) {
     const dir = mkdtempSync(join(tmpdir(), `qmd-disp-${engine}-`));
     mkdirSync(join(dir, '.agents'), { recursive: true });
-    writeFileSync(join(dir, '.agents', 'qmd-recall.json'), JSON.stringify({ collections: ['axiom'] }));
+    writeFileSync(join(dir, '.agents', 'qmd-recall.json'), JSON.stringify({ collections: ['sample'] }));
     const logPath = join(dir, 'r.log');
     try {
       dispatch(['recall', engine], { prompt: PROMPT, cwd: dir }, { QMD_RECALL_LOG: logPath });
@@ -70,7 +70,7 @@ test('posttool action → 비-스토리 입력에서 graceful 종료', () => {
   // collectionPaths 없는 config + 비-스토리 경로 → posttool이 빈 출력으로 graceful 종료
   const dir = mkdtempSync(join(tmpdir(), 'qmd-posttool-'));
   mkdirSync(join(dir, '.agents'), { recursive: true });
-  writeFileSync(join(dir, '.agents', 'qmd-recall.json'), JSON.stringify({ collections: ['axiom'] }));
+  writeFileSync(join(dir, '.agents', 'qmd-recall.json'), JSON.stringify({ collections: ['sample'] }));
   try {
     assert.doesNotThrow(() =>
       dispatch(['posttool', 'claude'], {

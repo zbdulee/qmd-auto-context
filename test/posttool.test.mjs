@@ -108,7 +108,7 @@ test('events 에 postToolUse 없으면 posttool core skip', () => {
     const out = execFileSync('python3', ['core/posttool.py'], {
       input: JSON.stringify({
         hook_event_name: 'PostToolUse',
-        tool_input: { file_path: join(tempDir, '04_Manuscript', 'ep001.md'), content: '원오빌 문의 기반 정렬 내용을 충분히 길게 수정' },
+        tool_input: { file_path: join(tempDir, '04_Manuscript', 'ep001.md'), content: '검색 결과 정렬은 어떻게 동작하는지 내용을 충분히 길게 수정' },
         cwd: tempDir,
       }),
       encoding: 'utf8',
