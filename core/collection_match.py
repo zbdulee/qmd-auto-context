@@ -1,15 +1,51 @@
 #!/usr/bin/env python3
 import argparse
+import fnmatch
 import json
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.resolve()))
+import resolve_paths as qmd_resolve_paths
+
+
+def _resolve_rel(cwd_path, rel):
+    # safe_collection_path와 동일한 해석: '~' 홈 확장, 절대경로는 그대로,
+    # 상대경로는 cwd 기준. (버그 B: expanduser 누락 불일치 수정)
+    candidate = Path(rel).expanduser()
+    if not candidate.is_absolute():
+        candidate = cwd_path / candidate
+    return candidate.resolve()
 
 
 def select_collections(edited_paths, cwd, config):
     cwd_path = Path(cwd).resolve()
+    roots = qmd_resolve_paths.allowed_roots(config)
+    collection_paths = config.get("collectionPaths") or {}
+    if not isinstance(collection_paths, dict):
+        collection_paths = {}
+    collections = config.get("collections")
+    if not isinstance(collections, list):
+        collections = []
     coll_dirs = {}
-    for name, rel in (config.get("collectionPaths") or {}).items():
-        if isinstance(name, str) and isinstance(rel, str):
-            coll_dirs[name] = (cwd_path / rel).resolve()
+    # resolve_paths와 동일하게 collections(실제 이름)를 순회하고, 각 이름을
+    # collectionPaths에서 fnmatch(첫 매칭)로 매핑한다. dirty-queue에는 wildcard
+    # 패턴 키가 아니라 실제 collection 이름이 들어간다. (버그 A 수정)
+    for name in collections:
+        if not isinstance(name, str):
+            continue
+        rel = None
+        for pat, val in collection_paths.items():
+            if isinstance(pat, str) and isinstance(val, str) and fnmatch.fnmatch(name, pat):
+                rel = val
+                break
+        if rel is None:
+            continue
+        # recall/update와 동일한 안전 경계(cwd 내부 또는 allowRoots 내부)를 적용한다.
+        if not qmd_resolve_paths.safe_collection_path(cwd_path, rel, roots):
+            print(f"skip unsafe collectionPath: {name} -> {rel}", file=sys.stderr)
+            continue
+        coll_dirs[name] = _resolve_rel(cwd_path, rel)
     selected = {}
     for p in edited_paths:
         ep = Path(p)

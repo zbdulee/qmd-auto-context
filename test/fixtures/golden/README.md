@@ -23,8 +23,8 @@
 
 ## 통합 시 결정 사항
 
-- claude/codex는 axiom fixture에서 **동일 포맷으로 수렴** → 통합 표준 포맷으로 이 형태 채택.
-- **prefix 스타일만 차이**: claude=첫 세그먼트 전체, codex/novel=하이픈 마지막 세그먼트(tag).
-  - 컬렉션명에 하이픈 없으면 동일(`axiom`→`axiom`). 하이픈 있을 때만 갈림(`yakbbal-manuscript`→ claude `yakbbal-manuscript` vs codex `manuscript`).
-  - **코어 결정**: prefix는 tag 스타일(마지막 세그먼트)을 표준으로 한다(novel UX 보존). Task 4에서 적용.
-- novel 전용 골든(멀티컬렉션·tag prefix)은 novel 컬렉션이 포함된 fixture가 필요하므로 Task 4/6에서 별도 검증.
+- claude/codex는 단일 컬렉션 fixture에서 **동일 포맷으로 수렴** → 통합 표준 포맷으로 이 형태 채택.
+- **prefix 스타일만 차이**: claude=첫 세그먼트 전체, codex/story=하이픈 마지막 세그먼트(tag).
+  - 컬렉션명에 하이픈 없으면 동일(`sample`→`sample`). 하이픈 있을 때만 갈림(`story-manuscript`→ claude `story-manuscript` vs codex `manuscript`).
+  - **코어 결정**: prefix는 tag 스타일(마지막 세그먼트)을 표준으로 한다(story UX 보존). Task 4에서 적용.
+- story 전용 골든(멀티컬렉션·tag prefix)은 story 컬렉션이 포함된 fixture가 필요하므로 Task 4/6에서 별도 검증.

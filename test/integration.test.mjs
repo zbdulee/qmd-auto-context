@@ -28,7 +28,7 @@ function runRecallAsync(input, env) {
 
 test('라이브 데몬 recall 스모크', { skip: !process.env.QMD_LIVE }, () => {
   const out = execFileSync('python3', ['core/recall.py'], {
-    input: JSON.stringify({ prompt: '원오빌 문의 기반 정렬', cwd: '/Users/dulee/work/axiom' }),
+    input: JSON.stringify({ prompt: '검색 결과 정렬은 어떻게 동작해', cwd: '/Users/example/work/sample' }),
     encoding: 'utf8',
   });
   assert.ok(out.includes('additionalContext'));
@@ -73,7 +73,7 @@ test('mock HTTP daemon recall integration validates query payload and context ou
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
     const { port } = server.address();
     const out = await runRecallAsync(
-      JSON.stringify({ prompt: '원오빌 문의 기반 정렬 어떻게 동작해?', cwd: tempDir }),
+      JSON.stringify({ prompt: '검색 결과 정렬은 어떻게 동작해?', cwd: tempDir }),
       { ...process.env, QMD_DAEMON_URL: `http://127.0.0.1:${port}` },
     );
 

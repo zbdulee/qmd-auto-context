@@ -12,7 +12,10 @@ LOG="${QMD_DAEMON_LOG:-$HOME/.cache/qmd/mcp.daemon.log}"
 MAX_BYTES=$((10 * 1024 * 1024))   # 10MB
 
 [ -f "$LOG" ] || exit 0
-SIZE=$(stat -f%z "$LOG" 2>/dev/null || echo 0)
+# cross-platform 파일 크기: BSD(macOS) stat -f%z → GNU(Linux) stat -c%s → wc -c 폴백.
+SIZE=$(stat -f%z "$LOG" 2>/dev/null || stat -c%s "$LOG" 2>/dev/null || wc -c <"$LOG" 2>/dev/null || echo 0)
+SIZE=$(printf '%s' "$SIZE" | tr -dc '0-9')
+[ -z "$SIZE" ] && SIZE=0
 [ "$SIZE" -lt "$MAX_BYTES" ] && exit 0
 
 mv -f "$LOG" "$LOG.1" 2>/dev/null || exit 0

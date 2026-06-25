@@ -107,7 +107,7 @@ pending 프로젝트에서 Edit·Write·apply_patch 등 편집 도구를 쓰면 
   "collectionPaths": { "proj-manuscript": "04_Manuscript" }, // posttool reader-facing 판별
   "lexicalPatterns": ["ep"],         // EP/화 번호 exact 검색 (소설 도메인)
   "prefixStyle": "full",             // "full"(기본) | "tag"(마지막 세그먼트)
-  "skipPaths": [".zb-context"],
+  "skipPaths": [".auto-context-ignore"],
   "topN": 3, "queryTimeout": 5
 }
 ```
@@ -117,6 +117,16 @@ pending 프로젝트에서 Edit·Write·apply_patch 등 편집 도구를 쓰면 
 ## 설치 / 제거
 
 Claude·Codex는 marketplace 플러그인 설치만으로 훅과 skill이 등록된다. 이 저장소는 더 이상 제품용 `install.sh`/`uninstall.sh`를 제공하지 않는다.
+
+```bash
+# 1. Claude Code: marketplace 등록 후 플러그인 설치
+/plugin marketplace add zbdulee/qmd-auto-context
+/plugin install qmd-auto-context
+
+# 2. qmd 의존성 설치 (지원 버전 >=2.5.3 <3.0.0)
+bun add -g @tobilu/qmd@2.5.3
+# 또는: npm install -g @tobilu/qmd@2.5.3
+```
 
 ```bash
 bash scripts/agy-local-hook-install.sh <프로젝트>  # Gemini(agy): 해당 프로젝트 .agents/hooks.json에 PostToolUse(posttool+index) 등록

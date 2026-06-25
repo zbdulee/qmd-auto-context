@@ -20,15 +20,15 @@ function selectionEvents(logPath) {
     .map((l) => JSON.parse(l)).filter((e) => e.event === 'qmd_recall_selection');
 }
 
-const PROMPT = '원오빌 문의 기반 정렬 어떻게 동작해?';
+const PROMPT = '검색 결과 정렬은 어떻게 동작해?';
 
 test('recall claude → additionalContext 생성', () => {
   const dir = mkdtempSync(join(tmpdir(), 'qmd-disp-'));
   mkdirSync(join(dir, '.agents'), { recursive: true });
-  writeFileSync(join(dir, '.agents', 'qmd-recall.json'), JSON.stringify({ collections: ['axiom'] }));
+  writeFileSync(join(dir, '.agents', 'qmd-recall.json'), JSON.stringify({ collections: ['sample'] }));
   try {
     const out = dispatch(['recall', 'claude'], { prompt: PROMPT, cwd: dir });
-    assert.match(JSON.parse(out).hookSpecificOutput.additionalContext, /\[axiom\]/);
+    assert.match(JSON.parse(out).hookSpecificOutput.additionalContext, /\[sample\]/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -36,7 +36,7 @@ test('engine 라벨이 selection 로그에 기록 (claude/codex/gemini)', () => 
   for (const engine of ['claude', 'codex', 'gemini']) {
     const dir = mkdtempSync(join(tmpdir(), `qmd-disp-${engine}-`));
     mkdirSync(join(dir, '.agents'), { recursive: true });
-    writeFileSync(join(dir, '.agents', 'qmd-recall.json'), JSON.stringify({ collections: ['axiom'] }));
+    writeFileSync(join(dir, '.agents', 'qmd-recall.json'), JSON.stringify({ collections: ['sample'] }));
     const logPath = join(dir, 'r.log');
     try {
       dispatch(['recall', engine], { prompt: PROMPT, cwd: dir }, { QMD_RECALL_LOG: logPath });
@@ -45,6 +45,39 @@ test('engine 라벨이 selection 로그에 기록 (claude/codex/gemini)', () => 
       assert.equal(ev[0].engine, engine, `engine=${engine}`);
     } finally { rmSync(dir, { recursive: true, force: true }); }
   }
+});
+
+// BUG-D regression: QMD_RECALL_LOG override가 없으면 hook 기본 로그가 /tmp가 아니라
+// 유저 격리 캐시 경로($HOME/.cache/qmd, QMD_CACHE_DIR override)여야 한다.
+test('BUG-D: QMD_RECALL_LOG 미지정 시 기본 로그는 /tmp가 아닌 캐시 경로', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'qmd-disp-log-'));
+  mkdirSync(join(dir, '.agents'), { recursive: true });
+  writeFileSync(join(dir, '.agents', 'qmd-recall.json'), JSON.stringify({ collections: ['sample'] }));
+  const cacheDir = join(dir, 'cache');
+  const env = { ...process.env, QMD_CACHE_DIR: cacheDir };
+  delete env.QMD_RECALL_LOG;
+  try {
+    execFileSync('bash', ['hooks/run-hook', 'recall', 'claude'], {
+      input: JSON.stringify({ prompt: PROMPT, cwd: dir }),
+      encoding: 'utf8',
+      env: { ...env, QMD_QUERY_FIXTURE: 'test/fixtures/daemon-response.json' },
+    });
+    // recall이 selection을 기본 로그(캐시 경로)에 기록했어야 한다.
+    assert.equal(existsSync(join(cacheDir, 'qmd-claude-hook.log')), true,
+      '기본 recall 로그가 캐시 경로에 생성돼야 함(/tmp 아님)');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// BUG-D regression: QMD_RECALL_LOG override는 반드시 존중돼야 한다(기존 동작 보존).
+test('BUG-D: QMD_RECALL_LOG override가 존중된다', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'qmd-disp-logov-'));
+  mkdirSync(join(dir, '.agents'), { recursive: true });
+  writeFileSync(join(dir, '.agents', 'qmd-recall.json'), JSON.stringify({ collections: ['sample'] }));
+  const logPath = join(dir, 'custom.log');
+  try {
+    dispatch(['recall', 'claude'], { prompt: PROMPT, cwd: dir }, { QMD_CACHE_DIR: join(dir, 'cache'), QMD_RECALL_LOG: logPath });
+    assert.equal(existsSync(logPath), true, 'override 경로에 로그가 기록돼야 함');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('CLAUDE_HEADLESS=1 → 무출력', () => {
@@ -70,7 +103,7 @@ test('posttool action → 비-스토리 입력에서 graceful 종료', () => {
   // collectionPaths 없는 config + 비-스토리 경로 → posttool이 빈 출력으로 graceful 종료
   const dir = mkdtempSync(join(tmpdir(), 'qmd-posttool-'));
   mkdirSync(join(dir, '.agents'), { recursive: true });
-  writeFileSync(join(dir, '.agents', 'qmd-recall.json'), JSON.stringify({ collections: ['axiom'] }));
+  writeFileSync(join(dir, '.agents', 'qmd-recall.json'), JSON.stringify({ collections: ['sample'] }));
   try {
     assert.doesNotThrow(() =>
       dispatch(['posttool', 'claude'], {

@@ -50,11 +50,11 @@ gate는 **새 판정 로직을 만들지 않고** `config.load_project_config(cw
 4. **`run-hook`**: `gate` action 추가(기존 recall|update|posttool|index에 5번째) → `preflight_gate.py` 위임.
 5. **hooks (matcher는 PostToolUse와 동일 집합 — 우회 방지)**: `hooks.json` PreToolUse matcher = 해당 플랫폼 PostToolUse와 동일(Claude `Edit|Write`). `hooks-codex.json` PreToolUse matcher = **`apply_patch|Edit|Write`** (현 PostToolUse와 동일; `apply_patch`만 잡으면 Edit/Write 경로로 우회됨).
 
-## 범용화 (axiom 특화 제거)
+## 범용화 (특정 repo 특화 제거)
 
 - **좁은 후보 우선**: `docs/current`, `docs/plans` 등 명확히 좁은 디렉터리 우선.
 - **넓은 후보 가드(확정 요건)**: `docs`(fallback)·`.codex`는 **파일수 ≤200 AND 총 크기 ≤5MB를 모두 만족할 때만** 후보 채택(둘 중 하나라도 초과하면 제외). 무분별 루트성 인덱싱 방지. (임계값은 구현 시 상수로 고정, 향후 조정 가능)
-- `docs/product-open/pc-web` 같은 repo 전용 경로는 기본 제외. 특수 repo는 `--recommend` 보고 직접 `.auto-context.json` 작성(axiom config가 예시). 향후 프로젝트 로컬 후보 override.
+- `docs/product-open/pc-web` 같은 repo 전용 경로는 기본 제외. 특수 repo는 `--recommend` 보고 직접 `.auto-context.json` 작성(대규모 모노레포 config가 예시). 향후 프로젝트 로컬 후보 override.
 
 ## deny reason (짧게 + 단일 생성기)
 

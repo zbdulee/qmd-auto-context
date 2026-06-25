@@ -79,6 +79,37 @@ test("컬렉션 밖 편집 → 큐 미생성", () => {
   assert.equal(existsSync(q), false);
 });
 
+test("cwd 밖 절대경로 collectionPath 편집 → 큐 미생성 (boundary)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "qproj-"));
+  const outside = mkdtempSync(join(tmpdir(), "qoutside-"));
+  writeFileSync(join(dir, ".auto-context.json"), JSON.stringify({
+    collections: ["leak"], indexing: true,
+    collectionPaths: { "leak": outside },
+  }));
+  writeFileSync(join(outside, "secret.md"), "x\n");
+  const q = join(mkdtempSync(join(tmpdir(), "q-")), "queue");
+  enqueue(dir, { hook_event_name: "PostToolUse", cwd: dir,
+    tool_input: { file_path: join(outside, "secret.md") } }, q);
+  assert.equal(existsSync(q), false);
+});
+
+test("allowRoots 안의 절대경로 collectionPath 편집 → 큐에 적재", () => {
+  const dir = mkdtempSync(join(tmpdir(), "qproj-"));
+  const outside = mkdtempSync(join(tmpdir(), "qoutside-"));
+  writeFileSync(join(dir, ".auto-context.json"), JSON.stringify({
+    collections: ["shared"], indexing: true,
+    collectionPaths: { "shared": outside },
+    allowRoots: [outside],
+  }));
+  writeFileSync(join(outside, "doc.md"), "x\n");
+  const q = join(mkdtempSync(join(tmpdir(), "q-")), "queue");
+  enqueue(dir, { hook_event_name: "PostToolUse", cwd: dir,
+    tool_input: { file_path: join(outside, "doc.md") } }, q);
+  const lines = readFileSync(q, "utf8").trim().split("\n");
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /^shared\t/);
+});
+
 test("sandbox → 무동작", () => {
   const proj = setupProj(["x-manuscript"]);
   const q = join(mkdtempSync(join(tmpdir(), "q-")), "queue");

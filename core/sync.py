@@ -3,7 +3,6 @@ import argparse
 import hashlib
 import json
 import os
-import shutil
 import sys
 import time
 from pathlib import Path
@@ -119,8 +118,15 @@ def acquire_lock():
 def release_lock(lock):
     if not lock:
         return
+    # 우리 락 구조는 디렉토리 안에 pid 파일만 둔다. shutil.rmtree로 통째 지우는 대신
+    # pid 파일만 unlink 후 빈 디렉토리를 rmdir 한다. 예상 밖 내용이 있으면 rmdir이
+    # 실패해(ENOTEMPTY) 보호된다 — env(QMD_SYNC_LOCKDIR) 오설정 시 재귀 삭제 방지.
     try:
-        shutil.rmtree(lock)
+        (lock / "pid").unlink()
+    except OSError:
+        pass
+    try:
+        os.rmdir(lock)
     except OSError:
         pass
 

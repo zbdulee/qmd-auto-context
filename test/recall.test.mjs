@@ -22,11 +22,11 @@ function recall(payload, env = {}) {
 test('fixture 응답 → additionalContext 생성', () => {
   const dir = mkdtempSync(join(tmpdir(), 'qmd-recall-'));
   mkdirSync(join(dir, '.agents'), { recursive: true });
-  writeFileSync(join(dir, '.agents', 'qmd-recall.json'), JSON.stringify({ collections: ['axiom'] }));
+  writeFileSync(join(dir, '.agents', 'qmd-recall.json'), JSON.stringify({ collections: ['sample'] }));
   try {
-    const r = recall({ prompt: '원오빌 문의 기반 정렬 어떻게 동작해?', cwd: dir });
+    const r = recall({ prompt: '검색 결과 정렬은 어떻게 동작해?', cwd: dir });
     assert.ok(r);
-    assert.match(r.hookSpecificOutput.additionalContext, /\[axiom\]/);   // collection prefix 포맷 유지
+    assert.match(r.hookSpecificOutput.additionalContext, /\[sample\]/);   // collection prefix 포맷 유지
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -37,7 +37,7 @@ test('fixture 응답 → additionalContext 생성', () => {
 test('명시 설정 없는(미동의) 폴더는 fallback collection 없이 빈 출력 (opt-in 일치)', () => {
   const dir = mkdtempSync(join(tmpdir(), 'qmd-nooptin-'));   // .agents 없음
   try {
-    const r = recall({ prompt: '원오빌 문의 기반 정렬 어떻게 동작해?', cwd: dir });
+    const r = recall({ prompt: '검색 결과 정렬은 어떻게 동작해?', cwd: dir });
     assert.equal(r, null, '미동의 폴더에서 fallback collection 으로 검색하면 안 됨');
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -58,18 +58,18 @@ test('skipPaths 필터 동작', async () => {
     fs.mkdirSync(agentsDir);
   }
   
-  // Create .agents/qmd-recall.json under tempDir with skipPaths targeting 'Interactions'
+  // Create .agents/qmd-recall.json under tempDir with skipPaths targeting the fixture doc path
   const config = {
     name: 'test-project',
-    collections: ['axiom'],
-    skipPaths: ['Interactions']
+    collections: ['sample'],
+    skipPaths: ['guide']
   };
   
   fs.writeFileSync(path.join(agentsDir, 'qmd-recall.json'), JSON.stringify(config));
   
   try {
     const r = recall({
-      prompt: '원오빌 문의 기반 정렬 어떻게 동작해?',
+      prompt: '검색 결과 정렬은 어떻게 동작해?',
       cwd: tempDir
     });
     
@@ -91,12 +91,12 @@ test('events 에 userPromptSubmit 없으면 recall core skip', () => {
   try {
     mkdirSync(join(tempDir, '.agents'), { recursive: true });
     writeFileSync(join(tempDir, '.agents', 'qmd-recall.json'), JSON.stringify({
-      collections: ['axiom'],
+      collections: ['sample'],
       events: ['sessionStart', 'postToolUse'],
     }));
     const r = recall({
       hook_event_name: 'UserPromptSubmit',
-      prompt: '원오빌 문의 기반 정렬 어떻게 동작해?',
+      prompt: '검색 결과 정렬은 어떻게 동작해?',
       cwd: tempDir,
     });
     assert.equal(r, null);
@@ -110,7 +110,7 @@ test('legacy novel manuscript collection은 lexicalPatterns 없이도 EP exact �
   try {
     mkdirSync(join(tempDir, '.agents'), { recursive: true });
     writeFileSync(join(tempDir, '.agents', 'qmd-recall.json'), JSON.stringify({
-      collections: ['yakbbal-manuscript'],
+      collections: ['story-manuscript'],
       minScore: 0.99,
     }));
     const r = recall({
@@ -126,7 +126,7 @@ test('legacy novel manuscript collection은 lexicalPatterns 없이도 EP exact �
 
 test('claude 골든과 포맷 동일', () => {
   const golden = JSON.parse(readFileSync('test/fixtures/golden/recall-claude.json', 'utf8'));
-  const r = recall({ prompt: '원오빌 문의 기반 정렬 어떻게 동작해?', cwd: 'test/fixtures/proj' });
+  const r = recall({ prompt: '검색 결과 정렬은 어떻게 동작해?', cwd: 'test/fixtures/proj' });
   
   assert.ok(r, 'recall output should not be null');
   
@@ -139,7 +139,7 @@ test('claude 골든과 포맷 동일', () => {
 
 test('recall core: QMD_SANDBOX=true → 무출력 exit 0', () => {
   const out = execFileSync('python3', ['core/recall.py'], {
-    input: JSON.stringify({ prompt: '원오빌 문의 기반 정렬 어떻게 동작해?', cwd: '/Users/dulee/work/axiom' }),
+    input: JSON.stringify({ prompt: '검색 결과 정렬은 어떻게 동작해?', cwd: '/Users/example/work/sample' }),
     env: { ...process.env, QMD_SANDBOX: 'true' },
   });
   assert.equal(out.toString().trim(), '');
@@ -147,34 +147,34 @@ test('recall core: QMD_SANDBOX=true → 무출력 exit 0', () => {
 
 test('recall core: --sandbox 인자 → 무출력 exit 0', () => {
   const out = execFileSync('python3', ['core/recall.py', '--sandbox'], {
-    input: JSON.stringify({ prompt: '원오빌 문의 기반 정렬 어떻게 동작해?', cwd: '/Users/dulee/work/axiom' }),
+    input: JSON.stringify({ prompt: '검색 결과 정렬은 어떻게 동작해?', cwd: '/Users/example/work/sample' }),
   });
   assert.equal(out.toString().trim(), '');
 });
 
 test('.auto-context.json indexing:true → recall 동작', () => {
   const dir = mkdtempSync(join(tmpdir(), 'qmd-r-'));
-  writeFileSync(join(dir, '.auto-context.json'), JSON.stringify({ indexing: true, collections: ['axiom'] }));
+  writeFileSync(join(dir, '.auto-context.json'), JSON.stringify({ indexing: true, collections: ['sample'] }));
   try {
-    const r = recall({ prompt: '원오빌 문의 기반 정렬 어떻게 동작해?', cwd: dir });
-    assert.match(r.hookSpecificOutput.additionalContext, /\[axiom\]/);
+    const r = recall({ prompt: '검색 결과 정렬은 어떻게 동작해?', cwd: dir });
+    assert.match(r.hookSpecificOutput.additionalContext, /\[sample\]/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('.auto-context.json indexing:false → recall 빈 출력', () => {
   const dir = mkdtempSync(join(tmpdir(), 'qmd-rf-'));
-  writeFileSync(join(dir, '.auto-context.json'), JSON.stringify({ indexing: false, collections: ['axiom'] }));
+  writeFileSync(join(dir, '.auto-context.json'), JSON.stringify({ indexing: false, collections: ['sample'] }));
   try {
-    assert.equal(recall({ prompt: '원오빌 문의 기반 정렬 어떻게 동작해?', cwd: dir }), null);
+    assert.equal(recall({ prompt: '검색 결과 정렬은 어떻게 동작해?', cwd: dir }), null);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('레거시 .agents/qmd-recall.json → recall 동작(하위호환)', () => {
   const dir = mkdtempSync(join(tmpdir(), 'qmd-rl-'));
   mkdirSync(join(dir, '.agents'), { recursive: true });
-  writeFileSync(join(dir, '.agents', 'qmd-recall.json'), JSON.stringify({ collections: ['axiom'] }));
+  writeFileSync(join(dir, '.agents', 'qmd-recall.json'), JSON.stringify({ collections: ['sample'] }));
   try {
-    const r = recall({ prompt: '원오빌 문의 기반 정렬 어떻게 동작해?', cwd: dir });
-    assert.match(r.hookSpecificOutput.additionalContext, /\[axiom\]/);
+    const r = recall({ prompt: '검색 결과 정렬은 어떻게 동작해?', cwd: dir });
+    assert.match(r.hookSpecificOutput.additionalContext, /\[sample\]/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
