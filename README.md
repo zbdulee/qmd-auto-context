@@ -1,14 +1,15 @@
 # qmd auto-context
 
-qmd 기반 자동 컨텍스트 주입 플러그인. **Claude Code · Codex**에서는 세션 시작 인덱스 갱신, 프롬프트별 관련 문서 recall, 편집 후 연속성 힌트와 자동 인덱싱을 제공한다. **Antigravity(Gemini)** 는 프로젝트 로컬 훅으로 편집 후 연속성 힌트와 자동 인덱싱만 지원한다.
+qmd 기반 자동 컨텍스트 주입 플러그인. **Claude Code · Codex · Hermes Agent**에서는 세션 시작 인덱스 갱신, 프롬프트별 관련 문서 recall, 편집 전 gate, 편집 후 자동 인덱싱을 제공한다. Claude·Codex는 편집 후 연속성 힌트도 모델 컨텍스트로 주입한다. **Antigravity(Gemini)** 는 프로젝트 로컬 훅으로 편집 후 연속성 힌트와 자동 인덱싱만 지원한다.
 
-흩어져 있던 글로벌/프로젝트 qmd 훅을 단일 리포로 SSOT화했다. 플랫폼 무관 `core/` 1벌 + `hooks/run-hook` 단일 디스패처 구조.
+흩어져 있던 글로벌/프로젝트 qmd 훅을 단일 리포로 SSOT화했다. 플랫폼 무관 `core/` 1벌 + Claude/Codex/Gemini용 `hooks/run-hook` 디스패처 + Hermes용 얇은 Python plugin adapter 구조.
 
 ## 구조
 
 ```
 core/        recall.py · update.sh · posttool.py · index_enqueue.py · sync.py · backend_manager.sh · config.py · keywords.py · resolve_paths.py · collection_match.py · agy_local_install.py
 hooks/       run-hook (단일 디스패처) · hooks.json · hooks-codex.json
+hermes_adapter/  Hermes Agent plugin hook adapter (pre_llm_call/on_session_start/pre_tool_call/post_tool_call)
 skills/      sync · query · update (수동 워크플로우)
 backend/     daemon.sh · keepalive.sh · logrotate.sh · index_worker.sh
 scripts/     agy-local-hook-install.sh · cleanup-legacy.sh
@@ -17,15 +18,16 @@ test/        *.test.mjs (node:test)
 
 ## 동작
 
-| 훅 | 역할 (core 스크립트) | Claude | Codex | Gemini(agy) |
-|----|------|--------|-------|--------|
-| 세션 시작 | qmd 인덱스 갱신 (`update.sh`) | `SessionStart` | `SessionStart` | — |
-| 프롬프트 제출 | 관련 문서 recall (`recall.py`) | `UserPromptSubmit` | `UserPromptSubmit` | — |
-| 편집 후 | 연속성 힌트 (`posttool.py`) + 자동 인덱싱 enqueue (`index_enqueue.py`) | `PostToolUse` | `PostToolUse` | `PostToolUse` |
+| 훅 | 역할 (core 스크립트) | Claude | Codex | Hermes Agent | Gemini(agy) |
+|----|------|--------|-------|--------------|-------------|
+| 세션 시작 | qmd 인덱스 갱신 (`update.sh`) | `SessionStart` | `SessionStart` | `on_session_start` | — |
+| 프롬프트 제출 | 관련 문서 recall (`recall.py`) | `UserPromptSubmit` | `UserPromptSubmit` | `pre_llm_call` | — |
+| 편집 전 | pending 프로젝트 gate (`preflight_gate.py`) | `PreToolUse` | `PreToolUse` | `pre_tool_call` | — |
+| 편집 후 | 연속성 힌트 (`posttool.py`) + 자동 인덱싱 enqueue (`index_enqueue.py`) | `PostToolUse` | `PostToolUse` | `post_tool_call`(index 중심) | `PostToolUse` |
 
-`hooks/run-hook <action> <engine>` 단일 디스패처가 모든 플랫폼의 훅 진입점이다(action: recall/update/posttool/index/gate). engine 라벨/로그 경로/sandbox 가드 후 `core/backend_manager.sh`로 qmd backend를 ensure/kick하고 `core/<script>`로 stdin을 패스스루한다.
+Claude/Codex/Gemini는 `hooks/run-hook <action> <engine>` 디스패처가 훅 진입점이다(action: recall/update/posttool/index/gate). Hermes Agent는 `plugin.yaml`/`__init__.py` 기반 Python plugin으로 `hermes_adapter/`가 동일한 `core/<script>`에 JSON stdin을 패스스루한다. 두 경로 모두 engine 라벨/로그 경로/sandbox 가드 후 `core/backend_manager.sh`로 qmd backend를 ensure/kick하고 **도메인 로직은 core/가 SSOT**로 유지한다.
 
-Claude·Codex는 marketplace 플러그인으로 세 이벤트를 모두 받는다.
+Claude·Codex는 marketplace 플러그인으로 세 이벤트를 모두 받는다. Hermes Agent는 Hermes plugin system의 `pre_llm_call`(Claude `UserPromptSubmit` 대응), `on_session_start`, `pre_tool_call`, `post_tool_call`을 쓴다.
 
 > ⚠️ **Gemini(agy)는 실험적(experimental) 지원이다.** marketplace를 지원하지 않아 `scripts/agy-local-hook-install.sh <프로젝트>`로 `.agents/hooks.json`에 `PostToolUse`(posttool+index)만 등록한다 — 즉 **편집 후 연속성 힌트(posttool, recall 위임)+자동 인덱싱(index)만** 동작하고, 세션 인덱스 갱신(`update`)·프롬프트 단위 recall(`UserPromptSubmit`)은 아직 없다(`AfterTool` 미발동으로 `PostToolUse` matcher `write_to_file|replace_file_content|multi_replace_file_content` 사용). backend는 동일한 plugin runtime manager가 ensure/kick한다. **프롬프트 recall·세션 update 등 완전 지원은 향후 제공 예정.**
 
@@ -37,11 +39,11 @@ flowchart TD
     B["프롬프트 제출"]
     C["파일 편집 (Write/Edit)"]
 
-    A -->|"SessionStart · claude/codex"| RH
-    B -->|"UserPromptSubmit · claude/codex"| RH
-    C -->|"PostToolUse · claude/codex/agy"| RH
+    A -->|"SessionStart · claude/codex<br/>on_session_start · hermes"| RH
+    B -->|"UserPromptSubmit · claude/codex<br/>pre_llm_call · hermes"| RH
+    C -->|"PostToolUse · claude/codex/agy<br/>post_tool_call · hermes"| RH
 
-    RH{{"hooks/run-hook · 단일 디스패처"}}
+    RH{{"hooks/run-hook 또는 hermes_adapter"}}
     RH --> BM["backend_manager.sh<br/>ensure / warm / rotate / kick-index"]
     BM -->|update| U["update.sh<br/>qmd 인덱스 갱신"]
     BM -->|recall| R["recall.py<br/>키워드→관련 문서 검색"]
@@ -60,7 +62,7 @@ flowchart TD
     W -.->|"새 임베딩 시 데몬 reload"| D
 ```
 
-> **플랫폼 차이**: Claude·Codex는 세 이벤트(`SessionStart`/`UserPromptSubmit`/`PostToolUse`)를 모두 받지만, **Gemini(agy)는 `PostToolUse`만**(실험적) 받는다 — 세션 시작 인덱스 갱신(`update`)·프롬프트 recall이 없고 **편집 후 연속성 힌트(`posttool`)+자동 인덱싱(`index`)만** 동작한다. agy 완전 지원은 향후 제공 예정.
+> **플랫폼 차이**: Claude·Codex는 세 이벤트(`SessionStart`/`UserPromptSubmit`/`PostToolUse`)를 모두 받고, Hermes Agent는 `on_session_start`/`pre_llm_call`/`pre_tool_call`/`post_tool_call`로 같은 core를 호출한다. 단, Hermes `post_tool_call`은 observer hook이라 반환값을 같은 턴 모델 컨텍스트에 주입하지 않는다 — Hermes 경로의 편집 후 처리는 자동 인덱싱 중심이며 posttool 힌트는 best-effort 실행만 한다. **Gemini(agy)는 `PostToolUse`만**(실험적) 받는다 — 세션 시작 인덱스 갱신(`update`)·프롬프트 recall이 없고 **편집 후 연속성 힌트(`posttool`)+자동 인덱싱(`index`)만** 동작한다. agy 완전 지원은 향후 제공 예정.
 
 ### qmd 미설치 / 데몬 부재 시
 
@@ -94,7 +96,7 @@ bash core/update.sh --skip [<프로젝트경로>]                   # 이 프로
 
 ### gate (미설정 프로젝트 편집 차단)
 
-pending 프로젝트에서 Edit·Write·apply_patch 등 편집 도구를 쓰면 **`PreToolUse` 훅이 deny**로 차단한다(Claude·Codex 적용, agy 제외). 세션 시작 시 안내된 5가지 선택지(추천 확인 / 추천 적용 / 직접 작성 / 거절 / 이번만 건너뜀) 중 하나를 실행하면 통과한다. `--skip`은 TTL 2h 마커 파일을 생성해 해당 세션 내 gate를 해제한다.
+pending 프로젝트에서 Edit·Write·apply_patch 등 편집 도구를 쓰면 **`PreToolUse`/`pre_tool_call` 훅이 deny/block**으로 차단한다(Claude·Codex·Hermes 적용, agy 제외). 세션 시작 시 안내된 5가지 선택지(추천 확인 / 추천 적용 / 직접 작성 / 거절 / 이번만 건너뜀) 중 하나를 실행하면 통과한다. `--skip`은 TTL 2h 마커 파일을 생성해 해당 세션 내 gate를 해제한다.
 
 상태는 명시 boolean `indexing`으로 결정된다(`true`=동의 / `false`=거절 / 파일 없음=pending):
 
@@ -116,12 +118,16 @@ pending 프로젝트에서 Edit·Write·apply_patch 등 편집 도구를 쓰면 
 
 ## 설치 / 제거
 
-Claude·Codex는 marketplace 플러그인 설치만으로 훅과 skill이 등록된다. 이 저장소는 더 이상 제품용 `install.sh`/`uninstall.sh`를 제공하지 않는다.
+Claude·Codex는 marketplace 플러그인 설치만으로 훅과 skill이 등록된다. Hermes Agent는 Hermes plugin system에 설치/enable하면 Python hook adapter가 등록된다. 이 저장소는 더 이상 제품용 `install.sh`/`uninstall.sh`를 제공하지 않는다.
 
 ```bash
 # 1. Claude Code: marketplace 등록 후 플러그인 설치
 /plugin marketplace add zbdulee/qmd-auto-context
 /plugin install qmd-auto-context
+
+# Hermes Agent: plugin 설치 후 enable (Hermes plugin은 opt-in)
+hermes plugins install zbdulee/qmd-auto-context
+hermes plugins enable qmd-auto-context
 
 # 2. qmd 의존성 설치 (지원 버전 >=2.5.3 <3.0.0)
 bun add -g @tobilu/qmd@2.5.3

@@ -1,0 +1,273 @@
+"""Bridge Hermes Agent plugin hooks to the existing qmd-auto-context core.
+
+This module is intentionally thin: it adapts Hermes hook callback shapes to the
+same JSON payloads used by Claude/Codex/Gemini dispatchers, then delegates to
+core/recall.py, core/update.sh, core/posttool.py, core/index_enqueue.py, and
+core/preflight_gate.py. qmd backend/config/indexing logic stays in core/.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any, Dict, Optional, Tuple
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_TIMEOUT = 8.0
+def _plugin_root() -> Path:
+    override = os.environ.get("QMD_HERMES_PLUGIN_ROOT_FOR_TEST")
+    if override:
+        return Path(override).resolve()
+    return Path(__file__).resolve().parents[1]
+
+
+def _core_path(*parts: str) -> Path:
+    return _plugin_root().joinpath(*parts)
+
+
+def _cwd(cwd: Optional[str] = None, **kwargs: Any) -> str:
+    candidate = (
+        cwd
+        or kwargs.get("cwd")
+        or kwargs.get("working_directory")
+        or os.environ.get("TERMINAL_CWD")
+        or ""
+    )
+    if candidate:
+        return str(candidate)
+    try:
+        return os.getcwd()
+    except OSError:
+        return str(Path.home())
+
+
+def _env() -> Dict[str, str]:
+    env = os.environ.copy()
+    env["QMD_ENGINE"] = "hermes"
+    if not env.get("QMD_RECALL_LOG"):
+        cache_dir = env.get("QMD_CACHE_DIR") or str(Path.home() / ".cache" / "qmd")
+        env["QMD_RECALL_LOG"] = str(Path(cache_dir) / "qmd-hermes-hook.log")
+    return env
+
+
+def _manager_path() -> str:
+    return os.environ.get("QMD_BACKEND_MANAGER") or str(_core_path("core", "backend_manager.sh"))
+
+
+def _run(
+    argv: list[str],
+    *,
+    payload: Optional[dict] = None,
+    timeout: float = DEFAULT_TIMEOUT,
+) -> subprocess.CompletedProcess[str]:
+    stdin = json.dumps(payload or {}, ensure_ascii=False) if payload is not None else None
+    return subprocess.run(
+        argv,
+        input=stdin,
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+        env=_env(),
+    )
+
+
+def _run_quiet(argv: list[str], *, timeout: float = DEFAULT_TIMEOUT) -> None:
+    try:
+        subprocess.run(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=timeout,
+            env=_env(),
+            check=False,
+        )
+    except Exception as exc:  # pragma: no cover - defensive hook isolation
+        logger.debug("qmd-auto-context manager command failed: %s", exc)
+
+
+def _ensure_background() -> None:
+    if os.environ.get("QMD_QUERY_FIXTURE"):
+        return
+    try:
+        subprocess.Popen(
+            ["bash", _manager_path(), "ensure"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=_env(),
+        )
+    except Exception as exc:  # pragma: no cover - defensive hook isolation
+        logger.debug("qmd-auto-context background ensure failed: %s", exc)
+
+
+def _json_stdout(proc: subprocess.CompletedProcess[str]) -> Optional[dict]:
+    out = (proc.stdout or "").strip()
+    if not out:
+        return None
+    try:
+        parsed = json.loads(out)
+    except json.JSONDecodeError:
+        logger.debug("qmd-auto-context core returned non-json stdout: %r", out[:200])
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _result_has_error(result: Any, status: Optional[str] = None) -> bool:
+    if status and status not in {"ok", "success"}:
+        return True
+    if isinstance(result, str):
+        try:
+            parsed = json.loads(result)
+        except (TypeError, ValueError):
+            return False
+        if isinstance(parsed, dict) and parsed.get("error"):
+            return True
+
+    return False
+
+
+def _map_edit_tool(tool_name: str, args: Any) -> Optional[Tuple[str, Dict[str, Any]]]:
+    if not isinstance(args, dict):
+        return None
+    if tool_name == "write_file":
+        path = args.get("path")
+        if not isinstance(path, str) or not path:
+            return None
+        return "Write", {
+            "file_path": path,
+            "content": args.get("content", "") if isinstance(args.get("content"), str) else "",
+        }
+    if tool_name == "patch":
+        mode = args.get("mode") or "replace"
+        if mode == "patch" or isinstance(args.get("patch"), str):
+            patch = args.get("patch")
+            if not isinstance(patch, str) or not patch:
+                return None
+            return "apply_patch", {"patch": patch}
+        path = args.get("path")
+        if not isinstance(path, str) or not path:
+            return None
+        tool_input: Dict[str, Any] = {"file_path": path}
+        if isinstance(args.get("old_string"), str):
+            tool_input["old_string"] = args["old_string"]
+        if isinstance(args.get("new_string"), str):
+            tool_input["new_string"] = args["new_string"]
+        if args.get("replace_all") is not None:
+            tool_input["replace_all"] = bool(args.get("replace_all"))
+        return "Edit", tool_input
+    return None
+
+
+def recall_context(
+    user_message: str = "",
+    cwd: Optional[str] = None,
+    **kwargs: Any,
+) -> Optional[Dict[str, str]]:
+    """Hermes pre_llm_call hook: inject qmd recall context into this turn."""
+    try:
+        prompt = user_message or kwargs.get("message") or ""
+        if not isinstance(prompt, str) or not prompt.strip():
+            return None
+        _ensure_background()
+        payload = {
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": prompt,
+            "cwd": _cwd(cwd, **kwargs),
+        }
+        proc = _run([sys.executable, str(_core_path("core", "recall.py"))], payload=payload)
+        parsed = _json_stdout(proc)
+        if not parsed:
+            return None
+        context = (
+            parsed.get("hookSpecificOutput", {})
+            .get("additionalContext")
+        )
+        if isinstance(context, str) and context.strip():
+            return {"context": context}
+    except Exception as exc:  # pragma: no cover - hook isolation
+        logger.debug("qmd-auto-context recall hook failed: %s", exc)
+    return None
+
+
+def session_update(cwd: Optional[str] = None, **kwargs: Any) -> None:
+    """Hermes on_session_start hook: run qmd update through core/update.sh."""
+    try:
+        manager = _manager_path()
+        _run_quiet(["bash", manager, "ensure", "--wait"])
+        _run_quiet(["bash", manager, "warm"])
+        _run_quiet(["bash", manager, "rotate"])
+        payload = {"hook_event_name": "SessionStart", "cwd": _cwd(cwd, **kwargs)}
+        _run(["bash", str(_core_path("core", "update.sh"))], payload=payload, timeout=30.0)
+    except Exception as exc:  # pragma: no cover - hook isolation
+        logger.debug("qmd-auto-context session update failed: %s", exc)
+
+
+def pre_edit_gate(
+    tool_name: str = "",
+    args: Any = None,
+    cwd: Optional[str] = None,
+    **kwargs: Any,
+) -> Optional[Dict[str, str]]:
+    """Hermes pre_tool_call hook: translate qmd pending-project gate to block."""
+    try:
+        mapped = _map_edit_tool(tool_name, args)
+        if mapped is None:
+            return None
+        core_tool, tool_input = mapped
+        payload = {
+            "hook_event_name": "PreToolUse",
+            "tool_name": core_tool,
+            "tool_input": tool_input,
+            "cwd": _cwd(cwd, **kwargs),
+        }
+        proc = _run([sys.executable, str(_core_path("core", "preflight_gate.py"))], payload=payload)
+        parsed = _json_stdout(proc)
+        if not parsed:
+            return None
+        hook_out = parsed.get("hookSpecificOutput", {})
+        if hook_out.get("permissionDecision") == "deny":
+            reason = hook_out.get("permissionDecisionReason") or "qmd-auto-context blocked this edit"
+            return {"action": "block", "message": str(reason)}
+    except Exception as exc:  # pragma: no cover - hook isolation
+        logger.debug("qmd-auto-context pre-edit gate failed: %s", exc)
+    return None
+
+
+def post_edit_sync(
+    tool_name: str = "",
+    args: Any = None,
+    result: Any = None,
+    status: Optional[str] = None,
+    cwd: Optional[str] = None,
+    **kwargs: Any,
+) -> None:
+    """Hermes post_tool_call hook: run post-edit hint path and enqueue indexing.
+
+    Hermes post_tool_call return values are observer-only, so posttool output is
+    intentionally not returned or claimed as injected. Dirty-queue indexing is
+    still performed via core/index_enqueue.py.
+    """
+    try:
+        mapped = _map_edit_tool(tool_name, args)
+        if mapped is None or _result_has_error(result, status):
+            return
+        core_tool, tool_input = mapped
+        payload = {
+            "hook_event_name": "PostToolUse",
+            "tool_name": core_tool,
+            "tool_input": tool_input,
+            "cwd": _cwd(cwd, **kwargs),
+        }
+        manager = _manager_path()
+        _run_quiet(["bash", manager, "ensure", "--wait"])
+        _run([sys.executable, str(_core_path("core", "posttool.py"))], payload=payload)
+        _run([sys.executable, str(_core_path("core", "index_enqueue.py"))], payload=payload)
+        _run_quiet(["bash", manager, "kick-index"])
+    except Exception as exc:  # pragma: no cover - hook isolation
+        logger.debug("qmd-auto-context post-edit sync failed: %s", exc)
