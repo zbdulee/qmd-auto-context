@@ -1,20 +1,20 @@
 # Wiki Conversation Compile TODO
 
 - 날짜: 2026-06-26
-- 상태: TODO / future milestone
+- 상태: TODO / future milestone. 최신 자동화 설계는 `docs/superpowers/specs/2026-06-26-auto-wiki-compile-automation.md` 참고.
 - 배경: `.auto-context/wiki/` promotion layer는 raw/source 문서뿐 아니라 세션 대화에서 나온 안정적 결론도 장기 지식 후보로 삼을 수 있다. 단, 대화 전문을 저장하거나 매 세션 요약을 무조건 승격하지 않는다.
 
 ## 답변 요약
 
-wiki compile은 사용자 대화 내용을 입력 후보로 참고할 수 있다. 하지만 wiki에 저장되는 것은 대화 원문이나 전체 세션 요약이 아니라, 사용자 승인 또는 반복 검증을 거친 장기 지식이다. 즉 “대화도 source가 될 수 있지만, 저장 대상은 transcript가 아니라 안정된 결정/규칙/개념”이라는 정책을 기본값으로 둔다.
+wiki compile은 사용자 대화 내용을 입력 후보로 참고할 수 있다. wiki에 저장되는 것은 대화 원문이나 전체 세션 요약이 아니라 정제된 장기 지식이다. 최신 방향은 “자동 생성하되 plain markdown으로 두어 사용자가 직접 수정/삭제할 수 있게 하고, 자동 생성 page는 `status: generated`로 표시한다”이다.
 
 ## 원칙
 
 1. 대화는 wiki의 입력 후보일 뿐, 저장 단위가 아니다.
 2. wiki에는 대화 원문이 아니라 재사용 가능한 장기 지식만 저장한다.
-3. 사용자 승인, 반복 등장, cross-file 영향, 다음 세션 재사용 가능성이 promotion 기준이다.
+3. 사용자 승인, 반복 등장, cross-file 영향, 다음 세션 재사용 가능성이 promotion/canon 승격 기준이다.
 4. secret, credential, 일회성 진행 상태, 실패한 임시 가설, 커밋 SHA/PR 번호 같은 stale artifact는 저장하지 않는다.
-5. compile은 자동 초안 생성까지만 허용하고, promotion은 lint/review 또는 사용자 승인 후 수행한다.
+5. compile은 자동 wiki page 생성을 허용하되 기본 상태는 `generated`이며, `canon` 승격은 lint/review 또는 사용자 승인 신호를 요구한다.
 6. query-time hook은 compile/promotion을 수행하지 않고, writer 동작은 명시적 command 또는 review gate 뒤에만 둔다.
 
 ## 저장 가능한 후보
@@ -40,27 +40,29 @@ wiki compile은 사용자 대화 내용을 입력 후보로 참고할 수 있다
 
 - [ ] `.auto-context/compile/candidates.jsonl` schema 정의
 - [ ] 후보 필드: `type`, `title`, `summary`, `sources`, `confidence`, `reason`, `created`, `redactions`
-- [ ] 후보 reason enum: `user_approved_decision`, `repeated_recall`, `cross_file_conclusion`, `manual_note`
+- [ ] 후보 trigger enum: `explicit_user_approval`, `post_session_summary`, `repeated_recall`, `cross_file_conclusion`, `manual`
 - [ ] local-only 권장 파일과 commit 가능 파일 경계 문서화
 
 ### 2. Candidate extraction
 
-- [ ] 세션 대화에서 promotion 후보만 추출하는 manual command 설계
-- [ ] 자동 실행은 기본 off
+- [ ] 세션 대화에서 promotion 후보만 추출하는 automatic compact-context extractor 설계
+- [ ] `compile.enabled`인 프로젝트에서는 자동 후보화/자동 generated wiki 작성을 허용하되 query-time hook은 read-only 유지
 - [ ] secret/token 패턴 redaction 선행
 - [ ] raw transcript 저장 금지 테스트 추가
 - [ ] 사용자 발화와 agent 답변을 그대로 저장하지 않고, 후보 `summary`와 `reason`만 저장하는 extractor 테스트 추가
 
-### 3. Lint / review gate
+### 3. Lint / review / editable markdown gate
 
 - [ ] 후보 lint 규칙 추가: secret, 일회성 artifact, stale status, transcript-like content reject
 - [ ] 사람이 검토할 수 있도록 findings/queue 출력
-- [ ] 사용자 승인 없이 wiki markdown으로 승격하지 않는 기본 정책 유지
+- [ ] 자동 생성 wiki markdown에는 `status: generated`, `reviewed:false`, auto-generated banner를 붙인다
+- [ ] 사용자 승인 없이 `status: canon`으로 승격하지 않는 기본 정책 유지
 
 ### 4. Promotion writer
 
 - [ ] candidate → `wiki/decisions|concepts|entities` markdown 변환
-- [ ] frontmatter schema 적용: `title`, `created`, `updated`, `type`, `tags`, `sources`, `confidence`, `contested`
+- [ ] frontmatter schema 적용: `title`, `created`, `updated`, `type`, `status`, `tags`, `sources`, `confidence`, `reviewed`, `createdBy`, `triggers`, `redactions`
+- [ ] 기존 page update는 `qmd:auto:start/end` managed section + `sourceHash` 일치 시에만 수행하고, 사용자 편집 충돌 시 candidate/finding으로 남긴다
 - [ ] `wiki/index.md` catalog 갱신
 - [ ] `wiki/log.md` append-only maintenance log 갱신
 
@@ -68,7 +70,8 @@ wiki compile은 사용자 대화 내용을 입력 후보로 참고할 수 있다
 
 - [ ] `collectionRoles`가 `wiki`인 collection을 먼저 조회
 - [ ] wiki 결과가 없거나 낮거나 검증 요청이면 raw backfill
-- [ ] conversation-derived wiki page도 source tier `[wiki]`로 명시
+- [ ] conversation-derived wiki page도 source/status tier(`[wiki:generated]`, `[wiki:canon]` 등)로 명시
+- [ ] `generated/tentative`는 낮은 우선순위로 recall하되 unreviewed 상태를 모델 컨텍스트에 명시하고, `discarded/contested`는 기본 제외한다
 - [ ] raw와 wiki가 같은 내용을 중복 주입하지 않도록 dedupe/priority 정책 추가
 
 ## Acceptance criteria

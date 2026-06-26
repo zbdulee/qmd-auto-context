@@ -1,6 +1,6 @@
 {
   "name": "qmd-auto-context",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "qmd 기반 자동 컨텍스트 주입 — recall/update/posttool/index hooks + sync/query/update manual skills",
   "author": { "name": "zbdulee", "url": "https://github.com/zbdulee" },
   "homepage": "https://github.com/zbdulee/qmd-auto-context",
