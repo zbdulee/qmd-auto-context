@@ -4,6 +4,10 @@
 - 상태: TODO / future milestone
 - 배경: `.auto-context/wiki/` promotion layer는 raw/source 문서뿐 아니라 세션 대화에서 나온 안정적 결론도 장기 지식 후보로 삼을 수 있다. 단, 대화 전문을 저장하거나 매 세션 요약을 무조건 승격하지 않는다.
 
+## 답변 요약
+
+wiki compile은 사용자 대화 내용을 입력 후보로 참고할 수 있다. 하지만 wiki에 저장되는 것은 대화 원문이나 전체 세션 요약이 아니라, 사용자 승인 또는 반복 검증을 거친 장기 지식이다. 즉 “대화도 source가 될 수 있지만, 저장 대상은 transcript가 아니라 안정된 결정/규칙/개념”이라는 정책을 기본값으로 둔다.
+
 ## 원칙
 
 1. 대화는 wiki의 입력 후보일 뿐, 저장 단위가 아니다.
@@ -11,6 +15,7 @@
 3. 사용자 승인, 반복 등장, cross-file 영향, 다음 세션 재사용 가능성이 promotion 기준이다.
 4. secret, credential, 일회성 진행 상태, 실패한 임시 가설, 커밋 SHA/PR 번호 같은 stale artifact는 저장하지 않는다.
 5. compile은 자동 초안 생성까지만 허용하고, promotion은 lint/review 또는 사용자 승인 후 수행한다.
+6. query-time hook은 compile/promotion을 수행하지 않고, writer 동작은 명시적 command 또는 review gate 뒤에만 둔다.
 
 ## 저장 가능한 후보
 
@@ -44,6 +49,7 @@
 - [ ] 자동 실행은 기본 off
 - [ ] secret/token 패턴 redaction 선행
 - [ ] raw transcript 저장 금지 테스트 추가
+- [ ] 사용자 발화와 agent 답변을 그대로 저장하지 않고, 후보 `summary`와 `reason`만 저장하는 extractor 테스트 추가
 
 ### 3. Lint / review gate
 
