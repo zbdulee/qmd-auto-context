@@ -12,7 +12,8 @@ wiki compile은 사용자 대화 내용을 입력 후보로 참고할 수 있다
 
 1. 대화는 wiki의 입력 후보일 뿐, 저장 단위가 아니다.
 2. wiki에는 대화 원문이 아니라 재사용 가능한 장기 지식만 저장한다.
-3. 사용자 승인, 반복 등장, cross-file 영향, 다음 세션 재사용 가능성이 promotion/canon 승격 기준이다.
+3. 사용자 승인, 반복 등장, cross-file 영향, 다음 세션 재사용 가능성이 generated page 작성 기준이다.
+   `canon` 승격은 직접적인 현재 사용자 승인/검토 신호가 있을 때만 가능하다.
 4. secret, credential, 일회성 진행 상태, 실패한 임시 가설, 커밋 SHA/PR 번호 같은 stale artifact는 저장하지 않는다.
 5. compile은 자동 wiki page 생성을 허용하되 기본 상태는 `generated`이며, `canon` 승격은 lint/review 또는 사용자 승인 신호를 요구한다.
 6. query-time hook은 compile/promotion을 수행하지 않고, writer 동작은 명시적 command 또는 review gate 뒤에만 둔다.
@@ -39,7 +40,7 @@ wiki compile은 사용자 대화 내용을 입력 후보로 참고할 수 있다
 ### 1. Candidate queue 설계
 
 - [ ] `.auto-context/compile/candidates.jsonl` schema 정의
-- [ ] 후보 필드: `type`, `title`, `summary`, `sources`, `confidence`, `reason`, `created`, `redactions`
+- [ ] 후보 필드: `type`, `title`, `summary`, `sources`, `confidence`, `trigger`, `created`, `redactions`, `suggestedStatus`, `targetPath`, `action`, `lint`
 - [ ] 후보 trigger enum: `explicit_user_approval`, `post_session_summary`, `repeated_recall`, `cross_file_conclusion`, `manual`
 - [ ] local-only 권장 파일과 commit 가능 파일 경계 문서화
 
@@ -47,9 +48,10 @@ wiki compile은 사용자 대화 내용을 입력 후보로 참고할 수 있다
 
 - [ ] 세션 대화에서 promotion 후보만 추출하는 automatic compact-context extractor 설계
 - [ ] `compile.enabled`인 프로젝트에서는 자동 후보화/자동 generated wiki 작성을 허용하되 query-time hook은 read-only 유지
+- [ ] pending/unconfigured/risky/sandbox/headless 프로젝트에서는 writer가 no-op 또는 hard reject 되도록 opt-in gate precondition 추가
 - [ ] secret/token 패턴 redaction 선행
 - [ ] raw transcript 저장 금지 테스트 추가
-- [ ] 사용자 발화와 agent 답변을 그대로 저장하지 않고, 후보 `summary`와 `reason`만 저장하는 extractor 테스트 추가
+- [ ] 사용자 발화와 agent 답변을 그대로 저장하지 않고, 후보 `summary`와 `trigger`만 저장하는 extractor 테스트 추가
 
 ### 3. Lint / review / editable markdown gate
 
@@ -63,6 +65,7 @@ wiki compile은 사용자 대화 내용을 입력 후보로 참고할 수 있다
 - [ ] candidate → `wiki/decisions|concepts|entities` markdown 변환
 - [ ] frontmatter schema 적용: `title`, `created`, `updated`, `type`, `status`, `tags`, `sources`, `confidence`, `reviewed`, `createdBy`, `triggers`, `redactions`
 - [ ] 기존 page update는 `qmd:auto:start/end` managed section + `sourceHash` 일치 시에만 수행하고, 사용자 편집 충돌 시 candidate/finding으로 남긴다
+- [ ] 사용자가 generated page를 삭제하면 `.auto-context/compile/tombstones.jsonl`에 tombstone을 남기고 같은 `targetPath`/`sourceHash` 자동 재생성을 막는다
 - [ ] `wiki/index.md` catalog 갱신
 - [ ] `wiki/log.md` append-only maintenance log 갱신
 
@@ -79,5 +82,7 @@ wiki compile은 사용자 대화 내용을 입력 후보로 참고할 수 있다
 - [ ] 대화 전문이 `.auto-context/wiki/**` 또는 `.auto-context/compile/**`에 저장되지 않는다.
 - [ ] secret-like content가 후보/승격 파일에 남지 않는다.
 - [ ] invalid/unsafe `.auto-context` 경로에서는 compile/promotion writer가 중단된다.
+- [ ] pending/unconfigured/sandbox/headless 프로젝트에서는 compile writer가 wiki/compile 파일을 쓰지 않는다.
+- [ ] deleted generated page는 명시 regenerate 전까지 자동 재생성되지 않는다.
 - [ ] promotion 전후 `npm test`가 통과한다.
 - [ ] wiki page는 사람이 읽고 수정 가능한 plain markdown이다.

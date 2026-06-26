@@ -94,6 +94,23 @@ qmd-auto-context가 대화와 작업 결과에서 장기 지식 후보를 자동
 - novel/worldbuilding repo: `mode: "auto-wiki"`, `defaultStatus: "generated"`
 - 미설정 legacy repo: compile absent → off처럼 동작
 
+### Write preconditions / guided opt-in
+
+Compile writer는 guided opt-in gate와 같은 안전 경계를 따른다. 아래 조건을 모두 만족할 때만
+`.auto-context/wiki/**` 또는 `.auto-context/compile/**`에 쓸 수 있다.
+
+- `core/config.py`가 찾은 project root/cwd가 safe project path로 resolve된다.
+- 프로젝트가 pending/unconfigured 상태가 아니며, `.auto-context/settings.json` 또는 legacy config에서
+  명시적으로 opt-in 되어 있다(`indexing:true`, 유효한 `collections`, `compile.enabled:true`).
+- `compile.mode != "off"`이며, writer action이 해당 mode에서 허용된다.
+- sandbox/headless 환경 변수나 `--sandbox` 인자가 있으면 writer는 무출력 no-op으로 종료한다.
+- risky/system path, unsafe `.auto-context`/`wikiPath`, symlinked managed directory/file, path traversal은
+  hard reject한다.
+- query-time recall hook(`core/recall.py`)에서는 절대 쓰지 않는다.
+
+즉 auto-first는 “동의된 프로젝트에서 자동 작성”이지, 미설정 프로젝트의 첫 편집 전에 파일을 만드는
+동작이 아니다.
+
 ## Wiki 디렉터리 구조
 
 기존 일반 구조:
@@ -231,10 +248,29 @@ Assign:
 
 Rules:
 
-- explicit canon signal from user → `status: canon` only if lint clean and no conflict.
+- explicit canon signal from user → `status: canon` only if lint clean, no conflict, and the signal is
+  a direct current-turn user instruction such as “확정”, “공식 설정”, “canon으로 저장”. This signal is
+  the review event and must set `reviewed: true`.
 - agent-only proposal → `status: generated` or `tentative`.
+- post-session summaries, compact summaries, repeated recall, and cross-file conclusions must not infer
+  `canon`; their highest automatic status is `reviewed` only after a separate review command/check.
 - rejected/changed idea → `status: discarded` under `discarded/`.
 - uncertainty/conflict → `status: contested` or candidate-only.
+
+### Status lifecycle
+
+| From | To | Allowed trigger | Notes |
+|---|---|---|---|
+| none | generated | lint-clean auto write | default for automatic pages |
+| none | tentative | low confidence / brainstorm-like but durable | lower recall priority |
+| generated/tentative | reviewed | explicit review command or user says the page is correct | set `reviewed:true` |
+| reviewed/generated/tentative | canon | direct user canon signal + lint clean + no conflict | set `reviewed:true`; never inferred from summaries |
+| generated/tentative/reviewed | contested | conflict with existing wiki/raw or user flags uncertainty | excluded from default recall |
+| any non-canon | discarded | user rejects/deletes or source later invalidates it | excluded from default recall |
+| canon | discarded/contested | explicit user correction only | append log entry with reason |
+
+Manual edits without frontmatter changes do not auto-promote status. If a user edits body text, recall keeps
+the existing status until frontmatter or a review command changes it.
 
 ### 4. Lint / safety gate
 
@@ -264,6 +300,7 @@ Writer behavior:
 - append `log.md` entry
 - update `index.md` one-line catalog
 - enqueue wiki collection for indexing via existing dirty queue path
+- respect deletion tombstones before recreating a missing target
 
 Managed section contract:
 
@@ -278,6 +315,15 @@ markers when the previous `sourceHash` still matches the last generated content.
 missing, malformed, or the generated section was manually edited, the writer must not overwrite it.
 Instead it appends a candidate with `action:"conflict"` and writes a lint finding. User-authored
 sections outside these markers are never rewritten by the compile writer.
+
+Deletion/tombstone contract:
+
+- If a generated page disappears, treat deletion as user feedback unless an explicit regenerate command is running.
+- Store suppression records in `.auto-context/compile/tombstones.jsonl` with `targetPath`, `sourceHash`,
+  `title`, `status:"deleted"`, and timestamp.
+- A later compile with the same `targetPath` or `sourceHash` must not recreate the page automatically.
+- A changed source may create a new candidate, but it should be candidate-only until reviewed.
+- Users can remove the tombstone or run an explicit regenerate command to allow recreation.
 
 ### 6. Recall behavior
 
