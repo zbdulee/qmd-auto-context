@@ -295,6 +295,9 @@ def main() -> int:
     }
 
     if lint["verdict"] != "clean" or target is None:
+        if "transcript_like" in lint.get("findings", []):
+            record["summary"] = "[REDACTED_TRANSCRIPT]"
+            record["redactions"] = sorted(set(record.get("redactions", []) + ["transcript_like"]))
         record["action"] = "rejected"
         append_jsonl(candidate_path, record)
         print(json.dumps({"action": "rejected", "findings": lint["findings"]}, ensure_ascii=False))

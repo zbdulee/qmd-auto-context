@@ -19,6 +19,7 @@ bash scripts/cleanup-legacy.sh              # 기존 글로벌 qmd 훅/managed L
 bash skills/sync/scripts/sync.sh <프로젝트>  # 수동 CUD sync: snapshot 비교 → dirty queue enqueue
 bash skills/query/scripts/query.sh <프로젝트> "<질문>"  # 수동 recall query(core/recall.py 경유)
 bash skills/update/scripts/update.sh <프로젝트>  # 수동 SessionStart update(core/update.sh 경유)
+bash skills/wiki-compile/scripts/wiki-compile.sh <프로젝트> < compact.json  # compact durable summary → wiki_compile.py
 
 bash core/update.sh --recommend [<경로>]              # 추천 확인 (read-only, 파일 변경 없음)
 bash core/update.sh --recommend --json [<경로>]       # 추천 결과를 JSON으로 출력
@@ -68,6 +69,7 @@ backend/   ← qmd MCP HTTP 데몬(:8483) launcher + keepalive/logrotate/index w
 - `sync` — agent-facing 수동 동기화 workflow. wrapper가 qmd 설치/버전을 확인하고 `core/sync.py --json` 실행 후 실제 변경이면 `backend_manager.sh kick-index`를 호출한다. 자동 hook이 아니며 사용자가 sync/resync를 요청할 때만 쓴다.
 - `query` — hook recall과 동일한 `core/recall.py` 경로를 수동 실행한다. 실행 전 backend manager가 qmd/daemon을 확인한다. qmd 데몬 직접 호출을 중복 구현하지 말 것.
 - `update` — SessionStart update와 동일한 `core/update.sh` 경로를 수동 실행한다. 실행 전 backend manager가 qmd/daemon/warm/logrotate를 처리한다. qmd 인덱스 갱신 요청에는 이 skill을 쓴다.
+- `wiki-compile` — compact durable summary/candidate JSON을 `core/wiki_extract.py` → `core/wiki_compile.py`로 수동 실행한다. raw transcript를 입력하지 않으며 query-time hook에서는 쓰지 않는다.
 - `hint`에 해당하는 skill은 만들지 않는다. PostToolUse posttool은 편집 직후 자동 실행되는 hook-only 연속성 힌트다.
 - `gate`에 해당하는 skill은 만들지 않는다. gate는 pending 프로젝트 편집 차단용 내부 안전장치다.
 

@@ -398,10 +398,11 @@ Keep query-time read-only.
 Allowed writers:
 
 - `core/update.sh --init-wiki [--preset novel] <path>`: scaffold + compile config.
-- future `core/wiki_compile.py`: candidate extraction and wiki write.
+- `core/wiki_extract.py`: compact durable summary/candidate JSON → compile candidate 변환. Raw transcript 저장 금지.
+- `core/wiki_compile.py`: candidate queue + generated wiki markdown writer.
 - future `core/wiki_lint.py`: lint/report.
-- future manual skill `skills/wiki-compile`: explicit user command.
-- optional post-session hook where host provides stable session summary.
+- manual skill `skills/wiki-compile`: explicit compact summary compile command.
+- future optional post-session hook where host provides stable session summary.
 
 Do not write wiki files inside `core/recall.py`.
 

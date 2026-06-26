@@ -165,6 +165,7 @@ backend는 plugin runtime manager가 세션/skill 실행 중 관리한다. qmd C
 | `UserPromptSubmit` recall | `query` | 관련 문서 수동 조회 |
 | `SessionStart` update | `update` | 인덱스 수동 갱신 |
 | `PostToolUse` index | `sync` | 훅이 놓친 CUD 변경 감지 후 dirty queue enqueue |
+| explicit writer | `wiki-compile` | compact durable summary를 generated wiki page/candidate로 반영 |
 
 `PostToolUse` posttool의 연속성 힌트는 hook-only 기능이다. 편집 직후 자동 실행되는 경로라 별도 수동 skill로 노출하지 않는다.
 
@@ -192,6 +193,15 @@ bash "$PLUGIN_ROOT/skills/query/scripts/query.sh" "$PWD" "검색할 질문"
 
 ```bash
 bash "$PLUGIN_ROOT/skills/update/scripts/update.sh" "$PWD"
+```
+
+### wiki-compile
+
+`wiki-compile` skill은 raw transcript가 아니라 짧은 durable summary/candidate JSON만 받아 `core/wiki_extract.py` → `core/wiki_compile.py` 경로로 wiki page 또는 candidate queue를 작성한다. Query-time recall hook은 계속 read-only다.
+
+```bash
+printf '%s\n' '{"trigger":"manual","durable":{"title":"Config layout","summary":"Canonical config lives under .auto-context/settings.json.","type":"decision","confidence":"high"}}' \
+  | bash "$PLUGIN_ROOT/skills/wiki-compile/scripts/wiki-compile.sh" "$PWD"
 ```
 
 ## 테스트

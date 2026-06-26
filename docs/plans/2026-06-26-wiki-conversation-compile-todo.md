@@ -1,7 +1,7 @@
 # Wiki Conversation Compile TODO
 
 - 날짜: 2026-06-26
-- 상태: TODO / future milestone. 최신 자동화 설계는 `docs/superpowers/specs/2026-06-26-auto-wiki-compile-automation.md` 참고.
+- 상태: Phase B-E + manual compact extractor implemented. Host 자동 session-summary hook 연결은 future milestone. 최신 자동화 설계는 `docs/superpowers/specs/2026-06-26-auto-wiki-compile-automation.md` 참고.
 - 배경: `.auto-context/wiki/` promotion layer는 raw/source 문서뿐 아니라 세션 대화에서 나온 안정적 결론도 장기 지식 후보로 삼을 수 있다. 단, 대화 전문을 저장하거나 매 세션 요약을 무조건 승격하지 않는다.
 
 ## 답변 요약
@@ -39,53 +39,54 @@ wiki compile은 사용자 대화 내용을 입력 후보로 참고할 수 있다
 
 ### 1. Candidate queue 설계
 
-- [ ] `.auto-context/compile/candidates.jsonl` schema 정의
-- [ ] 후보 필드: `type`, `title`, `summary`, `sources`, `confidence`, `trigger`, `created`, `redactions`, `suggestedStatus`, `targetPath`, `action`, `lint`
-- [ ] 후보 trigger enum: `explicit_user_approval`, `post_session_summary`, `repeated_recall`, `cross_file_conclusion`, `manual`
+- [x] `.auto-context/compile/candidates.jsonl` schema 정의
+- [x] 후보 필드: `type`, `title`, `summary`, `sources`, `confidence`, `trigger`, `created`, `redactions`, `suggestedStatus`, `targetPath`, `action`, `lint`
+- [x] 후보 trigger enum: `explicit_user_approval`, `post_session_summary`, `repeated_recall`, `cross_file_conclusion`, `manual`
 - [ ] local-only 권장 파일과 commit 가능 파일 경계 문서화
 
 ### 2. Candidate extraction
 
-- [ ] 세션 대화에서 promotion 후보만 추출하는 automatic compact-context extractor 설계
+- [x] compact durable summary/candidate JSON extractor 구현: `core/wiki_extract.py` + `skills/wiki-compile/scripts/wiki-compile.sh`
+- [ ] host가 제공하는 session-end summary / compact context를 자동 hook으로 연결
 - [ ] `compile.enabled`인 프로젝트에서는 자동 후보화/자동 generated wiki 작성을 허용하되 query-time hook은 read-only 유지
 - [ ] pending/unconfigured/risky/sandbox/headless 프로젝트에서는 writer가 no-op 또는 hard reject 되도록 opt-in gate precondition 추가
 - [ ] secret/token 패턴 redaction 선행
-- [ ] raw transcript 저장 금지 테스트 추가
-- [ ] 사용자 발화와 agent 답변을 그대로 저장하지 않고, 후보 `summary`와 `trigger`만 저장하는 extractor 테스트 추가
+- [x] raw transcript 저장 금지 테스트 추가
+- [x] 사용자 발화와 agent 답변을 그대로 저장하지 않고, 후보 `summary`와 `trigger`만 저장하는 extractor 테스트 추가
 
 ### 3. Lint / review / editable markdown gate
 
-- [ ] 후보 lint 규칙 추가: secret, 일회성 artifact, stale status, transcript-like content reject
+- [x] 후보 lint 규칙 추가: secret, transcript-like content reject
 - [ ] 사람이 검토할 수 있도록 findings/queue 출력
-- [ ] 자동 생성 wiki markdown에는 `status: generated`, `reviewed:false`, auto-generated banner를 붙인다
-- [ ] 사용자 승인 없이 `status: canon`으로 승격하지 않는 기본 정책 유지
+- [x] 자동 생성 wiki markdown에는 `status: generated`, `reviewed:false`, auto-generated banner를 붙인다
+- [x] 사용자 승인 없이 `status: canon`으로 승격하지 않는 기본 정책 유지
 
 ### 4. Promotion writer
 
-- [ ] candidate → `wiki/decisions|concepts|entities` markdown 변환
-- [ ] frontmatter schema 적용: `title`, `created`, `updated`, `type`, `status`, `sources`, `confidence`, `reviewed`, `createdBy`, `triggers`, `redactions`; `tags`는 optional legacy compatibility로만 둔다
+- [x] candidate → `wiki/decisions|concepts|entities` markdown 변환
+- [x] frontmatter schema 적용: `title`, `created`, `updated`, `type`, `status`, `sources`, `confidence`, `reviewed`, `createdBy`, `triggers`, `redactions`; `tags`는 optional legacy compatibility로만 둔다
 - [ ] 기존 page update는 `qmd:auto:start/end` managed section + `sourceHash` 일치 시에만 수행하고, 사용자 편집 충돌 시 candidate/finding으로 남긴다
-- [ ] `.auto-context/compile/generated-manifest.jsonl`을 생성 source of truth로 유지한다
-- [ ] 사용자가 generated/reviewed page를 삭제하면 `.auto-context/compile/tombstones.jsonl`에 tombstone을 남기고 같은 `targetPath`/`sourceHash` 자동 재생성을 막는다
+- [x] `.auto-context/compile/generated-manifest.jsonl`을 생성 source of truth로 유지한다
+- [x] 사용자가 generated/reviewed page를 삭제하면 `.auto-context/compile/tombstones.jsonl`에 tombstone을 남기고 같은 `targetPath`/`sourceHash` 자동 재생성을 막는다
 - [ ] 사용자가 canon page를 삭제하면 자동 복원/삭제 처리하지 않고 `contested` candidate/finding으로 명시 확인을 요청한다
-- [ ] `wiki/index.md` catalog 갱신
-- [ ] `wiki/log.md` append-only maintenance log 갱신
+- [x] `wiki/index.md` catalog 갱신
+- [x] `wiki/log.md` append-only maintenance log 갱신
 
 ### 5. Recall integration
 
-- [ ] `collectionRoles`가 `wiki`인 collection을 먼저 조회
+- [x] `collectionRoles`가 `wiki`인 collection을 먼저 조회
 - [ ] wiki 결과가 없거나 낮거나 검증 요청이면 raw backfill
-- [ ] conversation-derived wiki page도 source/status tier(`[wiki:generated]`, `[wiki:canon]` 등)로 명시
-- [ ] `generated/tentative`는 낮은 우선순위로 recall하되 unreviewed 상태를 모델 컨텍스트에 명시하고, `discarded/contested`는 기본 제외한다
+- [x] conversation-derived wiki page도 source/status tier(`[wiki:generated]`, `[wiki:canon]` 등)로 명시
+- [x] `generated/tentative`는 낮은 우선순위로 recall하되 unreviewed 상태를 모델 컨텍스트에 명시하고, `discarded/contested`는 기본 제외한다
 - [ ] raw와 wiki가 같은 내용을 중복 주입하지 않도록 dedupe/priority 정책 추가
-- [ ] qmd URI는 `collection -> collectionPaths[collection] -> projectRoot` 순서로 실제 wiki path를 resolve하고 `wikiPath` 밖이면 low-priority generated로 취급한다
+- [x] qmd URI는 `collection -> collectionPaths[collection] -> projectRoot` 순서로 실제 wiki path를 resolve하고 `wikiPath` 밖이면 low-priority generated로 취급한다
 
 ## Acceptance criteria
 
-- [ ] 대화 전문이 `.auto-context/wiki/**` 또는 `.auto-context/compile/**`에 저장되지 않는다.
-- [ ] secret-like content가 후보/승격 파일에 남지 않는다.
+- [x] 대화 전문이 `.auto-context/wiki/**` 또는 `.auto-context/compile/**`에 저장되지 않는다.
+- [x] secret-like content가 후보/승격 파일에 남지 않는다.
 - [ ] invalid/unsafe `.auto-context` 경로에서는 compile/promotion writer가 중단된다.
 - [ ] pending/unconfigured/sandbox/headless 프로젝트에서는 compile writer가 wiki/compile 파일을 쓰지 않는다.
-- [ ] deleted generated page는 명시 regenerate 전까지 자동 재생성되지 않는다.
-- [ ] promotion 전후 `npm test`가 통과한다.
-- [ ] wiki page는 사람이 읽고 수정 가능한 plain markdown이다.
+- [x] deleted generated page는 명시 regenerate 전까지 자동 재생성되지 않는다.
+- [x] promotion 전후 `npm test`가 통과한다.
+- [x] wiki page는 사람이 읽고 수정 가능한 plain markdown이다.
