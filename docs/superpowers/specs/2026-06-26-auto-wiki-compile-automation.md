@@ -88,6 +88,16 @@ qmd-auto-context가 대화와 작업 결과에서 장기 지식 후보를 자동
 - `mode:"guarded"`: lint-clean/high-confidence candidate만 wiki markdown으로 쓴다.
 - `mode:"auto-wiki"`: lint-clean candidate를 wiki markdown으로 쓴다.
 
+`guarded` mode write predicate is deterministic for tests:
+
+- `lint.verdict == "clean"`
+- `confidence == "high"`
+- no duplicate/conflict finding
+- no matching tombstone by `targetPath` or `sourceHash`
+- valid target path under `wikiPath`
+
+If any predicate fails, the writer records/updates only the candidate queue.
+
 초기 기본값 제안:
 
 - coding repo: `mode: "guarded"`, `defaultStatus: "generated"`
@@ -168,6 +178,7 @@ sources:
     path: docs/example.md
 triggers: []
 redactions: []
+tags: [] # optional, legacy compatibility only; not required by canonical schema
 ---
 ```
 
@@ -300,6 +311,7 @@ Writer behavior:
 - append `log.md` entry
 - update `index.md` one-line catalog
 - enqueue wiki collection for indexing via existing dirty queue path
+- update `.auto-context/compile/generated-manifest.jsonl` after every generated page create/update
 - respect deletion tombstones before recreating a missing target
 
 Managed section contract:
@@ -318,12 +330,23 @@ sections outside these markers are never rewritten by the compile writer.
 
 Deletion/tombstone contract:
 
-- If a generated page disappears, treat deletion as user feedback unless an explicit regenerate command is running.
+- The source of truth for “previously generated” pages is `.auto-context/compile/generated-manifest.jsonl`,
+  backed by `wiki/log.md` for human audit. Each record stores `targetPath`, `sourceHash`, `status`, `title`,
+  and last generated timestamp.
+- Before creating a page, the writer checks the manifest. If a manifest record exists but `targetPath` is
+  missing from disk, treat deletion as user feedback unless an explicit regenerate command is running.
 - Store suppression records in `.auto-context/compile/tombstones.jsonl` with `targetPath`, `sourceHash`,
-  `title`, `status:"deleted"`, and timestamp.
+  `title`, previous status, `status:"deleted"`, and timestamp.
 - A later compile with the same `targetPath` or `sourceHash` must not recreate the page automatically.
 - A changed source may create a new candidate, but it should be candidate-only until reviewed.
 - Users can remove the tombstone or run an explicit regenerate command to allow recreation.
+
+Deletion by previous status:
+
+- `generated` / `tentative`: tombstone and suppress automatic recreation.
+- `reviewed`: tombstone and suppress automatic recreation; recreate only by explicit review/regenerate command.
+- `canon`: do not silently recreate or silently discard. Record a `contested` candidate/finding that asks for
+  explicit user confirmation before recreating or marking discarded.
 
 ### 6. Recall behavior
 
@@ -343,7 +366,13 @@ e.g. `[wiki:generated]`, and the surrounding context text should not describe it
 Status source:
 
 - Initial implementation reads frontmatter from the result file path resolved from the qmd URI.
-- The path must resolve under `cwd / wikiPath`; otherwise status defaults to `generated` and the result is treated as low-priority.
+- Resolution order:
+  1. Parse `qmd://<collection>/<path>` into `collection` and collection-relative `path`.
+  2. Look up `collectionPaths[collection]` from normalized config.
+  3. Resolve `projectRoot / collectionPaths[collection] / path`.
+  4. Accept it only if it resolves under `projectRoot / wikiPath`.
+  5. If qmd returns an absolute file path, accept it only if it resolves under `projectRoot / wikiPath`.
+- If resolution fails or leaves `wikiPath`, status defaults to `generated` and the result is treated as low-priority.
 - Read only the frontmatter block or the first 4 KiB, whichever ends first.
 - If frontmatter is missing or invalid, status defaults to `generated`.
 

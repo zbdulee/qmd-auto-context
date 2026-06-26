@@ -63,9 +63,11 @@ wiki compile은 사용자 대화 내용을 입력 후보로 참고할 수 있다
 ### 4. Promotion writer
 
 - [ ] candidate → `wiki/decisions|concepts|entities` markdown 변환
-- [ ] frontmatter schema 적용: `title`, `created`, `updated`, `type`, `status`, `tags`, `sources`, `confidence`, `reviewed`, `createdBy`, `triggers`, `redactions`
+- [ ] frontmatter schema 적용: `title`, `created`, `updated`, `type`, `status`, `sources`, `confidence`, `reviewed`, `createdBy`, `triggers`, `redactions`; `tags`는 optional legacy compatibility로만 둔다
 - [ ] 기존 page update는 `qmd:auto:start/end` managed section + `sourceHash` 일치 시에만 수행하고, 사용자 편집 충돌 시 candidate/finding으로 남긴다
-- [ ] 사용자가 generated page를 삭제하면 `.auto-context/compile/tombstones.jsonl`에 tombstone을 남기고 같은 `targetPath`/`sourceHash` 자동 재생성을 막는다
+- [ ] `.auto-context/compile/generated-manifest.jsonl`을 생성 source of truth로 유지한다
+- [ ] 사용자가 generated/reviewed page를 삭제하면 `.auto-context/compile/tombstones.jsonl`에 tombstone을 남기고 같은 `targetPath`/`sourceHash` 자동 재생성을 막는다
+- [ ] 사용자가 canon page를 삭제하면 자동 복원/삭제 처리하지 않고 `contested` candidate/finding으로 명시 확인을 요청한다
 - [ ] `wiki/index.md` catalog 갱신
 - [ ] `wiki/log.md` append-only maintenance log 갱신
 
@@ -76,6 +78,7 @@ wiki compile은 사용자 대화 내용을 입력 후보로 참고할 수 있다
 - [ ] conversation-derived wiki page도 source/status tier(`[wiki:generated]`, `[wiki:canon]` 등)로 명시
 - [ ] `generated/tentative`는 낮은 우선순위로 recall하되 unreviewed 상태를 모델 컨텍스트에 명시하고, `discarded/contested`는 기본 제외한다
 - [ ] raw와 wiki가 같은 내용을 중복 주입하지 않도록 dedupe/priority 정책 추가
+- [ ] qmd URI는 `collection -> collectionPaths[collection] -> projectRoot` 순서로 실제 wiki path를 resolve하고 `wikiPath` 밖이면 low-priority generated로 취급한다
 
 ## Acceptance criteria
 

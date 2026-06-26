@@ -136,7 +136,7 @@ test('hierarchical recall queries wiki collections before raw backfill', async (
     assert.equal(requests.length, 1);
     assert.deepEqual(requests[0].collections, ['proj-wiki']);
     const parsed = JSON.parse(out);
-    assert.match(parsed.hookSpecificOutput.additionalContext, /\[wiki\]/);
+    assert.match(parsed.hookSpecificOutput.additionalContext, /\[wiki(?::generated)?\]/);
     assert.match(parsed.hookSpecificOutput.additionalContext, /Config layout/);
   } finally {
     await new Promise(resolve => server.close(resolve));

@@ -382,8 +382,13 @@ fi
 
 if [ "$1" = "--init-wiki" ]; then
   shift
+  preset="default"
+  if [ "$1" = "--preset" ]; then
+    preset="${2:-default}"
+    shift 2
+  fi
   target="${1:-$PWD}"
-  python3 - "$target" <<'PY'
+  python3 - "$target" "$preset" <<'PY'
 import json
 import os
 from pathlib import Path
@@ -391,6 +396,7 @@ import sys
 import tempfile
 
 target = Path(sys.argv[1]).resolve()
+preset = sys.argv[2] if len(sys.argv) > 2 else "default"
 settings_dir = target / ".auto-context"
 settings = settings_dir / "settings.json"
 
@@ -456,15 +462,10 @@ def ensure_project_file(path: Path, content: str) -> bool:
     path.write_text(content, encoding="utf-8")
     return True
 
-dirs = [
-    wiki,
-    wiki / "concepts",
-    wiki / "entities",
-    wiki / "decisions",
-    wiki / "sessions",
-    wiki / "comparisons",
-    wiki / "queries",
-]
+base_dirs = ["concepts", "entities", "decisions", "sessions", "comparisons", "queries"]
+novel_dirs = ["characters", "world", "timeline", "plot", "style", "discarded", "decisions", "sessions"]
+dir_names = novel_dirs if preset == "novel" else base_dirs
+dirs = [wiki] + [wiki / name for name in dir_names]
 for path in dirs:
     ensure_project_dir(path, "wiki")
 
@@ -504,6 +505,21 @@ collection_roles[wiki_collection] = "wiki"
 config["collectionRoles"] = collection_roles
 config["recallStrategy"] = "hierarchical"
 config.setdefault("wikiPath", ".auto-context/wiki")
+if preset == "novel":
+    compile_config = config.get("compile") if isinstance(config.get("compile"), dict) else {}
+    compile_config.setdefault("enabled", True)
+    compile_config.setdefault("mode", "auto-wiki")
+    compile_config.setdefault("autoWrite", True)
+    compile_config.setdefault("defaultStatus", "generated")
+    compile_config.setdefault("requireReviewForCanon", True)
+    compile_config.setdefault("candidatePath", ".auto-context/compile/candidates.jsonl")
+    compile_config.setdefault("tombstonePath", ".auto-context/compile/tombstones.jsonl")
+    compile_config.setdefault("manifestPath", ".auto-context/compile/generated-manifest.jsonl")
+    compile_config.setdefault("excludeStatusesFromRecall", ["discarded", "contested"])
+    compile_config.setdefault("lowPriorityStatuses", ["generated", "tentative"])
+    compile_config.setdefault("triggers", ["manual", "explicit_user_approval", "post_session_summary"])
+    compile_config.setdefault("maxAutoPageLines", 120)
+    config["compile"] = compile_config
 if "indexing" not in config:
     config["indexing"] = True
 

@@ -214,8 +214,36 @@ test('hierarchical recall: wiki 결과가 있으면 raw가 더 높아도 wiki만
   try {
     const r = recall({ prompt: 'config layout decision 내용을 알려줘', cwd: dir }, { QMD_QUERY_FIXTURE: fixture });
     assert.ok(r);
-    assert.match(r.hookSpecificOutput.additionalContext, /\[wiki\]/);
+    assert.match(r.hookSpecificOutput.additionalContext, /\[wiki(?::generated)?\]/);
     assert.match(r.hookSpecificOutput.additionalContext, /config-layout\.md/);
     assert.doesNotMatch(r.hookSpecificOutput.additionalContext, /raw-source\.md/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('hierarchical recall: wiki frontmatter status를 prefix에 표시하고 discarded는 제외', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'qmd-rh-status-'));
+  const fixture = join(dir, 'status-fixture.json');
+  mkdirSync(join(dir, '.auto-context', 'wiki', 'decisions'), { recursive: true });
+  writeFileSync(join(dir, '.auto-context', 'settings.json'), JSON.stringify({
+    indexing: true,
+    collections: ['proj-wiki'],
+    collectionPaths: { 'proj-wiki': '.auto-context/wiki' },
+    collectionRoles: { 'proj-wiki': 'wiki' },
+    recallStrategy: 'hierarchical',
+    topN: 3,
+    compile: { enabled: true, excludeStatusesFromRecall: ['discarded', 'contested'], lowPriorityStatuses: ['generated', 'tentative'] },
+  }));
+  writeFileSync(join(dir, '.auto-context', 'wiki', 'decisions', 'generated.md'), '---\nstatus: generated\n---\n# Generated\n');
+  writeFileSync(join(dir, '.auto-context', 'wiki', 'decisions', 'discarded.md'), '---\nstatus: discarded\n---\n# Discarded\n');
+  writeFileSync(fixture, JSON.stringify({ results: [
+    { file: 'qmd://proj-wiki/decisions/discarded.md', title: 'Discarded wiki', score: 0.99 },
+    { file: 'qmd://proj-wiki/decisions/generated.md', title: 'Generated wiki', score: 0.8 },
+  ] }));
+  try {
+    const r = recall({ prompt: 'config layout decision 내용을 알려줘', cwd: dir }, { QMD_QUERY_FIXTURE: fixture });
+    assert.ok(r);
+    assert.match(r.hookSpecificOutput.additionalContext, /\[wiki:generated\]/);
+    assert.match(r.hookSpecificOutput.additionalContext, /generated\.md/);
+    assert.doesNotMatch(r.hookSpecificOutput.additionalContext, /discarded\.md/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

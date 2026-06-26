@@ -48,6 +48,53 @@ def qmd_uri_to_collection(uri: str) -> str:
         return uri[len("qmd://"):].split("/", 1)[0]
     return uri.split("/", 1)[0] if "/" in uri else ""
 
+def resolve_wiki_result_path(result: dict, config: dict, cwd: str) -> Path | None:
+    uri = result.get("file", "")
+    collection = result.get("_collection", "") or qmd_uri_to_collection(uri)
+    collection_paths = config.get("collectionPaths", {}) if isinstance(config.get("collectionPaths"), dict) else {}
+    wiki_path = config.get("wikiPath", ".auto-context/wiki")
+    project_root = Path(qmd_config.find_project_config(cwd).get("projectRoot", cwd)).resolve()
+    wiki_root = (project_root / wiki_path).resolve()
+    candidates = []
+    if uri.startswith("qmd://") and "/" in uri[len("qmd://"):]:
+        rel = uri[len("qmd://"):].split("/", 1)[1]
+        base = collection_paths.get(collection, "")
+        if base:
+            candidates.append((project_root / base / rel).resolve())
+        candidates.append((project_root / rel).resolve())
+    elif uri:
+        path = Path(uri)
+        candidates.append(path.resolve() if path.is_absolute() else (project_root / path).resolve())
+    for candidate in candidates:
+        try:
+            candidate.relative_to(wiki_root)
+        except ValueError:
+            continue
+        if candidate.is_file():
+            return candidate
+    return None
+
+def read_wiki_status(result: dict, config: dict, cwd: str) -> str:
+    path = resolve_wiki_result_path(result, config, cwd)
+    if path is None:
+        return "generated"
+    try:
+        text = path.read_text(encoding="utf-8")[:4096]
+    except OSError:
+        return "generated"
+    if not text.startswith("---"):
+        return "generated"
+    end = text.find("\n---", 3)
+    if end == -1:
+        return "generated"
+    frontmatter = text[3:end]
+    for line in frontmatter.splitlines():
+        if line.strip().startswith("status:"):
+            status = line.split(":", 1)[1].strip().strip('"\'')
+            if status:
+                return status
+    return "generated"
+
 def ep_numbers(prompt: str) -> list[int]:
     nums: list[int] = []
     for match in re.finditer(r"\bEP[\s_-]*0*(\d{1,3})\b|\b0*(\d{1,3})\s*화", prompt, re.IGNORECASE):
@@ -92,6 +139,8 @@ def format_context(results: list[dict], prefix_style: str = "full", collection_r
         collection = result.get("_collection", "") or qmd_uri_to_collection(uri)
         
         tag = collection_roles.get(collection, collection)
+        if tag == "wiki" and result.get("_wiki_status"):
+            tag = f"wiki:{result['_wiki_status']}"
         if collection not in collection_roles and prefix_style == "tag" and collection:
             tag = collection.rsplit("-", 1)[-1]
         prefix = f"[{tag}] " if tag else ""
@@ -287,6 +336,9 @@ def main():
             uri = result.get("file", "")
             if uri.startswith("qmd://"):
                 result["_collection"] = uri[len("qmd://"):].split("/", 1)[0]
+        roles = config.get("collectionRoles", {}) if isinstance(config.get("collectionRoles"), dict) else {}
+        if roles.get(result.get("_collection", "")) == "wiki":
+            result["_wiki_status"] = read_wiki_status(result, config, cwd)
 
     if "ep" in config.get("lexicalPatterns", []):
         promote_ep_exact_matches(results, ep_numbers(prompt))
@@ -341,6 +393,9 @@ def main():
                 uri = result.get("file", "")
                 if uri.startswith("qmd://"):
                     result["_collection"] = uri[len("qmd://"):].split("/", 1)[0]
+            roles = config.get("collectionRoles", {}) if isinstance(config.get("collectionRoles"), dict) else {}
+            if roles.get(result.get("_collection", "")) == "wiki":
+                result["_wiki_status"] = read_wiki_status(result, config, cwd)
         if "ep" in config.get("lexicalPatterns", []):
             promote_ep_exact_matches(raw_results, ep_numbers(prompt))
         results = sorted(raw_results, key=lambda r: r.get("score", 0), reverse=True)
@@ -364,6 +419,12 @@ def main():
 
     if config.get("recallStrategy") == "hierarchical":
         roles = config.get("collectionRoles", {})
+        compile_cfg = config.get("compile", {}) if isinstance(config.get("compile"), dict) else {}
+        excluded_statuses = set(compile_cfg.get("excludeStatusesFromRecall", ["discarded", "contested"]))
+        filtered_results = [
+            r for r in filtered_results
+            if roles.get(r.get("_collection", "")) != "wiki" or r.get("_wiki_status", "generated") not in excluded_statuses
+        ]
         wiki_results = [r for r in filtered_results if roles.get(r.get("_collection", "")) == "wiki"]
         if wiki_results:
             filtered_results = wiki_results

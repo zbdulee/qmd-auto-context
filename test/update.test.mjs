@@ -207,6 +207,25 @@ test('update core: --init-wiki without settings creates an opt-in wiki-only conf
   }
 });
 
+test('update core: --init-wiki --preset novel creates novel dirs and compile defaults', () => {
+  const work = repoTemp('qmd-init-wiki-novel');
+  try {
+    const out = execFileSync('bash', [join(process.cwd(), 'core', 'update.sh'), '--init-wiki', '--preset', 'novel', work], { encoding: 'utf8' });
+    assert.match(out, /wiki scaffold/);
+    for (const dir of ['characters', 'world', 'timeline', 'plot', 'style', 'discarded', 'sessions', 'decisions']) {
+      assert.equal(existsSync(join(work, '.auto-context', 'wiki', dir)), true, `${dir} should exist`);
+    }
+    const cfg = JSON.parse(readFileSync(join(work, '.auto-context', 'settings.json'), 'utf8'));
+    assert.equal(cfg.compile.enabled, true);
+    assert.equal(cfg.compile.mode, 'auto-wiki');
+    assert.equal(cfg.compile.autoWrite, true);
+    assert.equal(cfg.compile.defaultStatus, 'generated');
+    assert.equal(cfg.compile.requireReviewForCanon, true);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
 test('update core: --init-wiki preserves invalid existing settings.json', () => {
   const work = repoTemp('qmd-init-wiki-invalid');
   try {

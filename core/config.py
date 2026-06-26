@@ -30,7 +30,31 @@ DEFAULT_CONFIG = {
     "collectionRoles": {},
     "recallStrategy": "flat",
     "wikiPath": ".auto-context/wiki",
-    "compile": {"enabled": False},
+    "compile": {
+        "enabled": False,
+        "mode": "off",
+        "autoWrite": False,
+        "defaultStatus": "generated",
+        "requireReviewForCanon": True,
+        "candidatePath": ".auto-context/compile/candidates.jsonl",
+        "tombstonePath": ".auto-context/compile/tombstones.jsonl",
+        "manifestPath": ".auto-context/compile/generated-manifest.jsonl",
+        "excludeStatusesFromRecall": ["discarded", "contested"],
+        "lowPriorityStatuses": ["generated", "tentative"],
+        "triggers": [],
+        "canonSignals": [],
+        "maxAutoPageLines": 120,
+    },
+}
+
+COMPILE_MODES = {"off", "candidates", "guarded", "auto-wiki"}
+WIKI_STATUSES = {"generated", "reviewed", "canon", "tentative", "contested", "discarded"}
+COMPILE_TRIGGERS = {
+    "explicit_user_approval",
+    "post_session_summary",
+    "repeated_recall",
+    "cross_file_conclusion",
+    "manual",
 }
 
 EVENT_ALIASES = {
@@ -97,10 +121,32 @@ def collection_role_map(value, collections):
 def compile_config(value):
     if not isinstance(value, dict):
         return dict(DEFAULT_CONFIG["compile"])
-    result = {"enabled": value.get("enabled") if isinstance(value.get("enabled"), bool) else False}
-    candidate_path = value.get("candidatePath")
-    if isinstance(candidate_path, str):
-        result["candidatePath"] = candidate_path
+    defaults = DEFAULT_CONFIG["compile"]
+    result = dict(defaults)
+    result["enabled"] = value.get("enabled") if isinstance(value.get("enabled"), bool) else defaults["enabled"]
+    result["mode"] = value.get("mode") if value.get("mode") in COMPILE_MODES else defaults["mode"]
+    if not result["enabled"]:
+        result["mode"] = "off"
+    result["autoWrite"] = value.get("autoWrite") if isinstance(value.get("autoWrite"), bool) else defaults["autoWrite"]
+    result["defaultStatus"] = value.get("defaultStatus") if value.get("defaultStatus") in WIKI_STATUSES else defaults["defaultStatus"]
+    result["requireReviewForCanon"] = value.get("requireReviewForCanon") if isinstance(value.get("requireReviewForCanon"), bool) else defaults["requireReviewForCanon"]
+    for key in ("candidatePath", "tombstonePath", "manifestPath"):
+        if isinstance(value.get(key), str):
+            result[key] = value[key]
+    result["excludeStatusesFromRecall"] = [
+        status for status in string_list(value.get("excludeStatusesFromRecall"), defaults["excludeStatusesFromRecall"])
+        if status in WIKI_STATUSES
+    ]
+    result["lowPriorityStatuses"] = [
+        status for status in string_list(value.get("lowPriorityStatuses"), defaults["lowPriorityStatuses"])
+        if status in {"generated", "tentative"}
+    ]
+    result["triggers"] = [
+        trigger for trigger in string_list(value.get("triggers"), defaults["triggers"])
+        if trigger in COMPILE_TRIGGERS
+    ]
+    result["canonSignals"] = string_list(value.get("canonSignals"), defaults["canonSignals"])
+    result["maxAutoPageLines"] = coerce_int(value.get("maxAutoPageLines", defaults["maxAutoPageLines"]), defaults["maxAutoPageLines"])
     return result
 
 

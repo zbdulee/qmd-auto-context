@@ -67,14 +67,39 @@ test('wiki recall 신규 필드는 additive로 normalize 된다', () => {
     collectionRoles: { 'proj-docs': 'raw', 'proj-wiki': 'wiki', 'proj-bad': 'unknown' },
     recallStrategy: 'hierarchical',
     wikiPath: '.auto-context/wiki',
-    compile: { enabled: true, candidatePath: '.auto-context/compile/candidates.jsonl' },
+    compile: {
+      enabled: true,
+      mode: 'auto-wiki',
+      autoWrite: true,
+      defaultStatus: 'generated',
+      requireReviewForCanon: true,
+      candidatePath: '.auto-context/compile/candidates.jsonl',
+      tombstonePath: '.auto-context/compile/tombstones.jsonl',
+      manifestPath: '.auto-context/compile/generated-manifest.jsonl',
+      excludeStatusesFromRecall: ['discarded', 'contested', 'bogus'],
+      lowPriorityStatuses: ['generated', 'tentative', 'canon'],
+      triggers: ['manual', 'post_session_summary', 'bad'],
+      canonSignals: ['확정'],
+      maxAutoPageLines: '80',
+    },
   }));
   assert.deepEqual(cfg.collectionRoles, { 'proj-docs': 'raw', 'proj-wiki': 'wiki' });
   assert.equal(cfg.recallStrategy, 'hierarchical');
   assert.equal(cfg.wikiPath, '.auto-context/wiki');
   assert.deepEqual(cfg.compile, {
     enabled: true,
+    mode: 'auto-wiki',
+    autoWrite: true,
+    defaultStatus: 'generated',
+    requireReviewForCanon: true,
     candidatePath: '.auto-context/compile/candidates.jsonl',
+    tombstonePath: '.auto-context/compile/tombstones.jsonl',
+    manifestPath: '.auto-context/compile/generated-manifest.jsonl',
+    excludeStatusesFromRecall: ['discarded', 'contested'],
+    lowPriorityStatuses: ['generated', 'tentative'],
+    triggers: ['manual', 'post_session_summary'],
+    canonSignals: ['확정'],
+    maxAutoPageLines: 80,
   });
 });
 
