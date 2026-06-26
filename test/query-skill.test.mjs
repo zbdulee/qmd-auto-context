@@ -20,7 +20,7 @@ test("query skill metadata and wrapper contract", () => {
   assert.equal(meta.name, "query");
   assert.match(meta.description, /qmd/i);
   assert.match(meta.description, /recall/i);
-  assert.match(meta.description, /\.auto-context\.json/);
+  assert.match(meta.description, /\.auto-context\/settings\.json/);
   assert.match(skill, /core\/recall\.py/);
   assert.match(skill, /hook/i);
 
@@ -38,7 +38,8 @@ test("query wrapper uses recall fixture and returns hook context", () => {
   const base = join(homedir(), ".tmp-qmd-query-skill");
   mkdirSync(base, { recursive: true });
   const dir = mkdtempSync(join(base, "proj-"));
-    writeFileSync(join(dir, ".auto-context.json"), JSON.stringify({
+    mkdirSync(join(dir, ".auto-context"), { recursive: true });
+    writeFileSync(join(dir, ".auto-context", "settings.json"), JSON.stringify({
       indexing: true,
       collections: ["sample"],
     }));

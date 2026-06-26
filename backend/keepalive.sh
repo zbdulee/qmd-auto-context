@@ -1,13 +1,16 @@
 #!/bin/bash
 # managed-by: qmd-auto-context
-# qmd 데몬 embedding context warm 유지 핑.
-# 데몬은 모델을 오래 살려두지만 embedding context는 idle 시 dispose 되어 재생성(~1-2s) 페널티가 붙는다.
-# 실측상 30초 간격이면 항상 완전 warm(~0.6s) 유지. vec 쿼리여야 embedding 모델을 touch 한다(lex는 BM25라 무의미).
+# qmd 데몬 생존 확인 핑.
+#
+# 이전 버전은 embedding context warm 유지를 위해 collection 없는 vec 쿼리를 주기적으로 보냈다.
+# qmd 2.5.x의 /query vec 경로는 collection 지정이 없으면 전역 vectors_vec를 검색하므로,
+# 큰 qmd index(수십만 vector)에서는 keepalive 한 번이 20~30초 이상 걸려 daemon health까지
+# 막을 수 있다. 기본값은 health-only로 두고, 전역 vec warm ping은 명시 opt-in일 때만 실행한다.
 #
 # 주의: qmd 데몬은 single-threaded(Node 이벤트루프)다. 핑이 겹치거나 데몬이 busy인데 또 쏘면
 # 서버를 더 바쁘게 만들어 /health 까지 막는다. 그래서:
 #  (1) single-flight: 이전 핑이 아직 돌면 skip (mkdir atomic lock)
-#  (2) health 가 즉답할 때만 vec 핑 (busy/down 이면 skip)
+#  (2) health 가 즉답할 때만 선택적 vec warm 핑 (busy/down 이면 skip)
 PORT="${QMD_DAEMON_PORT:-8483}"
 LOCKDIR="${TMPDIR:-/tmp}/qmd-keepalive.lock.d"
 
@@ -24,7 +27,11 @@ trap 'rmdir "$LOCKDIR" 2>/dev/null || true' EXIT
 # (2) health 즉답 확인. busy/down 이면 핑을 추가로 쏘지 않는다.
 curl -s -m 1 "http://localhost:${PORT}/health" >/dev/null 2>&1 || exit 0
 
-# warm 핑 (vec). 데몬이 정상이면 ~0.6s.
+# 기본값은 health-only. 전역 vec warm ping은 큰 index에서 daemon을 장시간 점유할 수 있으므로
+# 진단/실험 목적으로 명시 opt-in 한 경우에만 사용한다.
+[ "${QMD_KEEPALIVE_VEC_WARM:-0}" = "1" ] || exit 0
+
+# warm 핑 (vec, opt-in). qmd 본체가 server-side timeout을 강제하지 않으므로 curl timeout으로만 제한된다.
 curl -s -m 5 -X POST "http://localhost:${PORT}/query" \
   -H 'Content-Type: application/json' \
   -d '{"searches":[{"type":"vec","query":"keepalive warm ping"}],"limit":1,"rerank":false}' \

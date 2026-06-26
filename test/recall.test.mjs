@@ -145,6 +145,23 @@ test('recall core: QMD_SANDBOX=true → 무출력 exit 0', () => {
   assert.equal(out.toString().trim(), '');
 });
 
+test('recall core: health timeout 기본값 완화 + QMD_HEALTH_TIMEOUT override', () => {
+  const out = execFileSync('python3', ['-c', [
+    'import os',
+    'from core.recall import DEFAULT_HEALTH_TIMEOUT, health_timeout',
+    'print(DEFAULT_HEALTH_TIMEOUT)',
+    'os.environ["QMD_HEALTH_TIMEOUT"] = "3.5"',
+    'print(health_timeout())',
+    'os.environ["QMD_HEALTH_TIMEOUT"] = "invalid"',
+    'print(health_timeout())',
+    'os.environ["QMD_HEALTH_TIMEOUT"] = "nan"',
+    'print(health_timeout())',
+    'os.environ["QMD_HEALTH_TIMEOUT"] = "-1"',
+    'print(health_timeout())',
+  ].join('\n')], { encoding: 'utf8' }).trim().split('\n');
+  assert.deepEqual(out, ['2.0', '3.5', '2.0', '2.0', '2.0']);
+});
+
 test('recall core: --sandbox 인자 → 무출력 exit 0', () => {
   const out = execFileSync('python3', ['core/recall.py', '--sandbox'], {
     input: JSON.stringify({ prompt: '검색 결과 정렬은 어떻게 동작해?', cwd: '/Users/example/work/sample' }),
@@ -176,5 +193,29 @@ test('레거시 .agents/qmd-recall.json → recall 동작(하위호환)', () => 
   try {
     const r = recall({ prompt: '검색 결과 정렬은 어떻게 동작해?', cwd: dir });
     assert.match(r.hookSpecificOutput.additionalContext, /\[sample\]/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('hierarchical recall: wiki 결과가 있으면 raw가 더 높아도 wiki만 우선 주입', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'qmd-rh-'));
+  const fixture = join(dir, 'hierarchical-fixture.json');
+  mkdirSync(join(dir, '.auto-context'), { recursive: true });
+  writeFileSync(join(dir, '.auto-context', 'settings.json'), JSON.stringify({
+    indexing: true,
+    collections: ['proj-wiki', 'proj-docs'],
+    collectionRoles: { 'proj-wiki': 'wiki', 'proj-docs': 'raw' },
+    recallStrategy: 'hierarchical',
+    topN: 3,
+  }));
+  writeFileSync(fixture, JSON.stringify({ results: [
+    { file: 'qmd://proj-docs/docs/raw-source.md', title: 'Raw source', score: 1.0 },
+    { file: 'qmd://proj-wiki/.auto-context/wiki/decisions/config-layout.md', title: 'Wiki decision', score: 0.6 },
+  ] }));
+  try {
+    const r = recall({ prompt: 'config layout decision 내용을 알려줘', cwd: dir }, { QMD_QUERY_FIXTURE: fixture });
+    assert.ok(r);
+    assert.match(r.hookSpecificOutput.additionalContext, /\[wiki\]/);
+    assert.match(r.hookSpecificOutput.additionalContext, /config-layout\.md/);
+    assert.doesNotMatch(r.hookSpecificOutput.additionalContext, /raw-source\.md/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

@@ -1,6 +1,6 @@
 ---
 name: update
-description: Use when the user asks to manually refresh or rebuild the qmd auto-context index for a project — e.g. "qmd 갱신해줘", "인덱스 새로고침", "refresh the index", SessionStart-style refresh. Runs core/update.sh and honors .auto-context.json opt-in. For recovering missed filesystem create/update/delete events, prefer the sync skill instead.
+description: Use when the user asks to manually refresh or rebuild the qmd auto-context index for a project — e.g. "qmd 갱신해줘", "인덱스 새로고침", "refresh the index", SessionStart-style refresh. Runs core/update.sh and honors .auto-context/settings.json opt-in. For recovering missed filesystem create/update/delete events, prefer the sync skill instead.
 ---
 
 # Update
@@ -26,7 +26,7 @@ Run the qmd auto-context update path manually for the current project.
 
 ## Safety
 
-- Do not bypass `.auto-context.json` opt-in.
+- Do not bypass `.auto-context/settings.json` opt-in.
 - Do not auto-install qmd. The wrapper checks the plugin-tested qmd version and prints install guidance when needed.
 - Prefer `sync` when the user specifically asks to detect missed filesystem CUD events.
 - Preserve empty output as a valid graceful no-op state.

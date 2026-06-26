@@ -12,6 +12,38 @@ test('backend 스크립트에 사용자 하드코딩 없음', () => {
   }
 });
 
+test('keepalive 기본값은 전역 vec warm ping을 보내지 않는 health-only 모드다', () => {
+  const sh = readFileSync('backend/keepalive.sh', 'utf8');
+  assert.match(sh, /QMD_KEEPALIVE_VEC_WARM:-0/, 'vec warm ping은 기본 off 여야 함');
+  assert.match(sh, /\[ "\$\{QMD_KEEPALIVE_VEC_WARM:-0\}" = "1" \] \|\| exit 0/, 'opt-in 전에는 /query 전에 종료해야 함');
+  assert.match(sh, /\/query/, '명시 opt-in 용 warm ping 경로는 유지');
+});
+
+test('backend manager health timeout invalid 값은 2초 fallback', () => {
+  const d = mkdtempSync(join(tmpdir(), 'qmd-manager-health-'));
+  const bin = join(d, 'bin');
+  const log = join(d, 'curl.log');
+  try {
+    execFileSync('mkdir', ['-p', bin]);
+    writeFileSync(join(bin, 'curl'), `#!/usr/bin/env sh\necho "$@" >> "${log}"\nexit 1\n`, { mode: 0o755 });
+    execFileSync('bash', ['core/backend_manager.sh', 'health'], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH}`,
+        QMD_HEALTH_TIMEOUT: 'invalid',
+        QMD_DAEMON_PORT: '59999',
+        QMD_BACKEND_STATE_DIR: join(d, 'state'),
+        QMD_BACKEND_LOG: join(d, 'manager.log'),
+        QMD_DAEMON_LOG: join(d, 'daemon.log'),
+      },
+    });
+    assert.match(readFileSync(log, 'utf8'), / -m 2 /);
+  } finally {
+    execFileSync('rm', ['-rf', d]);
+  }
+});
+
 // BUG-4: index_worker 큐 락은 flock(1) 명령에 의존하면 안 된다(macOS 부재).
 // core/dirty_queue.py와 동일한 python fcntl.flock으로 직렬화해야 한다.
 test('BUG-4: index_worker 큐 스냅샷이 flock(1) 명령에 의존하지 않고 python fcntl을 쓴다', () => {

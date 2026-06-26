@@ -26,9 +26,27 @@ LOCKDIR="${QMD_WRITER_LOCKDIR:-$_QMD_LOCK_BASE/qmd-update.lock.d}"
 STATUS="${QMD_UPDATE_STATUS:-$_QMD_CACHE_DIR/update-status.txt}"
 
 # SessionStart 헬스체크: 데몬 포트 확인. 데몬 기동은 plugin-managed backend manager가 담당한다.
+qmd_health_timeout() {
+  python3 - <<'PY'
+import math
+import os
+
+default = 2.0
+try:
+    value = float(os.environ.get("QMD_HEALTH_TIMEOUT", default))
+except (TypeError, ValueError):
+    value = default
+if not math.isfinite(value) or value <= 0:
+    value = default
+print(f"{value:g}")
+PY
+}
+
 qmd_healthcheck() {
   local port="${QMD_HEALTHCHECK_PORT:-8483}"
-  if curl -sf -m 1 "http://127.0.0.1:${port}/health" >/dev/null 2>&1; then
+  local timeout
+  timeout="$(qmd_health_timeout)"
+  if curl -sf -m "$timeout" "http://127.0.0.1:${port}/health" >/dev/null 2>&1; then
     return 0
   fi
   # 안내는 stderr(JSON 파싱 경로 보호). core/update.sh는 launchd를 직접 제어하지 않는다.
@@ -161,24 +179,11 @@ run_resolve_only() {
 }
 
 load_config_json() {
-  local dir prev=""
-  dir=$(cd "$1" 2>/dev/null && pwd) || dir="$1"
-  # HOME 하위가 아니면 부모로 올라가지 않고 cwd만 검사 (find_git_root와 경계 일치)
-  local under_home=0
-  case "$dir/" in "$HOME"/*) under_home=1 ;; esac
-  while [ -n "$dir" ] && [ "$dir" != "/" ] && [ "$dir" != "$prev" ]; do
-    if [ -f "$dir/.auto-context.json" ]; then
-      cat "$dir/.auto-context.json"; return
-    fi
-    if [ -f "$dir/.agents/qmd-recall.json" ]; then
-      cat "$dir/.agents/qmd-recall.json"; return
-    fi
-    [ "$dir" = "$HOME" ] && break
-    [ "$under_home" = "0" ] && break
-    prev="$dir"
-    dir="$(dirname "$dir")"
-  done
-  printf '{}'
+  python3 "$(dirname "$0")/config.py" --cwd "$1" --raw 2>/dev/null || printf '{}'
+}
+
+migrate_config_json() {
+  python3 "$(dirname "$0")/config.py" --cwd "$1" --migrate
 }
 
 config_event_enabled() {
@@ -211,6 +216,10 @@ run_update() {
   cd "$workdir" 2>/dev/null || exit 0
   
   log "START: cwd=$workdir"
+
+  local migration_result
+  migration_result=$(migrate_config_json "$workdir" 2>&1 || true)
+  [ -n "$migration_result" ] && log "CONFIG MIGRATION: $migration_result"
 
   # 1. read config from .agents/qmd-recall.json if exists
   local config_json
@@ -318,7 +327,7 @@ main() {
       echo "      다음 중 하나를 선택하세요:"
       printf '  1) 추천 확인:       %s --recommend %q\n'        "$h" "$w"
       printf '  2) 추천 즉시 적용:  %s --optin --recommended %q\n' "$h" "$s"
-      printf '  3) 직접 작성:       %q/.auto-context.json 파일을 작성한 뒤 다음 세션에 자동 적용\n' "$w"
+      printf '  3) 직접 작성:       %q/.auto-context/settings.json 파일을 작성한 뒤 다음 세션에 자동 적용\n' "$w"
       printf '  4) 거절:            %s --optout %q\n'            "$h" "$w"
       printf '  5) 임시 건너뜀(2h):  %s --skip %q\n'              "$h" "$w"
     }
@@ -355,6 +364,167 @@ PY
   exit 0
 fi
 
+if [ "$1" = "--migrate-config" ]; then
+  shift
+  target="${1:-$PWD}"
+  result=$(migrate_config_json "$target")
+  migrated=$(printf '%s' "$result" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("migrated"))' 2>/dev/null || echo "False")
+  reason=$(printf '%s' "$result" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("reason") or "")' 2>/dev/null || echo "")
+  from_path=$(printf '%s' "$result" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("from") or "")' 2>/dev/null || echo "")
+  to_path=$(printf '%s' "$result" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("to") or "")' 2>/dev/null || echo "")
+  if [ "$migrated" = "True" ]; then
+    printf '[qmd] Migrated %s -> %s\n' "$from_path" "$to_path"
+  else
+    printf '[qmd] No migration needed: %s\n' "${reason:-unknown}"
+  fi
+  exit 0
+fi
+
+if [ "$1" = "--init-wiki" ]; then
+  shift
+  target="${1:-$PWD}"
+  python3 - "$target" <<'PY'
+import json
+import os
+from pathlib import Path
+import sys
+import tempfile
+
+target = Path(sys.argv[1]).resolve()
+settings_dir = target / ".auto-context"
+settings = settings_dir / "settings.json"
+
+def ensure_settings_dir() -> None:
+    if settings_dir.exists():
+        if settings_dir.is_symlink() or not settings_dir.is_dir():
+            print(f"[qmd] unsafe .auto-context path: {settings_dir}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        settings_dir.mkdir(parents=True, exist_ok=False)
+    try:
+        resolved = settings_dir.resolve()
+        resolved.relative_to(target)
+    except (OSError, ValueError):
+        print(f"[qmd] unsafe .auto-context path: {settings_dir}", file=sys.stderr)
+        sys.exit(1)
+    if resolved != settings_dir:
+        print(f"[qmd] unsafe .auto-context path: {settings_dir}", file=sys.stderr)
+        sys.exit(1)
+
+if settings.exists():
+    try:
+        config = json.loads(settings.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"[qmd] invalid settings.json preserved: {settings}: {exc}", file=sys.stderr)
+        sys.exit(1)
+    if not isinstance(config, dict):
+        print(f"[qmd] invalid settings.json preserved: {settings}: expected object", file=sys.stderr)
+        sys.exit(1)
+else:
+    config = {}
+
+ensure_settings_dir()
+wiki = settings_dir / "wiki"
+
+def ensure_project_dir(path: Path, label: str) -> None:
+    if path.exists():
+        if path.is_symlink() or not path.is_dir():
+            print(f"[qmd] unsafe {label} path: {path}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        path.mkdir(parents=False, exist_ok=False)
+    try:
+        resolved = path.resolve()
+        resolved.relative_to(target)
+    except (OSError, ValueError):
+        print(f"[qmd] unsafe {label} path: {path}", file=sys.stderr)
+        sys.exit(1)
+    if resolved != path:
+        print(f"[qmd] unsafe {label} path: {path}", file=sys.stderr)
+        sys.exit(1)
+
+
+def ensure_project_file(path: Path, content: str) -> bool:
+    if path.is_symlink():
+        print(f"[qmd] unsafe wiki file path: {path}", file=sys.stderr)
+        sys.exit(1)
+    if path.exists():
+        if not path.is_file():
+            print(f"[qmd] unsafe wiki file path: {path}", file=sys.stderr)
+            sys.exit(1)
+        return False
+    path.write_text(content, encoding="utf-8")
+    return True
+
+dirs = [
+    wiki,
+    wiki / "concepts",
+    wiki / "entities",
+    wiki / "decisions",
+    wiki / "sessions",
+    wiki / "comparisons",
+    wiki / "queries",
+]
+for path in dirs:
+    ensure_project_dir(path, "wiki")
+
+files = {
+    wiki / "SCHEMA.md": "# Auto-context Wiki Schema\n\nThis wiki stores promoted, durable project knowledge. Do not paste full transcripts here.\n",
+    wiki / "index.md": "# Auto-context Wiki Index\n\n- decisions/\n- concepts/\n- entities/\n- sessions/\n",
+    wiki / "log.md": "# Auto-context Wiki Log\n\nAppend notable wiki maintenance events here.\n",
+}
+created = []
+for path, content in files.items():
+    if ensure_project_file(path, content):
+        created.append(str(path))
+
+def slug(name: str) -> str:
+    cleaned = "".join(ch.lower() if ch.isalnum() else "-" for ch in name).strip("-")
+    while "--" in cleaned:
+        cleaned = cleaned.replace("--", "-")
+    return cleaned or "project"
+
+wiki_collection = f"{slug(target.name)}-wiki"
+collections = config.get("collections") if isinstance(config.get("collections"), list) else []
+collections = [item for item in collections if isinstance(item, str)]
+if wiki_collection not in collections:
+    collections.append(wiki_collection)
+config["collections"] = collections
+
+collection_paths = config.get("collectionPaths") if isinstance(config.get("collectionPaths"), dict) else {}
+collection_paths = {key: value for key, value in collection_paths.items() if isinstance(key, str) and isinstance(value, str)}
+collection_paths[wiki_collection] = ".auto-context/wiki"
+config["collectionPaths"] = collection_paths
+
+collection_roles = config.get("collectionRoles") if isinstance(config.get("collectionRoles"), dict) else {}
+collection_roles = {key: value for key, value in collection_roles.items() if isinstance(key, str) and isinstance(value, str)}
+for collection in collections:
+    collection_roles.setdefault(collection, "raw")
+collection_roles[wiki_collection] = "wiki"
+config["collectionRoles"] = collection_roles
+config["recallStrategy"] = "hierarchical"
+config.setdefault("wikiPath", ".auto-context/wiki")
+if "indexing" not in config:
+    config["indexing"] = True
+
+fd, tmp = tempfile.mkstemp(dir=str(settings_dir), prefix="settings.", suffix=".tmp")
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(config, handle, ensure_ascii=False, indent=2)
+        handle.write("\n")
+    os.replace(tmp, settings)
+except BaseException:
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+    raise
+
+print(f"[qmd] wiki scaffold ready: {wiki} ({len(created)} files created)")
+PY
+  exit 0
+fi
+
 if [ "$1" = "--recommend" ]; then
   shift
   json_flag=""
@@ -372,13 +542,33 @@ if [ "$1" = "--optin" ] || [ "$1" = "--optout" ]; then
     python3 - "$target" "$(dirname "$0")" <<'PY'
 import json, os, sys, tempfile, subprocess
 from pathlib import Path
-target = Path(sys.argv[1])
+target = Path(sys.argv[1]).resolve()
 core_dir = sys.argv[2]
-dest = target / ".auto-context.json"
+settings_dir = target / ".auto-context"
+dest = settings_dir / "settings.json"
+legacy_root = target / ".auto-context.json"
 legacy = target / ".agents" / "qmd-recall.json"
+
+def ensure_settings_dir() -> None:
+    if settings_dir.exists():
+        if settings_dir.is_symlink() or not settings_dir.is_dir():
+            print(f"[qmd] unsafe .auto-context path: {settings_dir}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        settings_dir.mkdir(parents=True, exist_ok=False)
+    try:
+        resolved = settings_dir.resolve()
+        resolved.relative_to(target)
+    except (OSError, ValueError):
+        print(f"[qmd] unsafe .auto-context path: {settings_dir}", file=sys.stderr)
+        sys.exit(1)
+    if resolved != settings_dir:
+        print(f"[qmd] unsafe .auto-context path: {settings_dir}", file=sys.stderr)
+        sys.exit(1)
+
 # 기존 config 존재 시 미덮음
-if dest.exists() or legacy.exists():
-    existing = dest if dest.exists() else legacy
+if dest.exists() or legacy_root.exists() or legacy.exists():
+    existing = dest if dest.exists() else (legacy_root if legacy_root.exists() else legacy)
     print(f"[qmd] --optin --recommended: {existing} 이(가) 이미 존재합니다. 덮어쓰지 않습니다.", file=sys.stderr)
     sys.exit(1)
 # recommend_config.py 호출
@@ -395,11 +585,11 @@ except json.JSONDecodeError as e:
     print(f"[qmd] recommend_config.py JSON 파싱 실패: {e}", file=sys.stderr)
     sys.exit(1)
 if not rec.get("available"):
-    print("[qmd] 추천 가능한 경로를 찾지 못했습니다. --optin 또는 .auto-context.json 직접 작성을 쓰세요.", file=sys.stderr)
+    print("[qmd] 추천 가능한 경로를 찾지 못했습니다. --optin 또는 .auto-context/settings.json 직접 작성을 쓰세요.", file=sys.stderr)
     sys.exit(1)
 config = rec["config"]
-target.mkdir(parents=True, exist_ok=True)
-fd, tmp = tempfile.mkstemp(dir=str(target), prefix=".auto-context.", suffix=".tmp")
+ensure_settings_dir()
+fd, tmp = tempfile.mkstemp(dir=str(settings_dir), prefix="settings.", suffix=".tmp")
 try:
     with os.fdopen(fd, "w") as fh:
         json.dump(config, fh, ensure_ascii=False, indent=2)
@@ -416,18 +606,40 @@ PY
   python3 - "$mode" "$target" <<'PY'
 import json, os, sys, tempfile
 from pathlib import Path
-mode, target = sys.argv[1], Path(sys.argv[2])
-dest = target / ".auto-context.json"
+mode, target = sys.argv[1], Path(sys.argv[2]).resolve()
+settings_dir = target / ".auto-context"
+dest = settings_dir / "settings.json"
+legacy_root = target / ".auto-context.json"
 legacy = target / ".agents" / "qmd-recall.json"
+
+def ensure_settings_dir() -> None:
+    if settings_dir.exists():
+        if settings_dir.is_symlink() or not settings_dir.is_dir():
+            print(f"[qmd] unsafe .auto-context path: {settings_dir}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        settings_dir.mkdir(parents=True, exist_ok=False)
+    try:
+        resolved = settings_dir.resolve()
+        resolved.relative_to(target)
+    except (OSError, ValueError):
+        print(f"[qmd] unsafe .auto-context path: {settings_dir}", file=sys.stderr)
+        sys.exit(1)
+    if resolved != settings_dir:
+        print(f"[qmd] unsafe .auto-context path: {settings_dir}", file=sys.stderr)
+        sys.exit(1)
+
 base = {}
 used_legacy = False
-for src in (dest, legacy):
+used_root_legacy = False
+for src in (dest, legacy_root, legacy):
     if src.exists():
         try:
             base = json.loads(src.read_text())
             if not isinstance(base, dict): base = {}
         except (OSError, json.JSONDecodeError): base = {}
         used_legacy = (src == legacy)   # 레거시를 base로 읽었는지(=dest 없었음)
+        used_root_legacy = (src == legacy_root)
         break
 if mode == "--optin":
     base["indexing"] = True
@@ -437,8 +649,8 @@ if mode == "--optin":
 else:
     base["indexing"] = False
     msg = f"[qmd] opt-out 완료: {target}. 이 폴더는 인덱싱·검색하지 않습니다."
-target.mkdir(parents=True, exist_ok=True)
-fd, tmp = tempfile.mkstemp(dir=str(target), prefix=".auto-context.", suffix=".tmp")
+ensure_settings_dir()
+fd, tmp = tempfile.mkstemp(dir=str(settings_dir), prefix="settings.", suffix=".tmp")
 try:
     with os.fdopen(fd, "w") as fh:
         json.dump(base, fh, ensure_ascii=False, indent=2)
@@ -450,6 +662,8 @@ except BaseException:
 # 레거시를 base로 승계했으면(=내용이 .auto-context.json에 담김) 중복 방치 않고 백업 후 제거
 if used_legacy and legacy.exists():
     os.replace(str(legacy), str(legacy) + ".bak-migrated")
+if used_root_legacy and legacy_root.exists():
+    legacy_root.unlink()
 print(msg)
 PY
   exit 0

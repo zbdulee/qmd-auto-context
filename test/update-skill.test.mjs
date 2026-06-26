@@ -20,7 +20,7 @@ test("update skill metadata and wrapper contract", () => {
   assert.equal(meta.name, "update");
   assert.match(meta.description, /qmd/i);
   assert.match(meta.description, /SessionStart/i);
-  assert.match(meta.description, /\.auto-context\.json/);
+  assert.match(meta.description, /\.auto-context\/settings\.json/);
   assert.match(meta.description, /index/i);
   assert.match(skill, /core\/update\.sh/);
   assert.match(skill, /hook/i);

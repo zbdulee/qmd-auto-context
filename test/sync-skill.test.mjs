@@ -15,7 +15,7 @@ test("sync skill metadata and wrapper contract", () => {
   const skill = readFileSync("skills/sync/SKILL.md", "utf8");
   const meta = frontmatter(skill);
   assert.equal(meta.name, "sync");
-  assert.match(meta.description, /\.auto-context\.json/);
+  assert.match(meta.description, /\.auto-context\/settings\.json/);
   assert.match(meta.description, /create\/update\/delete|CUD/i);
   assert.match(meta.description, /dirty queue/i);
   assert.match(skill, /core\/sync\.py/);

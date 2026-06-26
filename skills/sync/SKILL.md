@@ -1,6 +1,6 @@
 ---
 name: sync
-description: Use when the user asks to sync, resync, or reconcile qmd auto-context after filesystem changes — especially missed create/update/delete (CUD) events under .auto-context.json collectionPaths — e.g. "동기화해줘", "resync 문서", "놓친 변경 반영". Compares an mtime/size snapshot and enqueues changed collections to the dirty queue. Use this (not update) when the goal is catching missed file changes.
+description: Use when the user asks to sync, resync, or reconcile qmd auto-context after filesystem changes — especially missed create/update/delete (CUD) events under .auto-context/settings.json collectionPaths — e.g. "동기화해줘", "resync 문서", "놓친 변경 반영". Compares an mtime/size snapshot and enqueues changed collections to the dirty queue. Use this (not update) when the goal is catching missed file changes.
 ---
 
 # Sync
@@ -28,7 +28,7 @@ Run qmd auto-context filesystem sync for the current project.
 
 ## Safety
 
-- If no `.auto-context.json` or collections are configured, report no-op.
+- If no `.auto-context/settings.json` or collections are configured, report no-op.
 - Do not auto-install qmd. The wrapper checks the plugin-tested qmd version and prints install guidance when needed.
 - If sync is busy, report the returned `lockPath`; stale dead-PID locks are recovered automatically.
 - If the user only wants inspection, pass `--dry-run`.

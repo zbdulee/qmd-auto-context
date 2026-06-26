@@ -89,6 +89,231 @@ test('mock HTTP daemon recall integration validates query payload and context ou
   }
 });
 
+test('hierarchical recall queries wiki collections before raw backfill', async () => {
+  const requests = [];
+  const server = createServer((req, res) => {
+    if (req.method === 'GET' && req.url === '/health') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end('{"ok":true}');
+      return;
+    }
+    if (req.method === 'POST' && req.url === '/query') {
+      let body = '';
+      req.setEncoding('utf8');
+      req.on('data', chunk => { body += chunk; });
+      req.on('end', () => {
+        const payload = JSON.parse(body);
+        requests.push(payload);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ results: [
+          { file: 'qmd://proj-wiki/.auto-context/wiki/decisions/config-layout.md', title: 'Config layout', score: 0.93 },
+        ] }));
+      });
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+
+  const tempDir = mkdtempSync(join(process.cwd(), '.tmp-qmd-http-hier-'));
+  try {
+    mkdirSync(join(tempDir, '.auto-context'), { recursive: true });
+    writeFileSync(join(tempDir, '.auto-context', 'settings.json'), JSON.stringify({
+      indexing: true,
+      collections: ['proj-wiki', 'proj-docs'],
+      collectionRoles: { 'proj-wiki': 'wiki', 'proj-docs': 'raw' },
+      recallStrategy: 'hierarchical',
+      queryTimeout: 1.25,
+    }));
+
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address();
+    const out = await runRecallAsync(
+      JSON.stringify({ prompt: 'config layout decision 내용을 알려줘', cwd: tempDir }),
+      { ...process.env, QMD_DAEMON_URL: `http://127.0.0.1:${port}` },
+    );
+
+    assert.equal(requests.length, 1);
+    assert.deepEqual(requests[0].collections, ['proj-wiki']);
+    const parsed = JSON.parse(out);
+    assert.match(parsed.hookSpecificOutput.additionalContext, /\[wiki\]/);
+    assert.match(parsed.hookSpecificOutput.additionalContext, /Config layout/);
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test('hierarchical recall backfills raw collections when wiki has no results', async () => {
+  const requests = [];
+  const server = createServer((req, res) => {
+    if (req.method === 'GET' && req.url === '/health') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end('{"ok":true}');
+      return;
+    }
+    if (req.method === 'POST' && req.url === '/query') {
+      let body = '';
+      req.setEncoding('utf8');
+      req.on('data', chunk => { body += chunk; });
+      req.on('end', () => {
+        const payload = JSON.parse(body);
+        requests.push(payload);
+        const isWiki = payload.collections.includes('proj-wiki');
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ results: isWiki ? [] : [
+          { file: 'qmd://proj-docs/docs/raw-source.md', title: 'Raw source', score: 0.88 },
+        ] }));
+      });
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+
+  const tempDir = mkdtempSync(join(process.cwd(), '.tmp-qmd-http-hier-raw-'));
+  try {
+    mkdirSync(join(tempDir, '.auto-context'), { recursive: true });
+    writeFileSync(join(tempDir, '.auto-context', 'settings.json'), JSON.stringify({
+      indexing: true,
+      collections: ['proj-wiki', 'proj-docs'],
+      collectionRoles: { 'proj-wiki': 'wiki', 'proj-docs': 'raw' },
+      recallStrategy: 'hierarchical',
+      prefixStyle: 'tag',
+      queryTimeout: 1.25,
+    }));
+
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address();
+    const out = await runRecallAsync(
+      JSON.stringify({ prompt: 'config layout 근거를 찾아줘', cwd: tempDir }),
+      { ...process.env, QMD_DAEMON_URL: `http://127.0.0.1:${port}` },
+    );
+
+    assert.equal(requests.length, 2);
+    assert.deepEqual(requests[0].collections, ['proj-wiki']);
+    assert.deepEqual(requests[1].collections, ['proj-docs']);
+    const parsed = JSON.parse(out);
+    assert.match(parsed.hookSpecificOutput.additionalContext, /\[raw\]/);
+    assert.match(parsed.hookSpecificOutput.additionalContext, /Raw source/);
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test('hierarchical recall does not duplicate raw backfill when raw also has no results', async () => {
+  const requests = [];
+  const server = createServer((req, res) => {
+    if (req.method === 'GET' && req.url === '/health') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end('{"ok":true}');
+      return;
+    }
+    if (req.method === 'POST' && req.url === '/query') {
+      let body = '';
+      req.setEncoding('utf8');
+      req.on('data', chunk => { body += chunk; });
+      req.on('end', () => {
+        requests.push(JSON.parse(body));
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ results: [] }));
+      });
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+
+  const tempDir = mkdtempSync(join(process.cwd(), '.tmp-qmd-http-hier-empty-'));
+  try {
+    mkdirSync(join(tempDir, '.auto-context'), { recursive: true });
+    writeFileSync(join(tempDir, '.auto-context', 'settings.json'), JSON.stringify({
+      indexing: true,
+      collections: ['proj-wiki', 'proj-docs'],
+      collectionRoles: { 'proj-wiki': 'wiki', 'proj-docs': 'raw' },
+      recallStrategy: 'hierarchical',
+      queryTimeout: 1.25,
+    }));
+
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address();
+    const out = await runRecallAsync(
+      JSON.stringify({ prompt: 'config layout 근거를 찾아줘', cwd: tempDir }),
+      { ...process.env, QMD_DAEMON_URL: `http://127.0.0.1:${port}` },
+    );
+
+    assert.equal(out, '');
+    assert.equal(requests.length, 2);
+    assert.deepEqual(requests[0].collections, ['proj-wiki']);
+    assert.deepEqual(requests[1].collections, ['proj-docs']);
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test('hierarchical recall backfills raw when wiki results are below minScore', async () => {
+  const requests = [];
+  const server = createServer((req, res) => {
+    if (req.method === 'GET' && req.url === '/health') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end('{"ok":true}');
+      return;
+    }
+    if (req.method === 'POST' && req.url === '/query') {
+      let body = '';
+      req.setEncoding('utf8');
+      req.on('data', chunk => { body += chunk; });
+      req.on('end', () => {
+        const payload = JSON.parse(body);
+        requests.push(payload);
+        const isWiki = payload.collections.includes('proj-wiki');
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ results: isWiki ? [
+          { file: 'qmd://proj-wiki/.auto-context/wiki/decisions/stale.md', title: 'Weak wiki result', score: 0.1 },
+        ] : [
+          { file: 'qmd://proj-docs/docs/raw-source.md', title: 'Raw source', score: 0.88 },
+        ] }));
+      });
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+
+  const tempDir = mkdtempSync(join(process.cwd(), '.tmp-qmd-http-hier-low-'));
+  try {
+    mkdirSync(join(tempDir, '.auto-context'), { recursive: true });
+    writeFileSync(join(tempDir, '.auto-context', 'settings.json'), JSON.stringify({
+      indexing: true,
+      collections: ['proj-wiki', 'proj-docs'],
+      collectionRoles: { 'proj-wiki': 'wiki', 'proj-docs': 'raw' },
+      recallStrategy: 'hierarchical',
+      minScore: 0.5,
+      queryTimeout: 1.25,
+    }));
+
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address();
+    const out = await runRecallAsync(
+      JSON.stringify({ prompt: 'config layout 근거를 찾아줘', cwd: tempDir }),
+      { ...process.env, QMD_DAEMON_URL: `http://127.0.0.1:${port}` },
+    );
+
+    assert.equal(requests.length, 2);
+    assert.deepEqual(requests[0].collections, ['proj-wiki']);
+    assert.deepEqual(requests[1].collections, ['proj-docs']);
+    const parsed = JSON.parse(out);
+    assert.match(parsed.hookSpecificOutput.additionalContext, /\[raw\]/);
+    assert.match(parsed.hookSpecificOutput.additionalContext, /Raw source/);
+    assert.doesNotMatch(parsed.hookSpecificOutput.additionalContext, /Weak wiki result/);
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test('디스패처가 잘못된 stdin에도 graceful(크래시 없음)', () => {
   const out = execFileSync('bash', ['hooks/run-hook', 'recall', 'claude'], {
     input: 'not json',

@@ -44,8 +44,26 @@ PY
   export PATH
 }
 
+qmd_health_timeout() {
+  python3 - <<'PY'
+import math
+import os
+
+default = 2.0
+try:
+    value = float(os.environ.get("QMD_HEALTH_TIMEOUT", default))
+except (TypeError, ValueError):
+    value = default
+if not math.isfinite(value) or value <= 0:
+    value = default
+print(f"{value:g}")
+PY
+}
+
 health() {
-  curl -sf -m "${QMD_HEALTH_TIMEOUT:-1}" "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1
+  local timeout
+  timeout="$(qmd_health_timeout)"
+  curl -sf -m "$timeout" "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1
 }
 
 qmd_version() {

@@ -155,7 +155,7 @@ def main():
 
     cwd = payload.get("cwd") or os.getcwd()
 
-    # Load config to get collection paths (.auto-context.json 우선, 레거시 fallback, indexing:false skip)
+    # Load config to get collection paths (.auto-context/settings.json 우선, 레거시 fallback, indexing:false skip)
     config = qmd_config.load_project_config(cwd)
 
     # 미동의(pending)·거절(indexing:false)이면 collections=[] → recall.py 서브프로세스 띄우기 전에 즉시 종료

@@ -1,6 +1,6 @@
 ---
 name: query
-description: Use when the user asks to manually query, search, recall, or look up project docs via qmd auto-context — e.g. "qmd 검색", "문서에서 찾아줘", "recall this", "look up in notes". Runs the same read-only recall path as the UserPromptSubmit hook (core/recall.py) and honors .auto-context.json opt-in. Read-only — never edits files. Prefer this over calling the qmd daemon directly.
+description: Use when the user asks to manually query, search, recall, or look up project docs via qmd auto-context — e.g. "qmd 검색", "문서에서 찾아줘", "recall this", "look up in notes". Runs the same read-only recall path as the UserPromptSubmit hook (core/recall.py) and honors .auto-context/settings.json opt-in. Read-only — never edits files. Prefer this over calling the qmd daemon directly.
 ---
 
 # Query
@@ -26,7 +26,7 @@ Run a manual qmd auto-context recall query for the current project.
 
 ## Safety
 
-- Do not bypass `.auto-context.json` opt-in.
+- Do not bypass `.auto-context/settings.json` opt-in.
 - Do not auto-install qmd. The wrapper checks the plugin-tested qmd version and prints install guidance when needed.
 - Do not query qmd directly unless debugging the wrapper.
 - Preserve empty output as a valid no-result state.

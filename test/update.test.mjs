@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, symlinkSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 
@@ -96,6 +96,196 @@ test('update core: sessionStart disabled이면 qmd 실행 없이 skip', () => {
   }
 });
 
+test('update core: sessionStart disabled from .auto-context/settings.json skips qmd', () => {
+  const work = repoTemp('qmd-update-settings-events');
+  const bin = join(work, 'bin');
+  const qmdLog = join(work, 'qmd.log');
+  try {
+    mkdirSync(join(work, '.auto-context'), { recursive: true });
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(work, '.auto-context', 'settings.json'), JSON.stringify({ collections: ['x'], events: ['userPromptSubmit'] }));
+    writeFileSync(join(bin, 'qmd'), `#!/usr/bin/env sh\necho "$@" >> "${qmdLog}"\nexit 0\n`, { mode: 0o755 });
+
+    execFileSync('bash', [join(process.cwd(), 'core', 'update.sh'), '--worker', work], {
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+    });
+
+    assert.throws(() => readFileSync(qmdLog, 'utf8'), 'qmd should not be invoked when sessionStart is disabled');
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('update core: --migrate-config migrates legacy config and prints result', () => {
+  const work = repoTemp('qmd-migrate-config');
+  try {
+    writeFileSync(join(work, '.auto-context.json'), JSON.stringify({ indexing: true, collections: ['x'] }));
+    const out = execFileSync('bash', [join(process.cwd(), 'core', 'update.sh'), '--migrate-config', work], { encoding: 'utf8' });
+    assert.ok(out.includes('Migrated'), `expected migrated message, got: ${out}`);
+    assert.equal(existsSync(join(work, '.auto-context.json')), false);
+    assert.deepEqual(JSON.parse(readFileSync(join(work, '.auto-context', 'settings.json'), 'utf8')).collections, ['x']);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('update core: --migrate-config no-op when settings exists', () => {
+  const work = repoTemp('qmd-migrate-noop');
+  try {
+    mkdirSync(join(work, '.auto-context'), { recursive: true });
+    writeFileSync(join(work, '.auto-context.json'), JSON.stringify({ collections: ['old'] }));
+    writeFileSync(join(work, '.auto-context', 'settings.json'), JSON.stringify({ collections: ['new'] }));
+    const out = execFileSync('bash', [join(process.cwd(), 'core', 'update.sh'), '--migrate-config', work], { encoding: 'utf8' });
+    assert.ok(out.includes('settings_exists'), `expected settings_exists message, got: ${out}`);
+    assert.equal(existsSync(join(work, '.auto-context.json')), true);
+    assert.deepEqual(JSON.parse(readFileSync(join(work, '.auto-context', 'settings.json'), 'utf8')).collections, ['new']);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('update core: --migrate-config refuses symlinked .auto-context directory', () => {
+  const work = repoTemp('qmd-migrate-symlink');
+  const outside = repoTemp('qmd-migrate-outside');
+  try {
+    writeFileSync(join(work, '.auto-context.json'), JSON.stringify({ indexing: true, collections: ['x'] }));
+    symlinkSync(outside, join(work, '.auto-context'), 'dir');
+
+    const out = execFileSync('bash', [join(process.cwd(), 'core', 'update.sh'), '--migrate-config', work], { encoding: 'utf8' });
+
+    assert.match(out, /unsafe_settings_dir/);
+    assert.equal(existsSync(join(work, '.auto-context.json')), true);
+    assert.equal(existsSync(join(outside, 'settings.json')), false);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test('update core: --init-wiki creates scaffold and enables wiki recall without dropping existing collections', () => {
+  const work = repoTemp('qmd-init-wiki');
+  try {
+    mkdirSync(join(work, '.auto-context'), { recursive: true });
+    writeFileSync(join(work, '.auto-context', 'settings.json'), JSON.stringify({
+      indexing: true,
+      collections: ['docs'],
+    }));
+    const out = execFileSync('bash', [join(process.cwd(), 'core', 'update.sh'), '--init-wiki', work], { encoding: 'utf8' });
+    assert.match(out, /wiki scaffold/);
+    assert.equal(existsSync(join(work, '.auto-context', 'wiki', 'SCHEMA.md')), true);
+    assert.equal(existsSync(join(work, '.auto-context', 'wiki', 'decisions')), true);
+    const cfg = JSON.parse(readFileSync(join(work, '.auto-context', 'settings.json'), 'utf8'));
+    const wikiCollection = cfg.collections.find(c => c !== 'docs');
+    assert.match(wikiCollection, /-wiki$/);
+    assert.deepEqual(cfg.collections, ['docs', wikiCollection]);
+    assert.deepEqual(cfg.collectionPaths, { [wikiCollection]: '.auto-context/wiki' });
+    assert.equal(cfg.collectionRoles.docs, 'raw');
+    assert.equal(cfg.collectionRoles[wikiCollection], 'wiki');
+    assert.equal(cfg.recallStrategy, 'hierarchical');
+
+    writeFileSync(join(work, '.auto-context', 'wiki', 'index.md'), '# custom\n');
+    execFileSync('bash', [join(process.cwd(), 'core', 'update.sh'), '--init-wiki', work], { encoding: 'utf8' });
+    assert.equal(readFileSync(join(work, '.auto-context', 'wiki', 'index.md'), 'utf8'), '# custom\n');
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('update core: --init-wiki without settings creates an opt-in wiki-only config', () => {
+  const work = repoTemp('qmd-init-wiki-empty');
+  try {
+    execFileSync('bash', [join(process.cwd(), 'core', 'update.sh'), '--init-wiki', work], { encoding: 'utf8' });
+    const cfg = JSON.parse(readFileSync(join(work, '.auto-context', 'settings.json'), 'utf8'));
+    assert.equal(cfg.indexing, true);
+    assert.equal(cfg.collections.length, 1);
+    assert.match(cfg.collections[0], /-wiki$/);
+    assert.deepEqual(cfg.collectionPaths, { [cfg.collections[0]]: '.auto-context/wiki' });
+    assert.deepEqual(cfg.collectionRoles, { [cfg.collections[0]]: 'wiki' });
+    assert.equal(cfg.recallStrategy, 'hierarchical');
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('update core: --init-wiki preserves invalid existing settings.json', () => {
+  const work = repoTemp('qmd-init-wiki-invalid');
+  try {
+    mkdirSync(join(work, '.auto-context'), { recursive: true });
+    writeFileSync(join(work, '.auto-context', 'settings.json'), '{not json');
+
+    assert.throws(() => execFileSync('bash', [join(process.cwd(), 'core', 'update.sh'), '--init-wiki', work], { encoding: 'utf8' }));
+
+    assert.equal(readFileSync(join(work, '.auto-context', 'settings.json'), 'utf8'), '{not json');
+    assert.equal(existsSync(join(work, '.auto-context', 'wiki')), false);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('update core: --init-wiki refuses symlinked .auto-context directory', () => {
+  const work = repoTemp('qmd-init-wiki-symlink');
+  const outside = repoTemp('qmd-init-wiki-outside');
+  try {
+    symlinkSync(outside, join(work, '.auto-context'), 'dir');
+
+    assert.throws(() => execFileSync('bash', [join(process.cwd(), 'core', 'update.sh'), '--init-wiki', work], { encoding: 'utf8' }));
+
+    assert.equal(existsSync(join(outside, 'settings.json')), false);
+    assert.equal(existsSync(join(outside, 'wiki')), false);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test('update core: --init-wiki refuses symlinked wiki directory', () => {
+  const work = repoTemp('qmd-init-wiki-dir-symlink');
+  const outside = repoTemp('qmd-init-wiki-dir-outside');
+  try {
+    mkdirSync(join(work, '.auto-context'), { recursive: true });
+    symlinkSync(outside, join(work, '.auto-context', 'wiki'), 'dir');
+
+    assert.throws(() => execFileSync('bash', [join(process.cwd(), 'core', 'update.sh'), '--init-wiki', work], { encoding: 'utf8' }));
+
+    assert.equal(existsSync(join(outside, 'SCHEMA.md')), false);
+    assert.equal(existsSync(join(outside, 'decisions')), false);
+    assert.equal(existsSync(join(work, '.auto-context', 'settings.json')), false);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test('update core: worker migrates .auto-context.json before loading config', () => {
+  const work = repoTemp('qmd-worker-migrate');
+  const bin = join(work, 'bin');
+  const fakeHome = join(work, 'fakehome');
+  const qmdLog = join(work, 'qmd.log');
+  try {
+    mkdirSync(bin, { recursive: true });
+    mkdirSync(fakeHome, { recursive: true });
+    writeFileSync(join(work, '.auto-context.json'), JSON.stringify({
+      indexing: true,
+      collections: ['x'],
+    }));
+    writeFileSync(join(bin, 'qmd'), [
+      '#!/usr/bin/env sh',
+      `echo "$@" >> "${qmdLog}"`,
+      'exit 0',
+    ].join('\n'), { mode: 0o755 });
+
+    execFileSync('bash', [join(process.cwd(), 'core', 'update.sh'), '--worker', work], {
+      encoding: 'utf8',
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, HOME: fakeHome, QMD_CACHE_DIR: fakeHome, QMD_LOCK_BASE: join(work, 'locks') },
+    });
+
+    assert.equal(existsSync(join(work, '.auto-context.json')), false);
+    assert.deepEqual(JSON.parse(readFileSync(join(work, '.auto-context', 'settings.json'), 'utf8')).collections, ['x']);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
 test('update core: QMD_SANDBOX=true → 무출력 exit 0', () => {
   const out = execFileSync('bash', ['core/update.sh'], {
     env: { ...process.env, QMD_SANDBOX: 'true' },
@@ -109,7 +299,7 @@ test('update core: --sandbox 인자 → 무출력 exit 0', () => {
 });
 
 // BUG-2 regression: collection add가 "already exists" + exit 1 반환해도 update/embed는 실행돼야 함
-test('pending: 안내 메시지에 --recommend/--optin --recommended/.auto-context.json/--optout/--skip 5개 포함', () => {
+test('pending: 안내 메시지에 --recommend/--optin --recommended/.auto-context/settings.json/--optout/--skip 5개 포함', () => {
   // pending 폴더(config 없음)를 stdin으로 전달해 main() 경로의 pending 분기를 실행.
   // qmd, curl 등 외부 명령이 없어도 pending 분기는 메시지만 출력하고 종료하므로 PATH stub 불필요.
   const work = repoTemp('qmd-pending-msg');
@@ -130,7 +320,7 @@ test('pending: 안내 메시지에 --recommend/--optin --recommended/.auto-conte
 
     assert.ok(out.includes('--recommend'), `--recommend 없음: ${out}`);
     assert.ok(out.includes('--optin --recommended'), `--optin --recommended 없음: ${out}`);
-    assert.ok(out.includes('.auto-context.json'), `.auto-context.json 없음: ${out}`);
+    assert.ok(out.includes('.auto-context/settings.json'), `.auto-context/settings.json 없음: ${out}`);
     assert.ok(out.includes('--optout'), `--optout 없음: ${out}`);
     assert.ok(out.includes('--skip'), `--skip 없음: ${out}`);
   } finally {
@@ -143,9 +333,7 @@ test('update core: collection add already-exists exit 1도 update 실행 (BUG-2)
   const bin = join(work, 'bin');
   const fakeHome = join(work, 'fakehome');
   const qmdLog = join(work, 'qmd.log');
-  const LOCKDIR = '/tmp/qmd-update.lock.d';
-  // 혹시 남은 lock 정리 (cleanup)
-  try { rmSync(LOCKDIR, { recursive: true, force: true }); } catch (_) {}
+  const lockBase = join(work, 'locks');
   try {
     mkdirSync(join(work, '.agents'), { recursive: true });
     mkdirSync(bin, { recursive: true });
@@ -175,6 +363,8 @@ test('update core: collection add already-exists exit 1도 update 실행 (BUG-2)
         ...process.env,
         PATH: `${bin}:${process.env.PATH}`,
         HOME: fakeHome,           // normalize_qmd_path가 ~/.bun/bin 등을 PATH에 추가 못 하도록
+        QMD_CACHE_DIR: fakeHome,
+        QMD_LOCK_BASE: lockBase,
       },
     });
 
@@ -182,6 +372,5 @@ test('update core: collection add already-exists exit 1도 update 실행 (BUG-2)
     assert.ok(log.includes('update'), `qmd update가 호출돼야 하는데 qmd.log 내용: ${log}`);
   } finally {
     rmSync(work, { recursive: true, force: true });
-    try { rmSync(LOCKDIR, { recursive: true, force: true }); } catch (_) {}
   }
 });

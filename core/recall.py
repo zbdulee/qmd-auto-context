@@ -2,6 +2,7 @@
 import sys
 import os
 import json
+import math
 import re
 import urllib.request
 import urllib.error
@@ -14,13 +15,20 @@ import config as qmd_config
 import keywords as qmd_keywords
 
 DEFAULT_DAEMON_URL = "http://localhost:8483"
-HEALTH_TIMEOUT = 0.5
+DEFAULT_HEALTH_TIMEOUT = 2.0
 QUERY_TIMEOUT = 5.0
+
+def health_timeout() -> float:
+    try:
+        timeout = float(os.environ.get("QMD_HEALTH_TIMEOUT", DEFAULT_HEALTH_TIMEOUT))
+    except (TypeError, ValueError):
+        return DEFAULT_HEALTH_TIMEOUT
+    return timeout if math.isfinite(timeout) and timeout > 0 else DEFAULT_HEALTH_TIMEOUT
 
 def daemon_alive(daemon_url: str) -> bool:
     try:
         req = urllib.request.Request(f"{daemon_url}/health", method="GET")
-        with urllib.request.urlopen(req, timeout=HEALTH_TIMEOUT) as resp:
+        with urllib.request.urlopen(req, timeout=health_timeout()) as resp:
             return resp.status == 200
     except (urllib.error.URLError, OSError, ValueError):
         return False
@@ -74,7 +82,8 @@ def resolve_prefix_style(config: dict) -> str:
         return "tag"
     return "full"
 
-def format_context(results: list[dict], prefix_style: str = "full") -> str:
+def format_context(results: list[dict], prefix_style: str = "full", collection_roles: dict | None = None) -> str:
+    collection_roles = collection_roles or {}
     lines = ["관련 문서:"]
     for result in results:
         uri = result.get("file", "")
@@ -82,8 +91,8 @@ def format_context(results: list[dict], prefix_style: str = "full") -> str:
         title = result.get("title", "")
         collection = result.get("_collection", "") or qmd_uri_to_collection(uri)
         
-        tag = collection
-        if prefix_style == "tag" and collection:
+        tag = collection_roles.get(collection, collection)
+        if collection not in collection_roles and prefix_style == "tag" and collection:
             tag = collection.rsplit("-", 1)[-1]
         prefix = f"[{tag}] " if tag else ""
         
@@ -94,8 +103,8 @@ def format_context(results: list[dict], prefix_style: str = "full") -> str:
     lines.append("필요시 참조.")
     return "\n".join(lines)
 
-def log_score_observation(log_path: str, results: list[dict], collections: list[str]) -> None:
-    if not results:
+def log_score_observation(log_path: str | None, results: list[dict], collections: list[str]) -> None:
+    if not log_path or not results:
         return
     scores = [r.get("score", 0) for r in results]
     payload = {
@@ -114,7 +123,7 @@ def log_score_observation(log_path: str, results: list[dict], collections: list[
     except OSError:
         pass
 
-def log_recall_event(log_path: str, reason: str, **fields) -> None:
+def log_recall_event(log_path: str | None, reason: str, **fields) -> None:
     """Append a one-line selection/skip reason to QMD_RECALL_LOG.
 
     Writes to the log file only (never stdout), and only when QMD_RECALL_LOG
@@ -196,6 +205,12 @@ def main():
     if not collections:
         log_recall_event(log_path, "no_collections")
         return 0
+    raw_collections = []
+    queried_wiki_first = False
+    daemon_url = os.environ.get("QMD_DAEMON_URL", DEFAULT_DAEMON_URL)
+
+    def query_daemon(query_collections: list[str]) -> list[dict] | None:
+        return None
 
     if fixture_path:
         try:
@@ -206,42 +221,59 @@ def main():
             log_recall_event(log_path, "fixture_error", fixture=fixture_path)
             return 0
     else:
-        daemon_url = os.environ.get("QMD_DAEMON_URL", DEFAULT_DAEMON_URL)
         if not daemon_alive(daemon_url):
             log_recall_event(log_path, "daemon_unreachable", daemon=daemon_url)
             return 0
         else:
             lexical_query = " ".join(deduped_lexical_terms)
             vector_query = re.sub(r"\s+", " ", prompt).strip()
-            
-            query_payload = {
-                "searches": [
-                    {"type": "lex", "query": lexical_query},
-                    {"type": "vec", "query": vector_query},
-                ],
-                "collections": collections,
-                "limit": 8,
-                "minScore": 0,
-                "timeout": config.get("queryTimeout", QUERY_TIMEOUT),
-                "rerank": False,
-            }
-            
-            data = json.dumps(query_payload).encode("utf-8")
-            req = urllib.request.Request(
-                f"{daemon_url}/query",
-                data=data,
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
-            try:
-                timeout = float(config.get("queryTimeout", QUERY_TIMEOUT))
-                with urllib.request.urlopen(req, timeout=timeout) as resp:
-                    body = resp.read().decode("utf-8")
-                parsed = json.loads(body)
-                results = parsed.get("results", [])
-                if not isinstance(results, list):
-                    results = []
-            except (urllib.error.URLError, OSError, ValueError, json.JSONDecodeError):
+
+            def query_daemon(query_collections: list[str]) -> list[dict] | None:
+                query_payload = {
+                    "searches": [
+                        {"type": "lex", "query": lexical_query},
+                        {"type": "vec", "query": vector_query},
+                    ],
+                    "collections": query_collections,
+                    "limit": 8,
+                    "minScore": 0,
+                    "timeout": config.get("queryTimeout", QUERY_TIMEOUT),
+                    "rerank": False,
+                }
+
+                data = json.dumps(query_payload).encode("utf-8")
+                req = urllib.request.Request(
+                    f"{daemon_url}/query",
+                    data=data,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                try:
+                    timeout = float(config.get("queryTimeout", QUERY_TIMEOUT))
+                    with urllib.request.urlopen(req, timeout=timeout) as resp:
+                        body = resp.read().decode("utf-8")
+                    parsed = json.loads(body)
+                    daemon_results = parsed.get("results", [])
+                    return daemon_results if isinstance(daemon_results, list) else []
+                except (urllib.error.URLError, OSError, ValueError, json.JSONDecodeError):
+                    return None
+
+            if config.get("recallStrategy") == "hierarchical":
+                roles = config.get("collectionRoles", {})
+                wiki_collections = [c for c in collections if roles.get(c) == "wiki"]
+                raw_collections = [c for c in collections if roles.get(c) != "wiki"]
+                if wiki_collections:
+                    queried_wiki_first = True
+                    results = query_daemon(wiki_collections)
+                    if results is None:
+                        log_recall_event(log_path, "query_failed", daemon=daemon_url)
+                        return 0
+                else:
+                    results = query_daemon(collections)
+            else:
+                results = query_daemon(collections)
+
+            if results is None:
                 log_recall_event(log_path, "query_failed", daemon=daemon_url)
                 return 0
 
@@ -293,6 +325,49 @@ def main():
 
         filtered_results.append(r)
 
+    if (
+        config.get("recallStrategy") == "hierarchical"
+        and queried_wiki_first
+        and raw_collections
+        and not filtered_results
+        and not fixture_path
+    ):
+        raw_results = query_daemon(raw_collections)
+        if raw_results is None:
+            log_recall_event(log_path, "query_failed", daemon=daemon_url)
+            return 0
+        for result in raw_results:
+            if "_collection" not in result:
+                uri = result.get("file", "")
+                if uri.startswith("qmd://"):
+                    result["_collection"] = uri[len("qmd://"):].split("/", 1)[0]
+        if "ep" in config.get("lexicalPatterns", []):
+            promote_ep_exact_matches(raw_results, ep_numbers(prompt))
+        results = sorted(raw_results, key=lambda r: r.get("score", 0), reverse=True)
+        filtered_results = []
+        dropped_skip = 0
+        dropped_min_score = 0
+        for r in results:
+            filepath = r.get("file", "")
+            should_skip = False
+            for skip in skip_paths:
+                if skip in filepath:
+                    should_skip = True
+                    break
+            if should_skip:
+                dropped_skip += 1
+                continue
+            if r.get("score", 0) < min_score:
+                dropped_min_score += 1
+                continue
+            filtered_results.append(r)
+
+    if config.get("recallStrategy") == "hierarchical":
+        roles = config.get("collectionRoles", {})
+        wiki_results = [r for r in filtered_results if roles.get(r.get("_collection", "")) == "wiki"]
+        if wiki_results:
+            filtered_results = wiki_results
+
     # Limit to topN
     top_n = int(config.get("topN", 3))
     final_results = filtered_results[:top_n]
@@ -318,7 +393,7 @@ def main():
     output = {
         "hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",
-            "additionalContext": format_context(final_results, resolve_prefix_style(config))
+            "additionalContext": format_context(final_results, resolve_prefix_style(config), config.get("collectionRoles", {}))
         }
     }
     print(json.dumps(output, ensure_ascii=False))

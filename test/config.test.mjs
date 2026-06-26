@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -15,6 +15,20 @@ function findProjectConfig(cwd, env = {}) {
 import json
 import config
 result = config.find_project_config(${JSON.stringify(cwd)})
+print(json.dumps(result, ensure_ascii=False))
+`;
+  const out = execFileSync('python3', ['-c', code], {
+    encoding: 'utf8',
+    env: { ...process.env, PYTHONPATH: 'core', ...env },
+  });
+  return JSON.parse(out);
+}
+
+function migrateLegacyConfig(cwd, env = {}) {
+  const code = `
+import json
+import config
+result = config.migrate_legacy_config(${JSON.stringify(cwd)})
 print(json.dumps(result, ensure_ascii=False))
 `;
   const out = execFileSync('python3', ['-c', code], {
@@ -45,6 +59,23 @@ test('신규 필드 파싱', () => {
   assert.deepEqual(cfg.skipPaths, ['.auto-context-ignore']);
   assert.equal(cfg.topN, 5);
   assert.equal(cfg.queryTimeout, 8);
+});
+
+test('wiki recall 신규 필드는 additive로 normalize 된다', () => {
+  const cfg = loadConfig(JSON.stringify({
+    collections: ['proj-docs', 'proj-wiki'],
+    collectionRoles: { 'proj-docs': 'raw', 'proj-wiki': 'wiki', 'proj-bad': 'unknown' },
+    recallStrategy: 'hierarchical',
+    wikiPath: '.auto-context/wiki',
+    compile: { enabled: true, candidatePath: '.auto-context/compile/candidates.jsonl' },
+  }));
+  assert.deepEqual(cfg.collectionRoles, { 'proj-docs': 'raw', 'proj-wiki': 'wiki' });
+  assert.equal(cfg.recallStrategy, 'hierarchical');
+  assert.equal(cfg.wikiPath, '.auto-context/wiki');
+  assert.deepEqual(cfg.compile, {
+    enabled: true,
+    candidatePath: '.auto-context/compile/candidates.jsonl',
+  });
 });
 
 test('빈/깨진 JSON → 전부 기본값', () => {
@@ -103,7 +134,49 @@ test('find_project_config: cwd .auto-context.json root/path 반환', () => {
     const result = findProjectConfig(dir, { HOME: home });
     assert.equal(result.projectRoot, realpathSync(dir));
     assert.equal(result.configPath, join(realpathSync(dir), '.auto-context.json'));
+    assert.equal(result.configFormat, 'auto-context-json');
     assert.deepEqual(result.config.collections, ['story']);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('find_project_config: .auto-context/settings.json preferred', () => {
+  const home = mkdtempSync(join(tmpdir(), 'qmd-cfg-home-'));
+  const dir = join(home, 'proj');
+  mkdirSync(join(dir, '.auto-context'), { recursive: true });
+  writeFileSync(join(dir, '.auto-context', 'settings.json'), JSON.stringify({
+    indexing: true,
+    collections: ['settings'],
+  }));
+  try {
+    const result = findProjectConfig(dir, { HOME: home });
+    assert.equal(result.projectRoot, realpathSync(dir));
+    assert.equal(result.configPath, join(realpathSync(dir), '.auto-context', 'settings.json'));
+    assert.equal(result.configFormat, 'auto-context-dir');
+    assert.deepEqual(result.config.collections, ['settings']);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('find_project_config: settings.json beats legacy .auto-context.json when both exist', () => {
+  const home = mkdtempSync(join(tmpdir(), 'qmd-cfg-home-'));
+  const dir = join(home, 'proj');
+  mkdirSync(join(dir, '.auto-context'), { recursive: true });
+  writeFileSync(join(dir, '.auto-context.json'), JSON.stringify({
+    indexing: true,
+    collections: ['legacy-root'],
+  }));
+  writeFileSync(join(dir, '.auto-context', 'settings.json'), JSON.stringify({
+    indexing: true,
+    collections: ['settings'],
+  }));
+  try {
+    const result = findProjectConfig(dir, { HOME: home });
+    assert.equal(result.configPath, join(realpathSync(dir), '.auto-context', 'settings.json'));
+    assert.equal(result.configFormat, 'auto-context-dir');
+    assert.deepEqual(result.config.collections, ['settings']);
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
@@ -122,6 +195,7 @@ test('find_project_config: parent .auto-context.json found from child cwd', () =
     const result = findProjectConfig(child, { HOME: home });
     assert.equal(result.projectRoot, realpathSync(dir));
     assert.equal(result.configPath, join(realpathSync(dir), '.auto-context.json'));
+    assert.equal(result.configFormat, 'auto-context-json');
     assert.deepEqual(result.config.collections, ['parent']);
   } finally {
     rmSync(home, { recursive: true, force: true });
@@ -139,6 +213,7 @@ test('find_project_config: legacy .agents/qmd-recall.json still works', () => {
     const result = findProjectConfig(dir, { HOME: home });
     assert.equal(result.projectRoot, realpathSync(dir));
     assert.equal(result.configPath, join(realpathSync(dir), '.agents', 'qmd-recall.json'));
+    assert.equal(result.configFormat, 'agents-legacy');
     assert.deepEqual(result.config.collections, ['legacy']);
   } finally {
     rmSync(home, { recursive: true, force: true });
@@ -153,7 +228,80 @@ test('find_project_config: no config returns null path and cwd root', () => {
     const result = findProjectConfig(dir, { HOME: home });
     assert.equal(result.projectRoot, realpathSync(dir));
     assert.equal(result.configPath, null);
+    assert.equal(result.configFormat, 'none');
     assert.deepEqual(result.config.collections, []);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('migrate_legacy_config moves .auto-context.json to .auto-context/settings.json and deletes old file', () => {
+  const home = mkdtempSync(join(tmpdir(), 'qmd-cfg-home-'));
+  const dir = join(home, 'proj');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, '.auto-context.json'), JSON.stringify({
+    indexing: true,
+    collections: ['legacy'],
+    minScore: 0.7,
+  }));
+  try {
+    const result = migrateLegacyConfig(dir, { HOME: home });
+    assert.equal(result.migrated, true);
+    assert.equal(result.from, join(realpathSync(dir), '.auto-context.json'));
+    assert.equal(result.to, join(realpathSync(dir), '.auto-context', 'settings.json'));
+    assert.equal(existsSync(join(dir, '.auto-context.json')), false);
+    const cfg = JSON.parse(readFileSync(join(dir, '.auto-context', 'settings.json'), 'utf8'));
+    assert.deepEqual(cfg.collections, ['legacy']);
+    assert.equal(cfg.minScore, 0.7);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('migrate_legacy_config is no-op when settings.json already exists', () => {
+  const home = mkdtempSync(join(tmpdir(), 'qmd-cfg-home-'));
+  const dir = join(home, 'proj');
+  mkdirSync(join(dir, '.auto-context'), { recursive: true });
+  writeFileSync(join(dir, '.auto-context.json'), JSON.stringify({ collections: ['legacy-root'] }));
+  writeFileSync(join(dir, '.auto-context', 'settings.json'), JSON.stringify({ collections: ['settings'] }));
+  try {
+    const result = migrateLegacyConfig(dir, { HOME: home });
+    assert.equal(result.migrated, false);
+    assert.equal(result.reason, 'settings_exists');
+    assert.equal(existsSync(join(dir, '.auto-context.json')), true);
+    assert.deepEqual(JSON.parse(readFileSync(join(dir, '.auto-context', 'settings.json'), 'utf8')).collections, ['settings']);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('migrate_legacy_config leaves legacy file on invalid JSON', () => {
+  const home = mkdtempSync(join(tmpdir(), 'qmd-cfg-home-'));
+  const dir = join(home, 'proj');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, '.auto-context.json'), '{not json');
+  try {
+    const result = migrateLegacyConfig(dir, { HOME: home });
+    assert.equal(result.migrated, false);
+    assert.equal(result.reason, 'invalid_json');
+    assert.equal(existsSync(join(dir, '.auto-context.json')), true);
+    assert.equal(existsSync(join(dir, '.auto-context', 'settings.json')), false);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('migrate_legacy_config does not migrate .agents/qmd-recall.json', () => {
+  const home = mkdtempSync(join(tmpdir(), 'qmd-cfg-home-'));
+  const dir = join(home, 'proj');
+  mkdirSync(join(dir, '.agents'), { recursive: true });
+  writeFileSync(join(dir, '.agents', 'qmd-recall.json'), JSON.stringify({ collections: ['agents'] }));
+  try {
+    const result = migrateLegacyConfig(dir, { HOME: home });
+    assert.equal(result.migrated, false);
+    assert.equal(result.reason, 'agents_legacy_not_migrated');
+    assert.equal(existsSync(join(dir, '.auto-context', 'settings.json')), false);
+    assert.equal(existsSync(join(dir, '.agents', 'qmd-recall.json')), true);
   } finally {
     rmSync(home, { recursive: true, force: true });
   }

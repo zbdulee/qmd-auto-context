@@ -81,9 +81,9 @@ def build_recommendation(cwd):
 def print_text(r):
     if not r["available"]:
         print("[qmd] 추천 가능한 좁은 auto-context 경로를 찾지 못했습니다.")
-        print("      .auto-context.json을 직접 작성하거나 plain --optin을 쓰세요.")
+        print("      .auto-context/settings.json을 직접 작성하거나 plain --optin을 쓰세요.")
         return
-    print("[qmd] 추천 .auto-context.json")
+    print("[qmd] 추천 .auto-context/settings.json")
     print("")
     print("선택된 경로:")
     for s in r["selected"]:

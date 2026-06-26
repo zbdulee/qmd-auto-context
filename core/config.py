@@ -2,8 +2,17 @@
 import argparse
 import json
 import math
+import os
 import sys
+import tempfile
+from pathlib import Path
 
+
+CONFIG_DIR_NAME = ".auto-context"
+SETTINGS_FILE_NAME = "settings.json"
+LEGACY_CONFIG_FILE_NAME = ".auto-context.json"
+LEGACY_AGENTS_DIR = ".agents"
+LEGACY_AGENTS_FILE_NAME = "qmd-recall.json"
 
 DEFAULT_CONFIG = {
     "name": "",
@@ -18,6 +27,10 @@ DEFAULT_CONFIG = {
     "prefixStyle": "full",
     "events": ["sessionStart", "userPromptSubmit", "postToolUse"],
     "indexing": None,
+    "collectionRoles": {},
+    "recallStrategy": "flat",
+    "wikiPath": ".auto-context/wiki",
+    "compile": {"enabled": False},
 }
 
 EVENT_ALIASES = {
@@ -66,6 +79,31 @@ def string_map(value):
     }
 
 
+def collection_role_map(value, collections):
+    if not isinstance(value, dict):
+        return {}
+    allowed_roles = {"raw", "wiki", "session"}
+    allowed_collections = set(collections)
+    return {
+        key: item
+        for key, item in value.items()
+        if isinstance(key, str)
+        and key in allowed_collections
+        and isinstance(item, str)
+        and item in allowed_roles
+    }
+
+
+def compile_config(value):
+    if not isinstance(value, dict):
+        return dict(DEFAULT_CONFIG["compile"])
+    result = {"enabled": value.get("enabled") if isinstance(value.get("enabled"), bool) else False}
+    candidate_path = value.get("candidatePath")
+    if isinstance(candidate_path, str):
+        result["candidatePath"] = candidate_path
+    return result
+
+
 def has_legacy_novel_collection(collections):
     return any(
         collection.endswith("-manuscript") or collection.endswith("-plot")
@@ -104,6 +142,10 @@ def normalize_config(input_config):
     config["collectionPaths"] = string_map(input_config.get("collectionPaths"))
     config["allowRoots"] = string_list(input_config.get("allowRoots"), DEFAULT_CONFIG["allowRoots"])
     config["prefixStyle"] = input_config.get("prefixStyle") if input_config.get("prefixStyle") in ("full", "tag") else DEFAULT_CONFIG["prefixStyle"]
+    config["collectionRoles"] = collection_role_map(input_config.get("collectionRoles"), config["collections"])
+    config["recallStrategy"] = input_config.get("recallStrategy") if input_config.get("recallStrategy") in ("flat", "hierarchical") else DEFAULT_CONFIG["recallStrategy"]
+    config["wikiPath"] = input_config.get("wikiPath") if isinstance(input_config.get("wikiPath"), str) else DEFAULT_CONFIG["wikiPath"]
+    config["compile"] = compile_config(input_config.get("compile"))
     if "events" in input_config and isinstance(input_config.get("events"), list):
         config["events"] = [
             canonical_event_name(event)
@@ -129,37 +171,48 @@ def normalize_config(input_config):
 
 
 def _is_within(path, root):
-    from pathlib import Path
     try:
         Path(path).relative_to(Path(root))
         return True
     except ValueError:
         return False
 
-
-def find_project_config(cwd):
-    """cwd→부모(HOME 경계)로 project config를 찾고 normalized config와 위치를 반환한다."""
-    from pathlib import Path
+def _project_search_dirs(cwd):
     path = Path(cwd).resolve()
     home = Path.home().resolve()
     # HOME 자체이거나 HOME 밖이면 cwd만; HOME 하위면 HOME까지만 부모 탐색.
     if path == home or not _is_within(path, home):
-        search = [path]
-    else:
-        search = [path]
-        for parent in path.parents:
-            search.append(parent)
-            if parent == home:
-                break
-    config_file = None
-    for d in search:
-        cand = d / ".auto-context.json"
-        legacy = d / ".agents" / "qmd-recall.json"
-        if cand.exists():
-            config_file = cand
+        return [path]
+    search = [path]
+    for parent in path.parents:
+        search.append(parent)
+        if parent == home:
             break
-        if legacy.exists():
-            config_file = legacy
+    return search
+
+
+def _candidate_configs(project_dir):
+    return [
+        (project_dir / CONFIG_DIR_NAME / SETTINGS_FILE_NAME, "auto-context-dir", project_dir),
+        (project_dir / LEGACY_CONFIG_FILE_NAME, "auto-context-json", project_dir),
+        (project_dir / LEGACY_AGENTS_DIR / LEGACY_AGENTS_FILE_NAME, "agents-legacy", project_dir),
+    ]
+
+
+def find_project_config(cwd):
+    """cwd→부모(HOME 경계)로 project config를 찾고 normalized config와 위치를 반환한다."""
+    path = Path(cwd).resolve()
+    config_file = None
+    config_format = "none"
+    project_root = path
+    for d in _project_search_dirs(cwd):
+        for cand, fmt, root in _candidate_configs(d):
+            if cand.exists():
+                config_file = cand
+                config_format = fmt
+                project_root = root
+                break
+        if config_file:
             break
     if config_file:
         try:
@@ -170,7 +223,8 @@ def find_project_config(cwd):
             return {
                 "config": config,
                 "configPath": str(config_file),
-                "projectRoot": str(config_file.parent.parent if config_file.name == "qmd-recall.json" else config_file.parent),
+                "configFormat": config_format,
+                "projectRoot": str(project_root),
             }
         except (json.JSONDecodeError, OSError):
             pass
@@ -179,21 +233,155 @@ def find_project_config(cwd):
     return {
         "config": fallback,
         "configPath": None,
+        "configFormat": "none",
         "projectRoot": str(path),
     }
 
 
+def find_legacy_auto_context_json(cwd):
+    """Find the nearest legacy .auto-context.json, unless new settings already exist first."""
+    for d in _project_search_dirs(cwd):
+        settings = d / CONFIG_DIR_NAME / SETTINGS_FILE_NAME
+        legacy_json = d / LEGACY_CONFIG_FILE_NAME
+        agents_legacy = d / LEGACY_AGENTS_DIR / LEGACY_AGENTS_FILE_NAME
+        if settings.exists():
+            return {"path": None, "projectRoot": str(d), "reason": "settings_exists"}
+        if legacy_json.exists():
+            return {"path": str(legacy_json), "projectRoot": str(d), "reason": None}
+        if agents_legacy.exists():
+            return {"path": None, "projectRoot": str(d), "reason": "agents_legacy_not_migrated"}
+    return {"path": None, "projectRoot": str(Path(cwd).resolve()), "reason": "no_legacy_config"}
+
+
+def _read_json_object(path):
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            parsed = json.load(handle)
+    except json.JSONDecodeError:
+        return None, "invalid_json"
+    except OSError:
+        return None, "read_error"
+    if not isinstance(parsed, dict):
+        return None, "invalid_json"
+    return parsed, None
+
+
+def _safe_project_settings_dir(project_root):
+    """Return .auto-context only if it is a real directory inside project_root."""
+    root = Path(project_root).resolve()
+    settings_dir = root / CONFIG_DIR_NAME
+    if settings_dir.exists():
+        if settings_dir.is_symlink() or not settings_dir.is_dir():
+            return None, "unsafe_settings_dir"
+    else:
+        try:
+            settings_dir.mkdir(parents=True, exist_ok=False)
+        except OSError:
+            return None, "write_error"
+    try:
+        resolved = settings_dir.resolve()
+        resolved.relative_to(root)
+    except (OSError, ValueError):
+        return None, "unsafe_settings_dir"
+    if resolved != settings_dir:
+        return None, "unsafe_settings_dir"
+    return settings_dir, None
+
+
+def migrate_legacy_config(cwd):
+    """Move .auto-context.json to .auto-context/settings.json safely.
+
+    This is intentionally separate from read-only config lookup so query-time
+    hooks can load config without mutating the project.
+    """
+    found = find_legacy_auto_context_json(cwd)
+    if not found.get("path"):
+        return {"migrated": False, "reason": found.get("reason", "no_legacy_config")}
+
+    legacy_path = Path(found["path"]).resolve()
+    project_root = Path(found["projectRoot"]).resolve()
+    settings_dir, dir_reason = _safe_project_settings_dir(project_root)
+    settings_path = project_root / CONFIG_DIR_NAME / SETTINGS_FILE_NAME
+    if dir_reason:
+        return {"migrated": False, "reason": dir_reason, "from": str(legacy_path), "to": str(settings_path)}
+    assert settings_dir is not None
+    tmp_path = None
+
+    if settings_path.exists():
+        return {"migrated": False, "reason": "settings_exists"}
+
+    parsed, reason = _read_json_object(legacy_path)
+    if reason:
+        return {"migrated": False, "reason": reason, "from": str(legacy_path)}
+    normalized = normalize_config(parsed)
+
+    try:
+        fd, tmp_name = tempfile.mkstemp(
+            dir=str(settings_dir),
+            prefix=f"{SETTINGS_FILE_NAME}.",
+            suffix=".tmp",
+            text=True,
+        )
+        tmp_path = Path(tmp_name)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(parsed, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+
+        tmp_parsed, reason = _read_json_object(tmp_path)
+        if reason or normalize_config(tmp_parsed) != normalized:
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+            return {"migrated": False, "reason": reason or "verification_failed", "from": str(legacy_path), "to": str(settings_path)}
+
+        tmp_path.replace(settings_path)
+
+        final_parsed, reason = _read_json_object(settings_path)
+        if reason or normalize_config(final_parsed) != normalized:
+            return {"migrated": False, "reason": reason or "verification_failed", "from": str(legacy_path), "to": str(settings_path)}
+
+        legacy_path.unlink()
+        return {"migrated": True, "from": str(legacy_path), "to": str(settings_path)}
+    except OSError as exc:
+        try:
+            if tmp_path and tmp_path.exists():
+                tmp_path.unlink()
+        except OSError:
+            pass
+        return {"migrated": False, "reason": "write_error", "error": str(exc), "from": str(legacy_path), "to": str(settings_path)}
+
+
 def load_project_config(cwd):
-    """cwd→부모(HOME 경계)로 .auto-context.json 우선, 없으면 레거시 .agents/qmd-recall.json 탐색.
+    """cwd→부모(HOME 경계)로 .auto-context/settings.json 우선, 없으면 레거시 config 탐색.
     indexing:false 면 collections=[] (검색/인덱싱 skip). 못 찾으면 빈 설정(collections=[])."""
     return find_project_config(cwd)["config"]
+
+
+def load_project_config_raw(cwd):
+    """Return the raw JSON object for the discovered project config, or {}."""
+    found = find_project_config(cwd)
+    config_path = found.get("configPath")
+    if not config_path:
+        return {}
+    parsed, reason = _read_json_object(config_path)
+    return parsed if not reason else {}
 
 
 def main():
     parser = argparse.ArgumentParser(description="Normalize qmd recall configuration.")
     parser.add_argument("--cwd", required=True)
+    parser.add_argument("--raw", action="store_true", help="Print raw discovered project config JSON instead of stdin normalization.")
+    parser.add_argument("--migrate", action="store_true", help="Migrate .auto-context.json to .auto-context/settings.json.")
     args = parser.parse_args()
-    _cwd = args.cwd
+
+    if args.migrate:
+        print(json.dumps(migrate_legacy_config(args.cwd), ensure_ascii=False))
+        return
+
+    if args.raw:
+        print(json.dumps(load_project_config_raw(args.cwd), ensure_ascii=False))
+        return
 
     config = normalize_config(load_input_config())
     print(json.dumps(config, ensure_ascii=False))
