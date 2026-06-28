@@ -37,6 +37,7 @@ DEFAULT_CONFIG = {
         "defaultStatus": "generated",
         "requireReviewForCanon": True,
         "candidatePath": ".auto-context/compile/candidates.jsonl",
+        "sourceQueuePath": ".auto-context/compile/source-queue.jsonl",
         "tombstonePath": ".auto-context/compile/tombstones.jsonl",
         "manifestPath": ".auto-context/compile/generated-manifest.jsonl",
         "excludeStatusesFromRecall": ["discarded", "contested"],
@@ -44,6 +45,11 @@ DEFAULT_CONFIG = {
         "triggers": [],
         "canonSignals": [],
         "maxAutoPageLines": 120,
+        "maxSourceChars": 12000,
+        "extractor": {
+            "argv": [],
+            "timeout": 30,
+        },
     },
 }
 
@@ -52,6 +58,7 @@ WIKI_STATUSES = {"generated", "reviewed", "canon", "tentative", "contested", "di
 COMPILE_TRIGGERS = {
     "explicit_user_approval",
     "post_session_summary",
+    "post_tool_source",
     "repeated_recall",
     "cross_file_conclusion",
     "manual",
@@ -130,7 +137,7 @@ def compile_config(value):
     result["autoWrite"] = value.get("autoWrite") if isinstance(value.get("autoWrite"), bool) else defaults["autoWrite"]
     result["defaultStatus"] = value.get("defaultStatus") if value.get("defaultStatus") in WIKI_STATUSES else defaults["defaultStatus"]
     result["requireReviewForCanon"] = value.get("requireReviewForCanon") if isinstance(value.get("requireReviewForCanon"), bool) else defaults["requireReviewForCanon"]
-    for key in ("candidatePath", "tombstonePath", "manifestPath"):
+    for key in ("candidatePath", "sourceQueuePath", "tombstonePath", "manifestPath"):
         if isinstance(value.get(key), str):
             result[key] = value[key]
     result["excludeStatusesFromRecall"] = [
@@ -147,6 +154,19 @@ def compile_config(value):
     ]
     result["canonSignals"] = string_list(value.get("canonSignals"), defaults["canonSignals"])
     result["maxAutoPageLines"] = coerce_int(value.get("maxAutoPageLines", defaults["maxAutoPageLines"]), defaults["maxAutoPageLines"])
+    result["maxSourceChars"] = coerce_int(value.get("maxSourceChars", defaults["maxSourceChars"]), defaults["maxSourceChars"])
+    raw_extractor = value.get("extractor")
+    extractor = raw_extractor if isinstance(raw_extractor, dict) else {}
+    default_extractor = defaults.get("extractor") if isinstance(defaults.get("extractor"), dict) else {"argv": [], "timeout": 30}
+    argv = extractor.get("argv")
+    if isinstance(argv, list) and all(isinstance(item, str) for item in argv):
+        normalized_argv = argv
+    else:
+        normalized_argv = list(default_extractor["argv"])
+    result["extractor"] = {
+        "argv": normalized_argv,
+        "timeout": coerce_int(extractor.get("timeout", default_extractor["timeout"]), default_extractor["timeout"]),
+    }
     return result
 
 

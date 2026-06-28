@@ -85,6 +85,17 @@ def safe_managed_dir(root: Path, rel: str) -> Path | None:
     return path
 
 
+def safe_compile_file(root: Path, compile_dir: Path, rel: object) -> Path | None:
+    if not isinstance(rel, str) or not rel:
+        return None
+    path = (root / rel).resolve()
+    try:
+        path.relative_to(compile_dir)
+    except ValueError:
+        return None
+    return path
+
+
 def resolve_target(root: Path, wiki_root: Path, candidate: dict, suggested_type: str) -> Path | None:
     raw_target = candidate.get("targetPath")
     if isinstance(raw_target, str) and raw_target.strip():
@@ -260,6 +271,8 @@ def main() -> int:
         return 0
 
     mode = compile_cfg.get("mode", "off")
+    if mode == "off":
+        return 0
     wiki_rel = config.get("wikiPath", ".auto-context/wiki")
     wiki_root = safe_managed_dir(root, wiki_rel)
     compile_dir = safe_managed_dir(root, ".auto-context/compile")
@@ -275,9 +288,12 @@ def main() -> int:
     summary, redactions = redact(str(candidate.get("summary") or "").strip())
     h = source_hash({**candidate, "summary": summary})
 
-    candidate_path = root / compile_cfg.get("candidatePath", ".auto-context/compile/candidates.jsonl")
-    tombstone_path = root / compile_cfg.get("tombstonePath", ".auto-context/compile/tombstones.jsonl")
-    manifest_path = root / compile_cfg.get("manifestPath", ".auto-context/compile/generated-manifest.jsonl")
+    candidate_path = safe_compile_file(root, compile_dir, compile_cfg.get("candidatePath", ".auto-context/compile/candidates.jsonl"))
+    tombstone_path = safe_compile_file(root, compile_dir, compile_cfg.get("tombstonePath", ".auto-context/compile/tombstones.jsonl"))
+    manifest_path = safe_compile_file(root, compile_dir, compile_cfg.get("manifestPath", ".auto-context/compile/generated-manifest.jsonl"))
+    if candidate_path is None or tombstone_path is None or manifest_path is None:
+        print(json.dumps({"action": "rejected", "reason": "unsafe_compile_path"}, ensure_ascii=False))
+        return 1
 
     record = {
         "ts": now_iso(),
@@ -319,7 +335,7 @@ def main() -> int:
         print(json.dumps({"action": "suppressed", "targetPath": record["targetPath"]}, ensure_ascii=False))
         return 0
 
-    if mode in ("off", "candidates") or not compile_cfg.get("autoWrite", False):
+    if mode == "candidates" or not compile_cfg.get("autoWrite", False):
         record["action"] = "candidate"
         append_jsonl(candidate_path, record)
         print(json.dumps({"action": "candidate", "targetPath": record["targetPath"]}, ensure_ascii=False))

@@ -2,8 +2,9 @@
 
 This module is intentionally thin: it adapts Hermes hook callback shapes to the
 same JSON payloads used by Claude/Codex/Gemini dispatchers, then delegates to
-core/recall.py, core/update.sh, core/posttool.py, core/index_enqueue.py, and
-core/preflight_gate.py. qmd backend/config/indexing logic stays in core/.
+core/recall.py, core/update.sh, core/posttool.py, core/index_enqueue.py,
+core/wiki_compile_enqueue.py, and core/preflight_gate.py. qmd backend/config/
+indexing/compile logic stays in core/.
 """
 
 from __future__ import annotations
@@ -53,6 +54,19 @@ def _env() -> Dict[str, str]:
         cache_dir = env.get("QMD_CACHE_DIR") or str(Path.home() / ".cache" / "qmd")
         env["QMD_RECALL_LOG"] = str(Path(cache_dir) / "qmd-hermes-hook.log")
     return env
+
+
+def _is_noop_env() -> bool:
+    env = os.environ
+    return bool(
+        env.get("QMD_SANDBOX")
+        or env.get("HERMES_SANDBOX")
+        or env.get("CLAUDE_SANDBOX")
+        or env.get("CODEX_SANDBOX")
+        or env.get("GEMINI_SANDBOX")
+        or env.get("HERMES_HEADLESS") == "1"
+        or env.get("CLAUDE_HEADLESS") == "1"
+    )
 
 
 def _manager_path() -> str:
@@ -171,6 +185,8 @@ def recall_context(
 ) -> Optional[Dict[str, str]]:
     """Hermes pre_llm_call hook: inject qmd recall context into this turn."""
     try:
+        if _is_noop_env():
+            return None
         prompt = user_message or kwargs.get("message") or ""
         if not isinstance(prompt, str) or not prompt.strip():
             return None
@@ -198,6 +214,8 @@ def recall_context(
 def session_update(cwd: Optional[str] = None, **kwargs: Any) -> None:
     """Hermes on_session_start hook: run qmd update through core/update.sh."""
     try:
+        if _is_noop_env():
+            return None
         manager = _manager_path()
         _run_quiet(["bash", manager, "ensure", "--wait"])
         _run_quiet(["bash", manager, "warm"])
@@ -216,6 +234,8 @@ def pre_edit_gate(
 ) -> Optional[Dict[str, str]]:
     """Hermes pre_tool_call hook: translate qmd pending-project gate to block."""
     try:
+        if _is_noop_env():
+            return None
         mapped = _map_edit_tool(tool_name, args)
         if mapped is None:
             return None
@@ -251,9 +271,12 @@ def post_edit_sync(
 
     Hermes post_tool_call return values are observer-only, so posttool output is
     intentionally not returned or claimed as injected. Dirty-queue indexing is
-    still performed via core/index_enqueue.py.
+    still performed via core/index_enqueue.py. Automatic wiki compile source
+    queueing is observer-only as well and delegates to core/wiki_compile_enqueue.py.
     """
     try:
+        if _is_noop_env():
+            return None
         mapped = _map_edit_tool(tool_name, args)
         if mapped is None or _result_has_error(result, status):
             return
@@ -265,9 +288,12 @@ def post_edit_sync(
             "cwd": _cwd(cwd, **kwargs),
         }
         manager = _manager_path()
+        payload_cwd = payload["cwd"]
         _run_quiet(["bash", manager, "ensure", "--wait"])
         _run([sys.executable, str(_core_path("core", "posttool.py"))], payload=payload)
         _run([sys.executable, str(_core_path("core", "index_enqueue.py"))], payload=payload)
         _run_quiet(["bash", manager, "kick-index"])
+        _run([sys.executable, str(_core_path("core", "wiki_compile_enqueue.py"))], payload=payload)
+        _run_quiet(["bash", manager, "kick-wiki-compile", str(payload_cwd)])
     except Exception as exc:  # pragma: no cover - hook isolation
         logger.debug("qmd-auto-context post-edit sync failed: %s", exc)

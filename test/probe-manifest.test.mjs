@@ -40,10 +40,11 @@ test('agy 루트 plugin.json: name qmd-auto-context', () => {
   assert.doesNotMatch(p.description, /Task \d|install\.sh|uninstall\.sh/);
 });
 
-test('agy 루트 hooks.json은 제공하지 않고 local installer가 절대경로 hook을 생성한다', () => {
+test('agy 루트 hooks.json은 제공하지 않고 local installer는 stale qmd hook만 정리한다', () => {
   assert.equal(existsSync('hooks.json'), false);
   const installer = readFileSync('core/agy_local_install.py', 'utf8');
-  assert.match(installer, /write_to_file\|replace_file_content\|multi_replace_file_content/);
-  assert.match(installer, /run-hook" posttool gemini/);
-  assert.match(installer, /run-hook" index gemini/);
+  assert.match(installer, /PostToolUse payload/);
+  assert.match(installer, /MARKER = "run-hook"/);
+  assert.doesNotMatch(installer, /run-hook" posttool gemini/);
+  assert.doesNotMatch(installer, /run-hook" index gemini/);
 });

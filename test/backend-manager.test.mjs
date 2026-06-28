@@ -309,3 +309,59 @@ test("manager source verifies pid command ownership before reuse or TERM", () =>
   assert.match(src, /ps -p "\$pid" -o command=/);
   assert.match(src, /mcp --http/);
 });
+
+test("kick-wiki-compile runs compile worker with explicit cwd and stays silent", () => {
+  const home = mkdtempSync(join(tmpdir(), "qmd-wiki-kick-"));
+  try {
+    const worker = join(home, "wiki-worker.sh");
+    const log = join(home, "worker.log");
+    const cwd = join(home, "project");
+    mkdirSync(cwd, { recursive: true });
+    writeFileSync(worker, `#!/usr/bin/env bash\nprintf '%s\n' "$*" >> "${log}"\n`, { mode: 0o755 });
+    const result = run(["kick-wiki-compile", cwd], {
+      HOME: home,
+      QMD_BACKEND_STATE_DIR: home,
+      QMD_COMPILE_WORKER_SCRIPT: worker,
+    });
+    assert.equal(result.status, 0);
+    assert.equal(result.stdout, "");
+    for (let i = 0; i < 20 && !existsSync(log); i++) {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+    }
+    assert.equal(readFileSync(log, "utf8").trim(), `--cwd ${cwd}`);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+
+test("kick-wiki-compile uses per-project locks so different cwd kicks are not dropped", () => {
+  const home = mkdtempSync(join(tmpdir(), "qmd-wiki-kick-multi-"));
+  try {
+    const worker = join(home, "wiki-worker.sh");
+    const log = join(home, "worker.log");
+    const cwdA = join(home, "project-a");
+    const cwdB = join(home, "project-b");
+    mkdirSync(cwdA, { recursive: true });
+    mkdirSync(cwdB, { recursive: true });
+    writeFileSync(worker, `#!/usr/bin/env bash\nprintf '%s\n' "$*" >> "${log}"\nsleep 0.2\n`, { mode: 0o755 });
+    execFileSync("/bin/bash", ["-c", "core/backend_manager.sh kick-wiki-compile \"$A\" & core/backend_manager.sh kick-wiki-compile \"$B\" & wait"], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        HOME: home,
+        A: cwdA,
+        B: cwdB,
+        QMD_BACKEND_STATE_DIR: home,
+        QMD_COMPILE_WORKER_SCRIPT: worker,
+      },
+    });
+    for (let i = 0; i < 20 && (!existsSync(log) || readFileSync(log, "utf8").trim().split("\n").filter(Boolean).length < 2); i++) {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+    }
+    const lines = readFileSync(log, "utf8").trim().split("\n").sort();
+    assert.deepEqual(lines, [`--cwd ${cwdA}`, `--cwd ${cwdB}`].sort());
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});

@@ -11,7 +11,9 @@ DAEMON_SCRIPT="${QMD_DAEMON_SCRIPT:-$ROOT/backend/daemon.sh}"
 KEEPALIVE_SCRIPT="${QMD_KEEPALIVE_SCRIPT:-$ROOT/backend/keepalive.sh}"
 LOGROTATE_SCRIPT="${QMD_LOGROTATE_SCRIPT:-$ROOT/backend/logrotate.sh}"
 INDEX_WORKER_SCRIPT="${QMD_INDEX_WORKER_SCRIPT:-$ROOT/backend/index_worker.sh}"
+COMPILE_WORKER_SCRIPT="${QMD_COMPILE_WORKER_SCRIPT:-$ROOT/core/wiki_compile_worker.py}"
 KICK_LOCK="${QMD_WORKER_KICK_LOCKDIR:-$STATE_DIR/index-kick.lock.d}"
+COMPILE_KICK_LOCK="${QMD_COMPILE_WORKER_KICK_LOCKDIR:-$STATE_DIR/wiki-compile-kick.lock.d}"
 START_LOCK="${QMD_DAEMON_START_LOCKDIR:-$STATE_DIR/daemon-start.lock.d}"
 REQUIRED_QMD_VERSION="${QMD_REQUIRED_VERSION:-2.5.3}"
 SUPPORTED_QMD_MAJOR="${QMD_SUPPORTED_MAJOR:-2}"
@@ -272,6 +274,37 @@ kick_index() {
   ) >/dev/null 2>&1 &
 }
 
+kick_wiki_compile() {
+  local cwd="${1:-}"
+  local lock_hash lock_dir
+  [ -z "$cwd" ] && return 0
+  lock_hash="$(python3 - "$cwd" <<'PY' 2>/dev/null || true
+import hashlib
+import sys
+print(hashlib.sha256(sys.argv[1].encode('utf-8')).hexdigest()[:16])
+PY
+)"
+  [ -z "$lock_hash" ] && lock_hash="default"
+  lock_dir="${COMPILE_KICK_LOCK}.${lock_hash}"
+  if ! mkdir "$lock_dir" 2>/dev/null; then
+    if [ -n "$(find "$lock_dir" -maxdepth 0 -mmin +10 2>/dev/null)" ]; then
+      rm -f "$lock_dir/pid" 2>/dev/null || true
+      rmdir "$lock_dir" 2>/dev/null || true
+      mkdir "$lock_dir" 2>/dev/null || return 0
+    else
+      return 0
+    fi
+  fi
+  (
+    trap 'rm -f "$lock_dir/pid" 2>/dev/null; rmdir "$lock_dir" 2>/dev/null || true' EXIT
+    echo "$$" >"$lock_dir/pid" 2>/dev/null || true
+    case "$COMPILE_WORKER_SCRIPT" in
+      *.sh|*.bash) bash "$COMPILE_WORKER_SCRIPT" --cwd "$cwd" >>"$MANAGER_LOG" 2>&1 || true ;;
+      *) python3 "$COMPILE_WORKER_SCRIPT" --cwd "$cwd" >>"$MANAGER_LOG" 2>&1 || true ;;
+    esac
+  ) >/dev/null 2>&1 &
+}
+
 has_marker() {
   [ -f "$1" ] && grep -q "managed-by: qmd-auto-context" "$1" 2>/dev/null
 }
@@ -285,6 +318,7 @@ case "${1:-}" in
   rotate) rotate ;;
   reload) reload ;;
   kick-index) kick_index ;;
+  kick-wiki-compile) shift; kick_wiki_compile "${1:-}" ;;
   cleanup-legacy) cleanup_legacy ;;
-  *) echo "usage: backend_manager.sh health|check-qmd [--manual]|start|ensure [--wait]|warm|rotate|reload|kick-index|cleanup-legacy" >&2; exit 2 ;;
+  *) echo "usage: backend_manager.sh health|check-qmd [--manual]|start|ensure [--wait]|warm|rotate|reload|kick-index|kick-wiki-compile <cwd>|cleanup-legacy" >&2; exit 2 ;;
 esac

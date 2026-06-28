@@ -68,3 +68,18 @@ test('codex PreToolUse matcher = PostToolUse matcher (우회 방지)', () => {
   const postMatcher = data.hooks['PostToolUse'][0].matcher;
   assert.equal(preMatcher, postMatcher, 'PreToolUse/PostToolUse matcher 불일치 — 우회 가능');
 });
+
+test('claude PostToolUse includes posttool, index, compile in order', () => {
+  const hooks = JSON.parse(readFileSync('hooks/hooks.json', 'utf8')).hooks['PostToolUse'][0].hooks;
+  assert.ok(hooks[0].command.includes('posttool claude'));
+  assert.ok(hooks[1].command.includes('index claude'));
+  assert.ok(hooks[2].command.includes('compile claude'));
+});
+
+test('codex PostToolUse includes posttool, index, compile without runtime order dependence', () => {
+  const hooks = JSON.parse(readFileSync('hooks/hooks-codex.json', 'utf8')).hooks['PostToolUse'][0].hooks;
+  const commands = hooks.map(h => h.command || '');
+  assert.ok(commands.some(command => command.includes('posttool codex')));
+  assert.ok(commands.some(command => command.includes('index codex')));
+  assert.ok(commands.some(command => command.includes('compile codex')));
+});

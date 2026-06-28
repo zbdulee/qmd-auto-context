@@ -12,7 +12,7 @@ node --test test/recall.test.mjs            # 단일 파일
 node --test --test-name-pattern "<정규식>"  # 이름으로 특정 테스트만
 QMD_LIVE=1 node --test test/integration.test.mjs   # 실제 데몬 라이브 스모크 (보통은 skip)
 
-bash scripts/agy-local-hook-install.sh <프로젝트>  # Gemini(agy): 프로젝트 .agents/hooks.json에 PostToolUse(posttool+index) 등록
+bash scripts/agy-local-hook-install.sh <프로젝트>  # Gemini(agy): 공식 payload adapter 전까지 stale qmd AGY hook cleanup only
 bash scripts/cleanup-legacy.sh --dry-run    # 기존 글로벌 qmd 훅/managed LaunchAgent cleanup 계획 확인
 bash scripts/cleanup-legacy.sh              # 기존 글로벌 qmd 훅/managed LaunchAgent cleanup 실행
 
@@ -78,14 +78,15 @@ backend/   ← qmd MCP HTTP 데몬(:8483) launcher + keepalive/logrotate/index w
 ### hooks (`hooks/`) — 유일한 훅 진입점
 > 구 `adapters/{claude,codex,gemini}/wrapper.py` 3벌은 제거되고 Claude/Codex/Gemini는 `hooks/run-hook` 단일 디스패처로 완전 통합됐다. Hermes Agent는 별도 host protocol이므로 Python plugin adapter(`plugin.yaml`, `__init__.py`, `hermes_adapter/`)가 같은 core 스크립트를 호출한다. **도메인 로직은 여전히 core/가 SSOT**다.
 
-- `run-hook` — 공통 디스패처(bash). 호출: `run-hook <action> <engine>` (action: recall|update|posttool|index, engine: claude|codex|gemini). `dirname "$0"`로 플러그인 루트를 찾고(env `CLAUDE_PLUGIN_ROOT`/`PLUGIN_ROOT` 있으면 우선), engine 라벨(`QMD_ENGINE`)·sandbox/headless 가드 후 backend manager ensure/kick와 `core/<script>` stdin 패스스루를 수행한다. **도메인 로직은 core/가 SSOT.**
-- `hooks.json` — Claude hooks (`${CLAUDE_PLUGIN_ROOT}`). `hooks-codex.json` — Codex hooks (`${PLUGIN_ROOT}`). 이벤트명 차이(claude/codex `UserPromptSubmit`/`PostToolUse` vs agy `PostToolUse` matcher `write_to_file|replace_file_content|multi_replace_file_content`, AfterTool은 실측상 미발동)로 플랫폼별로 나뉜다.
+- `run-hook` — 공통 디스패처(bash). 호출: `run-hook <action> <engine>` (action: recall|update|posttool|index|compile|gate, engine: claude|codex|gemini). `dirname "$0"`로 플러그인 루트를 찾고(env `CLAUDE_PLUGIN_ROOT`/`PLUGIN_ROOT` 있으면 우선), engine 라벨(`QMD_ENGINE`)·sandbox/headless 가드 후 backend manager ensure/kick와 `core/<script>` stdin 패스스루를 수행한다. **도메인 로직은 core/가 SSOT.**
+- `hooks.json` — Claude hooks (`${CLAUDE_PLUGIN_ROOT}`). `hooks-codex.json` — Codex hooks (`${PLUGIN_ROOT}`). Codex 공식 문서상 same-event command hooks는 동시 실행될 수 있으므로 posttool/index/compile은 서로 순서 의존하면 안 된다.
+- Antigravity(agy)는 공식 PostToolUse payload에 edited file path/tool input이 문서화되어 있지 않고 stdout contract도 `{}`라서, 현재 `scripts/agy-local-hook-install.sh`는 깨진 qmd run-hook 항목을 정리만 한다. AGY 자동 posttool/index/compile은 전용 payload adapter가 생긴 뒤 재활성화한다.
 - `hooks.json`은 **표준 구조** `{hooks:[{type:"command",command}]}`를 따라야 한다. 비표준 구조면 호스트(Claude/Codex)가 훅을 인식 못 함.
 - 매니페스트: `.claude-plugin/plugin.json`, `.codex-plugin/plugin.json`(+`interface`, `hooks` 경로 명시).
 
 ### Hermes Agent plugin (`plugin.yaml`, `__init__.py`, `hermes_adapter/`)
 - Hermes는 Claude/Codex hook JSON을 읽지 않고 Python plugin system을 쓴다. root `plugin.yaml` + `__init__.py`가 `hermes_adapter.plugin.register(ctx)`를 노출한다.
-- Hook mapping: `pre_llm_call`→`core/recall.py`, `on_session_start`→`core/update.sh`, `pre_tool_call`→`core/preflight_gate.py`, `post_tool_call`→`core/posttool.py` best-effort + `core/index_enqueue.py`.
+- Hook mapping: `pre_llm_call`→`core/recall.py`, `on_session_start`→`core/update.sh`, `pre_tool_call`→`core/preflight_gate.py`, `post_tool_call`→`core/posttool.py` best-effort + `core/index_enqueue.py` + `core/wiki_compile_enqueue.py`.
 - Hermes `post_tool_call` 반환값은 observer-only라 같은 턴 모델 컨텍스트에 posttool 힌트를 주입하지 않는다. 따라서 Hermes 경로의 편집 후 동작은 자동 인덱싱 중심이며, Claude/Codex posttool 컨텍스트 주입과 동일하다고 문서화하면 안 된다.
 
 ### 백엔드 (`backend/`)
@@ -95,7 +96,7 @@ backend/   ← qmd MCP HTTP 데몬(:8483) launcher + keepalive/logrotate/index w
 - `index_worker.sh` — one-shot dirty 큐 drain. writer lock 획득 → `qmd collection add`+`update`+`embed`(embed lock으로 update.sh와 직렬화) → 새 임베딩/삭제 있으면 manager reload. 큐 보존: busy/실패 시 drop 않고 큐를 그대로 둬 다음 kick에 재시도(coalesce).
 
 ### 설치 / cleanup
-Claude·Codex는 marketplace plugin install이 제품 경로다. 제품용 `install.sh`/`uninstall.sh`는 없다. AGY 로컬 훅 등록은 `scripts/agy-local-hook-install.sh`가 담당하고, 기존 레거시 qmd 글로벌 훅/managed LaunchAgent 정리는 `scripts/cleanup-legacy.sh` 또는 `backend_manager.sh cleanup-legacy` 같은 명시적 cleanup에서만 수행한다. 일반 hook 실행 중 LaunchAgent cleanup은 `QMD_CLEANUP_LEGACY=1` opt-in일 때만 허용한다.
+Claude·Codex는 marketplace plugin install이 제품 경로다. 제품용 `install.sh`/`uninstall.sh`는 없다. AGY는 공식 PostToolUse payload adapter 전까지 자동 qmd hook을 설치하지 않으며, `scripts/agy-local-hook-install.sh`는 과거 stale qmd run-hook cleanup만 수행한다. 기존 레거시 qmd 글로벌 훅/managed LaunchAgent 정리는 `scripts/cleanup-legacy.sh` 또는 `backend_manager.sh cleanup-legacy` 같은 명시적 cleanup에서만 수행한다. 일반 hook 실행 중 LaunchAgent cleanup은 `QMD_CLEANUP_LEGACY=1` opt-in일 때만 허용한다.
 
 ### 버전 bump 체크리스트
 릴리스 버전을 올릴 때는 모든 host manifest와 테스트 기대값을 같은 버전으로 맞춘다.

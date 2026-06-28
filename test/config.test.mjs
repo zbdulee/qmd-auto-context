@@ -74,13 +74,16 @@ test('wiki recall 신규 필드는 additive로 normalize 된다', () => {
       defaultStatus: 'generated',
       requireReviewForCanon: true,
       candidatePath: '.auto-context/compile/candidates.jsonl',
+      sourceQueuePath: '.auto-context/compile/source-queue.jsonl',
       tombstonePath: '.auto-context/compile/tombstones.jsonl',
       manifestPath: '.auto-context/compile/generated-manifest.jsonl',
       excludeStatusesFromRecall: ['discarded', 'contested', 'bogus'],
       lowPriorityStatuses: ['generated', 'tentative', 'canon'],
-      triggers: ['manual', 'post_session_summary', 'bad'],
+      triggers: ['manual', 'post_session_summary', 'post_tool_source', 'bad'],
       canonSignals: ['확정'],
       maxAutoPageLines: '80',
+      maxSourceChars: '12000',
+      extractor: { argv: ['python3', 'scripts/extract.py'], timeout: '30' },
     },
   }));
   assert.deepEqual(cfg.collectionRoles, { 'proj-docs': 'raw', 'proj-wiki': 'wiki' });
@@ -93,14 +96,32 @@ test('wiki recall 신규 필드는 additive로 normalize 된다', () => {
     defaultStatus: 'generated',
     requireReviewForCanon: true,
     candidatePath: '.auto-context/compile/candidates.jsonl',
+    sourceQueuePath: '.auto-context/compile/source-queue.jsonl',
     tombstonePath: '.auto-context/compile/tombstones.jsonl',
     manifestPath: '.auto-context/compile/generated-manifest.jsonl',
     excludeStatusesFromRecall: ['discarded', 'contested'],
     lowPriorityStatuses: ['generated', 'tentative'],
-    triggers: ['manual', 'post_session_summary'],
+    triggers: ['manual', 'post_session_summary', 'post_tool_source'],
     canonSignals: ['확정'],
     maxAutoPageLines: 80,
+    maxSourceChars: 12000,
+    extractor: { argv: ['python3', 'scripts/extract.py'], timeout: 30 },
   });
+});
+
+test('compile extractor config drops shell strings and invalid timeout', () => {
+  const cfg = loadConfig(JSON.stringify({
+    compile: {
+      enabled: true,
+      mode: 'guarded',
+      sourceQueuePath: 123,
+      maxSourceChars: 'NaN',
+      extractor: { command: 'python3 script.py', argv: 'python3 script.py', timeout: 'Infinity' },
+    },
+  }));
+  assert.equal(cfg.compile.sourceQueuePath, '.auto-context/compile/source-queue.jsonl');
+  assert.equal(cfg.compile.maxSourceChars, 12000);
+  assert.deepEqual(cfg.compile.extractor, { argv: [], timeout: 30 });
 });
 
 test('빈/깨진 JSON → 전부 기본값', () => {

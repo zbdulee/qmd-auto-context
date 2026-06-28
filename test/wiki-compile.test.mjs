@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
@@ -113,6 +113,28 @@ test('wiki_compile: disabled or candidates mode records candidate only', () => {
   }
 });
 
+
+test('wiki_compile: mode off is a no-op and writes no candidate audit', () => {
+  const work = repoTemp('wiki-compile-mode-off');
+  try {
+    writeSettings(work, { mode: 'off' });
+    const out = runCompile(work, {
+      trigger: 'manual',
+      title: 'Mode Off Candidate',
+      summary: 'Mode off should not write candidate audit records.',
+      suggestedType: 'concept',
+      confidence: 'high',
+      targetPath: '.auto-context/wiki/concepts/mode-off.md',
+    });
+
+    assert.equal(out, '');
+    assert.equal(existsSync(join(work, '.auto-context', 'compile', 'candidates.jsonl')), false);
+    assert.equal(existsSync(join(work, '.auto-context', 'wiki', 'concepts', 'mode-off.md')), false);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
 test('wiki_compile: missing generated page creates tombstone and suppresses automatic recreation', () => {
   const work = repoTemp('wiki-compile-tombstone');
   try {
@@ -131,6 +153,32 @@ test('wiki_compile: missing generated page creates tombstone and suppresses auto
 
     assert.equal(existsSync(join(work, '.auto-context', 'wiki', 'concepts', 'deleted-page.md')), false);
     assert.match(readFileSync(join(work, '.auto-context', 'compile', 'tombstones.jsonl'), 'utf8'), /deleted-page/);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+
+test('wiki_compile: compile audit paths are confined to project .auto-context/compile', () => {
+  const work = repoTemp('wiki-compile-safe-audit');
+  try {
+    const outsideName = `../outside-candidates-${work.split('/').pop()}.jsonl`;
+    writeSettings(work, { candidatePath: outsideName });
+    const result = spawnSync('python3', ['core/wiki_compile.py', '--cwd', work], {
+      encoding: 'utf8',
+      input: JSON.stringify({
+      trigger: 'manual',
+      title: 'Unsafe Audit Path',
+      summary: 'Unsafe audit path must be rejected before any outside write.',
+      suggestedType: 'decision',
+      confidence: 'high',
+      targetPath: '.auto-context/wiki/decisions/unsafe-audit.md',
+      }),
+    });
+    assert.equal(result.status, 1);
+    assert.match(result.stdout, /unsafe_managed_path|unsafe_compile_path/);
+    assert.equal(existsSync(join(work, '..', outsideName.slice(3))), false);
+    assert.equal(existsSync(join(work, '.auto-context', 'wiki', 'decisions', 'unsafe-audit.md')), false);
   } finally {
     rmSync(work, { recursive: true, force: true });
   }

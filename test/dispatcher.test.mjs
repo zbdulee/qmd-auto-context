@@ -126,6 +126,61 @@ test('run-hook index → index_enqueue.py 위임 (sandbox 무출력)', () => {
   assert.equal(out, '');
 });
 
+test('run-hook compile → wiki_compile_enqueue.py 위임 후 worker kick, stdout silent', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'qmd-compile-dispatch-'));
+  const enqueueLog = join(dir, 'enqueue.json');
+  const managerLog = join(dir, 'manager.log');
+  const enqueue = join(dir, 'enqueue.py');
+  const manager = join(dir, 'manager.sh');
+  writeFileSync(enqueue, `#!/usr/bin/env python3
+import sys
+open(${JSON.stringify(enqueueLog)}, 'w').write(sys.stdin.read())
+`);
+  writeFileSync(manager, `#!/usr/bin/env bash
+printf '%s\n' "$*" >> ${JSON.stringify(managerLog)}
+`);
+  try {
+    const payload = { hook_event_name: 'PostToolUse', cwd: dir, tool_input: { file_path: join(dir, 'docs', 'x.md') } };
+    const out = execFileSync('bash', ['hooks/run-hook', 'compile', 'claude'], {
+      input: JSON.stringify(payload),
+      encoding: 'utf8',
+      env: { ...process.env, QMD_CORE_COMPILE_ENQUEUE_SCRIPT: enqueue, QMD_BACKEND_MANAGER: manager },
+    });
+    assert.equal(out, '');
+    assert.deepEqual(JSON.parse(readFileSync(enqueueLog, 'utf8')), payload);
+    assert.equal(readFileSync(managerLog, 'utf8').trim(), `kick-wiki-compile ${dir}`);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+
+test('run-hook compile forwards QMD_ENGINE to wiki compile enqueue', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'qmd-compile-engine-'));
+  const engineLog = join(dir, 'engine.txt');
+  const enqueue = join(dir, 'enqueue.py');
+  const manager = join(dir, 'manager.sh');
+  writeFileSync(enqueue, `#!/usr/bin/env python3
+import os, sys
+sys.stdin.read()
+open(${JSON.stringify(engineLog)}, 'w').write(os.environ.get('QMD_ENGINE', ''))
+`);
+  writeFileSync(manager, '#!/usr/bin/env bash\nexit 0\n');
+  try {
+    execFileSync('bash', ['hooks/run-hook', 'compile', 'codex'], {
+      input: JSON.stringify({ hook_event_name: 'PostToolUse', cwd: dir, tool_input: { file_path: join(dir, 'docs', 'x.md') } }),
+      encoding: 'utf8',
+      env: { ...process.env, QMD_CORE_COMPILE_ENQUEUE_SCRIPT: enqueue, QMD_BACKEND_MANAGER: manager },
+    });
+    assert.equal(readFileSync(engineLog, 'utf8'), 'codex');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('run-hook compile --sandbox → 무출력', () => {
+  const out = execFileSync('bash', ['hooks/run-hook', 'compile', 'claude', '--sandbox'], {
+    input: '{}', encoding: 'utf8',
+  });
+  assert.equal(out, '');
+});
+
 test('run-hook gate claude → preflight_gate.py 위임 (tool 비-gated 시 무출력)', () => {
   // tool_name이 GATED_TOOLS에 없으면 preflight_gate.py가 무출력으로 allow
   const payload = { hook_event_name: 'PreToolUse', tool_name: 'bash', tool_input: {} };

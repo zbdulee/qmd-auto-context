@@ -25,15 +25,13 @@ test('cleanup-legacy dry-run is explicit and creates no files', () => {
   }
 });
 
-test('agy local hook registration has a dedicated script', () => {
+test('agy local hook script cleans stale qmd hooks without registering broken PostToolUse hooks', () => {
   const project = mkdtempSync(join(tmpdir(), 'qmd-agy-local-'));
   try {
     mkdirSync(project, { recursive: true });
     execFileSync('bash', ['scripts/agy-local-hook-install.sh', project], { encoding: 'utf8' });
     const hooks = JSON.parse(readFileSync(join(project, '.agents', 'hooks.json'), 'utf8'));
-    const commands = hooks.hooks.PostToolUse.flatMap(entry => entry.hooks.map(hook => hook.command));
-    assert.ok(commands.some(command => command.includes('run-hook') && command.includes('posttool gemini')));
-    assert.ok(commands.some(command => command.includes('run-hook') && command.includes('index gemini')));
+    assert.deepEqual(hooks, { hooks: {} });
   } finally {
     rmSync(project, { recursive: true, force: true });
   }

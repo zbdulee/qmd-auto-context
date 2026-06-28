@@ -107,24 +107,72 @@ print(json.dumps(pre_edit_gate(tool_name='write_file', args={'path':'docs/a.md',
   }
 });
 
-test('Hermes post_tool_call index maps patch mode=patch and kicks worker after enqueue', () => {
+test('Hermes post_tool_call index maps patch mode=patch and kicks workers after enqueue', () => {
   const { root, core, managerLog } = makeFakeRoot();
   const stdinLog = join(root, 'index.stdin.json');
+  const compileLog = join(root, 'compile.stdin.json');
   makeExecutable(join(core, 'index_enqueue.py'), `#!/usr/bin/env python3\nimport sys\nopen("${stdinLog}", "w").write(sys.stdin.read())\n`);
+  makeExecutable(join(core, 'wiki_compile_enqueue.py'), `#!/usr/bin/env python3\nimport sys\nopen("${compileLog}", "w").write(sys.stdin.read())\n`);
   makeExecutable(join(core, 'posttool.py'), '#!/usr/bin/env python3\nimport sys\nsys.stdin.read()\n');
   try {
     runPython(`
 from hermes_adapter.core_bridge import post_edit_sync
 post_edit_sync(tool_name='patch', args={'mode':'patch','patch':'*** Begin Patch'}, result='{}', status='ok', cwd='/tmp/project')
 `, { QMD_HERMES_PLUGIN_ROOT_FOR_TEST: root });
-    assert.equal(readFileSync(managerLog, 'utf8'), 'ensure --wait\nkick-index\n');
+    assert.equal(readFileSync(managerLog, 'utf8'), 'ensure --wait\nkick-index\nkick-wiki-compile /tmp/project\n');
     const payload = JSON.parse(readFileSync(stdinLog, 'utf8'));
     assert.equal(payload.hook_event_name, 'PostToolUse');
     assert.equal(payload.tool_name, 'apply_patch');
     assert.equal(payload.tool_input.patch, '*** Begin Patch');
     assert.equal(payload.cwd, '/tmp/project');
+    assert.deepEqual(JSON.parse(readFileSync(compileLog, 'utf8')), payload);
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Hermes post_tool_call skips compile enqueue on failed tool result', () => {
+  const { root, core, managerLog } = makeFakeRoot();
+  const compileLog = join(root, 'compile.stdin.json');
+  makeExecutable(join(core, 'wiki_compile_enqueue.py'), `#!/usr/bin/env python3\nimport sys\nopen("${compileLog}", "w").write(sys.stdin.read())\n`);
+  try {
+    runPython(`
+from hermes_adapter.core_bridge import post_edit_sync
+post_edit_sync(tool_name='write_file', args={'path':'docs/a.md','content':'x'}, result='{"error":"boom"}', status='error', cwd='/tmp/project')
+`, { QMD_HERMES_PLUGIN_ROOT_FOR_TEST: root });
+    assert.equal(existsSync(managerLog), false);
+    assert.equal(existsSync(compileLog), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+
+test('Hermes post/session hooks sandbox-headless no-op before manager or core side effects', () => {
+  for (const envName of ['QMD_SANDBOX', 'HERMES_HEADLESS']) {
+    const { root, core, managerLog } = makeFakeRoot();
+    const posttoolLog = join(root, 'posttool.called');
+    const indexLog = join(root, 'index.called');
+    const compileLog = join(root, 'compile.called');
+    const updateLog = join(root, 'update.called');
+    makeExecutable(join(core, 'posttool.py'), `#!/usr/bin/env python3\nopen(${JSON.stringify(posttoolLog)}, 'w').write('1')\n`);
+    makeExecutable(join(core, 'index_enqueue.py'), `#!/usr/bin/env python3\nopen(${JSON.stringify(indexLog)}, 'w').write('1')\n`);
+    makeExecutable(join(core, 'wiki_compile_enqueue.py'), `#!/usr/bin/env python3\nopen(${JSON.stringify(compileLog)}, 'w').write('1')\n`);
+    makeExecutable(join(core, 'update.sh'), `#!/usr/bin/env bash\necho called > ${JSON.stringify(updateLog)}\n`);
+    try {
+      runPython(`
+from hermes_adapter.core_bridge import post_edit_sync, session_update
+post_edit_sync(tool_name='write_file', args={'path':'docs/a.md','content':'x'}, result='{}', status='ok', cwd='/tmp/project')
+session_update(cwd='/tmp/project')
+`, { QMD_HERMES_PLUGIN_ROOT_FOR_TEST: root, [envName]: '1' });
+      assert.equal(existsSync(managerLog), false, `${envName}: manager should not run`);
+      assert.equal(existsSync(posttoolLog), false, `${envName}: posttool should not run`);
+      assert.equal(existsSync(indexLog), false, `${envName}: index enqueue should not run`);
+      assert.equal(existsSync(compileLog), false, `${envName}: compile enqueue should not run`);
+      assert.equal(existsSync(updateLog), false, `${envName}: update should not run`);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   }
 });
 
@@ -132,7 +180,7 @@ test('Hermes bridge does not reimplement qmd daemon/query logic', () => {
   const bridge = readFileSync('hermes_adapter/core_bridge.py', 'utf8');
   assert.doesNotMatch(bridge, /\/query/);
   assert.doesNotMatch(bridge, /urlopen|requests\./);
-  for (const script of ['core/recall.py', 'core/update.sh', 'core/index_enqueue.py', 'core/preflight_gate.py']) {
+  for (const script of ['core/recall.py', 'core/update.sh', 'core/index_enqueue.py', 'core/wiki_compile_enqueue.py', 'core/preflight_gate.py']) {
     assert.match(bridge, new RegExp(script.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   }
 });
