@@ -4,6 +4,7 @@ Adapters are pure functions: read one payload JSON on stdin, run a host CLI in a
 isolated temp cwd with tools/writes disabled, emit {"candidates": [...]} on stdout.
 They never touch the project filesystem.
 """
+from __future__ import annotations
 
 import json
 import os
@@ -122,6 +123,8 @@ def run_isolated(cmd: list[str], timeout: int) -> tuple[str | None, int]:
         return proc.stdout, proc.returncode
     except subprocess.TimeoutExpired:
         return None, 1
+    except FileNotFoundError:
+        return None, CLI_ABSENT
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 
@@ -144,7 +147,7 @@ def run_adapter(cli_name: str, env_override: str, build_cmd) -> int:
     timeout = int(payload.get("timeout") or os.environ.get("QMD_EXTRACTOR_TIMEOUT") or 120)
     out, code = run_isolated(build_cmd(binary, prompt), timeout)
     if out is None:
-        return 1
+        return code
     if code != 0:
         return code
     return emit(extract_candidates(out))
