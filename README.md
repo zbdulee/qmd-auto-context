@@ -103,9 +103,9 @@ LLM Wiki/promotion layer를 시작하려면 `--init-wiki`로 `.auto-context/wiki
 ### Automatic wiki compile (opt-in)
 
 자동 wiki compile은 기본 OFF이며, 활성화하려면 `.auto-context/settings.json`에서:
-- `compile.extractor`를 `dispatch: "by-engine"`과 `backends` 매핑(엔진→어댑터 경로)으로 설정
+- `compile.extractor`를 `dispatch: "by-engine"`과 `backends` 매핑(엔진→어댑터 **절대경로**)으로 설정
 - `compile.batch` 설정
-- 훅이 실행되는 환경에서 `QMD_COMPILE_TRUST_EXTRACTOR=1` export
+- **훅이 실행되는 환경에 `QMD_COMPILE_TRUST_EXTRACTOR=1`를 export**한다. 이 ENV 게이트가 없으면 `backends`를 설정해도 어댑터(LLM)는 실행되지 않는다(설정 파일만으로 임의 CLI가 실행되는 것을 막는 의도적 안전장치). 훅을 띄우는 셸 환경에 주입한다 — 예: 셸 프로파일(`~/.zshrc` 등) 또는 호스트의 env 설정(Claude Code `settings.json`의 `env`, Codex `config.toml`의 env 등). 한 프로젝트만 켜려면 그 프로젝트에서 세션을 띄우는 셸에서만 export한다.
 
 예시:
 
@@ -132,6 +132,11 @@ LLM Wiki/promotion layer를 시작하려면 `--init-wiki`로 `.auto-context/wiki
 ```
 
 각 어댑터는 격리된 임시 디렉터리에서 CLI를 실행하며 도구는 비활성화된다. 여기에 나열되지 않은 어댑터는 활성화되지 않으며, `default`는 선택사항이다(예: 사용자의 커스텀 agy wrapper).
+
+주의사항:
+- **어댑터 경로는 절대경로**이며 위 예시의 `/abs/path/to/plugin/...`을 **실제 플러그인 설치 위치**로 바꿔야 한다. marketplace로 설치한 경우 플러그인 캐시 디렉터리(예: `~/.claude/plugins/.../qmd-auto-context/core/extractors/...`) 아래 경로다.
+- host CLI가 `PATH`에 없거나 다른 바이너리를 쓰려면 `QMD_EXTRACTOR_CLAUDE_BIN` / `QMD_EXTRACTOR_CODEX_BIN` / `QMD_EXTRACTOR_HERMES_BIN`로 바이너리 경로를 직접 지정한다(미지정 시 fnm/bun/PATH 순으로 자동 탐색).
+- 트리거는 **`collectionRoles`가 `raw` 또는 `session`인 컬렉션의 `.md` 편집**에만 발화한다(`post_tool_source`). `wiki` 등 다른 role의 파일 편집은 compile 대상이 아니다.
 
 세션 기록: claude 어댑터는 `--no-session-persistence`, codex 어댑터는 `--ephemeral`로 호출돼 CLI 쪽에 세션이 저장되지 않는다. **hermes는 동등한 플래그가 없어** `-z --safe-mode`로 최대한 격리하지만 `~/.hermes`에 1회성 세션 기록이 남을 수 있다. hermes 어댑터를 쓸 때 이 점을 감안한다.
 
