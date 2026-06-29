@@ -60,3 +60,19 @@ test('claude adapter exits 127 when its CLI is absent', () => {
   } catch (e) { code = e.status; }
   assert.equal(code, 127);
 });
+
+test('codex adapter passes read-only sandbox and emits candidates', () => {
+  const d = mkdtempSync(join(tmpdir(), 'codex-ad-'));
+  const argsLog = join(d, 'args.txt');
+  const fakeCli = join(d, 'fake-codex');
+  writeFileSync(fakeCli, `#!/usr/bin/env bash\necho "$@" > "${argsLog}"\necho '{"candidates":[{"title":"CX","summary":"Durable codex.","suggestedType":"decision","confidence":"medium"}]}'\n`, { mode: 0o755 });
+  const out = execFileSync('python3', ['core/extractors/codex_adapter.py'], {
+    cwd: process.cwd(), input: '{"source":{"path":"docs/x.md","content":"b"},"wiki":{}}', encoding: 'utf8',
+    env: { ...process.env, QMD_EXTRACTOR_CODEX_BIN: fakeCli },
+  });
+  assert.equal(JSON.parse(out).candidates[0].title, 'CX');
+  const args = readFileSync(argsLog, 'utf8');
+  assert.match(args, /exec/);
+  assert.match(args, /-s read-only/);
+  rmSync(d, { recursive: true, force: true });
+});
