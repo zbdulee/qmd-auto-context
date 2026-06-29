@@ -1,0 +1,19 @@
+skills/enable-compile/SKILL.md
+  h_42d950683aaaea 1-26
+skills/enable-compile/scripts/enable-compile.sh
+  h_42d950683aaaea 1-10
+test/enable-compile-skill.test.mjs
+  h_42d950683aaaea 1-24
+test/manual-skills.test.mjs
+  h_42d950683aaaea 5,12
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "b7b27f422868b9daa8b8902d9ad24dbd967dc1e9",
+  "prompts": {},
+  "humans": {
+    "h_42d950683aaaea": {
+      "author": "dulee@zigbang.com"
+    }
+  }
+}
