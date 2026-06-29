@@ -141,7 +141,7 @@ def orientation(root: Path) -> dict:
     return result
 
 
-def run_extractor(argv: list[str], payload: dict, timeout: int, root: Path) -> tuple[dict | None, str | None]:
+def run_extractor(argv: list[str], payload: dict, timeout: int, root: Path) -> tuple[dict | None, str | None, int | None]:
     try:
         proc = subprocess.run(
             argv,
@@ -152,22 +152,26 @@ def run_extractor(argv: list[str], payload: dict, timeout: int, root: Path) -> t
             shell=False,
             cwd=str(root),
         )
-    except (OSError, subprocess.TimeoutExpired):
-        return None, "extractor_failed"
+    except FileNotFoundError:
+        return None, "extractor_failed", 127
+    except OSError:
+        return None, "extractor_failed", 127
+    except subprocess.TimeoutExpired:
+        return None, "extractor_timeout", None
     if proc.stderr:
         log = root / ".auto-context" / "compile" / "extractor.log"
         log.parent.mkdir(parents=True, exist_ok=True)
         with log.open("a", encoding="utf-8") as handle:
             handle.write(proc.stderr[-4000:] + "\n")
     if proc.returncode != 0:
-        return None, "extractor_failed"
+        return None, "extractor_failed", proc.returncode
     try:
         parsed = json.loads(proc.stdout)
     except json.JSONDecodeError:
-        return None, "invalid_extractor_json"
+        return None, "invalid_extractor_json", proc.returncode
     if not isinstance(parsed, dict):
-        return None, "invalid_extractor_json"
-    return parsed, None
+        return None, "invalid_extractor_json", proc.returncode
+    return parsed, None, 0
 
 
 def compile_candidate(root: Path, candidate: dict) -> dict | None:
@@ -244,10 +248,13 @@ def process_job(root: Path, config: dict, compile_cfg: dict, job: dict) -> tuple
         },
         "wiki": orientation(root),
     }
-    extracted, reason = run_extractor(argv, payload, timeout, root)
+    extracted, reason, returncode = run_extractor(argv, payload, timeout, root)
+    if reason in ("invalid_extractor_json",):
+        append_jsonl(cpath, bounded_failure("extractor_failed", job, reason))
+        return True, False  # permanent: drop
     if reason:
         append_jsonl(cpath, bounded_failure("extractor_failed", job, reason))
-        return False, True
+        return False, True  # transient: preserve (refined in Task 3)
 
     candidates = extracted.get("candidates") if isinstance(extracted, dict) else None
     if not isinstance(candidates, list):

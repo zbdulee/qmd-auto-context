@@ -127,22 +127,38 @@ test('missing extractor writes bounded needs_extractor record without source con
   }
 });
 
-test('invalid extractor JSON preserves source queue job', () => {
+test('invalid extractor JSON permanently drops source queue job', () => {
   const extractor = join(mkdtempSync(join(tmpdir(), 'extractor-bad-')), 'bad.py');
   writeFileSync(extractor, 'print("not json")\n');
   const project = setupProject({ extractor: { argv: ['python3', extractor], timeout: 30 } });
   try {
     runWorker(project, { QMD_COMPILE_TRUST_EXTRACTOR: '1' });
-    const queue = readFileSync(join(project, '.auto-context', 'compile', 'source-queue.jsonl'), 'utf8');
-    assert.match(queue, /docs\/source.md/);
+    // permanent failure: queue drained (not preserved)
+    assert.equal(readFileSync(join(project, '.auto-context', 'compile', 'source-queue.jsonl'), 'utf8'), '');
     const failures = jsonl(join(project, '.auto-context', 'compile', 'candidates.jsonl'));
     assert.equal(failures[0].action, 'extractor_failed');
+    assert.equal(failures[0].reason, 'invalid_extractor_json');
     assert.equal(JSON.stringify(failures[0]).includes('Durable decision'), false);
   } finally {
     rmSync(project, { recursive: true, force: true });
   }
 });
 
+
+test('worker drops job and audits when extractor returns invalid JSON (permanent)', () => {
+  const ex = join(mkdtempSync(join(tmpdir(), 'extractor-')), 'bad.py');
+  writeFileSync(ex, `#!/usr/bin/env python3\nprint("not json")\n`);
+  const project = setupProject({ extractor: { argv: ['python3', ex], timeout: 30 } });
+  try {
+    runWorker(project, { QMD_COMPILE_TRUST_EXTRACTOR: '1' });
+    const cands = jsonl(join(project, '.auto-context', 'compile', 'candidates.jsonl'));
+    assert.equal(cands.some((c) => c.reason === 'invalid_extractor_json'), true);
+    // permanent failure: queue drained (not preserved)
+    assert.equal(readFileSync(join(project, '.auto-context', 'compile', 'source-queue.jsonl'), 'utf8'), '');
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+});
 
 test('configured extractor argv is not executed without explicit local trust gate', () => {
   const extractor = join(mkdtempSync(join(tmpdir(), 'extractor-untrusted-')), 'extract.py');
