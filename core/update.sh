@@ -555,7 +555,9 @@ if [ "$1" = "--enable-compile" ]; then
   if [ "$1" = "--engines" ]; then engines="$2"; shift 2; fi
   core_dir="$(cd "$(dirname "$0")" && pwd)"
 
-  # Guard: project must be opted in (settings.json with indexing:true).
+  # Guard: project must be opted in (settings.json with indexing:true) AT target itself.
+  # Walking up to HOME is intentional for recall, but --enable-compile must write to target's
+  # own settings.json. Refuse if the opted-in config lives in an ancestor directory.
   state="$(python3 - "$target" "$core_dir" <<'PY'
 import json, sys
 from pathlib import Path
@@ -563,7 +565,8 @@ sys.path.insert(0, sys.argv[2])
 import config as qmd_config
 found = qmd_config.find_project_config(sys.argv[1])
 cfg = found["config"]
-print("optin" if cfg.get("indexing") is True else "no")
+own = cfg.get("indexing") is True and Path(found["projectRoot"]).resolve() == Path(sys.argv[1]).resolve()
+print("optin" if own else "no")
 PY
 )"
   if [ "$state" != "optin" ]; then
@@ -591,7 +594,7 @@ cfg = json.loads(settings.read_text(encoding="utf-8"))
 
 block = d.compile_block(root, engines)
 existing = cfg.get("compile") if isinstance(cfg.get("compile"), dict) else {}
-# Merge: keep existing keys, ensure post_tool_source trigger + extractor + batch.
+# Merge: block wins for the keys it sets (extractor/batch/enabled/...); unrelated existing keys are preserved.
 merged = {**existing, **block}
 trig = existing.get("triggers") if isinstance(existing.get("triggers"), list) else []
 merged["triggers"] = list(dict.fromkeys(["post_tool_source", *trig, *block["triggers"]]))

@@ -66,3 +66,37 @@ test('--enable-compile refuses a non-opted-in project', () => {
     assert.equal(existsSync(join(d, '.auto-context', 'settings.json')), false);
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
+
+test('--enable-compile refuses a subdir under an opted-in parent (target has no own settings.json)', () => {
+  // Parent is opted in; subdir has NO own settings.json.
+  // The guard must reject (output matches /--optin/) and must NOT crash.
+  const parent = mkdtempSync(join(tmpdir(), 'enable-compile-parent-'));
+  const subdir = join(parent, 'subproject');
+  try {
+    mkdirSync(join(parent, '.auto-context'), { recursive: true });
+    mkdirSync(join(parent, 'docs'), { recursive: true });
+    writeFileSync(join(parent, '.auto-context', 'settings.json'), JSON.stringify({
+      indexing: true, collections: ['parent-docs'], collectionPaths: { 'parent-docs': 'docs' },
+    }));
+    mkdirSync(subdir, { recursive: true });
+    // subdir intentionally has no settings.json of its own
+    let out;
+    assert.doesNotThrow(() => {
+      out = execFileSync('bash', [join(ROOT, 'core/update.sh'), '--enable-compile', subdir],
+        { cwd: ROOT, encoding: 'utf8', env: { ...process.env, CLAUDE_PLUGIN_ROOT: ROOT } });
+    });
+    assert.match(out, /--optin/);
+    assert.equal(existsSync(join(subdir, '.auto-context', 'settings.json')), false);
+  } finally { rmSync(parent, { recursive: true, force: true }); }
+});
+
+test('--enable-compile --engines codex <project> (engines BEFORE path) sets backends to exactly {codex}', () => {
+  const project = optedInProject();
+  try {
+    // Pass --engines BEFORE the project path to verify both arg orderings work
+    const out = execFileSync('bash', [join(ROOT, 'core/update.sh'), '--enable-compile', '--engines', 'codex', project],
+      { cwd: ROOT, encoding: 'utf8', env: { ...process.env, CLAUDE_PLUGIN_ROOT: ROOT } });
+    const cfg = JSON.parse(readFileSync(join(project, '.auto-context', 'settings.json'), 'utf8'));
+    assert.deepEqual(Object.keys(cfg.compile.extractor.backends), ['codex']);
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});
