@@ -30,6 +30,7 @@ print(json.dumps({'has_body':'UNIQ_SRC_BODY' in p,'has_candidates':'candidates' 
   const out = JSON.parse(runLib(py, ''));
   assert.equal(out.has_body, true);
   assert.equal(out.has_candidates, true);
+  assert.equal(out.no_tools, true);
 });
 
 test('claude adapter calls its CLI in a temp cwd and emits candidates', () => {

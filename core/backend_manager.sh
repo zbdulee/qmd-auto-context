@@ -323,5 +323,5 @@ case "${1:-}" in
   kick-index) kick_index ;;
   kick-wiki-compile) shift; kick_wiki_compile "${1:-}" "${2:-}" ;;
   cleanup-legacy) cleanup_legacy ;;
-  *) echo "usage: backend_manager.sh health|check-qmd [--manual]|start|ensure [--wait]|warm|rotate|reload|kick-index|kick-wiki-compile <cwd>|cleanup-legacy" >&2; exit 2 ;;
+  *) echo "usage: backend_manager.sh health|check-qmd [--manual]|start|ensure [--wait]|warm|rotate|reload|kick-index|kick-wiki-compile <cwd> [--flush]|cleanup-legacy" >&2; exit 2 ;;
 esac
