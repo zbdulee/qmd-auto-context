@@ -48,6 +48,14 @@ test('거절(indexing:false) → allow', () => {
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('로컬 optout marker → allow', () => {
+  const dir = makeTmpDir();
+  try {
+    execFileSync('bash', [join(process.cwd(), 'core', 'update.sh'), '--optout', dir], { encoding: 'utf8' });
+    assert.equal(gate({ tool_name: 'Edit', tool_input: { file_path: join(dir,'a.md') }, cwd: dir, session_id: 's1' }).trim(), '');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('sandbox → allow', () => {
   const dir = makeTmpDir();
   try {

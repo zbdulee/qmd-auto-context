@@ -14,6 +14,16 @@ function resolveWith(cwd, configJson) {
   const out = execFileSync('bash', ['core/update.sh', '--resolve-only', '--cwd', cwd], { input: configJson });
   return JSON.parse(out.toString());
 }
+function findConfig(cwd) {
+  const script = [
+    'import json, sys',
+    'sys.path.insert(0, "core")',
+    'import config',
+    'print(json.dumps(config.find_project_config(sys.argv[1])))',
+  ].join('; ');
+  const out = execFileSync('python3', ['-c', script, cwd], { encoding: 'utf8' });
+  return JSON.parse(out);
+}
 
 test('파일 없음(빈 config) → pending + prompt', () => {
   const dir = homeTemp('pending');
@@ -102,16 +112,62 @@ test('--optin refuses symlinked .auto-context directory', () => {
     rmSync(outside, { recursive: true, force: true });
   }
 });
-test('--optout → indexing:false (기존 필드 보존)', () => {
+test('--optout → local decision store only (프로젝트 config 없음)', () => {
+  const dir = homeTemp('cmdout-local');
+  try {
+    execFileSync('bash', ['core/update.sh', '--optout', dir]);
+    assert.equal(existsSync(join(dir, '.auto-context')), false);
+    assert.equal(existsSync(join(dir, '.auto-context.json')), false);
+    const found = findConfig(dir);
+    assert.equal(found.configFormat, 'local-optout');
+    assert.equal(found.config.indexing, false);
+    assert.deepEqual(found.config.collections, []);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('--optout local decision applies from child dirs in non-git projects', () => {
+  const dir = homeTemp('cmdout-local-child');
+  const child = join(dir, 'src', 'feature');
+  try {
+    mkdirSync(child, { recursive: true });
+    execFileSync('bash', ['core/update.sh', '--optout', dir]);
+    const found = findConfig(child);
+    assert.equal(found.configFormat, 'local-optout');
+    assert.equal(found.projectRoot, dir);
+    assert.equal(found.config.indexing, false);
+    assert.deepEqual(found.config.collections, []);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('--optout → local decision overrides existing project settings without editing them', () => {
   const dir = homeTemp('cmdout');
   try {
     mkdirSync(join(dir, '.auto-context'), { recursive: true });
     writeFileSync(join(dir, '.auto-context', 'settings.json'), JSON.stringify({ indexing: true, collections: ['keep'], skipPaths: ['x'] }));
     execFileSync('bash', ['core/update.sh', '--optout', dir]);
     const cfg = JSON.parse(readFileSync(join(dir, '.auto-context', 'settings.json'), 'utf8'));
-    assert.equal(cfg.indexing, false);
+    assert.equal(cfg.indexing, true);
     assert.deepEqual(cfg.collections, ['keep']);
     assert.deepEqual(cfg.skipPaths, ['x']);
+    const found = findConfig(dir);
+    assert.equal(found.configFormat, 'local-optout');
+    assert.equal(found.config.indexing, false);
+    assert.deepEqual(found.config.collections, []);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('--optin clears local optout marker and restores project config', () => {
+  const dir = homeTemp('cmdout-clear');
+  try {
+    mkdirSync(join(dir, '.auto-context'), { recursive: true });
+    writeFileSync(join(dir, '.auto-context', 'settings.json'), JSON.stringify({ indexing: true, collections: ['keep'] }));
+    execFileSync('bash', ['core/update.sh', '--optout', dir]);
+    assert.equal(findConfig(dir).configFormat, 'local-optout');
+    execFileSync('bash', ['core/update.sh', '--optin', dir]);
+    const found = findConfig(dir);
+    assert.equal(found.configFormat, 'auto-context-dir');
+    assert.equal(found.config.indexing, true);
+    assert.deepEqual(found.config.collections, ['keep']);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 test('--optin 따옴표 폴더명도 유효 JSON', () => {

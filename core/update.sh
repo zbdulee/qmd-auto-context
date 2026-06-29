@@ -565,6 +565,8 @@ import json, os, sys, tempfile, subprocess
 from pathlib import Path
 target = Path(sys.argv[1]).resolve()
 core_dir = sys.argv[2]
+sys.path.insert(0, str(Path(core_dir).resolve()))
+import config as qmd_config
 settings_dir = target / ".auto-context"
 dest = settings_dir / "settings.json"
 legacy_root = target / ".auto-context.json"
@@ -619,15 +621,18 @@ except BaseException:
     try: os.unlink(tmp)
     except OSError: pass
     raise
+qmd_config.clear_local_optout(target)
 print(f"[qmd] --optin --recommended 완료: {dest} ({config.get('collections')}). 다음 세션부터 인덱싱됩니다.")
 PY
     exit 0
   fi
   target="${1:-$PWD}"
-  python3 - "$mode" "$target" <<'PY'
+  python3 - "$mode" "$target" "$(dirname "$0")" <<'PY'
 import json, os, sys, tempfile
 from pathlib import Path
-mode, target = sys.argv[1], Path(sys.argv[2]).resolve()
+mode, target, core_dir = sys.argv[1], Path(sys.argv[2]).resolve(), sys.argv[3]
+sys.path.insert(0, str(Path(core_dir).resolve()))
+import config as qmd_config
 settings_dir = target / ".auto-context"
 dest = settings_dir / "settings.json"
 legacy_root = target / ".auto-context.json"
@@ -650,6 +655,11 @@ def ensure_settings_dir() -> None:
         print(f"[qmd] unsafe .auto-context path: {settings_dir}", file=sys.stderr)
         sys.exit(1)
 
+if mode == "--optout":
+    marker = qmd_config.write_local_optout(target)
+    print(f"[qmd] opt-out 완료: {target}. 로컬 decision store에 기록했습니다: {marker}. 이 폴더는 인덱싱·검색하지 않습니다.")
+    sys.exit(0)
+
 base = {}
 used_legacy = False
 used_root_legacy = False
@@ -667,9 +677,6 @@ if mode == "--optin":
     if not base.get("collections"):
         base["collections"] = [target.name.replace(" ", "-")]
     msg = f"[qmd] opt-in 완료: {target} ({base['collections']}). 다음 세션부터 인덱싱됩니다."
-else:
-    base["indexing"] = False
-    msg = f"[qmd] opt-out 완료: {target}. 이 폴더는 인덱싱·검색하지 않습니다."
 ensure_settings_dir()
 fd, tmp = tempfile.mkstemp(dir=str(settings_dir), prefix="settings.", suffix=".tmp")
 try:
@@ -685,6 +692,7 @@ if used_legacy and legacy.exists():
     os.replace(str(legacy), str(legacy) + ".bak-migrated")
 if used_root_legacy and legacy_root.exists():
     legacy_root.unlink()
+qmd_config.clear_local_optout(target)
 print(msg)
 PY
   exit 0

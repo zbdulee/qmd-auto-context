@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -13,6 +14,7 @@ SETTINGS_FILE_NAME = "settings.json"
 LEGACY_CONFIG_FILE_NAME = ".auto-context.json"
 LEGACY_AGENTS_DIR = ".agents"
 LEGACY_AGENTS_FILE_NAME = "qmd-recall.json"
+LOCAL_OPTOUT_DIR = Path(".config") / "qmd" / "optout"
 
 DEFAULT_CONFIG = {
     "name": "",
@@ -275,6 +277,90 @@ def _project_search_dirs(cwd):
     return search
 
 
+def project_identity_root(cwd):
+    """Return the repo-level root used for local per-user decisions."""
+    path = Path(cwd).resolve()
+    home = Path.home().resolve()
+    if path == home or not _is_within(path, home):
+        return path
+    for candidate in _project_search_dirs(path):
+        if (candidate / ".git").exists():
+            return candidate
+    return path
+
+
+def _local_optout_marker_path(root):
+    key = hashlib.sha256(str(Path(root).resolve()).encode("utf-8")).hexdigest()
+    return Path.home() / LOCAL_OPTOUT_DIR / f"{key}.json"
+
+
+def local_optout_marker_path(cwd):
+    return _local_optout_marker_path(project_identity_root(cwd))
+
+
+def find_local_optout(cwd):
+    cwd_path = Path(cwd).resolve()
+    direct = local_optout_marker_path(cwd_path)
+    if direct.is_file():
+        return {"marker": direct, "root": project_identity_root(cwd_path)}
+
+    marker_dir = Path.home() / LOCAL_OPTOUT_DIR
+    try:
+        candidates = list(marker_dir.glob("*.json"))
+    except OSError:
+        return None
+
+    matches = []
+    for marker in candidates:
+        try:
+            raw = json.loads(marker.read_text(encoding="utf-8"))
+            root_value = raw.get("root") if isinstance(raw, dict) else None
+            if not isinstance(root_value, str):
+                continue
+            root = Path(root_value).resolve()
+        except (OSError, json.JSONDecodeError):
+            continue
+        if _is_within(cwd_path, root):
+            matches.append((len(root.parts), marker, root))
+    if not matches:
+        return None
+    _, marker, root = max(matches, key=lambda item: item[0])
+    return {"marker": marker, "root": root}
+
+
+def has_local_optout(cwd):
+    return find_local_optout(cwd) is not None
+
+
+
+def write_local_optout(cwd):
+    root = project_identity_root(cwd)
+    marker = _local_optout_marker_path(root)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(marker.parent), prefix=marker.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump({"indexing": False, "root": str(root)}, fh, ensure_ascii=False, indent=2)
+        os.replace(tmp, marker)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return marker
+
+
+def clear_local_optout(cwd):
+    found = find_local_optout(cwd)
+    marker = found["marker"] if found else local_optout_marker_path(cwd)
+    try:
+        marker.unlink()
+    except FileNotFoundError:
+        pass
+    return marker
+
+
 def _candidate_configs(project_dir):
     return [
         (project_dir / CONFIG_DIR_NAME / SETTINGS_FILE_NAME, "auto-context-dir", project_dir),
@@ -286,6 +372,16 @@ def _candidate_configs(project_dir):
 def find_project_config(cwd):
     """cwd→부모(HOME 경계)로 project config를 찾고 normalized config와 위치를 반환한다."""
     path = Path(cwd).resolve()
+    local_optout = find_local_optout(path)
+    if local_optout:
+        config = normalize_config({"indexing": False})
+        config["collections"] = []
+        return {
+            "config": config,
+            "configPath": str(local_optout["marker"]),
+            "configFormat": "local-optout",
+            "projectRoot": str(local_optout["root"]),
+        }
     config_file = None
     config_format = "none"
     project_root = path
@@ -437,8 +533,8 @@ def migrate_legacy_config(cwd):
 
 
 def load_project_config(cwd):
-    """cwd→부모(HOME 경계)로 .auto-context/settings.json 우선, 없으면 레거시 config 탐색.
-    indexing:false 면 collections=[] (검색/인덱싱 skip). 못 찾으면 빈 설정(collections=[])."""
+    """Load effective config: local optout marker, then project settings/legacy config.
+    indexing:false means collections=[] (검색/인덱싱 skip). 못 찾으면 빈 설정(collections=[])."""
     return find_project_config(cwd)["config"]
 
 
