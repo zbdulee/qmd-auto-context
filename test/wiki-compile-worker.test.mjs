@@ -78,7 +78,7 @@ print(json.dumps({'candidates': [{
   const project = setupProject({ extractor: { argv: ['python3', extractor], timeout: 30 } });
   const dirtyQueue = join(mkdtempSync(join(tmpdir(), 'dirty-')), 'queue');
   try {
-    const out = runWorker(project, { QMD_DIRTY_QUEUE: dirtyQueue, QMD_COMPILE_TRUST_EXTRACTOR: '1' });
+    const out = runWorker(project, { QMD_DIRTY_QUEUE: dirtyQueue });
     assert.equal(out, '');
     const page = join(project, '.auto-context', 'wiki', 'decisions', 'source-compile-decision.md');
     assert.equal(existsSync(page), true);
@@ -102,7 +102,7 @@ print('{"candidates": []}')
 `);
   const project = setupProject({ mode: 'off', extractor: { argv: ['python3', extractor], timeout: 30 } });
   try {
-    runWorker(project, { QMD_COMPILE_TRUST_EXTRACTOR: '1' });
+    runWorker(project);
     assert.equal(existsSync(marker), false);
     assert.equal(existsSync(join(project, '.auto-context', 'compile', 'candidates.jsonl')), false);
     assert.match(readFileSync(join(project, '.auto-context', 'compile', 'source-queue.jsonl'), 'utf8'), /docs\/source.md/);
@@ -132,7 +132,7 @@ test('invalid extractor JSON permanently drops source queue job', () => {
   writeFileSync(extractor, 'print("not json")\n');
   const project = setupProject({ extractor: { argv: ['python3', extractor], timeout: 30 } });
   try {
-    runWorker(project, { QMD_COMPILE_TRUST_EXTRACTOR: '1' });
+    runWorker(project);
     // permanent failure: queue drained (not preserved)
     assert.equal(readFileSync(join(project, '.auto-context', 'compile', 'source-queue.jsonl'), 'utf8'), '');
     const failures = jsonl(join(project, '.auto-context', 'compile', 'candidates.jsonl'));
@@ -150,7 +150,7 @@ test('worker drops job and audits when extractor returns invalid JSON (permanent
   writeFileSync(ex, `#!/usr/bin/env python3\nprint("not json")\n`);
   const project = setupProject({ extractor: { argv: ['python3', ex], timeout: 30 } });
   try {
-    runWorker(project, { QMD_COMPILE_TRUST_EXTRACTOR: '1' });
+    runWorker(project);
     const cands = jsonl(join(project, '.auto-context', 'compile', 'candidates.jsonl'));
     assert.equal(cands.some((c) => c.reason === 'invalid_extractor_json'), true);
     // permanent failure: queue drained (not preserved)
@@ -160,8 +160,8 @@ test('worker drops job and audits when extractor returns invalid JSON (permanent
   }
 });
 
-test('configured extractor argv is not executed without explicit local trust gate', () => {
-  const extractor = join(mkdtempSync(join(tmpdir(), 'extractor-untrusted-')), 'extract.py');
+test('configured extractor runs without any trust env (install = consent)', () => {
+  const extractor = join(mkdtempSync(join(tmpdir(), 'extractor-noenv-')), 'extract.py');
   const marker = join(mkdtempSync(join(tmpdir(), 'extractor-marker-')), 'ran');
   writeFileSync(extractor, `#!/usr/bin/env python3
 open(${JSON.stringify(marker)}, 'w').write('ran')
@@ -169,11 +169,8 @@ print('{"candidates": []}')
 `);
   const project = setupProject({ extractor: { argv: ['python3', extractor], timeout: 30 } });
   try {
-    runWorker(project);
-    assert.equal(existsSync(marker), false);
-    const candidates = jsonl(join(project, '.auto-context', 'compile', 'candidates.jsonl'));
-    assert.equal(candidates[0].action, 'needs_extractor');
-    assert.equal(candidates[0].reason, 'untrusted_extractor');
+    runWorker(project); // NOTE: no QMD_COMPILE_TRUST_EXTRACTOR
+    assert.equal(existsSync(marker), true);
   } finally {
     rmSync(project, { recursive: true, force: true });
   }
@@ -213,7 +210,7 @@ print(json.dumps({'candidates': [{
 `);
   const project = setupProject({ extractor: { argv: ['python3', extractor], timeout: 30 } });
   try {
-    runWorker(project, { QMD_COMPILE_TRUST_EXTRACTOR: '1' });
+    runWorker(project);
     const queue = readFileSync(join(project, '.auto-context', 'compile', 'source-queue.jsonl'), 'utf8');
     assert.match(queue, /docs\/source.md/);
     const failures = jsonl(join(project, '.auto-context', 'compile', 'candidates.jsonl'));
@@ -246,7 +243,7 @@ print(json.dumps({'candidates': []}))
       cwd: project,
       source: { kind: 'file', path: 'README.md', collection: 'proj-docs' },
     }) + '\n');
-    runWorker(project, { QMD_COMPILE_TRUST_EXTRACTOR: '1' });
+    runWorker(project);
     assert.equal(existsSync(marker), false);
     const failures = jsonl(join(project, '.auto-context', 'compile', 'candidates.jsonl'));
     assert.equal(failures.at(-1).action, 'extractor_failed');
@@ -277,7 +274,7 @@ try:
 except RuntimeError:
     pass
 `;
-    execFileSync('python3', ['-c', script], { cwd: process.cwd(), env: { ...process.env, QMD_COMPILE_TRUST_EXTRACTOR: '1' } });
+    execFileSync('python3', ['-c', script], { cwd: process.cwd(), encoding: 'utf8' });
     assert.match(readFileSync(queue, 'utf8'), new RegExp(rawLine.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   } finally {
     rmSync(project, { recursive: true, force: true });
@@ -302,7 +299,7 @@ test('dispatch picks the adapter for payload.engine', () => {
   writeFileSync(join(project, '.auto-context', 'compile', 'source-queue.jsonl'),
     JSON.stringify({ ts: '2026-06-26T00:00:00Z', trigger: 'post_tool_source', engine: 'codex', cwd: project, source: { kind: 'file', path: 'docs/source.md', collection: 'proj-docs' } }) + '\n');
   try {
-    runWorker(project, { QMD_COMPILE_TRUST_EXTRACTOR: '1' });
+    runWorker(project);
     assert.equal(readFileSync(marker, 'utf8'), 'codex');
   } finally { rmSync(project, { recursive: true, force: true }); }
 });
@@ -316,7 +313,7 @@ test('non-executable primary (PermissionError) does NOT trigger fallback', () =>
   writeFileSync(fallback, `#!/usr/bin/env python3\nimport json\nprint(json.dumps({'candidates':[{'title':'FB','summary':'Durable: fallback must NOT run on a runtime failure.','suggestedType':'concept','confidence':'high','targetPath':'.auto-context/wiki/concepts/fb.md'}]}))\n`);
   const project = setupProject({ extractor: { dispatch: 'by-engine', backends: { claude: [nonExec] }, default: ['python3', fallback], timeout: 30 } });
   try {
-    runWorker(project, { QMD_COMPILE_TRUST_EXTRACTOR: '1' });
+    runWorker(project);
     // fallback must NOT have run (no double LLM call on a non-127 runtime failure)
     assert.equal(existsSync(join(project, '.auto-context', 'wiki', 'concepts', 'fb.md')), false);
   } finally { rmSync(project, { recursive: true, force: true }); }
@@ -330,7 +327,7 @@ test('dispatch falls back to default only when primary CLI is absent (exit 127)'
   writeFileSync(fallback, `#!/usr/bin/env python3\nimport json,sys\nprint(json.dumps({'candidates':[{'title':'FB','summary':'Durable: default backend handled the edit after primary was absent.','suggestedType':'concept','confidence':'high','targetPath':'.auto-context/wiki/concepts/fb.md'}]}))\n`);
   const project = setupProject({ extractor: { dispatch: 'by-engine', backends: { claude: ['python3', absent] }, default: ['python3', fallback], timeout: 30 } });
   try {
-    runWorker(project, { QMD_COMPILE_TRUST_EXTRACTOR: '1' });
+    runWorker(project);
     assert.equal(existsSync(join(project, '.auto-context', 'wiki', 'concepts', 'fb.md')), true);
   } finally { rmSync(project, { recursive: true, force: true }); }
 });
@@ -340,7 +337,7 @@ test('transient extractor failure sets cooldown and preserves the job', () => {
   writeFileSync(ex, `#!/usr/bin/env python3\nimport sys\nsys.stderr.write('rate limited')\nsys.exit(1)\n`);
   const project = setupProject({ extractor: { argv: ['python3', ex], timeout: 30, cooldownSeconds: 600 } });
   try {
-    runWorker(project, { QMD_COMPILE_TRUST_EXTRACTOR: '1' });
+    runWorker(project);
     assert.equal(existsSync(join(project, '.auto-context', 'compile', 'cooldown')), true);
     assert.notEqual(readFileSync(join(project, '.auto-context', 'compile', 'source-queue.jsonl'), 'utf8'), '');
   } finally { rmSync(project, { recursive: true, force: true }); }
@@ -353,7 +350,7 @@ test('active cooldown skips extraction entirely', () => {
   // pre-write a cooldown far in the future
   writeFileSync(join(project, '.auto-context', 'compile', 'cooldown'), String(Date.now() / 1000 + 9999));
   try {
-    runWorker(project, { QMD_COMPILE_TRUST_EXTRACTOR: '1' });
+    runWorker(project);
     const cands = jsonl(join(project, '.auto-context', 'compile', 'candidates.jsonl'));
     assert.equal(cands.some((c) => c.reason === 'cooldown_active'), true);
     assert.notEqual(readFileSync(join(project, '.auto-context', 'compile', 'source-queue.jsonl'), 'utf8'), '');
@@ -368,7 +365,7 @@ test('debounce: recent single edit under idle window is not processed yet', () =
   writeFileSync(join(project, '.auto-context', 'compile', 'source-queue.jsonl'),
     JSON.stringify({ ts: new Date().toISOString().replace(/\.\d+Z$/, 'Z'), trigger: 'post_tool_source', engine: 'claude', cwd: project, source: { kind: 'file', path: 'docs/source.md', collection: 'proj-docs' } }) + '\n');
   try {
-    runWorker(project, { QMD_COMPILE_TRUST_EXTRACTOR: '1' });
+    runWorker(project);
     assert.equal(existsSync(join(project, '.auto-context', 'wiki', 'concepts', 'x.md')), false);
     // job is re-queued, not lost
     assert.notEqual(readFileSync(join(project, '.auto-context', 'compile', 'source-queue.jsonl'), 'utf8'), '');
@@ -383,7 +380,7 @@ test('--flush-all processes even under idle window', () => {
     JSON.stringify({ ts: new Date().toISOString().replace(/\.\d+Z$/, 'Z'), trigger: 'post_tool_source', engine: 'claude', cwd: project, source: { kind: 'file', path: 'docs/source.md', collection: 'proj-docs' } }) + '\n');
   try {
     execFileSync('python3', ['core/wiki_compile_worker.py', '--cwd', project, '--flush-all'],
-      { cwd: process.cwd(), encoding: 'utf8', env: { ...process.env, QMD_COMPILE_TRUST_EXTRACTOR: '1' } });
+      { cwd: process.cwd(), encoding: 'utf8', env: { ...process.env } });
     assert.equal(existsSync(join(project, '.auto-context', 'wiki', 'concepts', 'f.md')), true);
   } finally { rmSync(project, { recursive: true, force: true }); }
 });
@@ -397,7 +394,7 @@ test('dedup: repeated edits of same path collapse to one extraction', () => {
   writeFileSync(join(project, '.auto-context', 'compile', 'source-queue.jsonl'),
     row('2026-06-26T00:00:00Z') + '\n' + row('2026-06-26T00:00:01Z') + '\n' + row('2026-06-26T00:00:02Z') + '\n');
   try {
-    runWorker(project, { QMD_COMPILE_TRUST_EXTRACTOR: '1' });
+    runWorker(project);
     assert.equal(readFileSync(counter, 'utf8'), '1');
   } finally { rmSync(project, { recursive: true, force: true }); }
 });

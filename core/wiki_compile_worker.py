@@ -317,10 +317,6 @@ def process_job(root: Path, config: dict, compile_cfg: dict, job: dict) -> tuple
     if primary is None and default is None:
         append_jsonl(cpath, bounded_failure("needs_extractor", job, "missing_extractor"))
         return True, False
-    if os.environ.get("QMD_COMPILE_TRUST_EXTRACTOR") != "1":
-        append_jsonl(cpath, bounded_failure("needs_extractor", job, "untrusted_extractor"))
-        return True, False
-
     if cooldown_active(root):
         append_jsonl(cpath, bounded_failure("needs_extractor", job, "cooldown_active"))
         return False, True
