@@ -291,3 +291,31 @@ test('source queue enqueue and claim share fcntl lock to avoid rename/open appen
   assert.match(worker, /fcntl\.flock/);
   assert.match(worker, /os\.replace/);
 });
+
+test('dispatch picks the adapter for payload.engine', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'adapter-'));
+  const marker = join(dir, 'which.txt');
+  const codexAd = join(dir, 'codex.py');
+  writeFileSync(codexAd, `#!/usr/bin/env python3\nimport json,sys\nopen(${JSON.stringify(marker)},'w').write('codex')\nprint(json.dumps({'candidates':[{'title':'T','summary':'Durable: dispatch chose codex adapter for this edit.','suggestedType':'concept','confidence':'high','targetPath':'.auto-context/wiki/concepts/t.md'}]}))\n`);
+  const project = setupProject({ extractor: { dispatch: 'by-engine', backends: { codex: ['python3', codexAd] }, default: [], timeout: 30 } });
+  // queue row uses engine 'claude' by default in setupProject; rewrite to codex
+  writeFileSync(join(project, '.auto-context', 'compile', 'source-queue.jsonl'),
+    JSON.stringify({ ts: '2026-06-26T00:00:00Z', trigger: 'post_tool_source', engine: 'codex', cwd: project, source: { kind: 'file', path: 'docs/source.md', collection: 'proj-docs' } }) + '\n');
+  try {
+    runWorker(project, { QMD_COMPILE_TRUST_EXTRACTOR: '1' });
+    assert.equal(readFileSync(marker, 'utf8'), 'codex');
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});
+
+test('dispatch falls back to default only when primary CLI is absent (exit 127)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'adapter-'));
+  const absent = join(dir, 'absent.py');
+  writeFileSync(absent, `#!/usr/bin/env python3\nimport sys\nsys.exit(127)\n`);
+  const fallback = join(dir, 'fallback.py');
+  writeFileSync(fallback, `#!/usr/bin/env python3\nimport json,sys\nprint(json.dumps({'candidates':[{'title':'FB','summary':'Durable: default backend handled the edit after primary was absent.','suggestedType':'concept','confidence':'high','targetPath':'.auto-context/wiki/concepts/fb.md'}]}))\n`);
+  const project = setupProject({ extractor: { dispatch: 'by-engine', backends: { claude: ['python3', absent] }, default: ['python3', fallback], timeout: 30 } });
+  try {
+    runWorker(project, { QMD_COMPILE_TRUST_EXTRACTOR: '1' });
+    assert.equal(existsSync(join(project, '.auto-context', 'wiki', 'concepts', 'fb.md')), true);
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});

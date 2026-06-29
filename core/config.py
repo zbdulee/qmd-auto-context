@@ -163,10 +163,16 @@ def compile_config(value):
         normalized_argv = argv
     else:
         normalized_argv = list(default_extractor["argv"])
-    result["extractor"] = {
+    normalized_extractor = {
         "argv": normalized_argv,
         "timeout": coerce_int(extractor.get("timeout", default_extractor["timeout"]), default_extractor["timeout"]),
     }
+    if extractor.get("dispatch") == "by-engine":
+        normalized_extractor["dispatch"] = "by-engine"
+        backends = extractor.get("backends")
+        normalized_extractor["backends"] = backends if isinstance(backends, dict) else {}
+        normalized_extractor["default"] = extractor.get("default") if isinstance(extractor.get("default"), list) else []
+    result["extractor"] = normalized_extractor
     return result
 
 

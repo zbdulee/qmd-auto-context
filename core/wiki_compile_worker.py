@@ -141,6 +141,26 @@ def orientation(root: Path) -> dict:
     return result
 
 
+def _argv_list(value) -> list[str] | None:
+    if isinstance(value, list) and value and all(isinstance(item, str) for item in value):
+        return value
+    return None
+
+
+def resolve_extractor_argv(compile_cfg: dict, engine: str) -> tuple[list[str] | None, list[str] | None]:
+    raw = compile_cfg.get("extractor")
+    extractor = raw if isinstance(raw, dict) else {}
+    legacy = _argv_list(extractor.get("argv"))
+    if legacy is not None:
+        return legacy, None
+    if extractor.get("dispatch") != "by-engine":
+        return None, None
+    backends = extractor.get("backends") if isinstance(extractor.get("backends"), dict) else {}
+    primary = _argv_list(backends.get(engine))
+    default = _argv_list(extractor.get("default"))
+    return primary, default
+
+
 def run_extractor(argv: list[str], payload: dict, timeout: int, root: Path) -> tuple[dict | None, str | None, int | None]:
     try:
         proc = subprocess.run(
@@ -224,12 +244,11 @@ def process_job(root: Path, config: dict, compile_cfg: dict, job: dict) -> tuple
         append_jsonl(cpath, bounded_failure("extractor_failed", job, "source_unreadable"))
         return True, False
 
-    raw_extractor = compile_cfg.get("extractor")
-    extractor = raw_extractor if isinstance(raw_extractor, dict) else {}
-    raw_argv = extractor.get("argv")
-    argv = raw_argv if isinstance(raw_argv, list) and all(isinstance(item, str) for item in raw_argv) else []
+    extractor = compile_cfg.get("extractor") if isinstance(compile_cfg.get("extractor"), dict) else {}
     timeout = int(extractor.get("timeout", 30) or 30)
-    if not argv:
+    engine = job.get("engine", "unknown")
+    primary, default = resolve_extractor_argv(compile_cfg, engine)
+    if primary is None and default is None:
         append_jsonl(cpath, bounded_failure("needs_extractor", job, "missing_extractor"))
         return True, False
     if os.environ.get("QMD_COMPILE_TRUST_EXTRACTOR") != "1":
@@ -248,7 +267,13 @@ def process_job(root: Path, config: dict, compile_cfg: dict, job: dict) -> tuple
         },
         "wiki": orientation(root),
     }
+    argv = primary if primary is not None else default
     extracted, reason, returncode = run_extractor(argv, payload, timeout, root)
+    if returncode == 127 and primary is not None and default is not None:
+        extracted, reason, returncode = run_extractor(default, payload, timeout, root)
+    if returncode == 127:
+        append_jsonl(cpath, bounded_failure("needs_extractor", job, "extractor_unavailable"))
+        return False, True  # CLI absent: preserve for when it's installed
     if reason in ("invalid_extractor_json",):
         append_jsonl(cpath, bounded_failure("extractor_failed", job, reason))
         return True, False  # permanent: drop
