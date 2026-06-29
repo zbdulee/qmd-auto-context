@@ -51,9 +51,16 @@ case "$ACTION" in
     exec python3 "${QMD_CORE_RECALL_SCRIPT:-$ROOT/core/recall.py}"
     ;;
   update)
-    bash "$MANAGER" ensure --wait >/dev/null 2>&1 || true
-    bash "$MANAGER" warm >/dev/null 2>&1 || true
-    bash "$MANAGER" rotate >/dev/null 2>&1 || true
+    # backend lifecycle(ensure/warm/rotate)는 백그라운드로 — SessionStart를 블록하지 않는다.
+    # 과거: `ensure --wait`가 데몬 미응답 시 wait_health(최대 ~30s)로 SessionStart를 동기 블록했다.
+    # 데몬 기동은 start_daemon이 nohup으로 비동기 처리하고, update core(update.sh main)도
+    # worker를 nohup으로 fork 후 즉시 종료하므로 데몬 준비를 동기 대기할 이유가 없다.
+    # (recall 액션과 동일하게 backend 준비는 off-critical-path로 둔다.)
+    {
+      bash "$MANAGER" ensure
+      bash "$MANAGER" warm
+      bash "$MANAGER" rotate
+    } >/dev/null 2>&1 &
     QMD_BACKEND_MANAGER="$MANAGER" exec bash "${QMD_CORE_UPDATE_SCRIPT:-$ROOT/core/update.sh}"
     ;;
   posttool)

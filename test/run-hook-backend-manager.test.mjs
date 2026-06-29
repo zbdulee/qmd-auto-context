@@ -31,7 +31,19 @@ test("sandbox exits before backend manager", () => {
   }
 });
 
-test("update action ensures, warms, rotates, then runs update core", () => {
+function waitForFile(path, predicate, timeoutMs = 4000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (existsSync(path)) {
+      const content = readFileSync(path, "utf8");
+      if (predicate(content)) return content;
+    }
+    execFileSync("/bin/sleep", ["0.02"]);
+  }
+  return existsSync(path) ? readFileSync(path, "utf8") : "";
+}
+
+test("update action runs core, then ensures/warms/rotates backend in background (no --wait)", () => {
   const d = mkdtempSync(join(tmpdir(), "qmd-runhook-update-"));
   try {
     const managerLog = join(d, "manager.log");
@@ -43,8 +55,39 @@ test("update action ensures, warms, rotates, then runs update core", () => {
       QMD_CORE_UPDATE_SCRIPT: updateCore,
     });
     assert.equal(out, "");
-    assert.equal(readFileSync(managerLog, "utf8"), "ensure --wait\nwarm\nrotate\n");
+    // update core runs synchronously (foreground exec)
     assert.equal(readFileSync(coreLog, "utf8"), "update\n");
+    // backend lifecycle runs in background, ordered, and WITHOUT the blocking --wait
+    const managerContent = waitForFile(managerLog, (c) => c.split("\n").filter(Boolean).length >= 3);
+    assert.equal(managerContent, "ensure\nwarm\nrotate\n");
+  } finally {
+    rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("update action does not block on a slow backend ensure", () => {
+  const d = mkdtempSync(join(tmpdir(), "qmd-runhook-update-noblock-"));
+  try {
+    const managerStarted = join(d, "manager.started");
+    const coreLog = join(d, "core.log");
+    // ensure blocks for 3s (simulates unresponsive daemon → wait_health); warm/rotate noop.
+    const manager = makeExecutable(
+      join(d, "manager.sh"),
+      `#!/usr/bin/env bash\nif [ "$1" = "ensure" ]; then echo started > "${managerStarted}"; sleep 3; fi\n`,
+    );
+    const updateCore = makeExecutable(join(d, "update.sh"), `#!/usr/bin/env bash\necho update >> "${coreLog}"\n`);
+    const start = Date.now();
+    const out = runHook(["update", "codex"], "{}", {
+      QMD_BACKEND_MANAGER: manager,
+      QMD_CORE_UPDATE_SCRIPT: updateCore,
+    });
+    const elapsed = Date.now() - start;
+    assert.equal(out, "");
+    assert.equal(readFileSync(coreLog, "utf8"), "update\n");
+    // must return well before the 3s backend ensure finishes
+    assert.ok(elapsed < 2000, `update hook blocked on backend ensure (${elapsed}ms)`);
+    // backend ensure was still kicked (in background)
+    assert.notEqual(waitForFile(managerStarted, () => true), "");
   } finally {
     rmSync(d, { recursive: true, force: true });
   }
