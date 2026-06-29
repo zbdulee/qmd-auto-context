@@ -651,6 +651,7 @@ git commit -m "feat: SessionStart sweep flushes debounced wiki-compile batch"
   - `resolve_bin(name: str, env_override: str) -> str | None` (env override → fnm/bun/PATH resolution like `backend_manager.normalize_path`)
   - `run_isolated(cmd: list[str], prompt_is_arg: bool, prompt: str, timeout: int) -> tuple[str | None, int]` (run in a fresh `tempfile.mkdtemp()` cwd, return `(stdout, returncode)`; stdin closed; temp dir removed in `finally`)
   - `emit(candidates_obj: dict) -> int` (print JSON to stdout, return 0; if no candidates, return 1)
+  - `run_adapter(cli_name: str, env_override: str, build_cmd) -> int` (the whole adapter flow: read payload, build prompt, resolve binary (→ `CLI_ABSENT` if missing), run isolated, extract, emit). `build_cmd(binary, prompt) -> list[str]`. This is what each adapter calls so the three adapters carry no duplicated logic.
   - Module constant `CLI_ABSENT = 127`
 
 - [ ] **Step 1: Write the failing tests**
@@ -836,6 +837,22 @@ def emit(candidates_obj: dict) -> int:
         return 1
     print(json.dumps({"candidates": candidates}, ensure_ascii=False))
     return 0
+
+
+def run_adapter(cli_name: str, env_override: str, build_cmd) -> int:
+    """Full adapter flow shared by all host adapters."""
+    payload = read_payload()
+    prompt = build_prompt(payload)
+    binary = resolve_bin(cli_name, env_override)
+    if not binary:
+        return CLI_ABSENT
+    timeout = int(payload.get("timeout") or os.environ.get("QMD_EXTRACTOR_TIMEOUT") or 120)
+    out, code = run_isolated(build_cmd(binary, prompt), timeout)
+    if out is None:
+        return 1
+    if code != 0:
+        return code
+    return emit(extract_candidates(out))
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
@@ -912,30 +929,17 @@ Expected: FAIL — adapter file missing.
 #!/usr/bin/env python3
 """Claude headless extractor adapter. payload(stdin) -> {"candidates":[...]}(stdout)."""
 
-import os
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.resolve()))
 import lib
 
-
-def main() -> int:
-    payload = lib.read_payload()
-    prompt = lib.build_prompt(payload)
-    binary = lib.resolve_bin("claude", "QMD_EXTRACTOR_CLAUDE_BIN")
-    if not binary:
-        return lib.CLI_ABSENT
-    timeout = int(payload.get("timeout") or os.environ.get("QMD_EXTRACTOR_TIMEOUT") or 120)
-    cmd = [binary, "-p", "--tools", "", "--permission-mode", "plan", "--output-format", "text", prompt]
-    out, code = lib.run_isolated(cmd, timeout)
-    if out is None or code != 0:
-        return 1 if code == 0 else code
-    return lib.emit(lib.extract_candidates(out))
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+sys.exit(lib.run_adapter(
+    "claude",
+    "QMD_EXTRACTOR_CLAUDE_BIN",
+    lambda b, p: [b, "-p", "--tools", "", "--permission-mode", "plan", "--output-format", "text", p],
+))
 ```
 
 Make it executable:
@@ -994,17 +998,24 @@ Expected: FAIL — adapter missing.
 
 - [ ] **Step 3: Create the adapter**
 
-`core/extractors/codex_adapter.py` (mode 0755), identical structure to Task 7 except:
+`core/extractors/codex_adapter.py` (mode 0755), same one-line delegation as Task 7 with the codex CLI/flags:
 
 ```python
-    binary = lib.resolve_bin("codex", "QMD_EXTRACTOR_CODEX_BIN")
-    if not binary:
-        return lib.CLI_ABSENT
-    timeout = int(payload.get("timeout") or os.environ.get("QMD_EXTRACTOR_TIMEOUT") or 120)
-    cmd = [binary, "exec", "-s", "read-only", "--skip-git-repo-check", prompt]
-```
+#!/usr/bin/env python3
+"""Codex headless extractor adapter. payload(stdin) -> {"candidates":[...]}(stdout)."""
 
-(Header/`main`/`__main__` identical to claude_adapter.py with `codex` substituted.)
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.resolve()))
+import lib
+
+sys.exit(lib.run_adapter(
+    "codex",
+    "QMD_EXTRACTOR_CODEX_BIN",
+    lambda b, p: [b, "exec", "-s", "read-only", "--skip-git-repo-check", p],
+))
+```
 
 ```bash
 chmod +x core/extractors/codex_adapter.py
@@ -1060,14 +1071,23 @@ Expected: FAIL — adapter missing.
 
 - [ ] **Step 3: Create the adapter**
 
-`core/extractors/hermes_adapter.py` (mode 0755), same structure with:
+`core/extractors/hermes_adapter.py` (mode 0755), same one-line delegation as Task 7 with the hermes CLI/flags:
 
 ```python
-    binary = lib.resolve_bin("hermes", "QMD_EXTRACTOR_HERMES_BIN")
-    if not binary:
-        return lib.CLI_ABSENT
-    timeout = int(payload.get("timeout") or os.environ.get("QMD_EXTRACTOR_TIMEOUT") or 120)
-    cmd = [binary, "-z", prompt, "--safe-mode", "--ignore-user-config", "--ignore-rules", "-t", ""]
+#!/usr/bin/env python3
+"""Hermes headless extractor adapter. payload(stdin) -> {"candidates":[...]}(stdout)."""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.resolve()))
+import lib
+
+sys.exit(lib.run_adapter(
+    "hermes",
+    "QMD_EXTRACTOR_HERMES_BIN",
+    lambda b, p: [b, "-z", p, "--safe-mode", "--ignore-user-config", "--ignore-rules", "-t", ""],
+))
 ```
 
 ```bash
