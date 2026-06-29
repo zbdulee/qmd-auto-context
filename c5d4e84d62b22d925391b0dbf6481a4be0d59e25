@@ -1,0 +1,15 @@
+core/extractors/hermes_adapter.py
+  h_42d950683aaaea 1-14
+test/wiki-extractors.test.mjs
+  h_42d950683aaaea 79-94
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "c5d4e84d62b22d925391b0dbf6481a4be0d59e25",
+  "prompts": {},
+  "humans": {
+    "h_42d950683aaaea": {
+      "author": "dulee@zigbang.com"
+    }
+  }
+}
