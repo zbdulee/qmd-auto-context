@@ -546,6 +546,70 @@ PY
   exit 0
 fi
 
+if [ "$1" = "--enable-compile" ]; then
+  shift
+  engines=""
+  if [ "$1" = "--engines" ]; then engines="$2"; shift 2; fi
+  target="${1:-$PWD}"
+  if [ -n "$1" ]; then shift; fi
+  if [ "$1" = "--engines" ]; then engines="$2"; shift 2; fi
+  core_dir="$(cd "$(dirname "$0")" && pwd)"
+
+  # Guard: project must be opted in (settings.json with indexing:true).
+  state="$(python3 - "$target" "$core_dir" <<'PY'
+import json, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[2])
+import config as qmd_config
+found = qmd_config.find_project_config(sys.argv[1])
+cfg = found["config"]
+print("optin" if cfg.get("indexing") is True else "no")
+PY
+)"
+  if [ "$state" != "optin" ]; then
+    echo "[qmd] 이 폴더는 아직 opt-in되지 않았습니다. 먼저 다음 중 하나를 실행하세요:"
+    echo "      bash core/update.sh --optin --recommended $(printf %q "$target")"
+    echo "      bash core/update.sh --optin $(printf %q "$target")"
+    exit 0
+  fi
+
+  # Reuse --init-wiki for scaffold + recall config (idempotent, recall-only).
+  bash "$0" --init-wiki "$target" >/dev/null 2>&1 || true
+
+  # Merge the shared compile block (engine backends derived from plugin root).
+  python3 - "$target" "$core_dir" "$engines" <<'PY'
+import json, os, sys, tempfile
+from pathlib import Path
+sys.path.insert(0, sys.argv[2])
+import wiki_compile_defaults as d
+
+target = Path(sys.argv[1]).resolve()
+engines = d.parse_engines(sys.argv[3] or None)
+root = d.plugin_root()
+settings = target / ".auto-context" / "settings.json"
+cfg = json.loads(settings.read_text(encoding="utf-8"))
+
+block = d.compile_block(root, engines)
+existing = cfg.get("compile") if isinstance(cfg.get("compile"), dict) else {}
+# Merge: keep existing keys, ensure post_tool_source trigger + extractor + batch.
+merged = {**existing, **block}
+trig = existing.get("triggers") if isinstance(existing.get("triggers"), list) else []
+merged["triggers"] = list(dict.fromkeys(["post_tool_source", *trig, *block["triggers"]]))
+cfg["compile"] = merged
+
+fd, tmp = tempfile.mkstemp(dir=str(settings.parent), prefix="settings.", suffix=".tmp")
+with os.fdopen(fd, "w", encoding="utf-8") as fh:
+    json.dump(cfg, fh, ensure_ascii=False, indent=2); fh.write("\n")
+os.replace(tmp, settings)
+print(f"[qmd] wiki auto-compile 활성화: {target}")
+print(f"      엔진: {', '.join(engines)} (해당 host CLI가 없으면 자동 skip)")
+print("      이제 raw/session 컬렉션의 .md를 편집하면 백그라운드로 해당 CLI를 실행해")
+print("      wiki 페이지(status: generated)를 초안 작성합니다.")
+print("      끄려면 settings.json의 compile.extractor 를 제거하세요.")
+PY
+  exit 0
+fi
+
 if [ "$1" = "--recommend" ]; then
   shift
   json_flag=""
