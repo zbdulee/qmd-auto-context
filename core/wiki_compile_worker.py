@@ -193,9 +193,12 @@ def run_extractor(argv: list[str], payload: dict, timeout: int, root: Path) -> t
             cwd=str(root),
         )
     except FileNotFoundError:
+        # Binary genuinely absent → 127 sentinel lets the worker try `default`.
         return None, "extractor_failed", 127
     except OSError:
-        return None, "extractor_failed", 127
+        # Present but unrunnable (PermissionError/ENOEXEC/ENOTDIR…) is a runtime/config
+        # failure, NOT "CLI absent": return a non-127 code so it does NOT trigger fallback.
+        return None, "extractor_failed", None
     except subprocess.TimeoutExpired:
         return None, "extractor_timeout", None
     if proc.stderr:

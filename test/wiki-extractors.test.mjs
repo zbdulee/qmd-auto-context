@@ -23,6 +23,17 @@ import json; print(json.dumps(lib.extract_candidates('no json here')))`;
   assert.deepEqual(JSON.parse(runLib(py, '')), {});
 });
 
+test('extract_candidates handles unbalanced braces inside string values', () => {
+  // summary contains a lone "{" — a naive brace counter would never close the object
+  const py = `import sys,json; sys.path.insert(0,'core/extractors'); import lib
+text = json.dumps({"candidates":[{"title":"T","summary":"code: function foo() {"}]})
+out = lib.extract_candidates('here:\\n' + text + '\\nthanks')
+print(json.dumps(out))`;
+  const out = JSON.parse(runLib(py, ''));
+  assert.equal(out.candidates[0].title, 'T');
+  assert.match(out.candidates[0].summary, /function foo\(\) \{/);
+});
+
 test('build_prompt embeds source content and a candidates-only instruction', () => {
   const py = `import sys,json; sys.path.insert(0,'core/extractors'); import lib
 p=lib.build_prompt({'source':{'path':'docs/x.md','content':'UNIQ_SRC_BODY'},'wiki':{'schema':'S','index':'I','logTail':''}})

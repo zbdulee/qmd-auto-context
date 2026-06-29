@@ -64,26 +64,26 @@ def build_prompt(payload: dict) -> str:
 def extract_candidates(text: str) -> dict:
     if not isinstance(text, str) or "candidates" not in text:
         return {}
-    # Scan for balanced {...} objects, prefer the last one that parses with "candidates".
+    # Use the JSON decoder (which respects string escaping) to scan each '{' as a
+    # possible object start. A naive brace counter miscounts '{'/'}' inside string
+    # values, so output whose summary contains a lone brace would be dropped.
+    # Prefer the last object that parses with a "candidates" list.
+    decoder = json.JSONDecoder()
     found = None
-    depth = 0
-    start = -1
-    for i, ch in enumerate(text):
-        if ch == "{":
-            if depth == 0:
-                start = i
-            depth += 1
-        elif ch == "}":
-            if depth > 0:
-                depth -= 1
-                if depth == 0 and start >= 0:
-                    chunk = text[start:i + 1]
-                    try:
-                        obj = json.loads(chunk)
-                    except json.JSONDecodeError:
-                        continue
-                    if isinstance(obj, dict) and isinstance(obj.get("candidates"), list):
-                        found = obj
+    idx = 0
+    length = len(text)
+    while idx < length:
+        start = text.find("{", idx)
+        if start == -1:
+            break
+        try:
+            obj, end = decoder.raw_decode(text, start)
+        except json.JSONDecodeError:
+            idx = start + 1
+            continue
+        if isinstance(obj, dict) and isinstance(obj.get("candidates"), list):
+            found = obj
+        idx = max(end, start + 1)
     return found or {}
 
 

@@ -307,6 +307,21 @@ test('dispatch picks the adapter for payload.engine', () => {
   } finally { rmSync(project, { recursive: true, force: true }); }
 });
 
+test('non-executable primary (PermissionError) does NOT trigger fallback', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'adapter-'));
+  // primary exists but is not executable -> subprocess raises PermissionError, NOT FileNotFoundError
+  const nonExec = join(dir, 'primary-noexec');
+  writeFileSync(nonExec, '#!/usr/bin/env bash\necho noop\n', { mode: 0o644 });
+  const fallback = join(dir, 'fallback.py');
+  writeFileSync(fallback, `#!/usr/bin/env python3\nimport json\nprint(json.dumps({'candidates':[{'title':'FB','summary':'Durable: fallback must NOT run on a runtime failure.','suggestedType':'concept','confidence':'high','targetPath':'.auto-context/wiki/concepts/fb.md'}]}))\n`);
+  const project = setupProject({ extractor: { dispatch: 'by-engine', backends: { claude: [nonExec] }, default: ['python3', fallback], timeout: 30 } });
+  try {
+    runWorker(project, { QMD_COMPILE_TRUST_EXTRACTOR: '1' });
+    // fallback must NOT have run (no double LLM call on a non-127 runtime failure)
+    assert.equal(existsSync(join(project, '.auto-context', 'wiki', 'concepts', 'fb.md')), false);
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});
+
 test('dispatch falls back to default only when primary CLI is absent (exit 127)', () => {
   const dir = mkdtempSync(join(tmpdir(), 'adapter-'));
   const absent = join(dir, 'absent.py');
