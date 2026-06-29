@@ -2,7 +2,10 @@
 import argparse
 import json
 import os
+import sys
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import wiki_compile_defaults as _wcd
 
 # (path, reason, suffix, narrow)  narrow=True면 무조건 채택, False면 크기 가드 적용
 CANDIDATES = [
@@ -68,11 +71,22 @@ def build_recommendation(cwd):
             filtered.append(s)
     selected = filtered
 
+    wiki_name = f"{prefix}-wiki"
+    collections = [s["name"] for s in selected]
+    collection_paths = {s["name"]: s["path"] for s in selected}
+    collection_paths[wiki_name] = ".auto-context/wiki"
+    roles = {s["name"]: "raw" for s in selected}
+    roles[wiki_name] = "wiki"
+
     config = {
         "indexing": True,
         "name": prefix,
-        "collections": [s["name"] for s in selected],
-        "collectionPaths": {s["name"]: s["path"] for s in selected},
+        "collections": collections + [wiki_name],
+        "collectionPaths": collection_paths,
+        "collectionRoles": roles,
+        "recallStrategy": "hierarchical",
+        "wikiPath": ".auto-context/wiki",
+        "compile": _wcd.compile_block(_wcd.plugin_root()),
         **DEFAULTS,
     }
     return {"available": bool(selected), "root": str(root), "selected": selected, "config": config}
