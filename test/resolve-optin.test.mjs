@@ -201,6 +201,19 @@ test('--optin --recommended: 추천 config 기록', () => {
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('--optin --recommended: wiki scaffold created (.auto-context/wiki/SCHEMA.md exists)', () => {
+  // After --optin --recommended on a project with docs/, the recommended config includes a
+  // wiki collection. The optin path must scaffold .auto-context/wiki/ so qmd update does not
+  // fail when it tries to add a nonexistent wiki directory as a collection.
+  const dir = mkdtempSync(join(tmpdir(), 'qmd-recin-wiki-'));
+  mkdirSync(join(dir, 'docs/current'), { recursive: true });
+  try {
+    execFileSync('bash', ['core/update.sh', '--optin', '--recommended', dir], { encoding: 'utf8' });
+    assert.equal(existsSync(join(dir, '.auto-context', 'wiki', 'SCHEMA.md')), true,
+      '.auto-context/wiki/SCHEMA.md must be scaffolded by --optin --recommended');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('--optin --recommended: 기존 config 미덮음', () => {
   const dir = mkdtempSync(join(tmpdir(), 'qmd-recex-'));
   mkdirSync(join(dir, 'docs/current'), { recursive: true });

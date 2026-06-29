@@ -90,6 +90,21 @@ test('--enable-compile refuses a subdir under an opted-in parent (target has no 
   } finally { rmSync(parent, { recursive: true, force: true }); }
 });
 
+test('--enable-compile refuses project opted-in via legacy .auto-context.json (no settings.json)', () => {
+  // A project opted in only via the legacy .auto-context.json must be refused.
+  // The output must mention --migrate-config and no .auto-context/settings.json must be created.
+  const d = mkdtempSync(join(tmpdir(), 'enable-compile-legacy-'));
+  try {
+    writeFileSync(join(d, '.auto-context.json'), JSON.stringify({
+      indexing: true, collections: ['legacy-col'], collectionPaths: { 'legacy-col': '.' },
+    }));
+    const out = runEnable(d);
+    assert.match(out, /--migrate-config/, 'output must mention --migrate-config');
+    assert.equal(existsSync(join(d, '.auto-context', 'settings.json')), false,
+      '.auto-context/settings.json must NOT be created for legacy-only opted-in project');
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
 test('--enable-compile --engines codex <project> (engines BEFORE path) sets backends to exactly {codex}', () => {
   const project = optedInProject();
   try {

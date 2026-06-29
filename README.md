@@ -93,12 +93,13 @@ bash core/update.sh --recommend --json [<프로젝트경로>]       # 추천 결
 bash core/update.sh --optin --recommended [<프로젝트경로>]    # 추천 적용 → .auto-context/settings.json 생성
 bash core/update.sh --migrate-config [<프로젝트경로>]         # 레거시 .auto-context.json → .auto-context/settings.json 이동
 bash core/update.sh --init-wiki [<프로젝트경로>]              # .auto-context/wiki scaffold 생성 + wiki recall 활성화
+bash core/update.sh --enable-compile [<프로젝트경로>]         # wiki scaffold + compile 설정 (편집 시 host CLI 백그라운드 실행)
 bash core/update.sh --skip [<프로젝트경로>]                   # 이 프로젝트 임시 gate 통과 마커 (TTL 2h, cwd 단위)
 ```
 
 `--recommend`는 `docs/current`, `docs/plans`, `docs` 등 좁은 경로를 탐색해 크기 가드를 통과한 경로만 추천한다(read-only — 파일을 생성·변경하지 않는다). `--optin --recommended`는 추천 결과를 `.auto-context/settings.json`으로 원자 기록한다. **plain `--optin`은 루트 전체를 컬렉션으로 설정하므로 큰 저장소에는 `--optin --recommended`가 안전하다.**
 
-LLM Wiki/promotion layer를 시작하려면 `--init-wiki`로 `.auto-context/wiki/`의 기본 `SCHEMA.md`/`index.md`/`log.md`와 하위 디렉터리를 만든다. 이 명령은 idempotent이며 기존 wiki 파일을 덮어쓰지 않는다. 동시에 `settings.json`에 wiki collection(`.auto-context/wiki`)과 `collectionRoles`/`recallStrategy:"hierarchical"`을 추가해, 컴파일된 wiki가 recall 대상에서 빠지는 상태를 방지한다. 자세한 설계는 `docs/superpowers/specs/2026-06-25-auto-context-wiki-promotion-layer.md`를 참고한다.
+LLM Wiki/promotion layer를 시작하려면 `--init-wiki`로 `.auto-context/wiki/`의 기본 `SCHEMA.md`/`index.md`/`log.md`와 하위 디렉터리를 만든다. 이 명령은 idempotent이며 기존 wiki 파일을 덮어쓰지 않는다. 동시에 `settings.json`에 wiki collection(`.auto-context/wiki`)과 `collectionRoles`/`recallStrategy:"hierarchical"`을 추가해, 컴파일된 wiki가 recall 대상에서 빠지는 상태를 방지한다. 자세한 설계는 `docs/superpowers/specs/2026-06-25-auto-context-wiki-promotion-layer.md`를 참고한다. `--init-wiki`는 wiki recall만 활성화하며 host CLI 실행 비용이 없는 반면, `--enable-compile`은 여기에 더해 auto-compile도 켜므로 raw/session 컬렉션의 `.md` 편집마다 host CLI를 백그라운드로 실행해 토큰을 소비한다.
 
 ### Automatic wiki compile
 
@@ -111,6 +112,8 @@ bash core/update.sh --enable-compile        # wiki scaffold + compile 설정 한
 또는 에이전트에게 "wiki 자동화 켜줘"라고 요청하면 `enable-compile` skill이 실행된다.
 
 **공개 고지(install = consent):** 플러그인을 설치하면 `raw`/`session` role `.md` 파일을 편집할 때마다 설정된 host CLI(claude/codex/hermes)가 **백그라운드에서** 해당 파일을 읽어 wiki page 초안(`defaultStatus: "generated"`)을 작성한다. 첫 번째 SessionStart에서 이 동작을 안내하는 알림이 표시된다. 비활성화하려면 `.auto-context/settings.json`에서 `compile.extractor`를 제거한다.
+
+> **Hermes 사용자 주의:** Hermes Agent의 `on_session_start`는 observer-only hook이라 위 첫 번째 세션 알림이 **Hermes에서는 표시되지 않는다**. Hermes로 이 플러그인을 사용할 경우 위 고지 내용을 사전에 숙지한 뒤 compile을 활성화하기 바란다.
 
 트리거: **`collectionRoles`가 `raw` 또는 `session`인 컬렉션의 `.md` 편집**에만 발화한다(`post_tool_source`). `wiki` 등 다른 role의 파일 편집은 compile 대상이 아니다.
 

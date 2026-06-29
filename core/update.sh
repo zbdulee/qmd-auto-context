@@ -579,9 +579,11 @@ if [ "$1" = "--enable-compile" ]; then
   if [ "$1" = "--engines" ]; then engines="$2"; shift 2; fi
   core_dir="$(cd "$(dirname "$0")" && pwd)"
 
-  # Guard: project must be opted in (settings.json with indexing:true) AT target itself.
-  # Walking up to HOME is intentional for recall, but --enable-compile must write to target's
-  # own settings.json. Refuse if the opted-in config lives in an ancestor directory.
+  # Guard: project must be opted in via the modern .auto-context/settings.json format
+  # (configFormat == "auto-context-dir") AT target itself. Walking up to HOME is intentional
+  # for recall, but --enable-compile must write to target's own settings.json.
+  # Refuse if: (a) not opted in at all, (b) opted-in via legacy config, or (c) config lives
+  # in an ancestor directory — any of these would shadow or corrupt the legacy config.
   state="$(python3 - "$target" "$core_dir" <<'PY'
 import json, sys
 from pathlib import Path
@@ -589,10 +591,24 @@ sys.path.insert(0, sys.argv[2])
 import config as qmd_config
 found = qmd_config.find_project_config(sys.argv[1])
 cfg = found["config"]
-own = cfg.get("indexing") is True and Path(found["projectRoot"]).resolve() == Path(sys.argv[1]).resolve()
-print("optin" if own else "no")
+fmt = found.get("configFormat", "none")
+own_root = Path(found["projectRoot"]).resolve() == Path(sys.argv[1]).resolve()
+if cfg.get("indexing") is True and own_root and fmt == "auto-context-dir":
+    print("optin")
+elif cfg.get("indexing") is True and own_root and fmt in ("auto-context-json", "agents-legacy"):
+    print("legacy")
+else:
+    print("no")
 PY
 )"
+  if [ "$state" = "legacy" ]; then
+    printf '[qmd] 이 프로젝트는 레거시 config(.auto-context.json 또는 .agents/qmd-recall.json)로 opt-in되어 있습니다.\n'
+    printf '      --enable-compile을 실행하면 새 .auto-context/settings.json이 레거시 config를 섀도잉해 기존 설정이 유실됩니다.\n'
+    printf '      먼저 레거시 config를 마이그레이션한 뒤 다시 실행하세요:\n'
+    printf '      bash core/update.sh --migrate-config %s\n' "$(printf %q "$target")"
+    printf '      bash core/update.sh --enable-compile %s\n' "$(printf %q "$target")"
+    exit 0
+  fi
   if [ "$state" != "optin" ]; then
     echo "[qmd] 이 폴더는 아직 opt-in되지 않았습니다. 먼저 다음 중 하나를 실행하세요:"
     echo "      bash core/update.sh --optin --recommended $(printf %q "$target")"
@@ -715,6 +731,26 @@ except BaseException:
 qmd_config.clear_local_optout(target)
 print(f"[qmd] --optin --recommended 완료: {dest} ({config.get('collections')}). 다음 세션부터 인덱싱됩니다.")
 PY
+    # Scaffold wiki if the written config contains a wiki collection.
+    # detect wikiPath or any collection whose collectionPaths entry is .auto-context/wiki
+    _needs_wiki="$(python3 - "$target" <<'PYWIKI'
+import json, sys
+from pathlib import Path
+settings = Path(sys.argv[1]) / ".auto-context" / "settings.json"
+try:
+    cfg = json.loads(settings.read_text(encoding="utf-8"))
+except Exception:
+    print("no"); sys.exit(0)
+paths = cfg.get("collectionPaths") if isinstance(cfg.get("collectionPaths"), dict) else {}
+if any(v == ".auto-context/wiki" for v in paths.values()) or cfg.get("wikiPath") == ".auto-context/wiki":
+    print("yes")
+else:
+    print("no")
+PYWIKI
+)"
+    if [ "$_needs_wiki" = "yes" ]; then
+      bash "$0" --init-wiki "$target" >/dev/null 2>&1 || true
+    fi
     exit 0
   fi
   target="${1:-$PWD}"
