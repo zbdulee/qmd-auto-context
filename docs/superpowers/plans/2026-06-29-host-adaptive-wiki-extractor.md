@@ -267,7 +267,10 @@ git commit -m "feat: engine-based extractor dispatch with CLI-absent fallback"
 
 **Files:**
 - Modify: `core/wiki_compile_worker.py` (`process_job`: add cooldown check + mark; classification)
-- Test: `test/wiki-compile-worker.test.mjs`
+- Modify: `core/config.py` (`compile_config`: normalize `extractor.cooldownSeconds`; add default)
+- Test: `test/wiki-compile-worker.test.mjs`, `test/config.test.mjs`
+
+> **Cross-task note (discovered in Task 2):** `core/config.py` `compile_config()` is an allowlist normalizer — the worker only sees keys it preserves. `cooldownSeconds` must be added there or the worker's `extractor.get("cooldownSeconds", 600)` will always be the default. See Step 3b.
 
 **Interfaces:**
 - Produces: `cooldown_path(root) -> Path` (`.auto-context/compile/cooldown`); `cooldown_active(root) -> bool`; `set_cooldown(root, seconds: int) -> None` writing the expiry epoch (float) as text.
@@ -360,9 +363,23 @@ Also change the `missing_candidates` branch (after `candidates = extracted.get(.
         return True, False  # permanent: drop
 ```
 
+- [ ] **Step 3b: Preserve `cooldownSeconds` in `core/config.py`**
+
+In `core/config.py`, add a default and normalize the key (the worker only sees normalized config).
+
+In `DEFAULT_CONFIG["compile"]["extractor"]` (currently `{"argv": [], "timeout": 30}`) add `"cooldownSeconds": 600`.
+
+In `compile_config`, in the `normalized_extractor = {...}` dict literal, add the line:
+
+```python
+        "cooldownSeconds": coerce_int(extractor.get("cooldownSeconds", default_extractor.get("cooldownSeconds", 600)), 600),
+```
+
+Add a `test/config.test.mjs` assertion that a config with `compile.extractor.cooldownSeconds: 300` normalizes to `300`, and that the default is `600` when omitted. Follow the existing config-test invocation pattern in that file.
+
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `node --test --test-name-pattern "cooldown" test/wiki-compile-worker.test.mjs`
+Run: `node --test --test-name-pattern "cooldown" test/wiki-compile-worker.test.mjs && node --test test/config.test.mjs`
 Expected: PASS
 
 - [ ] **Step 5: Full worker suite**
@@ -373,7 +390,7 @@ Expected: all PASS
 - [ ] **Step 6: Commit**
 
 ```bash
-git add core/wiki_compile_worker.py test/wiki-compile-worker.test.mjs
+git add core/wiki_compile_worker.py core/config.py test/wiki-compile-worker.test.mjs test/config.test.mjs
 git commit -m "feat: cooldown backoff and transient/permanent failure classification"
 ```
 
@@ -383,7 +400,10 @@ git commit -m "feat: cooldown backoff and transient/permanent failure classifica
 
 **Files:**
 - Modify: `core/wiki_compile_worker.py` (`main`: gate before processing; add dedup + readiness helpers)
-- Test: `test/wiki-compile-worker.test.mjs`
+- Modify: `core/config.py` (`compile_config`: normalize `compile.batch`; add default)
+- Test: `test/wiki-compile-worker.test.mjs`, `test/config.test.mjs`
+
+> **Cross-task note (discovered in Task 2):** `core/config.py` `compile_config()` only preserves allowlisted keys, so the worker sees `{}` for `compile.batch` unless normalized there. Without Step 3b, the batch tests below FAIL (worker would use default 90/5 and ignore configured values). Do Step 3b first.
 
 **Interfaces:**
 - Produces: `dedup_jobs(rows) -> tuple[list[tuple[str, dict]], list[str]]` returning `(kept_rows, dropped_raw_lines)` keeping the latest `ts` per `(cwd, source.path, source.collection)`. `batch_ready(kept_rows, idle_seconds, max_items, flush_all) -> bool`: True if `flush_all`, or `len(kept) >= max_items`, or oldest `ts` age (seconds) `>= idle_seconds`.
@@ -425,6 +445,25 @@ test('dedup: repeated edits of same path collapse to one extraction', () => {
 
 Run: `node --test --test-name-pattern "debounce|dedup" test/wiki-compile-worker.test.mjs`
 Expected: FAIL — worker currently processes everything immediately, once per row.
+
+- [ ] **Step 2b: Normalize `compile.batch` in `core/config.py`**
+
+The worker only sees normalized config, so add batch normalization first.
+
+In `DEFAULT_CONFIG["compile"]` add a sibling key: `"batch": {"idleSeconds": 90, "maxItems": 5}`.
+
+In `compile_config`, after the `result["extractor"] = normalized_extractor` line, add:
+
+```python
+    raw_batch = value.get("batch")
+    batch = raw_batch if isinstance(raw_batch, dict) else {}
+    result["batch"] = {
+        "idleSeconds": coerce_int(batch.get("idleSeconds", 90), 90),
+        "maxItems": coerce_int(batch.get("maxItems", 5), 5),
+    }
+```
+
+Add a `test/config.test.mjs` assertion: `compile.batch: {idleSeconds: 10, maxItems: 2}` normalizes to those values; defaults are 90/5 when omitted. Follow the existing config-test invocation pattern.
 
 - [ ] **Step 3: Add dedup + readiness, gate `main`**
 
@@ -519,7 +558,7 @@ Expected: all PASS (existing tests use a queue row with old `ts` 2026-06-26 → 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add core/wiki_compile_worker.py test/wiki-compile-worker.test.mjs
+git add core/wiki_compile_worker.py core/config.py test/wiki-compile-worker.test.mjs test/config.test.mjs
 git commit -m "feat: debounce/batch readiness gating and dedup by source path"
 ```
 
