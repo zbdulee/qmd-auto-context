@@ -1,0 +1,15 @@
+core/extractors/lib.py
+  h_42d950683aaaea 1-150
+test/wiki-extractors.test.mjs
+  h_42d950683aaaea 1-30
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "c6e719ccc5414e008a5a66198f7242334131e4c4",
+  "prompts": {},
+  "humans": {
+    "h_42d950683aaaea": {
+      "author": "dulee@zigbang.com"
+    }
+  }
+}
