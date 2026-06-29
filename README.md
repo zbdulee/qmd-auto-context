@@ -100,6 +100,39 @@ bash core/update.sh --skip [<프로젝트경로>]                   # 이 프로
 
 LLM Wiki/promotion layer를 시작하려면 `--init-wiki`로 `.auto-context/wiki/`의 기본 `SCHEMA.md`/`index.md`/`log.md`와 하위 디렉터리를 만든다. 이 명령은 idempotent이며 기존 wiki 파일을 덮어쓰지 않는다. 동시에 `settings.json`에 wiki collection(`.auto-context/wiki`)과 `collectionRoles`/`recallStrategy:"hierarchical"`을 추가해, 컴파일된 wiki가 recall 대상에서 빠지는 상태를 방지한다. 자세한 설계는 `docs/superpowers/specs/2026-06-25-auto-context-wiki-promotion-layer.md`를 참고한다.
 
+### Automatic wiki compile (opt-in)
+
+자동 wiki compile은 기본 OFF이며, 활성화하려면 `.auto-context/settings.json`에서:
+- `compile.extractor`를 `dispatch: "by-engine"`과 `backends` 매핑(엔진→어댑터 경로)으로 설정
+- `compile.batch` 설정
+- 훅이 실행되는 환경에서 `QMD_COMPILE_TRUST_EXTRACTOR=1` export
+
+예시:
+
+```jsonc
+"compile": {
+  "enabled": true,
+  "mode": "guarded",
+  "autoWrite": true,
+  "defaultStatus": "generated",
+  "triggers": ["post_tool_source", "manual"],
+  "extractor": {
+    "dispatch": "by-engine",
+    "backends": {
+      "claude": ["/abs/path/to/plugin/core/extractors/claude_adapter.py"],
+      "codex":  ["/abs/path/to/plugin/core/extractors/codex_adapter.py"],
+      "hermes": ["/abs/path/to/plugin/core/extractors/hermes_adapter.py"]
+    },
+    "default": [],
+    "timeout": 120,
+    "cooldownSeconds": 600
+  },
+  "batch": { "idleSeconds": 90, "maxItems": 5 }
+}
+```
+
+각 어댑터는 격리된 임시 디렉터리에서 CLI를 실행하며 도구는 비활성화된다. 여기에 나열되지 않은 어댑터는 활성화되지 않으며, `default`는 선택사항이다(예: 사용자의 커스텀 agy wrapper).
+
 ### gate (미설정 프로젝트 편집 차단)
 
 pending 프로젝트에서 Edit·Write·apply_patch 등 편집 도구를 쓰면 **`PreToolUse`/`pre_tool_call` 훅이 deny/block**으로 차단한다(Claude·Codex·Hermes 적용, agy 제외). 세션 시작 시 안내된 5가지 선택지(추천 확인 / 추천 적용 / 직접 작성 / 거절 / 이번만 건너뜀) 중 하나를 실행하면 통과한다. `--skip`은 TTL 2h 마커 파일을 생성해 해당 세션 내 gate를 해제한다.

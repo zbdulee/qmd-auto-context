@@ -64,6 +64,7 @@ backend/   ← qmd MCP HTTP 데몬(:8483) launcher + keepalive/logrotate/index w
 - `collection_match.py` — 편집 경로 → collectionPaths longest-prefix 컬렉션 선정. 복수 컬렉션 지원, 컬렉션 밖 편집은 빈 결과.
 - `recommend_config.py` — `--recommend`용 추천 생성. read-only(`.auto-context/settings.json` 쓰지 않음). `docs/current`·`docs/plans`·`docs` 등 좁은 경로를 탐색해 크기 가드(200파일/5MB) 통과 경로만 추천. `{available, config}` JSON 출력. 쓰기는 `--optin`/`--optin --recommended`에서만.
 - `preflight_gate.py` — PreToolUse hook. pending 프로젝트에서 Edit/Write/apply_patch 등 편집 도구를 deny로 차단(Claude·Codex). sandbox·skip 마커·pending 아닌 상태면 즉시 통과.
+- `extractors/` — host-CLI wiki extractor adapters (`claude_adapter.py`, `codex_adapter.py`, `hermes_adapter.py`) + `lib.py`. Pure `payload→{candidates}` functions run in an isolated temp cwd with tools disabled; selected by `compile.extractor.backends[engine]`. Shipped but disabled by default. Exit 127 = host CLI absent (worker then tries `extractor.default`).
 
 ### skills (`skills/`)
 - `sync` — agent-facing 수동 동기화 workflow. wrapper가 qmd 설치/버전을 확인하고 `core/sync.py --json` 실행 후 실제 변경이면 `backend_manager.sh kick-index`를 호출한다. 자동 hook이 아니며 사용자가 sync/resync를 요청할 때만 쓴다.
