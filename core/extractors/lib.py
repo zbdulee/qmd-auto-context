@@ -107,6 +107,10 @@ def resolve_bin(name: str, env_override: str) -> str | None:
 
 def run_isolated(cmd: list[str], timeout: int) -> tuple[str | None, int]:
     workdir = tempfile.mkdtemp(prefix="qmd-extract-")
+    # QMD_SANDBOX=1 neuters any qmd hook the nested CLI might fire (the dispatcher
+    # and core scripts honor it with an immediate silent exit), so the headless
+    # extractor can never recurse back into the compile pipeline.
+    child_env = {**os.environ, "QMD_SANDBOX": "1"}
     try:
         proc = subprocess.run(
             cmd,
@@ -116,6 +120,7 @@ def run_isolated(cmd: list[str], timeout: int) -> tuple[str | None, int]:
             timeout=timeout,
             shell=False,
             cwd=workdir,
+            env=child_env,
         )
         if proc.stderr:
             sys.stderr.write(proc.stderr[-4000:])

@@ -33,12 +33,21 @@ print(json.dumps({'has_body':'UNIQ_SRC_BODY' in p,'has_candidates':'candidates' 
   assert.equal(out.no_tools, true);
 });
 
+test('run_isolated injects QMD_SANDBOX=1 into the child env', () => {
+  const py = `import sys; sys.path.insert(0,'core/extractors'); import lib
+out, code = lib.run_isolated(['bash','-lc','printf %s "$QMD_SANDBOX"'], 10)
+print(out)`;
+  assert.equal(runLib(py, '').trim(), '1');
+});
+
 test('claude adapter calls its CLI in a temp cwd and emits candidates', () => {
   const d = mkdtempSync(join(tmpdir(), 'claude-ad-'));
   const cwdLog = join(d, 'cwd.txt');
+  const argsLog = join(d, 'args.txt');
+  const sandboxLog = join(d, 'sandbox.txt');
   const fakeCli = join(d, 'fake-claude');
-  // fake CLI: record the cwd it ran in, echo candidates JSON wrapped in prose
-  writeFileSync(fakeCli, `#!/usr/bin/env bash\npwd > "${cwdLog}"\necho 'sure:'\necho '{"candidates":[{"title":"C","summary":"Durable claude.","suggestedType":"concept","confidence":"high"}]}'\n`, { mode: 0o755 });
+  // fake CLI: record the cwd it ran in, its args, and the QMD_SANDBOX env it inherited
+  writeFileSync(fakeCli, `#!/usr/bin/env bash\npwd > "${cwdLog}"\necho "$@" > "${argsLog}"\nprintf '%s' "$QMD_SANDBOX" > "${sandboxLog}"\necho 'sure:'\necho '{"candidates":[{"title":"C","summary":"Durable claude.","suggestedType":"concept","confidence":"high"}]}'\n`, { mode: 0o755 });
   const payload = JSON.stringify({ source: { path: 'docs/x.md', content: 'body' }, wiki: {} });
   const out = execFileSync('python3', ['core/extractors/claude_adapter.py'], {
     cwd: process.cwd(), input: payload, encoding: 'utf8',
@@ -48,6 +57,10 @@ test('claude adapter calls its CLI in a temp cwd and emits candidates', () => {
   assert.equal(parsed.candidates[0].title, 'C');
   // ran in a temp dir, NOT the project cwd
   assert.notEqual(readFileSync(cwdLog, 'utf8').trim(), process.cwd());
+  // session persistence disabled (no CLI-side session record)
+  assert.match(readFileSync(argsLog, 'utf8'), /--no-session-persistence/);
+  // nested qmd hooks neutered: child inherits QMD_SANDBOX=1
+  assert.equal(readFileSync(sandboxLog, 'utf8'), '1');
   rmSync(d, { recursive: true, force: true });
 });
 
@@ -75,6 +88,7 @@ test('codex adapter passes read-only sandbox and emits candidates', () => {
   const args = readFileSync(argsLog, 'utf8');
   assert.match(args, /exec/);
   assert.match(args, /-s read-only/);
+  assert.match(args, /--ephemeral/);
   rmSync(d, { recursive: true, force: true });
 });
 
