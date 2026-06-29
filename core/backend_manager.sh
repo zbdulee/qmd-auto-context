@@ -276,6 +276,9 @@ kick_index() {
 
 kick_wiki_compile() {
   local cwd="${1:-}"
+  local flush="${2:-}"
+  local flush_arg=""
+  [ "$flush" = "--flush" ] && flush_arg="--flush-all"
   local lock_hash lock_dir
   [ -z "$cwd" ] && return 0
   lock_hash="$(python3 - "$cwd" <<'PY' 2>/dev/null || true
@@ -299,8 +302,8 @@ PY
     trap 'rm -f "$lock_dir/pid" 2>/dev/null; rmdir "$lock_dir" 2>/dev/null || true' EXIT
     echo "$$" >"$lock_dir/pid" 2>/dev/null || true
     case "$COMPILE_WORKER_SCRIPT" in
-      *.sh|*.bash) bash "$COMPILE_WORKER_SCRIPT" --cwd "$cwd" >>"$MANAGER_LOG" 2>&1 || true ;;
-      *) python3 "$COMPILE_WORKER_SCRIPT" --cwd "$cwd" >>"$MANAGER_LOG" 2>&1 || true ;;
+      *.sh|*.bash) bash "$COMPILE_WORKER_SCRIPT" --cwd "$cwd" $flush_arg >>"$MANAGER_LOG" 2>&1 || true ;;
+      *) python3 "$COMPILE_WORKER_SCRIPT" --cwd "$cwd" $flush_arg >>"$MANAGER_LOG" 2>&1 || true ;;
     esac
   ) >/dev/null 2>&1 &
 }
@@ -318,7 +321,7 @@ case "${1:-}" in
   rotate) rotate ;;
   reload) reload ;;
   kick-index) kick_index ;;
-  kick-wiki-compile) shift; kick_wiki_compile "${1:-}" ;;
+  kick-wiki-compile) shift; kick_wiki_compile "${1:-}" "${2:-}" ;;
   cleanup-legacy) cleanup_legacy ;;
   *) echo "usage: backend_manager.sh health|check-qmd [--manual]|start|ensure [--wait]|warm|rotate|reload|kick-index|kick-wiki-compile <cwd>|cleanup-legacy" >&2; exit 2 ;;
 esac

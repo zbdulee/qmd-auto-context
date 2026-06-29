@@ -335,6 +335,21 @@ test("kick-wiki-compile runs compile worker with explicit cwd and stays silent",
 });
 
 
+test("kick-wiki-compile --flush passes --flush-all to the worker", () => {
+  const d = mkdtempSync(join(tmpdir(), 'bm-flush-'));
+  const argsLog = join(d, 'args.txt');
+  const worker = join(d, 'worker.sh');
+  writeFileSync(worker, `#!/usr/bin/env bash\necho "$@" >> "${argsLog}"\n`, { mode: 0o755 });
+  try {
+    execFileSync('/bin/bash', ['core/backend_manager.sh', 'kick-wiki-compile', d, '--flush'],
+      { cwd: process.cwd(), encoding: 'utf8', env: { ...process.env, QMD_COMPILE_WORKER_SCRIPT: worker } });
+    // kick runs in background; poll the log briefly
+    let content = '';
+    for (let i = 0; i < 100 && !content.includes('--flush-all'); i++) { try { content = readFileSync(argsLog, 'utf8'); } catch {} execFileSync('/bin/sleep', ['0.02']); }
+    assert.match(content, /--flush-all/);
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
 test("kick-wiki-compile uses per-project locks so different cwd kicks are not dropped", () => {
   const home = mkdtempSync(join(tmpdir(), "qmd-wiki-kick-multi-"));
   try {

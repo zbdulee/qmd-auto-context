@@ -360,6 +360,19 @@ test('debounce: recent single edit under idle window is not processed yet', () =
   } finally { rmSync(project, { recursive: true, force: true }); }
 });
 
+test('--flush-all processes even under idle window', () => {
+  const ex = join(mkdtempSync(join(tmpdir(), 'extractor-')), 'ok.py');
+  writeFileSync(ex, `#!/usr/bin/env python3\nimport json,sys\nprint(json.dumps({'candidates':[{'title':'F','summary':'Durable: flush-all forced extraction past the idle gate.','suggestedType':'concept','confidence':'high','targetPath':'.auto-context/wiki/concepts/f.md'}]}))\n`);
+  const project = setupProject({ extractor: { argv: ['python3', ex], timeout: 30 }, batch: { idleSeconds: 9999, maxItems: 99 } });
+  writeFileSync(join(project, '.auto-context', 'compile', 'source-queue.jsonl'),
+    JSON.stringify({ ts: new Date().toISOString().replace(/\.\d+Z$/, 'Z'), trigger: 'post_tool_source', engine: 'claude', cwd: project, source: { kind: 'file', path: 'docs/source.md', collection: 'proj-docs' } }) + '\n');
+  try {
+    execFileSync('python3', ['core/wiki_compile_worker.py', '--cwd', project, '--flush-all'],
+      { cwd: process.cwd(), encoding: 'utf8', env: { ...process.env, QMD_COMPILE_TRUST_EXTRACTOR: '1' } });
+    assert.equal(existsSync(join(project, '.auto-context', 'wiki', 'concepts', 'f.md')), true);
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});
+
 test('dedup: repeated edits of same path collapse to one extraction', () => {
   const ex = join(mkdtempSync(join(tmpdir(), 'extractor-')), 'count.py');
   const counter = join(mkdtempSync(join(tmpdir(), 'count-')), 'n');
