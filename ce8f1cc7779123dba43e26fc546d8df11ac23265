@@ -1,0 +1,19 @@
+README.md
+  h_42d950683aaaea 96,102,116-117
+core/update.sh
+  h_42d950683aaaea 582-586,594-601,604-611,734-753
+test/enable-compile.test.mjs
+  h_42d950683aaaea 93-107
+test/resolve-optin.test.mjs
+  h_42d950683aaaea 204-216
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "ce8f1cc7779123dba43e26fc546d8df11ac23265",
+  "prompts": {},
+  "humans": {
+    "h_42d950683aaaea": {
+      "author": "dulee@zigbang.com"
+    }
+  }
+}
