@@ -1,0 +1,15 @@
+core/update.sh
+  h_42d950683aaaea 346-369
+test/wiki-compile-notice.test.mjs
+  h_42d950683aaaea 1-48
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "d9ad12af6628843f2aa582472d595a3f948760af",
+  "prompts": {},
+  "humans": {
+    "h_42d950683aaaea": {
+      "author": "dulee@zigbang.com"
+    }
+  }
+}
