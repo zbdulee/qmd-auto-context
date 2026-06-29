@@ -106,6 +106,7 @@ test('wiki recall 신규 필드는 additive로 normalize 된다', () => {
     maxAutoPageLines: 80,
     maxSourceChars: 12000,
     extractor: { argv: ['python3', 'scripts/extract.py'], timeout: 30, cooldownSeconds: 600 },
+    batch: { idleSeconds: 90, maxItems: 5 },
   });
 });
 
@@ -371,4 +372,23 @@ test('compile extractor cooldownSeconds is preserved and defaults to 600', () =>
     },
   }));
   assert.equal(withDefault.compile.extractor.cooldownSeconds, 600);
+});
+
+test('compile.batch normalizes idleSeconds and maxItems; defaults to 90/5 when omitted', () => {
+  const withBatch = loadConfig(JSON.stringify({
+    compile: {
+      enabled: true,
+      mode: 'guarded',
+      batch: { idleSeconds: 10, maxItems: 2 },
+    },
+  }));
+  assert.deepEqual(withBatch.compile.batch, { idleSeconds: 10, maxItems: 2 });
+
+  const withDefaults = loadConfig(JSON.stringify({
+    compile: {
+      enabled: true,
+      mode: 'guarded',
+    },
+  }));
+  assert.deepEqual(withDefaults.compile.batch, { idleSeconds: 90, maxItems: 5 });
 });

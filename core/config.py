@@ -51,6 +51,10 @@ DEFAULT_CONFIG = {
             "timeout": 30,
             "cooldownSeconds": 600,
         },
+        "batch": {
+            "idleSeconds": 90,
+            "maxItems": 5,
+        },
     },
 }
 
@@ -175,6 +179,12 @@ def compile_config(value):
         normalized_extractor["backends"] = backends if isinstance(backends, dict) else {}
         normalized_extractor["default"] = extractor.get("default") if isinstance(extractor.get("default"), list) else []
     result["extractor"] = normalized_extractor
+    raw_batch = value.get("batch")
+    batch = raw_batch if isinstance(raw_batch, dict) else {}
+    result["batch"] = {
+        "idleSeconds": coerce_int(batch.get("idleSeconds", 90), 90),
+        "maxItems": coerce_int(batch.get("maxItems", 5), 5),
+    }
     return result
 
 

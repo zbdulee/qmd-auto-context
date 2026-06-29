@@ -231,6 +231,49 @@ def compile_candidate(root: Path, candidate: dict) -> dict | None:
     return parsed if isinstance(parsed, dict) else None
 
 
+def _job_key(job: dict) -> tuple:
+    source = job.get("source") if isinstance(job.get("source"), dict) else {}
+    return (job.get("cwd", ""), source.get("path", ""), source.get("collection", ""))
+
+
+def _parse_ts(value) -> float | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def dedup_jobs(rows: list) -> tuple[list, list]:
+    latest: dict = {}
+    order: list = []
+    for raw_line, job in rows:
+        if job is None:
+            continue
+        key = _job_key(job)
+        ts = _parse_ts(job.get("ts")) or 0.0
+        if key not in latest:
+            order.append(key)
+            latest[key] = (raw_line, job, ts)
+        elif ts >= latest[key][2]:
+            latest[key] = (raw_line, job, ts)
+    kept = [(latest[key][0], latest[key][1]) for key in order]
+    kept_lines = {latest[key][0] for key in order}
+    dropped = [raw for raw, job in rows if job is not None and raw not in kept_lines]
+    return kept, dropped
+
+
+def batch_ready(kept: list, idle_seconds: int, max_items: int, flush_all: bool) -> bool:
+    if flush_all or not kept:
+        return True
+    if len(kept) >= max_items:
+        return True
+    now = datetime.now(timezone.utc).timestamp()
+    ages = [now - (_parse_ts(job.get("ts")) or now) for _, job in kept]
+    return max(ages, default=0) >= idle_seconds
+
+
 def process_job(root: Path, config: dict, compile_cfg: dict, job: dict) -> tuple[bool, bool]:
     """Return (processed, preserve_job)."""
     cpath = candidate_path(root, compile_cfg)
@@ -334,6 +377,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--cwd", default=os.getcwd())
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--flush-all", action="store_true")
     args = parser.parse_args()
 
     if os.environ.get("QMD_SANDBOX") or "--sandbox" in sys.argv:
@@ -356,13 +400,28 @@ def main():
         claimed.unlink(missing_ok=True)
         queue.touch(exist_ok=True)
         return 0
-    remaining = []
+
+    batch_cfg = compile_cfg.get("batch") if isinstance(compile_cfg.get("batch"), dict) else {}
+    idle_seconds = int(batch_cfg.get("idleSeconds", 90) or 0)
+    max_items = int(batch_cfg.get("maxItems", 5) or 1)
+
+    malformed = [raw for raw, job in rows if job is None]
+    kept, dropped = dedup_jobs(rows)  # dropped dup lines are discarded (latest wins)
+
+    if not batch_ready(kept, idle_seconds, max_items, args.flush_all):
+        # not ready: re-queue the deduped jobs (and malformed) and exit
+        requeue_lines(queue, [raw for raw, _ in kept] + malformed)
+        claimed.unlink(missing_ok=True)
+        queue.touch(exist_ok=True)
+        if args.json:
+            print(json.dumps({"processed": 0, "remaining": len(kept) + len(malformed)}, ensure_ascii=False))
+        return 0
+
+    rows = [(raw, job) for raw, job in kept]
+    remaining = list(malformed)
     processed_count = 0
     try:
         for idx, (raw_line, job) in enumerate(rows):
-            if job is None:
-                remaining.append(raw_line)
-                continue
             try:
                 processed, preserve = process_job(root, config, compile_cfg, job)
             except Exception:

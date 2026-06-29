@@ -344,3 +344,32 @@ test('active cooldown skips extraction entirely', () => {
     assert.notEqual(readFileSync(join(project, '.auto-context', 'compile', 'source-queue.jsonl'), 'utf8'), '');
   } finally { rmSync(project, { recursive: true, force: true }); }
 });
+
+test('debounce: recent single edit under idle window is not processed yet', () => {
+  const ex = join(mkdtempSync(join(tmpdir(), 'extractor-')), 'ok.py');
+  writeFileSync(ex, `#!/usr/bin/env python3\nimport json,sys\nprint(json.dumps({'candidates':[{'title':'X','summary':'Durable: should not run while batch is still settling.','suggestedType':'concept','confidence':'high','targetPath':'.auto-context/wiki/concepts/x.md'}]}))\n`);
+  const project = setupProject({ extractor: { argv: ['python3', ex], timeout: 30 }, batch: { idleSeconds: 9999, maxItems: 5 } });
+  // overwrite queue row with a fresh ts (now)
+  writeFileSync(join(project, '.auto-context', 'compile', 'source-queue.jsonl'),
+    JSON.stringify({ ts: new Date().toISOString().replace(/\.\d+Z$/, 'Z'), trigger: 'post_tool_source', engine: 'claude', cwd: project, source: { kind: 'file', path: 'docs/source.md', collection: 'proj-docs' } }) + '\n');
+  try {
+    runWorker(project, { QMD_COMPILE_TRUST_EXTRACTOR: '1' });
+    assert.equal(existsSync(join(project, '.auto-context', 'wiki', 'concepts', 'x.md')), false);
+    // job is re-queued, not lost
+    assert.notEqual(readFileSync(join(project, '.auto-context', 'compile', 'source-queue.jsonl'), 'utf8'), '');
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});
+
+test('dedup: repeated edits of same path collapse to one extraction', () => {
+  const ex = join(mkdtempSync(join(tmpdir(), 'extractor-')), 'count.py');
+  const counter = join(mkdtempSync(join(tmpdir(), 'count-')), 'n');
+  writeFileSync(ex, `#!/usr/bin/env python3\nimport json,sys,os\np=${JSON.stringify(counter)}\nn=int(open(p).read()) if os.path.exists(p) else 0\nopen(p,'w').write(str(n+1))\nprint(json.dumps({'candidates':[{'title':'X','summary':'Durable: deduped repeated edits into a single extraction.','suggestedType':'concept','confidence':'high','targetPath':'.auto-context/wiki/concepts/x.md'}]}))\n`);
+  const project = setupProject({ extractor: { argv: ['python3', ex], timeout: 30 }, batch: { idleSeconds: 0, maxItems: 1 } });
+  const row = (ts) => JSON.stringify({ ts, trigger: 'post_tool_source', engine: 'claude', cwd: project, source: { kind: 'file', path: 'docs/source.md', collection: 'proj-docs' } });
+  writeFileSync(join(project, '.auto-context', 'compile', 'source-queue.jsonl'),
+    row('2026-06-26T00:00:00Z') + '\n' + row('2026-06-26T00:00:01Z') + '\n' + row('2026-06-26T00:00:02Z') + '\n');
+  try {
+    runWorker(project, { QMD_COMPILE_TRUST_EXTRACTOR: '1' });
+    assert.equal(readFileSync(counter, 'utf8'), '1');
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});
