@@ -1,0 +1,17 @@
+core/extractors/claude_adapter.py
+  h_42d950683aaaea 1-14
+core/extractors/lib.py
+  h_42d950683aaaea 7,126-127,150
+test/wiki-extractors.test.mjs
+  h_42d950683aaaea 4-6,34-62
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "ae508603dd78c4d146ecea7ca11cab3e66ced5f5",
+  "prompts": {},
+  "humans": {
+    "h_42d950683aaaea": {
+      "author": "dulee@zigbang.com"
+    }
+  }
+}
