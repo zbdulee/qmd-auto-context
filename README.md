@@ -78,11 +78,11 @@ flowchart TD
 
 ## 설정 / opt-in (프로젝트 로컬)
 
-동의·거절·설정은 **프로젝트 루트 `.auto-context/settings.json` 파일**로 표현한다. **파일이 없으면 인덱싱·검색하지 않고**(미동의=pending), 세션 시작 시 1회 안내만 한다. 동의/거절은 헬퍼 한 줄로:
+동의·설정은 **프로젝트 루트 `.auto-context/settings.json` 파일**로 표현한다. 거절은 프로젝트에 파일을 남기지 않고 **사용자 로컬 decision store**(`~/.config/qmd/optout/`)에 기록한다. 설정 파일과 로컬 거절 기록이 모두 없으면 인덱싱·검색하지 않고(미동의=pending), 세션 시작 시 1회 안내만 한다. 동의/거절은 헬퍼 한 줄로:
 
 ```bash
 bash core/update.sh --optin  [<프로젝트경로>]   # 동의 → 인덱싱 + 매 세션 자동 갱신
-bash core/update.sh --optout [<프로젝트경로>]   # 거절 → 인덱싱·검색 안 함 (영구 침묵)
+bash core/update.sh --optout [<프로젝트경로>]   # 로컬 거절 → 프로젝트 파일 수정 없이 인덱싱·검색 안 함
 ```
 
 큰 저장소에서 루트 전체 인덱싱을 피하려면 **추천 기반 opt-in**을 쓴다:
@@ -133,11 +133,13 @@ LLM Wiki/promotion layer를 시작하려면 `--init-wiki`로 `.auto-context/wiki
 
 각 어댑터는 격리된 임시 디렉터리에서 CLI를 실행하며 도구는 비활성화된다. 여기에 나열되지 않은 어댑터는 활성화되지 않으며, `default`는 선택사항이다(예: 사용자의 커스텀 agy wrapper).
 
+세션 기록: claude 어댑터는 `--no-session-persistence`, codex 어댑터는 `--ephemeral`로 호출돼 CLI 쪽에 세션이 저장되지 않는다. **hermes는 동등한 플래그가 없어** `-z --safe-mode`로 최대한 격리하지만 `~/.hermes`에 1회성 세션 기록이 남을 수 있다. hermes 어댑터를 쓸 때 이 점을 감안한다.
+
 ### gate (미설정 프로젝트 편집 차단)
 
 pending 프로젝트에서 Edit·Write·apply_patch 등 편집 도구를 쓰면 **`PreToolUse`/`pre_tool_call` 훅이 deny/block**으로 차단한다(Claude·Codex·Hermes 적용, agy 제외). 세션 시작 시 안내된 5가지 선택지(추천 확인 / 추천 적용 / 직접 작성 / 거절 / 이번만 건너뜀) 중 하나를 실행하면 통과한다. `--skip`은 TTL 2h 마커 파일을 생성해 해당 세션 내 gate를 해제한다.
 
-상태는 명시 boolean `indexing`으로 결정된다(`true`=동의 / `false`=거절 / 파일 없음=pending):
+프로젝트 설정 파일에서 상태는 명시 boolean `indexing`으로 결정된다(`true`=동의 / 파일 없음=pending). 하위호환을 위해 기존 프로젝트 설정의 `indexing:false`도 거절로 계속 인정하지만, 새 `--optout`은 프로젝트 파일 대신 로컬 decision store에 기록한다. 로컬 거절 기록은 프로젝트 설정 파일보다 우선하며, `--optin` 또는 `--optin --recommended`가 해당 기록을 제거한다:
 
 ```jsonc
 {
