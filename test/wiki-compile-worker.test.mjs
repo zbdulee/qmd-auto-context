@@ -319,3 +319,28 @@ test('dispatch falls back to default only when primary CLI is absent (exit 127)'
     assert.equal(existsSync(join(project, '.auto-context', 'wiki', 'concepts', 'fb.md')), true);
   } finally { rmSync(project, { recursive: true, force: true }); }
 });
+
+test('transient extractor failure sets cooldown and preserves the job', () => {
+  const ex = join(mkdtempSync(join(tmpdir(), 'extractor-')), 'fail.py');
+  writeFileSync(ex, `#!/usr/bin/env python3\nimport sys\nsys.stderr.write('rate limited')\nsys.exit(1)\n`);
+  const project = setupProject({ extractor: { argv: ['python3', ex], timeout: 30, cooldownSeconds: 600 } });
+  try {
+    runWorker(project, { QMD_COMPILE_TRUST_EXTRACTOR: '1' });
+    assert.equal(existsSync(join(project, '.auto-context', 'compile', 'cooldown')), true);
+    assert.notEqual(readFileSync(join(project, '.auto-context', 'compile', 'source-queue.jsonl'), 'utf8'), '');
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});
+
+test('active cooldown skips extraction entirely', () => {
+  const ex = join(mkdtempSync(join(tmpdir(), 'extractor-')), 'should-not-run.py');
+  writeFileSync(ex, `#!/usr/bin/env python3\nimport sys\nopen('${join(tmpdir(), 'ran-marker-DUMMY')}','w')\nsys.exit(0)\n`);
+  const project = setupProject({ extractor: { argv: ['python3', ex], timeout: 30 } });
+  // pre-write a cooldown far in the future
+  writeFileSync(join(project, '.auto-context', 'compile', 'cooldown'), String(Date.now() / 1000 + 9999));
+  try {
+    runWorker(project, { QMD_COMPILE_TRUST_EXTRACTOR: '1' });
+    const cands = jsonl(join(project, '.auto-context', 'compile', 'candidates.jsonl'));
+    assert.equal(cands.some((c) => c.reason === 'cooldown_active'), true);
+    assert.notEqual(readFileSync(join(project, '.auto-context', 'compile', 'source-queue.jsonl'), 'utf8'), '');
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});

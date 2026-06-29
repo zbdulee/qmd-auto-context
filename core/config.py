@@ -49,6 +49,7 @@ DEFAULT_CONFIG = {
         "extractor": {
             "argv": [],
             "timeout": 30,
+            "cooldownSeconds": 600,
         },
     },
 }
@@ -166,6 +167,7 @@ def compile_config(value):
     normalized_extractor = {
         "argv": normalized_argv,
         "timeout": coerce_int(extractor.get("timeout", default_extractor["timeout"]), default_extractor["timeout"]),
+        "cooldownSeconds": coerce_int(extractor.get("cooldownSeconds", default_extractor.get("cooldownSeconds", 600)), 600),
     }
     if extractor.get("dispatch") == "by-engine":
         normalized_extractor["dispatch"] = "by-engine"

@@ -105,7 +105,7 @@ test('wiki recall 신규 필드는 additive로 normalize 된다', () => {
     canonSignals: ['확정'],
     maxAutoPageLines: 80,
     maxSourceChars: 12000,
-    extractor: { argv: ['python3', 'scripts/extract.py'], timeout: 30 },
+    extractor: { argv: ['python3', 'scripts/extract.py'], timeout: 30, cooldownSeconds: 600 },
   });
 });
 
@@ -121,7 +121,7 @@ test('compile extractor config drops shell strings and invalid timeout', () => {
   }));
   assert.equal(cfg.compile.sourceQueuePath, '.auto-context/compile/source-queue.jsonl');
   assert.equal(cfg.compile.maxSourceChars, 12000);
-  assert.deepEqual(cfg.compile.extractor, { argv: [], timeout: 30 });
+  assert.deepEqual(cfg.compile.extractor, { argv: [], timeout: 30, cooldownSeconds: 600 });
 });
 
 test('빈/깨진 JSON → 전부 기본값', () => {
@@ -351,4 +351,24 @@ test('migrate_legacy_config does not migrate .agents/qmd-recall.json', () => {
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
+});
+
+test('compile extractor cooldownSeconds is preserved and defaults to 600', () => {
+  const withCooldown = loadConfig(JSON.stringify({
+    compile: {
+      enabled: true,
+      mode: 'guarded',
+      extractor: { argv: ['python3', 'extract.py'], timeout: 30, cooldownSeconds: 300 },
+    },
+  }));
+  assert.equal(withCooldown.compile.extractor.cooldownSeconds, 300);
+
+  const withDefault = loadConfig(JSON.stringify({
+    compile: {
+      enabled: true,
+      mode: 'guarded',
+      extractor: { argv: ['python3', 'extract.py'], timeout: 30 },
+    },
+  }));
+  assert.equal(withDefault.compile.extractor.cooldownSeconds, 600);
 });

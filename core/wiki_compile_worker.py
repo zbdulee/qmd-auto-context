@@ -99,6 +99,26 @@ def candidate_path(root: Path, compile_cfg: dict) -> Path:
     return safe_compile_file(root, rel) or (root / ".auto-context" / "compile" / "candidates.jsonl")
 
 
+def cooldown_path(root: Path) -> Path:
+    return root / ".auto-context" / "compile" / "cooldown"
+
+
+def cooldown_active(root: Path) -> bool:
+    path = cooldown_path(root)
+    try:
+        expiry = float(path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return False
+    return datetime.now(timezone.utc).timestamp() < expiry
+
+
+def set_cooldown(root: Path, seconds: int) -> None:
+    path = cooldown_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    expiry = datetime.now(timezone.utc).timestamp() + max(0, seconds)
+    path.write_text(f"{expiry}\n", encoding="utf-8")
+
+
 def bounded_failure(action: str, job: dict, reason: str) -> dict:
     raw_source = job.get("source")
     source = raw_source if isinstance(raw_source, dict) else {}
@@ -255,6 +275,10 @@ def process_job(root: Path, config: dict, compile_cfg: dict, job: dict) -> tuple
         append_jsonl(cpath, bounded_failure("needs_extractor", job, "untrusted_extractor"))
         return True, False
 
+    if cooldown_active(root):
+        append_jsonl(cpath, bounded_failure("needs_extractor", job, "cooldown_active"))
+        return False, True
+
     payload = {
         "cwd": str(root),
         "engine": job.get("engine", "unknown"),
@@ -274,17 +298,18 @@ def process_job(root: Path, config: dict, compile_cfg: dict, job: dict) -> tuple
     if returncode == 127:
         append_jsonl(cpath, bounded_failure("needs_extractor", job, "extractor_unavailable"))
         return False, True  # CLI absent: preserve for when it's installed
-    if reason in ("invalid_extractor_json",):
-        append_jsonl(cpath, bounded_failure("extractor_failed", job, reason))
-        return True, False  # permanent: drop
     if reason:
         append_jsonl(cpath, bounded_failure("extractor_failed", job, reason))
-        return False, True  # transient: preserve (refined in Task 3)
+        if reason in ("invalid_extractor_json", "missing_candidates"):
+            return True, False  # permanent: drop
+        cooldown_seconds = int(extractor.get("cooldownSeconds", 600) or 600)
+        set_cooldown(root, cooldown_seconds)
+        return False, True  # transient: cooldown + preserve
 
     candidates = extracted.get("candidates") if isinstance(extracted, dict) else None
     if not isinstance(candidates, list):
         append_jsonl(cpath, bounded_failure("extractor_failed", job, "missing_candidates"))
-        return False, True
+        return True, False  # permanent: drop
     failed_compile = False
     for candidate in candidates:
         if not isinstance(candidate, dict):
