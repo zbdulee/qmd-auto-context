@@ -24,7 +24,7 @@ test("plugin descriptions list manual skills without hint", () => {
 
   for (const file of files) {
     const text = readFileSync(file, "utf8");
-    assert.match(text, /sync\/query\/update\/wiki-compile manual skills/);
+    assert.match(text, /sync\/query\/update\/wiki-compile\/enable-compile manual skills/);
     assert.doesNotMatch(text, /sync\/query\/update\/wiki-compile\/hint manual skills/);
   }
 });
