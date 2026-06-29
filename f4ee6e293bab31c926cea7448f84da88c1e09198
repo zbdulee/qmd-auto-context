@@ -1,0 +1,15 @@
+core/backend_manager.sh
+  h_42d950683aaaea 326
+test/wiki-extractors.test.mjs
+  h_42d950683aaaea 33
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "f4ee6e293bab31c926cea7448f84da88c1e09198",
+  "prompts": {},
+  "humans": {
+    "h_42d950683aaaea": {
+      "author": "dulee@zigbang.com"
+    }
+  }
+}
