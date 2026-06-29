@@ -1,0 +1,13 @@
+README.md
+  h_42d950683aaaea 106,108,136-140
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "7e1f24272df4ddab4770ea4838c9a9e408123557",
+  "prompts": {},
+  "humans": {
+    "h_42d950683aaaea": {
+      "author": "dulee@zigbang.com"
+    }
+  }
+}
