@@ -76,3 +76,19 @@ test('codex adapter passes read-only sandbox and emits candidates', () => {
   assert.match(args, /-s read-only/);
   rmSync(d, { recursive: true, force: true });
 });
+
+test('hermes adapter passes safe-mode/no-tools and emits candidates', () => {
+  const d = mkdtempSync(join(tmpdir(), 'hermes-ad-'));
+  const argsLog = join(d, 'args.txt');
+  const fakeCli = join(d, 'fake-hermes');
+  writeFileSync(fakeCli, `#!/usr/bin/env bash\necho "$@" > "${argsLog}"\necho '{"candidates":[{"title":"HM","summary":"Durable hermes.","suggestedType":"entity","confidence":"low"}]}'\n`, { mode: 0o755 });
+  const out = execFileSync('python3', ['core/extractors/hermes_adapter.py'], {
+    cwd: process.cwd(), input: '{"source":{"path":"docs/x.md","content":"b"},"wiki":{}}', encoding: 'utf8',
+    env: { ...process.env, QMD_EXTRACTOR_HERMES_BIN: fakeCli },
+  });
+  assert.equal(JSON.parse(out).candidates[0].title, 'HM');
+  const args = readFileSync(argsLog, 'utf8');
+  assert.match(args, /-z/);
+  assert.match(args, /--safe-mode/);
+  rmSync(d, { recursive: true, force: true });
+});
