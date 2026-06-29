@@ -1,0 +1,15 @@
+core/update.sh
+  h_42d950683aaaea 549-612
+test/enable-compile.test.mjs
+  h_42d950683aaaea 1-68
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "72e5bbbd99a16b3b26a273840ddf9e1c032789f4",
+  "prompts": {},
+  "humans": {
+    "h_42d950683aaaea": {
+      "author": "dulee@zigbang.com"
+    }
+  }
+}
