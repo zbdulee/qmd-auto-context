@@ -1,0 +1,15 @@
+core/recommend_config.py
+  h_42d950683aaaea 5,7-8,74-80,84-89
+test/recommend-config.test.mjs
+  h_42d950683aaaea 7-8,10-14,26-28,30,37,44-46,61-75
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "75ba0c6e7bad4bff6892e46702e77164c133d309",
+  "prompts": {},
+  "humans": {
+    "h_42d950683aaaea": {
+      "author": "dulee@zigbang.com"
+    }
+  }
+}
