@@ -343,6 +343,30 @@ main() {
     bash "$QMD_BACKEND_MANAGER" kick-wiki-compile "$workdir" --flush >/dev/null 2>&1 &
   fi
 
+  # First-run disclosure: extractor configured but not yet announced for this project.
+  notice_engines="$(python3 - "$workdir" "$(dirname "$0")" <<'PY' 2>/dev/null || true
+import json, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[2])
+import config as qmd_config
+cfg = qmd_config.find_project_config(sys.argv[1])["config"]
+comp = cfg.get("compile") if isinstance(cfg.get("compile"), dict) else {}
+ext = comp.get("extractor") if isinstance(comp.get("extractor"), dict) else {}
+backends = ext.get("backends") if isinstance(ext.get("backends"), dict) else {}
+print(",".join(sorted(backends.keys())) if backends else "")
+PY
+)"
+  if [ -n "$notice_engines" ]; then
+    marker="$workdir/.auto-context/compile/.notice-shown"
+    if [ ! -f "$marker" ]; then
+      echo "[qmd] wiki auto-compile이 활성화되어 있습니다 (엔진: $notice_engines)."
+      echo "      raw/session 컬렉션의 .md를 편집하면 백그라운드로 해당 CLI를 실행해 wiki 초안(generated)을 만듭니다."
+      echo "      끄려면 .auto-context/settings.json의 compile.extractor 를 제거하세요."
+      mkdir -p "$workdir/.auto-context/compile" 2>/dev/null || true
+      : > "$marker" 2>/dev/null || true
+    fi
+  fi
+
   # 헬스체크: config·reason 검사 통과 후, fork 직전 1회 실행 (main() 호출에서만).
   # --resolve-only 내부 재귀호출(--cwd 포함)과 --worker 경로에서는 실행 안 됨.
   qmd_healthcheck
