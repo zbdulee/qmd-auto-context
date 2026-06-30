@@ -10,6 +10,6 @@ import lib
 sys.exit(lib.run_adapter(
     "claude",
     "QMD_EXTRACTOR_CLAUDE_BIN",
-    lambda b, p: [b, "-p", "--tools", "", "--permission-mode", "plan",
+    lambda b, p: [b, "-p", "--safe-mode", "--tools", "", "--permission-mode", "plan",
                   "--output-format", "text", "--no-session-persistence", p],
 ))

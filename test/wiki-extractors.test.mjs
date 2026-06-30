@@ -70,6 +70,8 @@ test('claude adapter calls its CLI in a temp cwd and emits candidates', () => {
   assert.notEqual(readFileSync(cwdLog, 'utf8').trim(), process.cwd());
   // session persistence disabled (no CLI-side session record)
   assert.match(readFileSync(argsLog, 'utf8'), /--no-session-persistence/);
+  // compile extractor should not load custom skills/plugins/hooks/MCP/rules.
+  assert.match(readFileSync(argsLog, 'utf8'), /--safe-mode/);
   // nested qmd hooks neutered: child inherits QMD_SANDBOX=1
   assert.equal(readFileSync(sandboxLog, 'utf8'), '1');
   rmSync(d, { recursive: true, force: true });
@@ -100,6 +102,8 @@ test('codex adapter passes read-only sandbox and emits candidates', () => {
   assert.match(args, /exec/);
   assert.match(args, /-s read-only/);
   assert.match(args, /--ephemeral/);
+  assert.match(args, /--ignore-user-config/);
+  assert.match(args, /--ignore-rules/);
   rmSync(d, { recursive: true, force: true });
 });
 

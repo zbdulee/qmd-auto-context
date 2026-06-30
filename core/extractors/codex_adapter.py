@@ -10,5 +10,6 @@ import lib
 sys.exit(lib.run_adapter(
     "codex",
     "QMD_EXTRACTOR_CODEX_BIN",
-    lambda b, p: [b, "exec", "-s", "read-only", "--skip-git-repo-check", "--ephemeral", p],
+    lambda b, p: [b, "exec", "-s", "read-only", "--skip-git-repo-check",
+                  "--ephemeral", "--ignore-user-config", "--ignore-rules", p],
 ))
