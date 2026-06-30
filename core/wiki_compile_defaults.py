@@ -2,7 +2,8 @@
 """Single source of the wiki auto-compile config block.
 
 --enable-compile, --init-wiki (recall stays separate), and recommend_config all
-use these so onboarding paths agree on adapter locations and compile defaults.
+use these so onboarding paths agree on portable built-in engine names and
+compile defaults. The worker resolves built-in adapter paths at runtime.
 """
 from __future__ import annotations
 
@@ -29,9 +30,9 @@ def parse_engines(value: str | None) -> tuple[str, ...]:
     return picked or ENGINES
 
 
-def adapter_paths(root, engines=ENGINES) -> dict:
-    base = Path(root) / "core" / "extractors"
-    return {e: [str(base / f"{e}_adapter.py")] for e in engines}
+def builtin_engines(engines=ENGINES) -> list[str]:
+    picked = [e for e in engines if e in ENGINES]
+    return picked or list(ENGINES)
 
 
 def compile_block(root, engines=ENGINES) -> dict:
@@ -52,7 +53,8 @@ def compile_block(root, engines=ENGINES) -> dict:
         "maxAutoPageLines": 120,
         "extractor": {
             "dispatch": "by-engine",
-            "backends": adapter_paths(root, engines),
+            "backends": {},
+            "builtins": builtin_engines(engines),
             "default": [],
             "timeout": 120,
             "cooldownSeconds": 600,

@@ -125,6 +125,32 @@ test('compile extractor config drops shell strings and invalid timeout', () => {
   assert.deepEqual(cfg.compile.extractor, { argv: [], timeout: 30, cooldownSeconds: 600 });
 });
 
+test('compile extractor config preserves valid built-ins and drops invalid values', () => {
+  const cfg = loadConfig(JSON.stringify({
+    compile: {
+      enabled: true,
+      mode: 'auto-wiki',
+      extractor: {
+        dispatch: 'by-engine',
+        argv: [],
+        backends: { codex: ['python3', 'custom.py'], bogus: 'python3 bad.py' },
+        builtins: ['codex', 'bogus', 42, 'hermes'],
+        default: ['python3', 'fallback.py'],
+        timeout: 120,
+      },
+    },
+  }));
+  assert.deepEqual(cfg.compile.extractor, {
+    argv: [],
+    timeout: 120,
+    cooldownSeconds: 600,
+    dispatch: 'by-engine',
+    backends: { codex: ['python3', 'custom.py'] },
+    builtins: ['codex', 'hermes'],
+    default: ['python3', 'fallback.py'],
+  });
+});
+
 test('빈/깨진 JSON → 전부 기본값', () => {
   const cfg = loadConfig('not json at all');
   assert.deepEqual(cfg.collections, []);

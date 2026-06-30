@@ -1,239 +1,209 @@
 # qmd auto-context
 
-qmd 기반 자동 컨텍스트 주입 플러그인. **Claude Code · Codex · Hermes Agent**에서는 세션 시작 인덱스 갱신, 프롬프트별 관련 문서 recall, 편집 전 gate, 편집 후 자동 인덱싱, 자동 wiki compile queue를 제공한다. Claude·Codex는 편집 후 연속성 힌트도 모델 컨텍스트로 주입한다. **Antigravity(agy/Gemini)** 는 공식 PostToolUse payload adapter 전까지 자동 qmd hook을 설치하지 않는다.
+qmd auto-context는 프로젝트 안의 문서와 메모를 자동으로 찾아서 에이전트 대화에 넣어 주는 플러그인입니다. 매번 "이 문서도 참고해"라고 붙여 넣지 않아도, 질문과 관련된 내용을 qmd에서 찾아 컨텍스트로 전달합니다.
 
-흩어져 있던 글로벌/프로젝트 qmd 훅을 단일 리포로 SSOT화했다. 플랫폼 무관 `core/` 1벌 + Claude/Codex/Gemini용 `hooks/run-hook` 디스패처 + Hermes용 얇은 Python plugin adapter 구조.
+현재 README는 **Claude Code**, **Codex**, 그리고 **Hermes Agent plugin 경로**를 다룹니다.
 
-## 구조
+## 무엇을 해주나
 
-```
-core/        recall.py · update.sh · posttool.py · index_enqueue.py · wiki_compile_enqueue.py · wiki_compile_worker.py · sync.py · backend_manager.sh · config.py · keywords.py · resolve_paths.py · collection_match.py · agy_local_install.py
-hooks/       run-hook (단일 디스패처) · hooks.json · hooks-codex.json
-hermes_adapter/  Hermes Agent plugin hook adapter (pre_llm_call/on_session_start/pre_tool_call/post_tool_call)
-skills/      sync · query · update (수동 워크플로우)
-backend/     daemon.sh · keepalive.sh · logrotate.sh · index_worker.sh
-scripts/     agy-local-hook-install.sh · cleanup-legacy.sh
-test/        *.test.mjs (node:test)
-```
+- 세션을 시작할 때 qmd 인덱스를 최신 상태로 맞춥니다.
+- 사용자가 질문하면 관련 문서를 찾아 모델 컨텍스트에 추가합니다.
+- 설정되지 않은 프로젝트에서 실수로 편집을 시작하면 먼저 opt-in 여부를 묻습니다.
+- 파일을 편집한 뒤 변경된 문서만 다시 인덱싱하도록 큐에 넣습니다.
+- Claude Code와 Codex에서는 편집 직후 필요한 연속성 힌트도 이어서 넣어 줍니다.
+- wiki compile을 켜면 raw/session 문서를 정리해 `.auto-context/wiki` 초안으로 승격할 수 있습니다.
 
-## 동작
+한 줄로 말하면, **프로젝트 문서를 자동으로 기억해 주는 qmd 기반 컨텍스트 레이어**입니다.
 
-| 훅 | 역할 (core 스크립트) | Claude | Codex | Hermes Agent | Gemini(agy) |
-|----|------|--------|-------|--------------|-------------|
-| 세션 시작 | qmd 인덱스 갱신 (`update.sh`) | `SessionStart` | `SessionStart` | `on_session_start` | — |
-| 프롬프트 제출 | 관련 문서 recall (`recall.py`) | `UserPromptSubmit` | `UserPromptSubmit` | `pre_llm_call` | — |
-| 편집 전 | pending 프로젝트 gate (`preflight_gate.py`) | `PreToolUse` | `PreToolUse` | `pre_tool_call` | — |
-| 편집 후 | 연속성 힌트 (`posttool.py`) + 자동 인덱싱 enqueue (`index_enqueue.py`) + 자동 wiki compile enqueue (`wiki_compile_enqueue.py`) | `PostToolUse` | `PostToolUse` | `post_tool_call`(observer) | — |
-
-Claude/Codex는 `hooks/run-hook <action> <engine>` 디스패처가 훅 진입점이다(action: recall/update/posttool/index/compile/gate). Hermes Agent는 `plugin.yaml`/`__init__.py` 기반 Python plugin으로 `hermes_adapter/`가 동일한 `core/<script>`에 JSON stdin을 패스스루한다. 두 경로 모두 engine 라벨/로그 경로/sandbox 가드 후 `core/backend_manager.sh`로 qmd backend를 ensure/kick하고 **도메인 로직은 core/가 SSOT**로 유지한다.
-
-Claude·Codex는 marketplace 플러그인으로 세 이벤트를 모두 받는다. Hermes Agent는 Hermes plugin system의 `pre_llm_call`(Claude `UserPromptSubmit` 대응), `on_session_start`, `pre_tool_call`, `post_tool_call`을 쓴다.
-
-> ⚠️ **Antigravity(agy/Gemini)는 현재 자동 qmd hook 비활성 상태다.** Antigravity 2.0 공식 PostToolUse payload에는 edited file path/tool input이 문서화되어 있지 않고 stdout contract도 `{}`라서, Claude/Codex/Hermes용 posttool/index/compile core를 그대로 연결하면 hook contract 오류가 날 수 있다. `scripts/agy-local-hook-install.sh <프로젝트>`는 과거 stale qmd run-hook 항목 cleanup만 수행하며, 전용 payload adapter가 생긴 뒤 자동 posttool/index/compile을 재활성화한다.
-
-### 흐름도
+## 기본 흐름
 
 ```mermaid
-flowchart TD
-    A["세션 시작"]
-    B["프롬프트 제출"]
-    C["파일 편집 (Write/Edit)"]
-
-    A -->|"SessionStart · claude/codex<br/>on_session_start · hermes"| RH
-    B -->|"UserPromptSubmit · claude/codex<br/>pre_llm_call · hermes"| RH
-    C -->|"PostToolUse · claude/codex<br/>post_tool_call · hermes"| RH
-
-    RH{{"hooks/run-hook 또는 hermes_adapter"}}
-    RH --> BM["backend_manager.sh<br/>ensure / warm / rotate / kick-index"]
-    BM -->|update| U["update.sh<br/>qmd 인덱스 갱신"]
-    BM -->|recall| R["recall.py<br/>키워드→관련 문서 검색"]
-    BM -->|posttool| P["posttool.py<br/>스토리 편집 시 연속성 힌트"]
-    BM -->|index| IX["index_enqueue.py<br/>편집 파일 큐 적재"]
-    BM -->|compile| CQ["wiki_compile_enqueue.py<br/>source markdown compile queue"]
-
-    D{"qmd 데몬 :8483<br/>응답 가능?"}
-    R --> D
-    U --> D
-    P -->|recall 위임| D
-    D -->|"예"| OUT["관련 문서·힌트를 모델 컨텍스트에 주입"]
-    D -->|"아니오 · 미설치/부재/timeout"| SKIP["graceful 무동작<br/>(빈 출력, 에러·차단 없음)"]
-
-    IX -->|append| Q[("dirty-queue")]
-    CQ -.->|"plugin-managed async kick"| CW["wiki_compile_worker.py<br/>extractor argv → wiki_compile.py"]
-    Q -.->|"plugin-managed async kick"| W["index_worker.sh<br/>add + update + embed"]
-    W -.->|"새 임베딩 시 데몬 reload"| D
+flowchart LR
+    A["프로젝트 opt-in"] --> B["세션 시작: qmd 인덱스 갱신"]
+    B --> C["질문 입력"]
+    C --> D["관련 문서 recall"]
+    D --> E["모델 컨텍스트에 추가"]
+    E --> F["파일 편집"]
+    F --> G["변경 파일 자동 인덱싱 큐"]
 ```
 
-> **플랫폼 차이**: Claude·Codex는 세 이벤트(`SessionStart`/`UserPromptSubmit`/`PostToolUse`)를 모두 받고, Hermes Agent는 `on_session_start`/`pre_llm_call`/`pre_tool_call`/`post_tool_call`로 같은 core를 호출한다. 단, Hermes `post_tool_call`은 observer hook이라 반환값을 같은 턴 모델 컨텍스트에 주입하지 않는다 — Hermes 경로의 편집 후 처리는 자동 인덱싱/compile queue 중심이며 posttool 힌트는 best-effort 실행만 한다. **Antigravity(agy/Gemini)는 공식 PostToolUse payload adapter 전까지 자동 hook 미지원**이다.
+qmd가 설치되어 있지 않거나 데몬이 응답하지 않으면 훅은 조용히 건너뜁니다. 프롬프트나 편집을 막지 않고, 컨텍스트 주입만 생략합니다.
 
-### qmd 미설치 / 데몬 부재 시
+## 설치
 
-모든 훅은 graceful하게 **무동작**한다 — 에러를 내거나 세션을 막지 않는다. CLI fallback이 없어 데몬 HTTP(`:8483`)만 바라본다.
-
-- **recall / posttool**: 데몬 `/health` 실패 시 빈 출력(`reason=daemon_unreachable`). 컨텍스트 주입만 안 될 뿐 프롬프트는 정상 진행된다.
-- **update / posttool / index**: hook dispatcher가 backend manager를 통해 qmd 존재/버전과 daemon 상태를 조용히 확인한다.
-- **index_enqueue**: 편집 파일을 dirty 큐에 적재만 한다(qmd 미호출). qmd가 설치되어 있으면 backend manager가 one-shot worker를 비동기로 kick한다.
-
-즉 **빈 출력은 정상 동작**이다(빈 출력 ≠ 버그). 원인 구분은 `QMD_RECALL_LOG`의 `reason` 필드로 본다.
-
-## 설정 / opt-in (프로젝트 로컬)
-
-동의·설정은 **프로젝트 루트 `.auto-context/settings.json` 파일**로 표현한다. 거절은 프로젝트에 파일을 남기지 않고 **사용자 로컬 decision store**(`~/.config/qmd/optout/`)에 기록한다. 설정 파일과 로컬 거절 기록이 모두 없으면 인덱싱·검색하지 않고(미동의=pending), 세션 시작 시 1회 안내만 한다. 동의/거절은 헬퍼 한 줄로:
+Claude Code와 Codex는 marketplace 플러그인으로 설치합니다. Hermes Agent는 Hermes plugin system에서 설치하고 enable합니다.
 
 ```bash
-bash core/update.sh --optin  [<프로젝트경로>]   # 동의 → 인덱싱 + 매 세션 자동 갱신
-bash core/update.sh --optout [<프로젝트경로>]   # 로컬 거절 → 프로젝트 파일 수정 없이 인덱싱·검색 안 함
-```
-
-큰 저장소에서 루트 전체 인덱싱을 피하려면 **추천 기반 opt-in**을 쓴다:
-
-```bash
-bash core/update.sh --recommend [<프로젝트경로>]              # 추천 확인 (read-only, 파일 변경 없음)
-bash core/update.sh --recommend --json [<프로젝트경로>]       # 추천 결과를 JSON으로 출력
-bash core/update.sh --optin --recommended [<프로젝트경로>]    # 추천 적용 → .auto-context/settings.json 생성
-bash core/update.sh --migrate-config [<프로젝트경로>]         # 레거시 .auto-context.json → .auto-context/settings.json 이동
-bash core/update.sh --init-wiki [<프로젝트경로>]              # .auto-context/wiki scaffold 생성 + wiki recall 활성화
-bash core/update.sh --enable-compile [<프로젝트경로>]         # wiki scaffold + compile 설정 (편집 시 host CLI 백그라운드 실행)
-bash core/update.sh --skip [<프로젝트경로>]                   # 이 프로젝트 임시 gate 통과 마커 (TTL 2h, cwd 단위)
-```
-
-`--recommend`는 `docs/current`, `docs/plans`, `docs` 등 좁은 경로를 탐색해 크기 가드를 통과한 경로만 추천한다(read-only — 파일을 생성·변경하지 않는다). `--optin --recommended`는 추천 결과를 `.auto-context/settings.json`으로 원자 기록한다. **plain `--optin`은 루트 전체를 컬렉션으로 설정하므로 큰 저장소에는 `--optin --recommended`가 안전하다.**
-
-LLM Wiki/promotion layer를 시작하려면 `--init-wiki`로 `.auto-context/wiki/`의 기본 `SCHEMA.md`/`index.md`/`log.md`와 하위 디렉터리를 만든다. 이 명령은 idempotent이며 기존 wiki 파일을 덮어쓰지 않는다. 동시에 `settings.json`에 wiki collection(`.auto-context/wiki`)과 `collectionRoles`/`recallStrategy:"hierarchical"`을 추가해, 컴파일된 wiki가 recall 대상에서 빠지는 상태를 방지한다. 자세한 설계는 `docs/superpowers/specs/2026-06-25-auto-context-wiki-promotion-layer.md`를 참고한다. `--init-wiki`는 wiki recall만 활성화하며 host CLI 실행 비용이 없는 반면, `--enable-compile`은 여기에 더해 auto-compile도 켜므로 raw/session 컬렉션의 `.md` 편집마다 host CLI를 백그라운드로 실행해 토큰을 소비한다.
-
-### Automatic wiki compile
-
-자동 wiki compile은 **recommended 온보딩 경로(`--optin --recommended`)에서 wiki가 감지되면 기본으로 활성화**된다. 수동으로 켜려면:
-
-```bash
-bash core/update.sh --enable-compile        # wiki scaffold + compile 설정 한 번에
-```
-
-또는 에이전트에게 "wiki 자동화 켜줘"라고 요청하면 `enable-compile` skill이 실행된다.
-
-**공개 고지(install = consent):** 플러그인을 설치하면 `raw`/`session` role `.md` 파일을 편집할 때마다 설정된 host CLI(claude/codex/hermes)가 **백그라운드에서** 해당 파일을 읽어 wiki page 초안(`defaultStatus: "generated"`)을 작성한다. 첫 번째 SessionStart에서 이 동작을 안내하는 알림이 표시된다. 비활성화하려면 `.auto-context/settings.json`에서 `compile.extractor`를 제거한다.
-
-> **Hermes 사용자 주의:** Hermes Agent의 `on_session_start`는 observer-only hook이라 위 첫 번째 세션 알림이 **Hermes에서는 표시되지 않는다**. Hermes로 이 플러그인을 사용할 경우 위 고지 내용을 사전에 숙지한 뒤 compile을 활성화하기 바란다.
-
-트리거: **`collectionRoles`가 `raw` 또는 `session`인 컬렉션의 `.md` 편집**에만 발화한다(`post_tool_source`). `wiki` 등 다른 role의 파일 편집은 compile 대상이 아니다.
-
-주의사항:
-- host CLI가 `PATH`에 없거나 다른 바이너리를 쓰려면 `QMD_EXTRACTOR_CLAUDE_BIN` / `QMD_EXTRACTOR_CODEX_BIN` / `QMD_EXTRACTOR_HERMES_BIN`로 바이너리 경로를 직접 지정한다(미지정 시 fnm/bun/PATH 순으로 자동 탐색).
-- 각 어댑터는 격리된 임시 디렉터리에서 CLI를 실행하며 도구는 비활성화된다.
-
-세션 기록: claude 어댑터는 `--no-session-persistence`, codex 어댑터는 `--ephemeral`로 호출돼 CLI 쪽에 세션이 저장되지 않는다. **hermes는 동등한 플래그가 없어** `-z --safe-mode`로 최대한 격리하지만 `~/.hermes`에 1회성 세션 기록이 남을 수 있다. hermes 어댑터를 쓸 때 이 점을 감안한다.
-
-### gate (미설정 프로젝트 편집 차단)
-
-pending 프로젝트에서 Edit·Write·apply_patch 등 편집 도구를 쓰면 **`PreToolUse`/`pre_tool_call` 훅이 deny/block**으로 차단한다(Claude·Codex·Hermes 적용, agy 제외). 세션 시작 시 안내된 5가지 선택지(추천 확인 / 추천 적용 / 직접 작성 / 거절 / 이번만 건너뜀) 중 하나를 실행하면 통과한다. `--skip`은 TTL 2h 마커 파일을 생성해 해당 세션 내 gate를 해제한다.
-
-프로젝트 설정 파일에서 상태는 명시 boolean `indexing`으로 결정된다(`true`=동의 / 파일 없음=pending). 하위호환을 위해 기존 프로젝트 설정의 `indexing:false`도 거절로 계속 인정하지만, 새 `--optout`은 프로젝트 파일 대신 로컬 decision store에 기록한다. 로컬 거절 기록은 프로젝트 설정 파일보다 우선하며, `--optin` 또는 `--optin --recommended`가 해당 기록을 제거한다:
-
-```jsonc
-{
-  "indexing": true,                  // 필수: 인덱싱 동의 여부
-  "name": "내 프로젝트",
-  "collections": ["proj-manuscript", "proj-plot"],
-  "minScore": 0.8,
-  "collectionPaths": { "proj-manuscript": "04_Manuscript" }, // posttool reader-facing 판별
-  "lexicalPatterns": ["ep"],         // EP/화 번호 exact 검색 (소설 도메인)
-  "prefixStyle": "full",             // "full"(기본) | "tag"(마지막 세그먼트)
-  "skipPaths": [".auto-context-ignore"],
-  "topN": 3, "queryTimeout": 5
-}
-```
-
-레거시 `.auto-context.json`과 `.agents/qmd-recall.json`은 하위호환으로 계속 읽힌다(`indexing` 키 없으면 collections 있을 때 동의로 간주). `--optin` 실행 시 레거시 내용을 `.auto-context/settings.json`으로 승계한다. v0.7부터 update-time 경로는 `.auto-context.json`만 있는 프로젝트를 `.auto-context/settings.json`으로 검증 후 자동 이동하며, 수동으로는 `--migrate-config`를 사용할 수 있다.
-
-## 설치 / 제거
-
-Claude·Codex는 marketplace 플러그인 설치만으로 훅과 skill이 등록된다. Hermes Agent는 Hermes plugin system에 설치/enable하면 Python hook adapter가 등록된다. 이 저장소는 더 이상 제품용 `install.sh`/`uninstall.sh`를 제공하지 않는다.
-
-```bash
-# 1. Claude Code: marketplace 등록 후 플러그인 설치
+# Claude Code
 /plugin marketplace add zbdulee/qmd-auto-context
 /plugin install qmd-auto-context
 
-# Hermes Agent: plugin 설치 후 enable (Hermes plugin은 opt-in)
+# Codex
+codex plugin marketplace add zbdulee/qmd-auto-context --sparse .agents/plugins
+codex plugin add qmd-auto-context@qmd-auto-context-marketplace
+
+# Hermes Agent
 hermes plugins install zbdulee/qmd-auto-context
 hermes plugins enable qmd-auto-context
+```
 
-# 2. qmd 의존성 설치 (지원 버전 >=2.5.3 <3.0.0)
+qmd CLI도 필요합니다. 지원 버전은 `>=2.5.3 <3.0.0`입니다.
+
+```bash
 bun add -g @tobilu/qmd@2.5.3
-# 또는: npm install -g @tobilu/qmd@2.5.3
+# 또는
+npm install -g @tobilu/qmd@2.5.3
 ```
+
+이 저장소는 제품용 `install.sh`/`uninstall.sh`를 제공하지 않습니다. 플러그인 runtime이 필요한 backend daemon, keepalive, logrotate, index worker를 관리합니다.
+
+## 프로젝트 설정
+
+프로젝트별 동의와 설정은 `.auto-context/settings.json`에 저장됩니다. 설정 파일이 없으면 기본적으로 아무 것도 인덱싱하지 않습니다.
+
+큰 저장소에서는 추천 설정을 먼저 확인하는 흐름이 가장 안전합니다.
 
 ```bash
-bash scripts/agy-local-hook-install.sh <프로젝트>  # Gemini(agy): stale qmd AGY run-hook cleanup only
-bash scripts/cleanup-legacy.sh --dry-run          # 기존 글로벌 qmd 훅/managed LaunchAgent cleanup 계획 확인
-bash scripts/cleanup-legacy.sh                    # 기존 글로벌 qmd 훅/managed LaunchAgent cleanup 실행
+bash core/update.sh --recommend [<프로젝트경로>]              # 추천 확인, 파일 변경 없음
+bash core/update.sh --recommend --json [<프로젝트경로>]       # 추천 결과를 JSON으로 출력
+bash core/update.sh --optin --recommended [<프로젝트경로>]    # 추천 설정으로 opt-in
 ```
 
-backend는 plugin runtime manager가 세션/skill 실행 중 관리한다. qmd CLI가 없거나 지원 버전 밖이면 hook은 조용히 no-op하고 manual skill이 설치/업그레이드 안내를 출력한다.
-
-### sandbox
-
-`QMD_SANDBOX=true`/`GEMINI_SANDBOX=true` 또는 `--sandbox` 인자 시 디스패처/코어는 즉시 무출력 종료(격리 환경 데몬 hang 방지).
-
-## 백엔드
-
-`core/backend_manager.sh`가 plugin runtime에서 qmd MCP HTTP 데몬(8483), health-only keepalive, logrotate, index worker kick을 관리한다. `qmd` CLI가 없거나 지원 버전(`>=2.5.3 <3.0.0`) 밖이면 훅은 조용히 no-op하고 manual skill은 pinned 설치 안내를 출력한다. 훅은 `qmd`를 자동 설치/업그레이드하지 않는다.
-
-데몬 health check 기본 timeout은 2초이며 `QMD_HEALTH_TIMEOUT`으로 override할 수 있다(잘못된 값은 2초로 fallback). `backend/keepalive.sh`는 기본적으로 `/health`만 확인한다. 큰 인덱스에서 전역 vec warm ping이 데몬을 오래 점유할 수 있어, vec warm ping은 `QMD_KEEPALIVE_VEC_WARM=1`을 명시한 경우에만 수행한다.
-
-편집 후 자동 인덱싱: PostToolUse 훅이 편집 파일을 dirty 큐에 쌓으면, backend manager가 `index_worker.sh`를 one-shot background worker로 kick해 해당 컬렉션만 `qmd collection add`+`qmd update`+`qmd embed`한다.
-
-## 수동 skills
-
-| Hook 동작 | Skill | 용도 |
-|----------|-------|------|
-| `UserPromptSubmit` recall | `query` | 관련 문서 수동 조회 |
-| `SessionStart` update | `update` | 인덱스 수동 갱신 |
-| `PostToolUse` index | `sync` | 훅이 놓친 CUD 변경 감지 후 dirty queue enqueue |
-| explicit writer | `wiki-compile` | compact durable summary를 generated wiki page/candidate로 반영 |
-
-`PostToolUse` posttool의 연속성 힌트는 hook-only 기능이다. 편집 직후 자동 실행되는 경로라 별도 수동 skill로 노출하지 않는다.
-
-### sync
-
-`sync` skill은 `.auto-context/settings.json`의 `collectionPaths`를 스캔해 이전 snapshot과 현재 파일 상태를 비교한다. 생성/수정/삭제가 감지된 collection만 dirty queue에 넣고, 실제 qmd 갱신은 plugin-managed worker가 처리한다. 삭제 처리는 파일 단위 qmd 명령이 아니라 `qmd update`의 removed 처리에 맡긴다.
+직접 opt-in하거나 거절할 수도 있습니다.
 
 ```bash
-bash "$PLUGIN_ROOT/skills/sync/scripts/sync.sh" "$PWD"
+bash core/update.sh --optin  [<프로젝트경로>]   # 현재 프로젝트를 qmd auto-context 대상으로 등록
+bash core/update.sh --optout [<프로젝트경로>]   # 로컬 decision store에 거절 기록
+bash core/update.sh --skip   [<프로젝트경로>]   # 이번 세션에서만 gate 통과, TTL 2시간
 ```
 
-inspection만 원하면 `--dry-run`, 최초 snapshot만 만들고 queue를 건드리지 않으려면 `--baseline-only`를 추가한다.
+`--optin --recommended`는 `docs/current`, `docs/plans`, `docs`처럼 좁은 문서 경로를 우선 추천합니다. 이 경로는 wiki scaffold와 자동 compile 설정도 함께 켭니다. 이후 raw/session role의 Markdown 파일을 편집하면 설정된 host CLI가 백그라운드에서 `.auto-context/wiki` 초안을 만들 수 있습니다.
 
-### query
+plain `--optin`은 프로젝트 루트 전체를 컬렉션으로 잡을 수 있으니 큰 저장소에서는 추천 경로를 쓰는 편이 좋습니다. 자동 compile 없이 인덱싱만 켜고 싶다면 plain `--optin`을 쓰고, 나중에 필요할 때 `--enable-compile`을 실행하세요.
 
-`query` skill은 훅의 `UserPromptSubmit` recall과 같은 `core/recall.py` 경로를 수동으로 실행한다. 실행 전 backend manager가 qmd 설치/버전과 daemon 준비를 확인한다. `.auto-context/settings.json` opt-in, `QMD_QUERY_FIXTURE`, `QMD_DAEMON_URL`, minScore/topN 필터와 빈 출력 정책을 그대로 따른다.
+예시 설정:
+
+```jsonc
+{
+  "indexing": true,
+  "name": "my-project",
+  "collections": ["my-project-docs"],
+  "collectionPaths": {
+    "my-project-docs": "docs/current"
+  },
+  "minScore": 0.8,
+  "topN": 3,
+  "queryTimeout": 5,
+  "skipPaths": [".auto-context-ignore"]
+}
+```
+
+레거시 `.auto-context.json`과 `.agents/qmd-recall.json`도 하위호환으로 읽습니다. 새 설정은 `.auto-context/settings.json`을 기준으로 관리합니다.
+
+## 편집 전 gate
+
+설정이 없는 프로젝트에서 `Edit`, `Write`, `apply_patch` 같은 편집 도구를 쓰면 gate가 먼저 멈춰 세웁니다. 이때 다음 중 하나를 선택하면 됩니다.
+
+- 추천 확인: `bash core/update.sh --recommend`
+- 추천 적용: `bash core/update.sh --optin --recommended`
+- 직접 설정 파일 작성
+- 거절: `bash core/update.sh --optout`
+- 이번만 통과: `bash core/update.sh --skip`
+
+이 gate는 "원치 않는 프로젝트 전체 인덱싱"을 막기 위한 안전장치입니다.
+
+## Wiki Compile
+
+LLM Wiki/promotion layer를 쓰려면 먼저 wiki scaffold를 만듭니다.
 
 ```bash
-bash "$PLUGIN_ROOT/skills/query/scripts/query.sh" "$PWD" "검색할 질문"
+bash core/update.sh --init-wiki [<프로젝트경로>]
 ```
 
-### update
-
-`update` skill은 훅의 `SessionStart`와 같은 `core/update.sh` 경로를 수동으로 실행한다. 실행 전 backend manager가 qmd 설치/버전, daemon 준비, warm, logrotate를 처리한다. `.auto-context/settings.json` opt-in, risky path 검사, qmd 부재 시 graceful no-op 정책을 그대로 따른다.
+plain `--optin`으로 시작했거나 기존 프로젝트에서 자동 compile을 나중에 켜려면 다음 명령을 씁니다.
 
 ```bash
-bash "$PLUGIN_ROOT/skills/update/scripts/update.sh" "$PWD"
+bash core/update.sh --enable-compile [<프로젝트경로>]
 ```
 
-### wiki-compile
+자동 compile은 `raw` 또는 `session` role 컬렉션의 Markdown 파일을 편집할 때 동작합니다. 설정된 host CLI가 백그라운드에서 해당 파일을 읽고 `.auto-context/wiki`에 generated 초안을 만듭니다. 비활성화하려면 `.auto-context/settings.json`에서 `compile.enabled:false` 또는 `compile.mode:"off"`로 설정하면 됩니다.
 
-`wiki-compile` skill은 raw transcript가 아니라 짧은 durable summary/candidate JSON만 받아 `core/wiki_extract.py` → `core/wiki_compile.py` 경로로 wiki page 또는 candidate queue를 작성한다. Query-time recall hook은 계속 read-only다.
+Hermes Agent의 `on_session_start`는 observer-only hook이라 첫 세션 안내가 같은 방식으로 표시되지 않을 수 있습니다. Hermes에서 compile을 켜는 경우 위 동작을 먼저 확인하고 활성화하세요.
+
+## 수동 명령
+
+자동 훅과 같은 core 경로를 수동으로 실행할 수 있습니다.
+
+| 명령 | 용도 |
+|------|------|
+| `bash skills/query/scripts/query.sh <프로젝트> "<질문>"` | 관련 문서 recall을 직접 확인 |
+| `bash skills/update/scripts/update.sh <프로젝트>` | qmd 인덱스 수동 갱신 |
+| `bash skills/sync/scripts/sync.sh <프로젝트>` | 훅이 놓친 파일 변경을 dirty queue에 적재 |
+| `bash skills/wiki-compile/scripts/wiki-compile.sh <프로젝트>` | durable summary JSON을 wiki page/candidate로 반영 |
+
+예시:
 
 ```bash
-printf '%s\n' '{"trigger":"manual","durable":{"title":"Config layout","summary":"Canonical config lives under .auto-context/settings.json.","type":"decision","confidence":"high"}}' \
-  | bash "$PLUGIN_ROOT/skills/wiki-compile/scripts/wiki-compile.sh" "$PWD"
+bash skills/query/scripts/query.sh "$PWD" "이 프로젝트 설정 방식 설명해줘"
+bash skills/update/scripts/update.sh "$PWD"
+bash skills/sync/scripts/sync.sh "$PWD" --dry-run
 ```
+
+## 문제 해결
+
+### 컨텍스트가 안 들어오는 것 같을 때
+
+빈 출력은 정상일 수 있습니다. 다음 상황에서는 훅이 조용히 통과합니다.
+
+- 프로젝트가 아직 opt-in되지 않음
+- qmd CLI가 없거나 지원 버전이 아님
+- qmd daemon이 응답하지 않음
+- 검색 결과가 `minScore` 기준을 넘지 못함
+- sandbox 환경이라 훅이 비활성화됨
+
+원인을 보려면 recall 로그를 켭니다.
+
+```bash
+QMD_RECALL_LOG=/tmp/qmd-recall.log bash skills/query/scripts/query.sh "$PWD" "검색할 질문"
+tail -n 20 /tmp/qmd-recall.log
+```
+
+로그의 `reason` 값으로 `no_collections`, `daemon_unreachable`, `query_failed`, `no_results_after_filter`, `selected` 등을 확인할 수 있습니다.
+
+### qmd backend가 궁금할 때
+
+`core/backend_manager.sh`가 qmd MCP HTTP daemon(`:8483`)을 확인하고 필요할 때 시작합니다. 훅은 qmd를 자동 설치하거나 업그레이드하지 않습니다. qmd가 없으면 자동 훅은 조용히 지나가고, 수동 skill은 설치 안내를 출력합니다.
+
+### 기존 글로벌 훅을 정리하고 싶을 때
+
+```bash
+bash scripts/cleanup-legacy.sh --dry-run
+bash scripts/cleanup-legacy.sh
+```
+
+명시적으로 실행한 경우에만 기존 글로벌 qmd 훅이나 managed LaunchAgent cleanup을 수행합니다.
+
+## 구조
+
+내부는 세 층으로 나뉩니다.
+
+```text
+core/            플랫폼과 무관한 실제 로직
+hooks/           Claude Code와 Codex hook dispatcher
+hermes_adapter/  Hermes Agent용 Python adapter
+backend/         qmd daemon, keepalive, logrotate, index worker
+skills/          query, update, sync, wiki-compile 수동 워크플로우
+scripts/         legacy cleanup 같은 운영 스크립트
+test/            node:test 기반 회귀 테스트
+```
+
+중요한 규칙은 하나입니다. **도메인 로직은 `core/`가 SSOT**이고, 각 host adapter는 JSON stdin/stdout을 core script로 얇게 전달합니다.
 
 ## 테스트
 
 ```bash
-npm test    # node --test, 결정적 단위/회귀 테스트
-QMD_LIVE=1 node --test test/integration.test.mjs   # 데몬 라이브 스모크
+npm test
+QMD_LIVE=1 node --test test/integration.test.mjs
 ```
 
-데몬 응답은 `test/fixtures/`로 주입(`QMD_QUERY_FIXTURE`)해 라이브 의존 없이 결정적으로 검증한다.
+일반 테스트는 fixture 기반이라 qmd live daemon 없이 결정적으로 실행됩니다. `QMD_LIVE=1`은 실제 daemon 연동 스모크를 보고 싶을 때만 사용합니다.

@@ -22,6 +22,7 @@ from wiki_compile_enqueue import _queue_lock_path, _safe_queue_path
 
 
 DEFAULT_SOURCE_QUEUE = ".auto-context/compile/source-queue.jsonl"
+BUILTIN_EXTRACTOR_ENGINES = {"claude", "codex", "hermes"}
 
 
 def now_iso():
@@ -167,6 +168,15 @@ def _argv_list(value) -> list[str] | None:
     return None
 
 
+def _builtin_adapter_argv(engine: str) -> list[str] | None:
+    if engine not in BUILTIN_EXTRACTOR_ENGINES:
+        return None
+    adapter = Path(__file__).resolve().parent / "extractors" / f"{engine}_adapter.py"
+    if not adapter.is_file():
+        return None
+    return [sys.executable, str(adapter)]
+
+
 def resolve_extractor_argv(compile_cfg: dict, engine: str) -> tuple[list[str] | None, list[str] | None]:
     raw = compile_cfg.get("extractor")
     extractor = raw if isinstance(raw, dict) else {}
@@ -177,6 +187,9 @@ def resolve_extractor_argv(compile_cfg: dict, engine: str) -> tuple[list[str] | 
         return None, None
     backends = extractor.get("backends") if isinstance(extractor.get("backends"), dict) else {}
     primary = _argv_list(backends.get(engine))
+    builtins = extractor.get("builtins") if isinstance(extractor.get("builtins"), list) else []
+    if primary is None and engine in {item for item in builtins if isinstance(item, str)}:
+        primary = _builtin_adapter_argv(engine)
     default = _argv_list(extractor.get("default"))
     return primary, default
 

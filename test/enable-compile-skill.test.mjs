@@ -20,5 +20,8 @@ test('enable-compile skill wrapper wires compile for the project', () => {
       { cwd: ROOT, encoding: 'utf8', env: { ...process.env, CLAUDE_PLUGIN_ROOT: ROOT, QMD_SANDBOX: '' } });
     const cfg = JSON.parse(readFileSync(join(d, '.auto-context', 'settings.json'), 'utf8'));
     assert.equal(cfg.compile.extractor.dispatch, 'by-engine');
+    assert.deepEqual(cfg.compile.extractor.backends, {});
+    assert.deepEqual(cfg.compile.extractor.builtins, ['claude', 'codex', 'hermes']);
+    assert.doesNotMatch(JSON.stringify(cfg.compile), /core\/extractors|_adapter\.py/);
   } finally { rmSync(d, { recursive: true, force: true }); }
 });

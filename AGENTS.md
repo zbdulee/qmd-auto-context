@@ -4,6 +4,8 @@ This file provides guidance to Codex and other coding agents when working with c
 
 qmd 기반 자동 컨텍스트 주입 훅을 **Claude Code · Codex · Hermes Agent · Antigravity(Gemini)** 에서 동작시키는 플러그인. 사용자 안내는 `README.md` 참고. 이 문서는 코드 작업 시 알아야 할 구조·명령·함정에 집중한다.
 
+개발 시에는 **Claude Code · Codex · Hermes Agent** 세 host의 동작성을 모두 고려한다. 공통 로직은 `core/`에 두고, host별 adapter/hook 차이(Claude/Codex command hook, Hermes Python plugin 및 observer-only `post_tool_call`)가 깨지지 않는지 함께 확인한다.
+
 ## 명령
 
 ```bash
@@ -27,6 +29,7 @@ bash core/update.sh --optin --recommended [<경로>]    # 추천 적용 → .aut
 bash core/update.sh --optout [<경로>]                 # 로컬 decision store에 거절 기록(프로젝트 파일 수정 없음)
 bash core/update.sh --migrate-config [<경로>]         # 레거시 .auto-context.json → .auto-context/settings.json 이동
 bash core/update.sh --init-wiki [<경로>]              # .auto-context/wiki scaffold 생성 + wiki recall 활성화
+bash core/update.sh --enable-compile [<경로>]         # wiki scaffold + compile 설정 한 번에 (recommended 온보딩에서 기본 활성화)
 bash core/update.sh --skip [<경로>]                   # 이 프로젝트 임시 gate 통과 마커 (TTL 2h, cwd 단위)
 ```
 
@@ -54,7 +57,7 @@ backend/   ← qmd MCP HTTP 데몬(:8483) launcher + keepalive/logrotate/index w
 
 ### 코어 (`core/`)
 - `recall.py` — UserPromptSubmit 핵심. 흐름: `config.load_project_config(cwd)` → 키워드 추출(`keywords.py`) → 데몬 `/query`(lex+vec 하이브리드, 또는 `QMD_QUERY_FIXTURE`) → skipPaths/minScore 필터 → topN → `additionalContext` 포맷. **CLI fallback은 없음** — 데몬 죽었거나 timeout이면 graceful하게 빈 출력(에러 아님).
-- `update.sh` — SessionStart에서 qmd 인덱스 갱신. `--resolve-only`, `--migrate-config`, `--init-wiki` 모드 있음(`--init-wiki`는 scaffold와 wiki collection/role/hierarchical recall 설정을 함께 적용).
+- `update.sh` — SessionStart에서 qmd 인덱스 갱신. `--resolve-only`, `--migrate-config`, `--init-wiki`, `--enable-compile` 모드 있음(`--init-wiki`는 scaffold와 wiki collection/role/hierarchical recall 설정을, `--enable-compile`은 wiki scaffold + compile 설정까지 함께 적용).
 - `posttool.py` — 편집 후 연속성 힌트. `is_story_path`는 config의 `collectionPaths`로 판별(하드코딩 없음). 이벤트명 `PostToolUse`(claude/codex)와 `AfterTool`(gemini) **둘 다** 수용. 내부적으로 recall.py를 subprocess로 위임.
 - `config.py` — 사용자 로컬 optout marker(`~/.config/qmd/optout`)를 먼저 확인한 뒤, `.auto-context/settings.json`(없으면 레거시 `.auto-context.json`, `.agents/qmd-recall.json`) 로드 + 기본값 병합. 숫자 필드(minScore/topN/queryTimeout) 보수적 coercion, 실패 시 기본값. legacy novel 컬렉션명(`*-manuscript`/`*-plot`)은 `lexicalPatterns:["ep"]` 자동 활성화.
 - `resolve_paths.py` — collectionPaths→경로 매핑 + risky path / allowRoots traversal 검증.
@@ -65,6 +68,8 @@ backend/   ← qmd MCP HTTP 데몬(:8483) launcher + keepalive/logrotate/index w
 - `collection_match.py` — 편집 경로 → collectionPaths longest-prefix 컬렉션 선정. 복수 컬렉션 지원, 컬렉션 밖 편집은 빈 결과.
 - `recommend_config.py` — `--recommend`용 추천 생성. read-only(`.auto-context/settings.json` 쓰지 않음). `docs/current`·`docs/plans`·`docs` 등 좁은 경로를 탐색해 크기 가드(200파일/5MB) 통과 경로만 추천. `{available, config}` JSON 출력. 쓰기는 `--optin`/`--optin --recommended`에서만.
 - `preflight_gate.py` — PreToolUse hook. pending 프로젝트에서 Edit/Write/apply_patch 등 편집 도구를 deny로 차단(Claude·Codex). sandbox·skip 마커·pending 아닌 상태면 즉시 통과.
+- `wiki_compile_defaults.py` — recommended 온보딩·`--enable-compile`·SessionStart notice가 공유하는 compile 설정 블록 생성 헬퍼. generated config에는 절대 adapter 경로를 쓰지 않고 `compile.extractor.builtins`에 `claude`/`codex`/`hermes` 같은 symbolic engine만 저장한다.
+- `extractors/` — host-CLI wiki extractor adapters (`claude_adapter.py`, `codex_adapter.py`, `hermes_adapter.py`) + `lib.py`. Pure `payload→{candidates}` functions run in an isolated temp cwd with tools disabled. Worker는 `compile.extractor.argv`(legacy explicit) → `compile.extractor.backends[engine]`(explicit) → `compile.extractor.builtins`(runtime-resolved adapter) → `extractor.default` 순서로 선택한다. **플러그인 install = consent**: 설치 후 첫 SessionStart에 일회성 안내 notice가 표시되며, recommended 온보딩(`--optin --recommended`)·`--enable-compile`이 기본으로 compile을 활성화한다. Exit 127 = host CLI absent (worker then tries `extractor.default`). 격리: `lib.run_isolated`가 자식 env에 `QMD_SANDBOX=1`을 넣어 nested CLI의 qmd 훅을 즉시 무력화(재귀 차단)하고, claude는 `--no-session-persistence`·codex는 `--ephemeral`로 CLI-쪽 세션 기록도 끈다(hermes는 동등 플래그 없어 ~/.hermes에 1회성 기록이 남을 수 있음).
 
 ### skills (`skills/`)
 - `sync` — agent-facing 수동 동기화 workflow. wrapper가 qmd 설치/버전을 확인하고 `core/sync.py --json` 실행 후 실제 변경이면 `backend_manager.sh kick-index`를 호출한다. 자동 hook이 아니며 사용자가 sync/resync를 요청할 때만 쓴다.

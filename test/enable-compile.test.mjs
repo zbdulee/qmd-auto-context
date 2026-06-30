@@ -22,27 +22,59 @@ function optedInProject() {
   return d;
 }
 
-test('--enable-compile wires compile block with derived adapter paths', () => {
+test('--enable-compile wires compile block with portable built-in engines', () => {
   const project = optedInProject();
   try {
     const out = runEnable(project);
     const cfg = JSON.parse(readFileSync(join(project, '.auto-context', 'settings.json'), 'utf8'));
     assert.equal(cfg.compile.enabled, true);
     assert.equal(cfg.compile.extractor.dispatch, 'by-engine');
-    assert.deepEqual(Object.keys(cfg.compile.extractor.backends).sort(), ['claude', 'codex', 'hermes']);
-    assert.equal(cfg.compile.extractor.backends.claude[0], join(ROOT, 'core/extractors/claude_adapter.py'));
+    assert.deepEqual(cfg.compile.extractor.backends, {});
+    assert.deepEqual(cfg.compile.extractor.builtins, ['claude', 'codex', 'hermes']);
+    assert.doesNotMatch(JSON.stringify(cfg.compile), new RegExp(`${ROOT}|core/extractors|_adapter\\\\.py`));
     assert.ok(cfg.compile.triggers.includes('post_tool_source'));
     assert.equal(existsSync(join(project, '.auto-context', 'wiki', 'SCHEMA.md')), true); // scaffolded
     assert.match(out, /auto-compile/i); // disclosure printed
   } finally { rmSync(project, { recursive: true, force: true }); }
 });
 
-test('--enable-compile --engines limits backends', () => {
+test('--enable-compile --engines limits built-in engines', () => {
   const project = optedInProject();
   try {
     runEnable(project, ['--engines', 'codex']);
     const cfg = JSON.parse(readFileSync(join(project, '.auto-context', 'settings.json'), 'utf8'));
-    assert.deepEqual(Object.keys(cfg.compile.extractor.backends), ['codex']);
+    assert.deepEqual(cfg.compile.extractor.builtins, ['codex']);
+    assert.deepEqual(cfg.compile.extractor.backends, {});
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});
+
+test('--enable-compile preserves existing explicit extractor configuration', () => {
+  const project = optedInProject();
+  try {
+    const settings = join(project, '.auto-context', 'settings.json');
+    const cfg = JSON.parse(readFileSync(settings, 'utf8'));
+    cfg.compile = {
+      enabled: false,
+      extractor: {
+        argv: ['python3', 'custom-extractor.py'],
+        dispatch: 'by-engine',
+        backends: { claude: ['python3', 'claude-extractor.py'] },
+        default: ['python3', 'fallback-extractor.py'],
+        timeout: 9,
+      },
+      triggers: ['manual'],
+    };
+    writeFileSync(settings, JSON.stringify(cfg));
+
+    runEnable(project);
+    const updated = JSON.parse(readFileSync(settings, 'utf8'));
+    assert.equal(updated.compile.enabled, true);
+    assert.deepEqual(updated.compile.extractor.argv, ['python3', 'custom-extractor.py']);
+    assert.deepEqual(updated.compile.extractor.backends, { claude: ['python3', 'claude-extractor.py'] });
+    assert.deepEqual(updated.compile.extractor.default, ['python3', 'fallback-extractor.py']);
+    assert.equal(updated.compile.extractor.timeout, 9);
+    assert.ok(updated.compile.triggers.includes('manual'));
+    assert.ok(updated.compile.triggers.includes('post_tool_source'));
   } finally { rmSync(project, { recursive: true, force: true }); }
 });
 
@@ -105,13 +137,14 @@ test('--enable-compile refuses project opted-in via legacy .auto-context.json (n
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 
-test('--enable-compile --engines codex <project> (engines BEFORE path) sets backends to exactly {codex}', () => {
+test('--enable-compile --engines codex <project> (engines BEFORE path) sets builtins to exactly [codex]', () => {
   const project = optedInProject();
   try {
     // Pass --engines BEFORE the project path to verify both arg orderings work
     const out = execFileSync('bash', [join(ROOT, 'core/update.sh'), '--enable-compile', '--engines', 'codex', project],
       { cwd: ROOT, encoding: 'utf8', env: { ...process.env, CLAUDE_PLUGIN_ROOT: ROOT } });
     const cfg = JSON.parse(readFileSync(join(project, '.auto-context', 'settings.json'), 'utf8'));
-    assert.deepEqual(Object.keys(cfg.compile.extractor.backends), ['codex']);
+    assert.deepEqual(cfg.compile.extractor.builtins, ['codex']);
+    assert.deepEqual(cfg.compile.extractor.backends, {});
   } finally { rmSync(project, { recursive: true, force: true }); }
 });

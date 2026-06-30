@@ -70,6 +70,9 @@ test('recommended config wires wiki + compile by default', () => {
     assert.equal(cfg.collectionRoles[cfg.collections.find((c) => c.endsWith('-wiki'))], 'wiki');
     assert.equal(cfg.recallStrategy, 'hierarchical');
     assert.equal(cfg.compile.extractor.dispatch, 'by-engine');
+    assert.deepEqual(cfg.compile.extractor.backends, {});
+    assert.deepEqual(cfg.compile.extractor.builtins, ['claude', 'codex', 'hermes']);
+    assert.doesNotMatch(JSON.stringify(cfg.compile), /core\/extractors|_adapter\.py/);
     assert.ok(cfg.compile.triggers.includes('post_tool_source'));
   } finally { rmSync(d, { recursive: true, force: true }); }
 });

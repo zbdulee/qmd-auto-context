@@ -15,7 +15,7 @@ function project(withBackends) {
   mkdirSync(join(d, 'docs'), { recursive: true });
   const compile = withBackends
     ? { enabled: true, mode: 'auto-wiki', triggers: ['post_tool_source'],
-        extractor: { dispatch: 'by-engine', backends: { claude: ['/x/claude_adapter.py'] } } }
+        extractor: { dispatch: 'by-engine', backends: {}, builtins: ['claude', 'codex'] } }
     : { enabled: false };
   writeFileSync(join(d, '.auto-context', 'settings.json'), JSON.stringify({
     indexing: true, collections: ['p-docs'], collectionPaths: { 'p-docs': 'docs' }, compile,
@@ -29,11 +29,12 @@ function runMain(d) {
       env: { ...process.env, QMD_BACKEND_MANAGER: '/bin/true' } });
 }
 
-test('first-run notice shown once when backends configured, then suppressed', () => {
+test('first-run notice shown once when built-in engines configured, then suppressed', () => {
   const d = project(true);
   try {
     const first = runMain(d);
     assert.match(first, /auto-compile/i);
+    assert.match(first, /claude,codex/);
     assert.equal(existsSync(join(d, '.auto-context', 'compile', '.notice-shown')), true);
     const second = runMain(d);
     assert.doesNotMatch(second, /auto-compile/i);

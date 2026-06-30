@@ -198,6 +198,9 @@ test('--optin --recommended: 추천 config 기록', () => {
     const cfg = JSON.parse(readFileSync(join(dir, '.auto-context', 'settings.json'), 'utf8'));
     assert.equal(cfg.indexing, true);
     assert.ok(cfg.collections.length >= 1);
+    assert.deepEqual(cfg.compile.extractor.backends, {});
+    assert.deepEqual(cfg.compile.extractor.builtins, ['claude', 'codex', 'hermes']);
+    assert.doesNotMatch(JSON.stringify(cfg.compile), /core\/extractors|_adapter\.py/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 

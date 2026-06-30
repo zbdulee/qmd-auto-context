@@ -70,6 +70,7 @@ COMPILE_TRIGGERS = {
     "cross_file_conclusion",
     "manual",
 }
+BUILTIN_EXTRACTOR_ENGINES = {"claude", "codex", "hermes"}
 
 EVENT_ALIASES = {
     "SessionStart": "sessionStart",
@@ -115,6 +116,35 @@ def string_map(value):
         for key, item in value.items()
         if isinstance(key, str) and isinstance(item, str)
     }
+
+
+def argv_list(value, default=None):
+    if default is None:
+        default = []
+    if isinstance(value, list) and all(isinstance(item, str) for item in value):
+        return value
+    return list(default)
+
+
+def extractor_backends(value):
+    if not isinstance(value, dict):
+        return {}
+    return {
+        key: item
+        for key, item in value.items()
+        if isinstance(key, str)
+        and isinstance(item, list)
+        and item
+        and all(isinstance(arg, str) for arg in item)
+    }
+
+
+def builtin_extractor_engines(value):
+    return [
+        item
+        for item in string_list(value, [])
+        if item in BUILTIN_EXTRACTOR_ENGINES
+    ]
 
 
 def collection_role_map(value, collections):
@@ -165,11 +195,7 @@ def compile_config(value):
     raw_extractor = value.get("extractor")
     extractor = raw_extractor if isinstance(raw_extractor, dict) else {}
     default_extractor = defaults.get("extractor") if isinstance(defaults.get("extractor"), dict) else {"argv": [], "timeout": 30}
-    argv = extractor.get("argv")
-    if isinstance(argv, list) and all(isinstance(item, str) for item in argv):
-        normalized_argv = argv
-    else:
-        normalized_argv = list(default_extractor["argv"])
+    normalized_argv = argv_list(extractor.get("argv"), default_extractor["argv"])
     normalized_extractor = {
         "argv": normalized_argv,
         "timeout": coerce_int(extractor.get("timeout", default_extractor["timeout"]), default_extractor["timeout"]),
@@ -177,9 +203,9 @@ def compile_config(value):
     }
     if extractor.get("dispatch") == "by-engine":
         normalized_extractor["dispatch"] = "by-engine"
-        backends = extractor.get("backends")
-        normalized_extractor["backends"] = backends if isinstance(backends, dict) else {}
-        normalized_extractor["default"] = extractor.get("default") if isinstance(extractor.get("default"), list) else []
+        normalized_extractor["backends"] = extractor_backends(extractor.get("backends"))
+        normalized_extractor["builtins"] = builtin_extractor_engines(extractor.get("builtins"))
+        normalized_extractor["default"] = argv_list(extractor.get("default"), [])
     result["extractor"] = normalized_extractor
     raw_batch = value.get("batch")
     batch = raw_batch if isinstance(raw_batch, dict) else {}

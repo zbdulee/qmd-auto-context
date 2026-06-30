@@ -92,6 +92,44 @@ print(json.dumps({'candidates': [{
   }
 });
 
+test('worker resolves built-in extractor adapter at runtime from plugin root', () => {
+  const fakeCli = join(mkdtempSync(join(tmpdir(), 'fake-claude-cli-')), 'claude');
+  writeFileSync(fakeCli, `#!/usr/bin/env python3
+import json
+print(json.dumps({'candidates': [{
+  'title': 'Builtin Adapter Decision',
+  'summary': 'Generated through the built-in Claude adapter resolved by the worker.',
+  'suggestedType': 'decision',
+  'confidence': 'high',
+  'targetPath': '.auto-context/wiki/decisions/builtin-adapter-decision.md'
+}]}))
+`, { mode: 0o755 });
+  const project = setupProject({
+    extractor: {
+      dispatch: 'by-engine',
+      backends: {},
+      builtins: ['claude'],
+      default: [],
+      timeout: 30,
+    },
+  });
+  const dirtyQueue = join(mkdtempSync(join(tmpdir(), 'dirty-builtin-')), 'queue');
+  try {
+    const out = runWorker(project, {
+      QMD_DIRTY_QUEUE: dirtyQueue,
+      QMD_EXTRACTOR_CLAUDE_BIN: fakeCli,
+    });
+    assert.equal(out, '');
+    const page = join(project, '.auto-context', 'wiki', 'decisions', 'builtin-adapter-decision.md');
+    assert.equal(existsSync(page), true);
+    const text = readFileSync(page, 'utf8');
+    assert.match(text, /Builtin Adapter Decision/);
+    assert.match(readFileSync(dirtyQueue, 'utf8'), /^proj-wiki\t/);
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+});
+
 
 test('compile mode off prevents worker extractor and candidate writes', () => {
   const extractor = join(mkdtempSync(join(tmpdir(), 'extractor-mode-off-')), 'extract.py');
@@ -287,6 +325,46 @@ test('source queue enqueue and claim share fcntl lock to avoid rename/open appen
   assert.match(enqueue, /fcntl\.flock/);
   assert.match(worker, /fcntl\.flock/);
   assert.match(worker, /os\.replace/);
+});
+
+test('resolver keeps extractor.argv ahead of explicit and built-in backends', () => {
+  const code = `
+import json, sys
+sys.path.insert(0, 'core')
+import wiki_compile_worker as w
+cfg = {'extractor': {'argv': ['python3', 'legacy.py'], 'dispatch': 'by-engine', 'backends': {'codex': ['python3', 'custom.py']}, 'builtins': ['codex'], 'default': ['python3', 'fallback.py']}}
+print(json.dumps(w.resolve_extractor_argv(cfg, 'codex')))
+`;
+  const [primary, fallback] = JSON.parse(execFileSync('python3', ['-c', code], { cwd: process.cwd(), encoding: 'utf8' }));
+  assert.deepEqual(primary, ['python3', 'legacy.py']);
+  assert.equal(fallback, null);
+});
+
+test('resolver keeps explicit engine backend ahead of built-in backend', () => {
+  const code = `
+import json, sys
+sys.path.insert(0, 'core')
+import wiki_compile_worker as w
+cfg = {'extractor': {'dispatch': 'by-engine', 'backends': {'codex': ['python3', 'custom.py']}, 'builtins': ['codex'], 'default': ['python3', 'fallback.py']}}
+print(json.dumps(w.resolve_extractor_argv(cfg, 'codex')))
+`;
+  const [primary, fallback] = JSON.parse(execFileSync('python3', ['-c', code], { cwd: process.cwd(), encoding: 'utf8' }));
+  assert.deepEqual(primary, ['python3', 'custom.py']);
+  assert.deepEqual(fallback, ['python3', 'fallback.py']);
+});
+
+test('resolver maps built-in engine to adapter path from worker location without plugin env', () => {
+  const code = `
+import json, os, sys
+os.environ.pop('CLAUDE_PLUGIN_ROOT', None)
+os.environ.pop('PLUGIN_ROOT', None)
+sys.path.insert(0, 'core')
+import wiki_compile_worker as w
+cfg = {'extractor': {'dispatch': 'by-engine', 'backends': {}, 'builtins': ['codex'], 'default': []}}
+print(json.dumps({'primary': w.resolve_extractor_argv(cfg, 'codex')[0], 'executable': sys.executable}))
+`;
+  const out = JSON.parse(execFileSync('python3', ['-c', code], { cwd: process.cwd(), encoding: 'utf8' }));
+  assert.deepEqual(out.primary, [out.executable, join(process.cwd(), 'core', 'extractors', 'codex_adapter.py')]);
 });
 
 test('dispatch picks the adapter for payload.engine', () => {

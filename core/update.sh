@@ -353,7 +353,9 @@ cfg = qmd_config.find_project_config(sys.argv[1])["config"]
 comp = cfg.get("compile") if isinstance(cfg.get("compile"), dict) else {}
 ext = comp.get("extractor") if isinstance(comp.get("extractor"), dict) else {}
 backends = ext.get("backends") if isinstance(ext.get("backends"), dict) else {}
-print(",".join(sorted(backends.keys())) if backends else "")
+builtins = ext.get("builtins") if isinstance(ext.get("builtins"), list) else []
+engines = sorted(set(backends.keys()) | {e for e in builtins if isinstance(e, str)})
+print(",".join(engines) if engines else "")
 PY
 )"
   if [ -n "$notice_engines" ]; then
@@ -619,7 +621,7 @@ PY
   # Reuse --init-wiki for scaffold + recall config (idempotent, recall-only).
   bash "$0" --init-wiki "$target" >/dev/null 2>&1 || true
 
-  # Merge the shared compile block (engine backends derived from plugin root).
+  # Merge the shared compile block (portable built-in engines, resolved by worker).
   python3 - "$target" "$core_dir" "$engines" <<'PY'
 import json, os, sys, tempfile
 from pathlib import Path
@@ -636,6 +638,12 @@ block = d.compile_block(root, engines)
 existing = cfg.get("compile") if isinstance(cfg.get("compile"), dict) else {}
 # Merge: block wins for the keys it sets (extractor/batch/enabled/...); unrelated existing keys are preserved.
 merged = {**existing, **block}
+existing_extractor = existing.get("extractor") if isinstance(existing.get("extractor"), dict) else {}
+block_extractor = block.get("extractor") if isinstance(block.get("extractor"), dict) else {}
+if existing_extractor:
+    # Existing extractor config is explicit user/runtime configuration. Keep it ahead
+    # of generated portable built-in defaults so --enable-compile stays non-destructive.
+    merged["extractor"] = {**block_extractor, **existing_extractor}
 trig = existing.get("triggers") if isinstance(existing.get("triggers"), list) else []
 merged["triggers"] = list(dict.fromkeys(["post_tool_source", *trig, *block["triggers"]]))
 cfg["compile"] = merged
