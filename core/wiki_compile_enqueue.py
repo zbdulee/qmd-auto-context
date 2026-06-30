@@ -25,6 +25,10 @@ def _utc_now():
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _is_hidden_source_path(rel_path: str) -> bool:
+    return any(part.startswith(".") for part in Path(rel_path).parts)
+
+
 def _engine(payload):
     value = payload.get("engine") or os.environ.get("QMD_ENGINE") or DEFAULT_ENGINE
     return value if isinstance(value, str) and value.strip() else DEFAULT_ENGINE
@@ -96,6 +100,8 @@ def _source_record(path_value, cwd, project_root, config, engine):
     try:
         rel_path = resolved.relative_to(Path(project_root).resolve()).as_posix()
     except ValueError:
+        return None
+    if _is_hidden_source_path(rel_path):
         return None
     return {
         "ts": _utc_now(),

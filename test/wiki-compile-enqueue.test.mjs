@@ -110,3 +110,26 @@ test('non-markdown, outside collection, wiki role, disabled trigger, and sandbox
     rmSync(project, { recursive: true, force: true });
   }
 });
+
+test('dot-directory and hidden markdown sources do not enqueue for automatic compile', () => {
+  const project = setupProject({
+    collections: ['proj-root'],
+    collectionPaths: { 'proj-root': '.' },
+    collectionRoles: { 'proj-root': 'raw' },
+  });
+  try {
+    mkdirSync(join(project, '.agents', 'skills'), { recursive: true });
+    mkdirSync(join(project, 'docs', '.draft'), { recursive: true });
+    writeFileSync(join(project, '.agents', 'skills', 'writer.md'), '# Agent Skill\n');
+    writeFileSync(join(project, 'docs', '.draft', 'idea.md'), '# Draft\n');
+    writeFileSync(join(project, 'docs', '.hidden.md'), '# Hidden file\n');
+
+    runEnqueue(project, { tool_input: { file_path: join(project, '.agents', 'skills', 'writer.md') } });
+    runEnqueue(project, { tool_input: { file_path: join(project, 'docs', '.draft', 'idea.md') } });
+    runEnqueue(project, { tool_input: { file_path: join(project, 'docs', '.hidden.md') } });
+
+    assert.deepEqual(queueLines(project), []);
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+});

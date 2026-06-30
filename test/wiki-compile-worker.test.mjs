@@ -291,6 +291,34 @@ print(json.dumps({'candidates': []}))
   }
 });
 
+test('worker rejects queued dot-directory markdown source before extractor', () => {
+  const extractor = join(mkdtempSync(join(tmpdir(), 'extractor-hidden-source-')), 'extract.py');
+  const marker = join(mkdtempSync(join(tmpdir(), 'extractor-hidden-source-marker-')), 'ran');
+  writeFileSync(extractor, `#!/usr/bin/env python3
+open(${JSON.stringify(marker)}, 'w').write('ran')
+print('{"candidates": []}')
+`);
+  const project = setupProject({ extractor: { argv: ['python3', extractor], timeout: 30 } });
+  try {
+    mkdirSync(join(project, 'docs', '.draft'), { recursive: true });
+    writeFileSync(join(project, 'docs', '.draft', 'idea.md'), '# Hidden draft\n');
+    writeFileSync(join(project, '.auto-context', 'compile', 'source-queue.jsonl'), JSON.stringify({
+      ts: '2026-06-26T00:00:00Z',
+      trigger: 'post_tool_source',
+      engine: 'claude',
+      cwd: project,
+      source: { kind: 'file', path: 'docs/.draft/idea.md', collection: 'proj-docs' },
+    }) + '\n');
+    runWorker(project);
+    assert.equal(existsSync(marker), false);
+    const failures = jsonl(join(project, '.auto-context', 'compile', 'candidates.jsonl'));
+    assert.equal(failures.at(-1).action, 'extractor_failed');
+    assert.equal(failures.at(-1).reason, 'invalid_source_scope');
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+});
+
 test('worker restores claimed queue if processing raises unexpectedly', () => {
   const project = setupProject({ extractor: { argv: ['python3', '-c', 'print(1)'], timeout: 30 } });
   try {

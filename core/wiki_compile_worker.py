@@ -145,6 +145,10 @@ def read_text_bounded(path: Path, max_chars: int) -> str | None:
     return text[:max_chars]
 
 
+def is_hidden_source_path(rel_path: str) -> bool:
+    return any(part.startswith(".") for part in Path(rel_path).parts)
+
+
 def orientation(root: Path) -> dict:
     wiki = root / ".auto-context" / "wiki"
     result = {}
@@ -306,6 +310,9 @@ def process_job(root: Path, config: dict, compile_cfg: dict, job: dict) -> tuple
         append_jsonl(cpath, bounded_failure("extractor_failed", job, "unsafe_source_path"))
         return True, False
     if src.suffix.lower() != ".md":
+        append_jsonl(cpath, bounded_failure("extractor_failed", job, "invalid_source_scope"))
+        return True, False
+    if is_hidden_source_path(rel):
         append_jsonl(cpath, bounded_failure("extractor_failed", job, "invalid_source_scope"))
         return True, False
     selected = select_collections([str(src)], str(root), config) or {}
