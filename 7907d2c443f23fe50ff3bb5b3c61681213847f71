@@ -1,0 +1,59 @@
+.agents/plugins/marketplace.json
+  h_42d950683aaaea 9
+.claude-plugin/marketplace.json
+  h_42d950683aaaea 9
+.claude-plugin/plugin.json
+  h_42d950683aaaea 4
+.codex-plugin/plugin.json
+  h_42d950683aaaea 3
+AGENTS.md
+  h_42d950683aaaea 7-8,32,60,71-72
+CLAUDE.md
+  h_42d950683aaaea 7-8,71-72
+README.md
+  h_42d950683aaaea 3,5,7,9-14,16,18,21-27,30,32,34,36-39,41-43,45-47,50,53-55,58,60,62,64,67-69,72,74-78,80,82,84,88-93,95-97,101,103,105,107-111,113,115-120,123-124,126,129,131,133,135,137-142,144,146-150,152,154,156,158-162,164,167-168,171,173,175,177,180-181,184,186,188-197,200-201,205-206,209
+core/config.py
+  h_42d950683aaaea 73,121-149,198,206-208
+core/update.sh
+  h_42d950683aaaea 356-358,624,641-646
+core/wiki_compile_defaults.py
+  h_42d950683aaaea 5-6,33-35,56-57
+core/wiki_compile_worker.py
+  h_42d950683aaaea 25,171-179,190-192
+docs/plans/2026-06-30-portable-wiki-extractor-config.md
+  h_42d950683aaaea 1-68
+package.json
+  h_42d950683aaaea 3
+plugin.json
+  h_42d950683aaaea 3
+plugin.yaml
+  h_42d950683aaaea 2
+test/config.test.mjs
+  h_42d950683aaaea 128-153
+test/enable-compile-skill.test.mjs
+  h_42d950683aaaea 23-25
+test/enable-compile.test.mjs
+  h_42d950683aaaea 25,32-34,41,46-77,140,147-148
+test/probe-manifest.test.mjs
+  h_42d950683aaaea 18,39
+test/recommend-config.test.mjs
+  h_42d950683aaaea 73-75
+test/resolve-optin.test.mjs
+  h_42d950683aaaea 201-203
+test/wiki-compile-defaults.test.mjs
+  h_42d950683aaaea 9,11,13-14,26,32-34,41-43,47-54
+test/wiki-compile-notice.test.mjs
+  h_42d950683aaaea 18,32,37
+test/wiki-compile-worker.test.mjs
+  h_42d950683aaaea 95-132,330-369
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "7907d2c443f23fe50ff3bb5b3c61681213847f71",
+  "prompts": {},
+  "humans": {
+    "h_42d950683aaaea": {
+      "author": "dulee@zigbang.com"
+    }
+  }
+}
