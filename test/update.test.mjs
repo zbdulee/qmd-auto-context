@@ -393,3 +393,49 @@ test('update core: collection add already-exists exit 1도 update 실행 (BUG-2)
     rmSync(work, { recursive: true, force: true });
   }
 });
+
+test('update core: QMD_BIN override may point to a non-qmd filename', () => {
+  const work = repoTemp('qmd-update-qmd-bin');
+  const bin = join(work, 'bin');
+  const fakeHome = join(work, 'fakehome');
+  const qmdLog = join(work, 'qmd.log');
+  const lockBase = join(work, 'locks');
+  const qmdBin = join(bin, 'qmd-custom');
+  try {
+    mkdirSync(join(work, '.agents'), { recursive: true });
+    mkdirSync(bin, { recursive: true });
+    mkdirSync(fakeHome, { recursive: true });
+    writeFileSync(join(work, '.agents', 'qmd-recall.json'), JSON.stringify({
+      indexing: true,
+      collections: ['x'],
+    }));
+    writeFileSync(qmdBin, [
+      '#!/usr/bin/env sh',
+      `log="${qmdLog}"`,
+      'echo "$@" >> "$log"',
+      'case "$1 $2" in',
+      '  "collection list") exit 0 ;;',
+      '  "collection show") exit 0 ;;',
+      '  "collection add") exit 0 ;;',
+      '  *) exit 0 ;;',
+      'esac',
+    ].join('\n'), { mode: 0o755 });
+
+    execFileSync('bash', [join(process.cwd(), 'core', 'update.sh'), '--worker', work], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `/usr/bin:/bin`,
+        HOME: fakeHome,
+        QMD_BIN: qmdBin,
+        QMD_CACHE_DIR: fakeHome,
+        QMD_LOCK_BASE: lockBase,
+      },
+    });
+
+    const log = readFileSync(qmdLog, 'utf8');
+    assert.ok(log.includes('update'), `QMD_BIN override가 호출돼야 하는데 qmd.log 내용: ${log}`);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});

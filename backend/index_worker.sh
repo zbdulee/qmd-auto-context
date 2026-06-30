@@ -6,6 +6,9 @@ set -u
 # sandbox는 어떤 부작용(mkdir 포함)도 없이 즉시 무출력 종료.
 [ -n "${QMD_SANDBOX:-}" ] && exit 0
 
+_QMD_ROOT="$(cd "$(dirname "$0")/.." && pwd)" || exit 0
+. "$_QMD_ROOT/core/qmd_path.sh"
+
 # 유저 격리 경로(멀티유저 /tmp symlink 선점 방지). update.sh와 락 기본값을 통일.
 # WRITER_LOCK/EMBED_LOCK 기본값은 update.sh와 반드시 동일해야 직렬화가 유지된다.
 _QMD_UID="$(/usr/bin/id -un 2>/dev/null || id -u 2>/dev/null || echo qmd)"
@@ -22,7 +25,6 @@ EMBED_LOCK="${QMD_EMBED_LOCKDIR:-$_QMD_LOCK_BASE/qmd-embed.lock.d}"
 # kick-index 경로에서 worker 로그가 recall 로그 파일로 강제 합쳐진다(그리고 과거엔 /tmp).
 # 전용 QMD_INDEX_WORKER_LOG override만 받고, 기본은 유저 격리 캐시 경로.
 LOG="${QMD_INDEX_WORKER_LOG:-$_QMD_CACHE_DIR/index-worker.log}"
-QMD="${QMD_FAKE_QMD:-qmd}"
 
 log() { printf '[%s] index-worker: %s\n' "$(date '+%H:%M:%S')" "$*" >>"$LOG" 2>&1 || true; }
 
@@ -64,10 +66,9 @@ reload_daemon() {
 
 [ -f "$QUEUE" ] || exit 0
 
-# PATH 보정 (비대화형 hook 환경; update.sh와 동일)
-[ -d "$HOME/.bun/bin" ] && PATH="$HOME/.bun/bin:$PATH"
-FNM_NODE_BIN=$(ls -d "$HOME/.local/share/fnm/node-versions"/v*/installation/bin 2>/dev/null | sort -V | tail -1)
-[ -n "$FNM_NODE_BIN" ] && PATH="$FNM_NODE_BIN:$PATH"
+# PATH 보정 (비대화형 hook 환경; update.sh/backend_manager.sh와 동일)
+normalize_qmd_path
+QMD="${QMD_FAKE_QMD:-$(resolve_qmd_bin 2>/dev/null || printf '%s' qmd)}"
 unset BUN_INSTALL; export PATH
 
 # single-flight

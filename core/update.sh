@@ -12,6 +12,8 @@ for arg in "$@"; do
   fi
 done
 
+_QMD_CORE_DIR="$(cd "$(dirname "$0")" && pwd)" || exit 0
+. "$_QMD_CORE_DIR/qmd_path.sh"
 
 # 유저 격리 경로(멀티유저 /tmp symlink 선점 방지). backend_manager.sh와 통일.
 # 로그/status는 $HOME/.cache/qmd/, 락은 user-private 디렉토리.
@@ -165,14 +167,6 @@ write_failure_status() {
   } >"$STATUS"
 }
 
-normalize_qmd_path() {
-  [ -d "$HOME/.bun/bin" ] && PATH="$HOME/.bun/bin:$PATH"
-  local fnm_node_bin
-  fnm_node_bin=$(ls -d "$HOME/.local/share/fnm/node-versions"/v*/installation/bin 2>/dev/null | sort -V | tail -1)
-  [ -n "$fnm_node_bin" ] && PATH="$fnm_node_bin:$PATH"
-  export PATH
-}
-
 run_resolve_only() {
   local cwd="$1"
   python3 "$(dirname "$0")/resolve_paths.py" --cwd "$cwd"
@@ -210,7 +204,9 @@ PY
 
 run_update() {
   normalize_qmd_path
-  command -v qmd >/dev/null 2>&1 || exit 0
+  local qmd_bin
+  qmd_bin="$(resolve_qmd_bin 2>/dev/null)" || exit 0
+  qmd() { "$qmd_bin" "$@"; }
 
   workdir="$1"
   cd "$workdir" 2>/dev/null || exit 0
@@ -277,10 +273,10 @@ run_update() {
     if ! mkdir "$EMBED_LOCK" 2>/dev/null; then
       log "EMBED: already running, skip"
     else
-      LOG="$LOG" EMBED_LOCK="$EMBED_LOCK" QMD_DAEMON_PORT="${QMD_DAEMON_PORT:-8483}" QMD_BACKEND_MANAGER="${QMD_BACKEND_MANAGER:-}" nohup bash -c '
+      LOG="$LOG" EMBED_LOCK="$EMBED_LOCK" QMD_BIN_RESOLVED="$qmd_bin" QMD_DAEMON_PORT="${QMD_DAEMON_PORT:-8483}" QMD_BACKEND_MANAGER="${QMD_BACKEND_MANAGER:-}" nohup bash -c '
         echo "$$" > "$EMBED_LOCK/pid" 2>/dev/null || true
         trap "rm -f \"$EMBED_LOCK/pid\" 2>/dev/null; rmdir \"$EMBED_LOCK\" 2>/dev/null" EXIT
-        out=$(qmd embed 2>&1); printf "%s\n" "$out" >> "$LOG"
+        out=$("$QMD_BIN_RESOLVED" embed 2>&1); printf "%s\n" "$out" >> "$LOG"
         if printf "%s" "$out" | grep -qiE "embedded|chunks"; then
           # SIGTERM 으로 graceful shutdown 유도 → 데몬이 SQLite clean close 하며 WAL checkpoint.
           # SIGKILL 강제종료는 clean close 차단 → WAL checkpoint 누락 → vec query 저하.

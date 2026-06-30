@@ -18,32 +18,12 @@ START_LOCK="${QMD_DAEMON_START_LOCKDIR:-$STATE_DIR/daemon-start.lock.d}"
 REQUIRED_QMD_VERSION="${QMD_REQUIRED_VERSION:-2.5.3}"
 SUPPORTED_QMD_MAJOR="${QMD_SUPPORTED_MAJOR:-2}"
 
+. "$ROOT/core/qmd_path.sh"
+
 mkdir -p "$STATE_DIR" "$(dirname "$MANAGER_LOG")" "$(dirname "$DAEMON_LOG")" 2>/dev/null || true
 
 log() {
   printf '[%s] backend-manager: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >>"$MANAGER_LOG" 2>&1 || true
-}
-
-normalize_path() {
-  local fnm_node_bin
-  fnm_node_bin=$(python3 - "$HOME/.local/share/fnm/node-versions" <<'PY' 2>/dev/null || true
-import re
-import sys
-from pathlib import Path
-
-root = Path(sys.argv[1])
-candidates = []
-for path in root.glob("v*/installation/bin"):
-    match = re.match(r"^v(\d+)\.(\d+)\.(\d+)$", path.parent.parent.name)
-    if match:
-        candidates.append((tuple(int(x) for x in match.groups()), path))
-if candidates:
-    print(max(candidates)[1])
-PY
-)
-  [ -n "$fnm_node_bin" ] && PATH="$fnm_node_bin:$PATH"
-  [ -d "$HOME/.bun/bin" ] && PATH="$HOME/.bun/bin:$PATH"
-  export PATH
 }
 
 qmd_health_timeout() {
@@ -69,9 +49,9 @@ health() {
 }
 
 qmd_version() {
-  normalize_path
-  command -v qmd >/dev/null 2>&1 || return 1
-  qmd --version 2>/dev/null | sed -E 's/^qmd[[:space:]]+//'
+  local qmd_bin
+  qmd_bin="$(resolve_qmd_bin 2>/dev/null)" || return 1
+  "$qmd_bin" --version 2>/dev/null | sed -E 's/^qmd[[:space:]]+//'
 }
 
 version_ok() {

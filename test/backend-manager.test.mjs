@@ -31,6 +31,11 @@ function makeFakeFNMQmd(home, nodeVersion, qmdVersion = "2.5.3") {
   writeFileSync(join(bin, "qmd"), `#!/usr/bin/env sh\necho qmd ${qmdVersion}\n`, { mode: 0o755 });
 }
 
+function makeFakeQmdAt(path, version = "2.5.3") {
+  mkdirSync(path, { recursive: true });
+  writeFileSync(join(path, "qmd"), `#!/usr/bin/env sh\necho qmd ${version}\n`, { mode: 0o755 });
+}
+
 test("health exits cleanly and prints nothing when daemon is down", () => {
   const result = run(["health"], { QMD_DAEMON_PORT: "1" });
   assert.equal(result.status, 0);
@@ -72,6 +77,40 @@ test("check-qmd finds qmd through HOME .bun path normalization", () => {
   const home = mkdtempSync(join(tmpdir(), "qmd-path-"));
   try {
     makeFakeQmd(home);
+    const result = run(["check-qmd", "--manual"], {
+      HOME: home,
+      PATH: "/usr/bin:/bin",
+      QMD_BACKEND_STATE_DIR: home,
+    });
+    assert.equal(result.status, 0);
+    assert.equal(result.stdout, "");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("check-qmd honors QMD_BIN outside PATH", () => {
+  const home = mkdtempSync(join(tmpdir(), "qmd-bin-override-"));
+  try {
+    const custom = join(home, "custom", "tools");
+    makeFakeQmdAt(custom);
+    const result = run(["check-qmd", "--manual"], {
+      HOME: home,
+      PATH: "/usr/bin:/bin",
+      QMD_BACKEND_STATE_DIR: home,
+      QMD_BIN: join(custom, "qmd"),
+    });
+    assert.equal(result.status, 0);
+    assert.equal(result.stdout, "");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("check-qmd finds qmd through HOME .local bin normalization", () => {
+  const home = mkdtempSync(join(tmpdir(), "qmd-local-bin-"));
+  try {
+    makeFakeQmdAt(join(home, ".local", "bin"));
     const result = run(["check-qmd", "--manual"], {
       HOME: home,
       PATH: "/usr/bin:/bin",
@@ -342,7 +381,7 @@ test("kick-wiki-compile --flush passes --flush-all to the worker", () => {
   writeFileSync(worker, `#!/usr/bin/env bash\necho "$@" >> "${argsLog}"\n`, { mode: 0o755 });
   try {
     execFileSync('/bin/bash', ['core/backend_manager.sh', 'kick-wiki-compile', d, '--flush'],
-      { cwd: process.cwd(), encoding: 'utf8', env: { ...process.env, QMD_COMPILE_WORKER_SCRIPT: worker } });
+      { cwd: process.cwd(), encoding: 'utf8', env: { ...process.env, HOME: d, QMD_BACKEND_STATE_DIR: d, QMD_COMPILE_WORKER_SCRIPT: worker } });
     // kick runs in background; poll the log briefly
     let content = '';
     for (let i = 0; i < 100 && !content.includes('--flush-all'); i++) { try { content = readFileSync(argsLog, 'utf8'); } catch {} execFileSync('/bin/sleep', ['0.02']); }

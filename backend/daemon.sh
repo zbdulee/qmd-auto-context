@@ -11,8 +11,10 @@
 # foreground(`mcp --http`, --daemon 아님)로 실행해야 manager가 프로세스를 추적/재기동한다.
 set -euo pipefail
 
-export PATH="$HOME/.bun/bin:$PATH"
-QMD_BIN="$(command -v qmd || echo "$HOME/.bun/bin/qmd")"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$ROOT/core/qmd_path.sh"
+normalize_qmd_path
+QMD_BIN="$(resolve_qmd_bin 2>/dev/null || echo "$HOME/.bun/bin/qmd")"
 PORT="${QMD_DAEMON_PORT:-8483}"
 FNM_ROOT="$HOME/.local/share/fnm/node-versions"
 
