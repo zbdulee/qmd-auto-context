@@ -50,6 +50,7 @@ SECRET_PATTERNS = [
 TRANSCRIPT_RE = re.compile(r"(?im)^\s*(user|assistant|system|human|ai)\s*:")
 AUTO_START_RE = re.compile(r'<!-- qmd:auto:start id="main" sourceHash="([a-f0-9]+)" -->')
 AUTO_BLOCK_RE = re.compile(r'<!-- qmd:auto:start id="main" sourceHash="([a-f0-9]+)" -->\n.*?\n<!-- qmd:auto:end -->', re.S)
+FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---\n", re.S)
 
 
 def now_iso() -> str:
@@ -96,19 +97,181 @@ def safe_compile_file(root: Path, compile_dir: Path, rel: object) -> Path | None
     return path
 
 
-def resolve_target(root: Path, wiki_root: Path, candidate: dict, suggested_type: str) -> Path | None:
+def normalize_identity(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    return re.sub(r"\s+", " ", value.strip().lower())
+
+
+def slug_identity(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    return re.sub(r"[^A-Za-z0-9가-힣]+", "-", value.lower()).strip("-")
+
+
+def identity_keys(value: object) -> set[str]:
+    return {key for key in (normalize_identity(value), slug_identity(value)) if key}
+
+
+def clean_aliases(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    aliases = []
+    seen = set()
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        alias = item.strip()
+        if not alias:
+            continue
+        norm = normalize_identity(alias)
+        if norm in seen:
+            continue
+        seen.add(norm)
+        aliases.append(alias)
+    return aliases
+
+
+def clean_canonical_key(value: object) -> str:
+    return value.strip() if isinstance(value, str) and value.strip() else ""
+
+
+def unquote_yaml(value: str) -> str:
+    text = value.strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in ("'", '"'):
+        text = text[1:-1]
+    return text.replace('\\"', '"')
+
+
+def parse_yaml_scalar(value: str):
+    text = unquote_yaml(value)
+    if text.lower() == "true":
+        return True
+    if text.lower() == "false":
+        return False
+    return text
+
+
+def parse_yaml_inline_list(value: str) -> list:
+    text = value.strip()
+    if not (text.startswith("[") and text.endswith("]")):
+        return []
+    inner = text[1:-1].strip()
+    if not inner:
+        return []
+    return [parse_yaml_scalar(part.strip()) for part in inner.split(",") if part.strip()]
+
+
+def parse_frontmatter(text: str) -> tuple[dict, bool]:
+    match = FRONTMATTER_RE.match(text)
+    if not match:
+        return {}, False
+    meta = {}
+    current_key = None
+    for raw_line in match.group(1).splitlines():
+        if not raw_line.strip():
+            continue
+        if raw_line.startswith("  - "):
+            if current_key is None:
+                return {}, False
+            meta.setdefault(current_key, []).append(parse_yaml_scalar(raw_line[4:]))
+            continue
+        if raw_line.startswith(" ") or ":" not in raw_line:
+            return {}, False
+        key, raw_value = raw_line.split(":", 1)
+        key = key.strip()
+        if not key:
+            return {}, False
+        if key in meta:
+            return {}, False
+        raw_value = raw_value.strip()
+        if raw_value == "":
+            meta[key] = []
+            current_key = key
+        elif raw_value.startswith("[") and raw_value.endswith("]"):
+            meta[key] = parse_yaml_inline_list(raw_value)
+            current_key = None
+        else:
+            meta[key] = parse_yaml_scalar(raw_value)
+            current_key = None
+    return meta, True
+
+
+def identity_values_from_meta(meta: dict) -> list[str]:
+    values = []
+    for key in ("canonicalKey", "title"):
+        value = meta.get(key)
+        if isinstance(value, str) and value.strip():
+            values.append(value.strip())
+    aliases = meta.get("aliases")
+    if isinstance(aliases, list):
+        values.extend(alias.strip() for alias in aliases if isinstance(alias, str) and alias.strip())
+    elif isinstance(aliases, str) and aliases.strip():
+        values.append(aliases.strip())
+    return values
+
+
+def build_identity_index(wiki_root: Path) -> dict[str, set[Path]]:
+    index: dict[str, set[Path]] = {}
+    if not wiki_root.exists():
+        return index
+    for page in wiki_root.rglob("*.md"):
+        try:
+            text = page.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        meta, ok = parse_frontmatter(text)
+        if not ok:
+            continue
+        for value in identity_values_from_meta(meta):
+            for key in identity_keys(value):
+                index.setdefault(key, set()).add(page.resolve())
+    return index
+
+
+def candidate_identity_tiers(candidate: dict) -> list[tuple[str, list[str]]]:
+    tiers = []
+    canonical = clean_canonical_key(candidate.get("canonicalKey"))
+    if canonical:
+        tiers.append(("canonicalKey", [canonical]))
+    aliases = clean_aliases(candidate.get("aliases"))
+    if aliases:
+        tiers.append(("aliases", aliases))
+    title = str(candidate.get("title") or "").strip()
+    if title:
+        tiers.append(("title", [title]))
+    return tiers
+
+
+def lookup_identity(candidate: dict, identity_index: dict[str, set[Path]]) -> tuple[str, list[Path]]:
+    for reason, values in candidate_identity_tiers(candidate):
+        matches = set()
+        for value in values:
+            for key in identity_keys(value):
+                matches.update(identity_index.get(key, set()))
+        if matches:
+            return reason, sorted(matches)
+    return "", []
+
+
+def resolve_target(root: Path, wiki_root: Path, candidate: dict, suggested_type: str, identity_index: dict[str, set[Path]]) -> tuple[Path | None, str, list[Path]]:
     raw_target = candidate.get("targetPath")
     if isinstance(raw_target, str) and raw_target.strip():
         target = (root / raw_target).resolve()
     else:
+        match_reason, matches = lookup_identity(candidate, identity_index)
+        if len(matches) == 1:
+            return matches[0], match_reason, matches
+        if len(matches) > 1:
+            return None, f"ambiguous_{match_reason}", matches
         title = str(candidate.get("title") or "wiki-page")
         slug = re.sub(r"[^A-Za-z0-9가-힣]+", "-", title.lower()).strip("-") or "wiki-page"
         target = (wiki_root / TYPE_DIRS.get(suggested_type, "concepts") / f"{slug}.md").resolve()
     try:
         target.relative_to(wiki_root)
     except ValueError:
-        return None
-    return target
+        return None, "unsafe", []
+    return target, "explicit" if isinstance(raw_target, str) and raw_target.strip() else "slug", []
 
 
 def redact(text: str) -> tuple[str, list[str]]:
@@ -122,11 +285,11 @@ def redact(text: str) -> tuple[str, list[str]]:
 
 
 def source_hash(candidate: dict) -> str:
+    identity = clean_canonical_key(candidate.get("canonicalKey")) or str(candidate.get("title") or "")
     stable = {
-        "title": candidate.get("title"),
+        "identity": identity,
         "summary": candidate.get("summary"),
         "sources": candidate.get("sources"),
-        "targetPath": candidate.get("targetPath"),
     }
     return hashlib.sha256(json.dumps(stable, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:16]
 
@@ -170,6 +333,19 @@ def read_jsonl(path: Path) -> list[dict]:
     return rows
 
 
+def same_generated_identity(row: dict, record: dict) -> bool:
+    if row.get("targetPath") and row.get("targetPath") == record.get("targetPath"):
+        return True
+    if record.get("targetResolution") == "explicit":
+        return False
+    if row.get("sourceHash") and row.get("sourceHash") == record.get("sourceHash"):
+        return True
+    canonical_key = record.get("canonicalKey")
+    if canonical_key and row.get("canonicalKey") == canonical_key:
+        return True
+    return False
+
+
 def yaml_scalar(value) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
@@ -185,9 +361,21 @@ def markdown_page(candidate: dict, summary: str, status: str, redactions: list[s
     confidence = str(candidate.get("confidence") or "medium")
     sources = candidate.get("sources") if isinstance(candidate.get("sources"), list) else []
     triggers = [candidate.get("trigger")] if isinstance(candidate.get("trigger"), str) else []
+    canonical_key = clean_canonical_key(candidate.get("canonicalKey"))
+    aliases = clean_aliases(candidate.get("aliases"))
     lines = [
         "---",
         f"title: {yaml_scalar(candidate.get('title') or 'Untitled')}",
+    ]
+    if canonical_key:
+        lines.append(f"canonicalKey: {yaml_scalar(canonical_key)}")
+    if aliases:
+        lines.append("aliases:")
+        for alias in aliases:
+            lines.append(f"  - {yaml_scalar(alias)}")
+    else:
+        lines.append("aliases: []")
+    lines.extend([
         f"type: {suggested_type}",
         f"status: {status}",
         f"created: {created}",
@@ -196,7 +384,7 @@ def markdown_page(candidate: dict, summary: str, status: str, redactions: list[s
         f"confidence: {confidence}",
         "reviewed: false",
         "sources:",
-    ]
+    ])
     if sources:
         for source in sources:
             if isinstance(source, dict):
@@ -255,6 +443,26 @@ def find_wiki_collection(config: dict) -> tuple[str | None, str | None]:
     return None, None
 
 
+def is_auto_writable_page(path: Path) -> tuple[bool, list[str]]:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return False, ["unreadable_target"]
+    meta, ok = parse_frontmatter(text)
+    if not ok:
+        return False, ["frontmatter_unparseable"]
+    findings = []
+    if meta.get("reviewed") is True:
+        findings.append("reviewed_true")
+    if str(meta.get("status") or "").strip().lower() in {"reviewed", "canon", "manual"}:
+        findings.append("protected_status")
+    if meta.get("createdBy") != "qmd-auto-context":
+        findings.append("non_qmd_created_by")
+    if not AUTO_BLOCK_RE.search(text):
+        findings.append("managed_section_missing")
+    return not findings, findings
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--cwd", default=os.getcwd())
@@ -281,7 +489,8 @@ def main() -> int:
         return 1
 
     suggested_type = candidate.get("suggestedType") if candidate.get("suggestedType") in ALLOWED_TYPES else "concept"
-    target = resolve_target(root, wiki_root, candidate, suggested_type)
+    identity_index = build_identity_index(wiki_root)
+    target, target_reason, target_matches = resolve_target(root, wiki_root, candidate, suggested_type, identity_index)
     max_lines = int(compile_cfg.get("maxAutoPageLines", 120) or 120)
     lint = lint_candidate(candidate, target, max_lines)
     title = str(candidate.get("title") or "Untitled").strip() or "Untitled"
@@ -305,10 +514,21 @@ def main() -> int:
         "confidence": candidate.get("confidence", "medium"),
         "sources": candidate.get("sources") if isinstance(candidate.get("sources"), list) else [],
         "targetPath": str(candidate.get("targetPath") or (target.relative_to(root).as_posix() if target else "")),
+        "canonicalKey": clean_canonical_key(candidate.get("canonicalKey")),
+        "aliases": clean_aliases(candidate.get("aliases")),
+        "targetResolution": target_reason,
+        "targetMatches": [match.relative_to(root).as_posix() for match in target_matches],
         "sourceHash": h,
         "lint": lint,
         "redactions": redactions,
     }
+
+    if target_reason.startswith("ambiguous_"):
+        record["action"] = "merge-needed"
+        record["lint"] = {"verdict": "needs_review", "findings": [target_reason]}
+        append_jsonl(candidate_path, record)
+        print(json.dumps({"action": "merge-needed", "reason": target_reason, "targetMatches": record["targetMatches"]}, ensure_ascii=False))
+        return 0
 
     if lint["verdict"] != "clean" or target is None:
         if "transcript_like" in lint.get("findings", []):
@@ -319,20 +539,23 @@ def main() -> int:
         print(json.dumps({"action": "rejected", "findings": lint["findings"]}, ensure_ascii=False))
         return 0
 
-    previous = [row for row in read_jsonl(manifest_path) if row.get("targetPath") == record["targetPath"] or row.get("sourceHash") == h]
+    tombstones = read_jsonl(tombstone_path)
+    if any(same_generated_identity(row, record) for row in tombstones) and not args.regenerate:
+        record["action"] = "suppressed"
+        append_jsonl(candidate_path, record)
+        print(json.dumps({"action": "suppressed", "targetPath": record["targetPath"]}, ensure_ascii=False))
+        return 0
+
+    previous = [
+        row for row in read_jsonl(manifest_path)
+        if same_generated_identity(row, record)
+    ]
     if previous and not target.exists() and not args.regenerate:
         tombstone = {**record, "action": "deleted", "status": "deleted", "previousStatus": previous[-1].get("status", "generated")}
         append_jsonl(tombstone_path, tombstone)
         record["action"] = "tombstoned"
         append_jsonl(candidate_path, record)
         print(json.dumps({"action": "tombstoned", "targetPath": record["targetPath"]}, ensure_ascii=False))
-        return 0
-
-    tombstones = read_jsonl(tombstone_path)
-    if any(row.get("targetPath") == record["targetPath"] or row.get("sourceHash") == h for row in tombstones) and not args.regenerate:
-        record["action"] = "suppressed"
-        append_jsonl(candidate_path, record)
-        print(json.dumps({"action": "suppressed", "targetPath": record["targetPath"]}, ensure_ascii=False))
         return 0
 
     if mode == "candidates" or not compile_cfg.get("autoWrite", False):
@@ -353,16 +576,23 @@ def main() -> int:
     action = "created"
     if target.exists():
         old = target.read_text(encoding="utf-8")
-        if AUTO_BLOCK_RE.search(old):
-            page_block = AUTO_BLOCK_RE.search(page).group(0)
-            page = AUTO_BLOCK_RE.sub(page_block, old)
-            action = "updated"
-        else:
-            record["action"] = "conflict"
-            record["lint"] = {"verdict": "reject", "findings": ["managed_section_missing"]}
+        auto_writable, findings = is_auto_writable_page(target)
+        if not auto_writable:
+            record["action"] = "merge-needed"
+            record["lint"] = {"verdict": "needs_review", "findings": findings}
             append_jsonl(candidate_path, record)
-            print(json.dumps({"action": "conflict", "targetPath": record["targetPath"]}, ensure_ascii=False))
+            print(json.dumps({"action": "merge-needed", "targetPath": record["targetPath"], "findings": findings}, ensure_ascii=False))
             return 0
+        page_block_match = AUTO_BLOCK_RE.search(page)
+        if page_block_match is None:
+            record["action"] = "merge-needed"
+            record["lint"] = {"verdict": "needs_review", "findings": ["generated_section_missing"]}
+            append_jsonl(candidate_path, record)
+            print(json.dumps({"action": "merge-needed", "targetPath": record["targetPath"], "findings": ["generated_section_missing"]}, ensure_ascii=False))
+            return 0
+        page_block = page_block_match.group(0)
+        page = AUTO_BLOCK_RE.sub(page_block, old)
+        action = "updated"
     target.write_text(page, encoding="utf-8")
 
     record["action"] = action

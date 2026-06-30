@@ -66,7 +66,7 @@ def to_candidate(payload: dict[str, Any], item: dict[str, Any]) -> dict[str, Any
         suggested_type = "concept"
     target_path = item.get("targetPath")
     if not isinstance(target_path, str) or not target_path.strip():
-        target_path = f".auto-context/wiki/{TYPE_DIRS[suggested_type]}/{slugify(title)}.md"
+        target_path = ""
 
     trigger = payload.get("trigger") if isinstance(payload.get("trigger"), str) else "manual"
     source_ref = payload.get("sourceRef") if isinstance(payload.get("sourceRef"), str) else "compact-context"
@@ -79,26 +79,40 @@ def to_candidate(payload: dict[str, Any], item: dict[str, Any]) -> dict[str, Any
     if TRANSCRIPT_RE.search(summary):
         summary = "[REDACTED_TRANSCRIPT] transcript-like compact input rejected before wiki compile."
         title = title.strip() or "Rejected transcript"
-        target_path = f".auto-context/wiki/{TYPE_DIRS[suggested_type]}/{slugify(title)}.md"
-        return {
+        candidate = {
             "trigger": trigger,
             "title": title,
             "summary": "User: [REDACTED_TRANSCRIPT]",
             "suggestedType": suggested_type,
             "confidence": item.get("confidence", "low"),
             "sources": sources,
-            "targetPath": target_path,
+            "targetPath": f".auto-context/wiki/{TYPE_DIRS[suggested_type]}/{slugify(title)}.md",
         }
+        if isinstance(item.get("canonicalKey"), str) and item.get("canonicalKey").strip():
+            candidate["canonicalKey"] = item.get("canonicalKey").strip()
+        if isinstance(item.get("aliases"), list):
+            aliases = [alias.strip() for alias in item.get("aliases") if isinstance(alias, str) and alias.strip()]
+            if aliases:
+                candidate["aliases"] = aliases
+        return candidate
 
-    return {
+    candidate = {
         "trigger": trigger,
         "title": title.strip(),
         "summary": summary.strip(),
         "suggestedType": suggested_type,
         "confidence": item.get("confidence", "medium"),
         "sources": sources,
-        "targetPath": target_path,
     }
+    if target_path:
+        candidate["targetPath"] = target_path
+    if isinstance(item.get("canonicalKey"), str) and item.get("canonicalKey").strip():
+        candidate["canonicalKey"] = item.get("canonicalKey").strip()
+    if isinstance(item.get("aliases"), list):
+        aliases = [alias.strip() for alias in item.get("aliases") if isinstance(alias, str) and alias.strip()]
+        if aliases:
+            candidate["aliases"] = aliases
+    return candidate
 
 
 def run_compile(cwd: str, candidate: dict[str, Any], regenerate: bool = False) -> str:

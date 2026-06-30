@@ -37,10 +37,11 @@ print(json.dumps(out))`;
 test('build_prompt embeds source content and a candidates-only instruction', () => {
   const py = `import sys,json; sys.path.insert(0,'core/extractors'); import lib
 p=lib.build_prompt({'source':{'path':'docs/x.md','content':'UNIQ_SRC_BODY'},'wiki':{'schema':'S','index':'I','logTail':''}})
-print(json.dumps({'has_body':'UNIQ_SRC_BODY' in p,'has_candidates':'candidates' in p,'no_tools':'tool' in p.lower()}))`;
+print(json.dumps({'has_body':'UNIQ_SRC_BODY' in p,'has_candidates':'candidates' in p,'has_identity':'canonicalKey' in p and 'aliases' in p and 'targetPath' in p,'no_tools':'tool' in p.lower()}))`;
   const out = JSON.parse(runLib(py, ''));
   assert.equal(out.has_body, true);
   assert.equal(out.has_candidates, true);
+  assert.equal(out.has_identity, true);
   assert.equal(out.no_tools, true);
 });
 

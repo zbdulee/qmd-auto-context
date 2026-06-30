@@ -22,7 +22,11 @@ _PROMPT_TEMPLATE = """You convert one source document into compact, durable wiki
 
 Output RULES (strict):
 - Output ONLY a single JSON object: {{"candidates": [ ... ]}}. No prose, no code fence.
-- Each candidate: {{"title": str, "summary": str, "suggestedType": one of {types}, "confidence": "low"|"medium"|"high"}}.
+- Each candidate: {{"title": str, "summary": str, "suggestedType": one of {types}, "confidence": "low"|"medium"|"high", "canonicalKey": optional str, "aliases": optional str[], "targetPath": optional str}}.
+- Treat title as a display name only. Prefer a stable English kebab-case or snake_case canonicalKey that can survive title changes.
+- aliases should include Korean title variants and common alternate names when they exist.
+- If the source overlaps an existing wiki entry, reuse that entry's canonicalKey and targetPath instead of creating a new concept.
+- Do not split into multiple candidates unless the source contains clearly independent durable concepts. If uncertain, emit one candidate or none.
 - summary is a short durable conclusion (a decision, rule, concept, or entity fact). NOT a transcript, NOT step-by-step dialog.
 - Never include secrets, API keys, tokens, or credentials. Omit anything sensitive.
 - If nothing durable is worth saving, output {{"candidates": []}}.

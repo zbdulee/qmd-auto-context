@@ -259,6 +259,48 @@ print(json.dumps({'candidates': [{
   }
 });
 
+test('compile writer merge-needed drains source queue without bounded failure retry', () => {
+  const extractor = join(mkdtempSync(join(tmpdir(), 'extractor-merge-needed-')), 'extract.py');
+  writeFileSync(extractor, `#!/usr/bin/env python3
+import json
+print(json.dumps({'candidates': [{
+  'title': 'Signal Detection',
+  'summary': 'This update should wait for manual merge instead of requeueing forever.',
+  'suggestedType': 'concept',
+  'confidence': 'high',
+  'canonicalKey': 'signal-perception-rule'
+}]}))
+`);
+  const project = setupProject({ mode: 'auto-wiki', extractor: { argv: ['python3', extractor], timeout: 30 } });
+  const targetDir = join(project, '.auto-context', 'wiki', 'concepts');
+  mkdirSync(targetDir, { recursive: true });
+  writeFileSync(join(targetDir, 'reviewed-signal.md'), [
+    '---',
+    'title: "Reviewed Signal Rule"',
+    'canonicalKey: "signal-perception-rule"',
+    'type: concept',
+    'status: reviewed',
+    'createdBy: qmd-auto-context',
+    'reviewed: true',
+    '---',
+    '',
+    '<!-- qmd:auto:start id="main" sourceHash="aaaaaaaaaaaaaaaa" -->',
+    '## Summary',
+    'Old reviewed summary.',
+    '<!-- qmd:auto:end -->',
+    '',
+  ].join('\n'));
+  try {
+    runWorker(project);
+    assert.equal(readFileSync(join(project, '.auto-context', 'compile', 'source-queue.jsonl'), 'utf8'), '');
+    const rows = jsonl(join(project, '.auto-context', 'compile', 'candidates.jsonl'));
+    assert.equal(rows.at(-1).action, 'merge-needed');
+    assert.equal(rows.some((row) => row.action === 'compile_failed'), false);
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+});
+
 
 
 

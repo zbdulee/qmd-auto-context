@@ -65,6 +65,31 @@ test('wiki_extract: compact durable summary becomes wiki_compile candidate and p
   }
 });
 
+test('wiki_extract: preserves canonicalKey and aliases from compact candidates', () => {
+  const work = repoTemp('wiki-extract-identity');
+  try {
+    writeSettings(work);
+    runExtract(work, {
+      trigger: 'manual',
+      sourceRef: 'session:identity',
+      durable: {
+        title: 'Signal Perception Rule',
+        canonicalKey: 'signal-perception-rule',
+        aliases: ['Signal rule'],
+        summary: 'Identity fields from compact input should reach the compile writer.',
+        type: 'concept',
+        confidence: 'high',
+      },
+    });
+
+    const page = readFileSync(join(work, '.auto-context', 'wiki', 'concepts', 'signal-perception-rule.md'), 'utf8');
+    assert.match(page, /canonicalKey: "signal-perception-rule"/);
+    assert.match(page, /aliases:\n  - "Signal rule"/);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
 test('wiki_extract: raw transcript-shaped input is rejected before compile writer persists it', () => {
   const work = repoTemp('wiki-extract-transcript');
   try {
@@ -74,6 +99,8 @@ test('wiki_extract: raw transcript-shaped input is rejected before compile write
       sourceRef: 'session:local',
       durable: {
         title: 'Transcript Dump',
+        canonicalKey: 'transcript-dump',
+        aliases: ['Transcript dump alias'],
         summary: 'User: save this entire chat\nAssistant: ok I will',
         type: 'session',
         confidence: 'high',
@@ -85,6 +112,8 @@ test('wiki_extract: raw transcript-shaped input is rejected before compile write
     const candidate = readFileSync(join(work, '.auto-context', 'compile', 'candidates.jsonl'), 'utf8');
     assert.match(candidate, /transcript_like/);
     assert.doesNotMatch(candidate, /User: save this entire chat/);
+    assert.match(candidate, /transcript-dump/);
+    assert.match(candidate, /Transcript dump alias/);
   } finally {
     rmSync(work, { recursive: true, force: true });
   }

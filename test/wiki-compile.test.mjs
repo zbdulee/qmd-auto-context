@@ -40,6 +40,10 @@ function runCompile(work, payload, env = {}) {
   });
 }
 
+function readJsonl(path) {
+  return readFileSync(path, 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
+}
+
 test('wiki_compile: lint-clean candidate writes generated markdown, audit files, and dirty queue', () => {
   const work = repoTemp('wiki-compile-write');
   const dirtyQueue = join(work, 'dirty-queue');
@@ -66,6 +70,349 @@ test('wiki_compile: lint-clean candidate writes generated markdown, audit files,
     assert.match(readFileSync(join(work, '.auto-context', 'wiki', 'index.md'), 'utf8'), /decisions\/config-layout.md/);
     assert.match(readFileSync(join(work, '.auto-context', 'wiki', 'log.md'), 'utf8'), /created/);
     assert.match(readFileSync(dirtyQueue, 'utf8'), /proj-wiki\t.*\.auto-context\/wiki/);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('wiki_compile: writes canonical identity metadata into generated frontmatter', () => {
+  const work = repoTemp('wiki-compile-identity-frontmatter');
+  try {
+    writeSettings(work);
+    runCompile(work, {
+      trigger: 'manual',
+      title: 'Signal Perception Rule',
+      canonicalKey: 'signal-perception-rule',
+      aliases: ['Signal rule', 'Perception rule'],
+      summary: 'Signal perception should be stored as one durable concept, not split by display title changes.',
+      suggestedType: 'concept',
+      confidence: 'high',
+    });
+
+    const page = readFileSync(join(work, '.auto-context', 'wiki', 'concepts', 'signal-perception-rule.md'), 'utf8');
+    assert.match(page, /canonicalKey: "signal-perception-rule"/);
+    assert.match(page, /aliases:\n  - "Signal rule"\n  - "Perception rule"/);
+    const rows = readJsonl(join(work, '.auto-context', 'compile', 'candidates.jsonl'));
+    assert.equal(rows[0].canonicalKey, 'signal-perception-rule');
+    assert.deepEqual(rows[0].aliases, ['Signal rule', 'Perception rule']);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('wiki_compile: reuses existing page by canonicalKey when title changes and targetPath is omitted', () => {
+  const work = repoTemp('wiki-compile-reuse-canonical');
+  try {
+    writeSettings(work);
+    runCompile(work, {
+      trigger: 'manual',
+      title: 'Signal Perception Rule',
+      canonicalKey: 'signal-perception-rule',
+      aliases: ['Signal perception'],
+      summary: 'Initial durable rule.',
+      suggestedType: 'concept',
+      confidence: 'high',
+      targetPath: '.auto-context/wiki/concepts/signal-rules.md',
+    });
+    const out = runCompile(work, {
+      trigger: 'manual',
+      title: 'Medicine Signal Detection',
+      canonicalKey: 'signal-perception-rule',
+      aliases: ['Medicine signal detection'],
+      summary: 'Updated durable rule should land in the existing page.',
+      suggestedType: 'concept',
+      confidence: 'high',
+    });
+
+    assert.match(out, /updated/);
+    assert.equal(existsSync(join(work, '.auto-context', 'wiki', 'concepts', 'medicine-signal-detection.md')), false);
+    const page = readFileSync(join(work, '.auto-context', 'wiki', 'concepts', 'signal-rules.md'), 'utf8');
+    assert.match(page, /Updated durable rule should land in the existing page/);
+    const rows = readJsonl(join(work, '.auto-context', 'compile', 'candidates.jsonl'));
+    assert.equal(rows.at(-1).targetPath, '.auto-context/wiki/concepts/signal-rules.md');
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('wiki_compile: reuses existing page by alias or title before creating a title slug', () => {
+  const work = repoTemp('wiki-compile-reuse-alias-title');
+  try {
+    writeSettings(work);
+    runCompile(work, {
+      trigger: 'manual',
+      title: 'Canonical Signal Concept',
+      canonicalKey: 'canonical-signal-concept',
+      aliases: ['Signal Detection'],
+      summary: 'Initial durable concept.',
+      suggestedType: 'concept',
+      confidence: 'high',
+      targetPath: '.auto-context/wiki/concepts/canonical-signal.md',
+    });
+    runCompile(work, {
+      trigger: 'manual',
+      title: 'Signal Detection',
+      summary: 'Alias-matched update should reuse canonical-signal.md.',
+      suggestedType: 'concept',
+      confidence: 'high',
+    });
+
+    assert.equal(existsSync(join(work, '.auto-context', 'wiki', 'concepts', 'signal-detection.md')), false);
+    const page = readFileSync(join(work, '.auto-context', 'wiki', 'concepts', 'canonical-signal.md'), 'utf8');
+    assert.match(page, /Alias-matched update should reuse canonical-signal\.md/);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('wiki_compile: explicit targetPath wins over identity lookup', () => {
+  const work = repoTemp('wiki-compile-explicit-target-wins');
+  try {
+    writeSettings(work);
+    runCompile(work, {
+      trigger: 'manual',
+      title: 'Signal Perception Rule',
+      canonicalKey: 'signal-perception-rule',
+      summary: 'Existing canonical page.',
+      suggestedType: 'concept',
+      confidence: 'high',
+      targetPath: '.auto-context/wiki/concepts/existing-signal.md',
+    });
+    runCompile(work, {
+      trigger: 'manual',
+      title: 'Signal Perception Rule',
+      canonicalKey: 'signal-perception-rule',
+      summary: 'Explicit target should create a separate page for this requested location.',
+      suggestedType: 'concept',
+      confidence: 'high',
+      targetPath: '.auto-context/wiki/concepts/explicit-signal.md',
+    });
+
+    assert.equal(existsSync(join(work, '.auto-context', 'wiki', 'concepts', 'explicit-signal.md')), true);
+    const rows = readJsonl(join(work, '.auto-context', 'compile', 'candidates.jsonl'));
+    assert.equal(rows.at(-1).targetPath, '.auto-context/wiki/concepts/explicit-signal.md');
+    assert.equal(rows.at(-1).targetResolution, 'explicit');
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('wiki_compile: ambiguous identity matches record merge-needed without creating slug fallback', () => {
+  const work = repoTemp('wiki-compile-ambiguous-identity');
+  try {
+    writeSettings(work);
+    const targetDir = join(work, '.auto-context', 'wiki', 'concepts');
+    mkdirSync(targetDir, { recursive: true });
+    for (const name of ['signal-a.md', 'signal-b.md']) {
+      writeFileSync(join(targetDir, name), [
+        '---',
+        'title: "Signal Detection"',
+        'canonicalKey: "signal-perception-rule"',
+        'type: concept',
+        'status: generated',
+        'createdBy: qmd-auto-context',
+        'reviewed: false',
+        '---',
+        '',
+        '<!-- qmd:auto:start id="main" sourceHash="aaaaaaaaaaaaaaaa" -->',
+        '## Summary',
+        'Existing generated summary.',
+        '<!-- qmd:auto:end -->',
+        '',
+      ].join('\n'));
+    }
+
+    const out = runCompile(work, {
+      trigger: 'manual',
+      title: 'Different Signal Title',
+      canonicalKey: 'signal-perception-rule',
+      summary: 'Ambiguous update should wait for manual selection.',
+      suggestedType: 'concept',
+      confidence: 'high',
+    });
+
+    assert.match(out, /merge-needed/);
+    assert.equal(existsSync(join(work, '.auto-context', 'wiki', 'concepts', 'different-signal-title.md')), false);
+    const rows = readJsonl(join(work, '.auto-context', 'compile', 'candidates.jsonl'));
+    assert.equal(rows.at(-1).action, 'merge-needed');
+    assert.equal(rows.at(-1).lint.findings[0], 'ambiguous_canonicalKey');
+    assert.equal(rows.at(-1).targetMatches.length, 2);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('wiki_compile: protected existing identity match records merge-needed without overwriting', () => {
+  const work = repoTemp('wiki-compile-merge-needed');
+  try {
+    writeSettings(work);
+    const targetDir = join(work, '.auto-context', 'wiki', 'concepts');
+    mkdirSync(targetDir, { recursive: true });
+    const target = join(targetDir, 'reviewed-signal.md');
+    writeFileSync(target, [
+      '---',
+      'title: "Reviewed Signal Rule"',
+      'canonicalKey: "signal-perception-rule"',
+      'aliases:',
+      '  - "Signal Detection"',
+      'type: concept',
+      'status: reviewed',
+      'createdBy: qmd-auto-context',
+      'reviewed: true',
+      '---',
+      '',
+      'Human reviewed text must stay untouched.',
+      '',
+      '<!-- qmd:auto:start id="main" sourceHash="aaaaaaaaaaaaaaaa" -->',
+      '## Summary',
+      'Old generated block must not be replaced.',
+      '<!-- qmd:auto:end -->',
+      '',
+    ].join('\n'));
+
+    const out = runCompile(work, {
+      trigger: 'manual',
+      title: 'Signal Detection',
+      canonicalKey: 'signal-perception-rule',
+      summary: 'New summary should be held for manual merge.',
+      suggestedType: 'concept',
+      confidence: 'high',
+    });
+
+    assert.match(out, /merge-needed/);
+    const page = readFileSync(target, 'utf8');
+    assert.match(page, /Old generated block must not be replaced/);
+    assert.doesNotMatch(page, /New summary should be held/);
+    const rows = readJsonl(join(work, '.auto-context', 'compile', 'candidates.jsonl'));
+    assert.equal(rows.at(-1).action, 'merge-needed');
+    assert.equal(rows.at(-1).targetPath, '.auto-context/wiki/concepts/reviewed-signal.md');
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('wiki_compile: manual status page records merge-needed without overwriting auto block', () => {
+  const work = repoTemp('wiki-compile-manual-status');
+  try {
+    writeSettings(work);
+    const targetDir = join(work, '.auto-context', 'wiki', 'concepts');
+    mkdirSync(targetDir, { recursive: true });
+    const target = join(targetDir, 'manual-signal.md');
+    writeFileSync(target, [
+      '---',
+      'title: "Manual Signal Rule"',
+      'canonicalKey: "signal-perception-rule"',
+      'type: concept',
+      'status: manual',
+      'createdBy: qmd-auto-context',
+      'reviewed: false',
+      '---',
+      '',
+      '<!-- qmd:auto:start id="main" sourceHash="aaaaaaaaaaaaaaaa" -->',
+      '## Summary',
+      'Manual-status generated block must not be replaced.',
+      '<!-- qmd:auto:end -->',
+      '',
+    ].join('\n'));
+
+    const out = runCompile(work, {
+      trigger: 'manual',
+      title: 'Manual Signal Rule',
+      canonicalKey: 'signal-perception-rule',
+      summary: 'New summary should not overwrite manual status.',
+      suggestedType: 'concept',
+      confidence: 'high',
+    });
+
+    assert.match(out, /merge-needed/);
+    const page = readFileSync(target, 'utf8');
+    assert.match(page, /Manual-status generated block must not be replaced/);
+    assert.doesNotMatch(page, /New summary should not overwrite/);
+    const rows = readJsonl(join(work, '.auto-context', 'compile', 'candidates.jsonl'));
+    assert.equal(rows.at(-1).lint.findings.includes('protected_status'), true);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('wiki_compile: malformed existing frontmatter is fail-safe merge-needed', () => {
+  const work = repoTemp('wiki-compile-malformed-frontmatter');
+  try {
+    writeSettings(work);
+    const targetDir = join(work, '.auto-context', 'wiki', 'concepts');
+    mkdirSync(targetDir, { recursive: true });
+    const target = join(targetDir, 'malformed.md');
+    writeFileSync(target, [
+      '---',
+      'title: "Malformed Page"',
+      'canonicalKey: "signal-perception-rule"',
+      '  bad-indent',
+      '---',
+      '',
+      '<!-- qmd:auto:start id="main" sourceHash="aaaaaaaaaaaaaaaa" -->',
+      '## Summary',
+      'Original text must remain.',
+      '<!-- qmd:auto:end -->',
+      '',
+    ].join('\n'));
+
+    const out = runCompile(work, {
+      trigger: 'manual',
+      title: 'Malformed Page',
+      summary: 'Explicit target must not overwrite malformed frontmatter.',
+      suggestedType: 'concept',
+      confidence: 'high',
+      targetPath: '.auto-context/wiki/concepts/malformed.md',
+    });
+
+    assert.match(out, /merge-needed/);
+    assert.match(readFileSync(target, 'utf8'), /Original text must remain/);
+    assert.doesNotMatch(readFileSync(target, 'utf8'), /Explicit target must not overwrite/);
+    const rows = readJsonl(join(work, '.auto-context', 'compile', 'candidates.jsonl'));
+    assert.equal(rows.at(-1).lint.findings[0], 'frontmatter_unparseable');
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('wiki_compile: tombstone suppresses deleted generated page by canonicalKey', () => {
+  const work = repoTemp('wiki-compile-tombstone-canonical');
+  try {
+    writeSettings(work);
+    runCompile(work, {
+      trigger: 'manual',
+      title: 'Signal Rule',
+      canonicalKey: 'signal-perception-rule',
+      summary: 'Initial summary that creates the generated page.',
+      suggestedType: 'concept',
+      confidence: 'high',
+      targetPath: '.auto-context/wiki/concepts/signal-rule.md',
+    });
+    rmSync(join(work, '.auto-context', 'wiki', 'concepts', 'signal-rule.md'));
+    const tombstoned = runCompile(work, {
+      trigger: 'manual',
+      title: 'Renamed Signal Rule',
+      canonicalKey: 'signal-perception-rule',
+      summary: 'Different summary must not recreate a deleted generated identity.',
+      suggestedType: 'concept',
+      confidence: 'high',
+      targetPath: '.auto-context/wiki/concepts/signal-rule.md',
+    });
+    const suppressed = runCompile(work, {
+      trigger: 'manual',
+      title: 'Another Signal Rule',
+      canonicalKey: 'signal-perception-rule',
+      summary: 'Another summary must still respect the deleted generated identity.',
+      suggestedType: 'concept',
+      confidence: 'high',
+    });
+
+    assert.match(tombstoned, /tombstoned/);
+    assert.match(suppressed, /suppressed/);
+    assert.equal(existsSync(join(work, '.auto-context', 'wiki', 'concepts', 'renamed-signal-rule.md')), false);
+    assert.equal(existsSync(join(work, '.auto-context', 'wiki', 'concepts', 'another-signal-rule.md')), false);
+    const rows = readJsonl(join(work, '.auto-context', 'compile', 'candidates.jsonl'));
+    assert.equal(rows.at(-1).action, 'suppressed');
   } finally {
     rmSync(work, { recursive: true, force: true });
   }

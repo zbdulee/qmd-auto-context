@@ -40,7 +40,7 @@ wiki compile은 사용자 대화 내용을 입력 후보로 참고할 수 있다
 ### 1. Candidate queue 설계
 
 - [x] `.auto-context/compile/candidates.jsonl` schema 정의
-- [x] 후보 필드: `type`, `title`, `summary`, `sources`, `confidence`, `trigger`, `created`, `redactions`, `suggestedStatus`, `targetPath`, `action`, `lint`
+- [x] 후보 필드: `type`, `title`, `canonicalKey`, `aliases`, `summary`, `sources`, `confidence`, `trigger`, `created`, `redactions`, `suggestedStatus`, `targetPath`, `action`, `lint`
 - [x] 후보 trigger enum: `explicit_user_approval`, `post_session_summary`, `repeated_recall`, `cross_file_conclusion`, `manual`
 - [ ] local-only 권장 파일과 commit 가능 파일 경계 문서화
 
@@ -65,7 +65,8 @@ wiki compile은 사용자 대화 내용을 입력 후보로 참고할 수 있다
 
 - [x] candidate → `wiki/decisions|concepts|entities` markdown 변환
 - [x] frontmatter schema 적용: `title`, `created`, `updated`, `type`, `status`, `sources`, `confidence`, `reviewed`, `createdBy`, `triggers`, `redactions`; `tags`는 optional legacy compatibility로만 둔다
-- [ ] 기존 page update는 `qmd:auto:start/end` managed section + `sourceHash` 일치 시에만 수행하고, 사용자 편집 충돌 시 candidate/finding으로 남긴다
+- [x] 기존 page update는 `qmd:auto:start/end` managed section이 있고 `reviewed:true`/수동 소유가 아닐 때만 수행하고, 사용자 편집 충돌 시 `merge-needed` candidate/finding으로 남긴다
+- [x] generated wiki identity는 `canonicalKey`/`aliases`/`title` frontmatter index로 기존 targetPath를 재사용한다. 기존 generated 파일은 자동 migration하지 않으며, 수동 병합 후 canonicalKey/aliases를 심으면 이후 self-healing된다.
 - [x] `.auto-context/compile/generated-manifest.jsonl`을 생성 source of truth로 유지한다
 - [x] 사용자가 generated/reviewed page를 삭제하면 `.auto-context/compile/tombstones.jsonl`에 tombstone을 남기고 같은 `targetPath`/`sourceHash` 자동 재생성을 막는다
 - [ ] 사용자가 canon page를 삭제하면 자동 복원/삭제 처리하지 않고 `contested` candidate/finding으로 명시 확인을 요청한다
@@ -85,7 +86,7 @@ wiki compile은 사용자 대화 내용을 입력 후보로 참고할 수 있다
 
 - [x] 대화 전문이 `.auto-context/wiki/**` 또는 `.auto-context/compile/**`에 저장되지 않는다.
 - [x] secret-like content가 후보/승격 파일에 남지 않는다.
-- [ ] invalid/unsafe `.auto-context` 경로에서는 compile/promotion writer가 중단된다.
+- [x] invalid/unsafe `.auto-context` 경로에서는 compile/promotion writer가 중단된다.
 - [ ] pending/unconfigured/sandbox/headless 프로젝트에서는 compile writer가 wiki/compile 파일을 쓰지 않는다.
 - [x] deleted generated page는 명시 regenerate 전까지 자동 재생성되지 않는다.
 - [x] promotion 전후 `npm test`가 통과한다.

@@ -128,6 +128,10 @@ bash core/update.sh --enable-compile [<프로젝트경로>]
 
 자동 compile은 `raw` 또는 `session` role 컬렉션의 Markdown 파일을 편집할 때 동작합니다. 설정된 host CLI가 백그라운드에서 해당 파일을 읽고 `.auto-context/wiki`에 generated 초안을 만듭니다. `.agents`, `.claude`, `.codex`, `.github`, `.auto-context`처럼 점으로 시작하는 경로의 Markdown은 자동 compile 대상에서 제외합니다. 비활성화하려면 `.auto-context/settings.json`에서 `compile.enabled:false` 또는 `compile.mode:"off"`로 설정하면 됩니다.
 
+generated wiki page는 `canonicalKey`와 `aliases` frontmatter를 저장할 수 있습니다. 자동 compile은 `targetPath`가 없을 때 기존 wiki page의 `canonicalKey`, `aliases`, `title`을 먼저 찾아 재사용하고, 매칭이 없을 때만 title slug로 새 파일을 만듭니다. 여러 page가 같은 identity로 걸리거나, 기존 page가 `reviewed:true`/수동 소유/managed auto block 없음 상태라면 자동 overwrite하지 않고 `.auto-context/compile/candidates.jsonl`에 `action:"merge-needed"`로 남깁니다.
+
+기존 generated wiki 파일은 자동 migration하지 않습니다. 중복으로 쪼개진 파일은 사람이 수동 병합한 뒤 남길 page frontmatter에 안정적인 `canonicalKey`와 한국어 제목 변형을 `aliases`로 심으면, 이후 같은 개념은 해당 page로 self-healing됩니다.
+
 Hermes Agent의 `on_session_start`는 observer-only hook이라 첫 세션 안내가 같은 방식으로 표시되지 않을 수 있습니다. Hermes에서 compile을 켜는 경우 위 동작을 먼저 확인하고 활성화하세요.
 
 ## 수동 명령
