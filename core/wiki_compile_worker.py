@@ -387,6 +387,16 @@ def process_job(root: Path, config: dict, compile_cfg: dict, job: dict) -> tuple
         append_jsonl(cpath, bounded_failure("needs_extractor", job, "cooldown_active"))
         return False, True
 
+    wiki_root = (root / config.get("wikiPath", ".auto-context/wiki")).resolve()
+    semantic_cfg = compile_cfg.get("semanticDedup") if isinstance(compile_cfg.get("semanticDedup"), dict) else {}
+    similar_pages = gather_similar_pages(
+        root, wiki_root, config, compile_cfg, content,
+        int(semantic_cfg.get("topK", 3) or 3),
+        int(semantic_cfg.get("similarPageMaxChars", 12000) or 12000),
+    )
+    wiki_ctx = orientation(root)
+    if similar_pages:
+        wiki_ctx["similarPages"] = similar_pages
     payload = {
         "cwd": str(root),
         "engine": job.get("engine", "unknown"),
@@ -397,7 +407,7 @@ def process_job(root: Path, config: dict, compile_cfg: dict, job: dict) -> tuple
             "collection": source.get("collection", ""),
             "content": content,
         },
-        "wiki": orientation(root),
+        "wiki": wiki_ctx,
     }
     argv = primary if primary is not None else default
     extracted, reason, returncode = run_extractor(argv, payload, timeout, root)

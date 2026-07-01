@@ -728,3 +728,58 @@ test('gather_similar_pages: null score in result does not crash, treated as belo
     rmSync(project, { recursive: true, force: true });
   }
 });
+
+test('process_job includes similarPages in the extractor payload when the daemon finds a match', () => {
+  const extractorDir = mkdtempSync(join(tmpdir(), 'extractor-similar-'));
+  const extractor = join(extractorDir, 'extract.py');
+  const dump = join(extractorDir, 'received-wiki.json');
+  writeFileSync(extractor, `#!/usr/bin/env python3
+import json, sys
+payload = json.loads(sys.stdin.read())
+open(${JSON.stringify(dump)}, 'w').write(json.dumps(payload['wiki']))
+print(json.dumps({'candidates': []}))
+`);
+  const project = setupProject({ extractor: { argv: ['python3', extractor], timeout: 30 } });
+  try {
+    mkdirSync(join(project, '.auto-context', 'wiki', 'entities'), { recursive: true });
+    writeFileSync(join(project, '.auto-context', 'wiki', 'entities', 'known.md'), [
+      '---', 'title: "Known"', 'canonicalKey: "known"', 'type: entity', 'status: generated',
+      'createdBy: qmd-auto-context', '---', '',
+      '<!-- qmd:auto:start id="main" sourceHash="abc123" -->', '## Summary', 'The known fact.',
+      '<!-- qmd:auto:end -->', '',
+    ].join('\n'));
+    const fixture = join(project, 'daemon-fixture.json');
+    writeFileSync(fixture, JSON.stringify({ results: [{ file: 'proj-wiki/entities/known.md', score: 0.9 }] }));
+
+    runWorker(project, { QMD_QUERY_FIXTURE: fixture });
+
+    const receivedWiki = JSON.parse(readFileSync(dump, 'utf8'));
+    assert.equal(receivedWiki.similarPages.length, 1);
+    assert.equal(receivedWiki.similarPages[0].path, '.auto-context/wiki/entities/known.md');
+    assert.match(receivedWiki.similarPages[0].content, /The known fact\./);
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+});
+
+test('process_job omits similarPages entirely when nothing qualifies (unchanged payload shape)', () => {
+  const extractorDir = mkdtempSync(join(tmpdir(), 'extractor-no-similar-'));
+  const extractor = join(extractorDir, 'extract.py');
+  const dump = join(extractorDir, 'received-wiki.json');
+  writeFileSync(extractor, `#!/usr/bin/env python3
+import json, sys
+payload = json.loads(sys.stdin.read())
+open(${JSON.stringify(dump)}, 'w').write(json.dumps(payload['wiki']))
+print(json.dumps({'candidates': []}))
+`);
+  const project = setupProject({ extractor: { argv: ['python3', extractor], timeout: 30 } });
+  try {
+    // No QMD_QUERY_FIXTURE at all and no daemon running: query_wiki_similar fails open to None.
+    runWorker(project);
+    const receivedWiki = JSON.parse(readFileSync(dump, 'utf8'));
+    assert.equal('similarPages' in receivedWiki, false);
+    assert.equal(typeof receivedWiki.index, 'string');
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+});
