@@ -507,7 +507,10 @@ def query_wiki_similar(daemon_url: str, collection: str, text: str, top_k: int, 
     if fixture_path:
         try:
             with open(fixture_path, "r", encoding="utf-8") as f:
-                results = json.load(f).get("results", [])
+                parsed = json.load(f)
+            if not isinstance(parsed, dict):
+                return None
+            results = parsed.get("results", [])
         except (OSError, json.JSONDecodeError):
             return None
         return results if isinstance(results, list) else []
@@ -530,6 +533,8 @@ def query_wiki_similar(daemon_url: str, collection: str, text: str, top_k: int, 
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             body = resp.read().decode("utf-8")
         parsed = json.loads(body)
+        if not isinstance(parsed, dict):
+            return None
         results = parsed.get("results", [])
         return results if isinstance(results, list) else []
     except (urllib.error.URLError, OSError, ValueError, json.JSONDecodeError):

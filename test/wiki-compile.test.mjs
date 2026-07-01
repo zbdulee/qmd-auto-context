@@ -811,3 +811,23 @@ test('wiki_compile: semantic gate fails open when QMD_QUERY_FIXTURE is malformed
     rmSync(work, { recursive: true, force: true });
   }
 });
+
+test('wiki_compile: semantic gate fails open when QMD_QUERY_FIXTURE returns valid JSON that is not a dict', () => {
+  const work = repoTemp('wiki-compile-semantic-fixture-wrong-shape');
+  try {
+    writeSettings(work);
+    const fixture = join(work, 'array-fixture.json');
+    writeFileSync(fixture, JSON.stringify([1, 2, 3]));
+
+    const out = JSON.parse(runCompile(work, {
+      title: 'New entity with array-shaped fixture',
+      summary: 'Should still be created — fail-open when JSON is valid but wrong shape.',
+      suggestedType: 'entity',
+      confidence: 'high',
+    }, { QMD_QUERY_FIXTURE: fixture }));
+
+    assert.equal(out.action, 'created');
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
