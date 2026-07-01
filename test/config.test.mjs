@@ -108,7 +108,7 @@ test('wiki recall 신규 필드는 additive로 normalize 된다', () => {
     maxSourceChars: 12000,
     extractor: { argv: ['python3', 'scripts/extract.py'], timeout: 30, cooldownSeconds: 600 },
     batch: { idleSeconds: 90, maxItems: 5 },
-    semanticDedup: { enabled: true, threshold: 0.82, topK: 3 },
+    semanticDedup: { enabled: true, threshold: 0.82, topK: 3, similarPageMaxChars: 12000 },
   });
 });
 
@@ -425,15 +425,30 @@ test('compile.semanticDedup normalizes enabled/threshold/topK; defaults to true/
   const withSemantic = loadConfig(JSON.stringify({
     compile: { semanticDedup: { enabled: false, threshold: '0.5', topK: 7 } },
   }));
-  assert.deepEqual(withSemantic.compile.semanticDedup, { enabled: false, threshold: 0.5, topK: 7 });
+  assert.deepEqual(withSemantic.compile.semanticDedup, { enabled: false, threshold: 0.5, topK: 7, similarPageMaxChars: 12000 });
 
   const withDefaults = loadConfig(JSON.stringify({ compile: {} }));
-  assert.deepEqual(withDefaults.compile.semanticDedup, { enabled: true, threshold: 0.82, topK: 3 });
+  assert.deepEqual(withDefaults.compile.semanticDedup, { enabled: true, threshold: 0.82, topK: 3, similarPageMaxChars: 12000 });
 
   const withBadValues = loadConfig(JSON.stringify({
     compile: { semanticDedup: { enabled: 'nope', threshold: 'nan', topK: -1 } },
   }));
-  assert.deepEqual(withBadValues.compile.semanticDedup, { enabled: true, threshold: 0.82, topK: 3 });
+  assert.deepEqual(withBadValues.compile.semanticDedup, { enabled: true, threshold: 0.82, topK: 3, similarPageMaxChars: 12000 });
+});
+
+test('compile.semanticDedup.similarPageMaxChars normalizes with a 12000 default', () => {
+  const withValue = loadConfig(JSON.stringify({
+    compile: { semanticDedup: { similarPageMaxChars: '8000' } },
+  }));
+  assert.equal(withValue.compile.semanticDedup.similarPageMaxChars, 8000);
+
+  const withDefaults = loadConfig(JSON.stringify({ compile: {} }));
+  assert.equal(withDefaults.compile.semanticDedup.similarPageMaxChars, 12000);
+
+  const withBadValue = loadConfig(JSON.stringify({
+    compile: { semanticDedup: { similarPageMaxChars: 'not-a-number' } },
+  }));
+  assert.equal(withBadValue.compile.semanticDedup.similarPageMaxChars, 12000);
 });
 
 test('WIKI_STATUSES / lowPriorityStatuses accept superseded', () => {

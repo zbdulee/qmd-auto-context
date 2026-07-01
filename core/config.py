@@ -62,6 +62,7 @@ DEFAULT_CONFIG = {
             "enabled": True,
             "threshold": 0.82,
             "topK": 3,
+            "similarPageMaxChars": 12000,
         },
     },
 }
@@ -221,11 +222,12 @@ def compile_config(value):
     }
     raw_semantic = value.get("semanticDedup")
     semantic = raw_semantic if isinstance(raw_semantic, dict) else {}
-    default_semantic = defaults.get("semanticDedup", {"enabled": True, "threshold": 0.82, "topK": 3})
+    default_semantic = defaults.get("semanticDedup", {"enabled": True, "threshold": 0.82, "topK": 3, "similarPageMaxChars": 12000})
     result["semanticDedup"] = {
         "enabled": semantic.get("enabled") if isinstance(semantic.get("enabled"), bool) else default_semantic["enabled"],
         "threshold": coerce_float(semantic.get("threshold", default_semantic["threshold"]), default_semantic["threshold"]),
         "topK": coerce_int(semantic.get("topK", default_semantic["topK"]), default_semantic["topK"]),
+        "similarPageMaxChars": coerce_int(semantic.get("similarPageMaxChars", default_semantic["similarPageMaxChars"]), default_semantic["similarPageMaxChars"]),
     }
     return result
 
