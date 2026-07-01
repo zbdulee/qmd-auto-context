@@ -76,9 +76,12 @@ source markdown edit (unchanged: post_tool_source → queue → worker → extra
       1. identity_index lookup (canonicalKey/alias/title) — UNCHANGED
          match found  → auto-update existing page (or merge-needed if protected status), as today
          no match     → 2
-      2. semantic gate (NEW):
+      2. semantic gate (NEW), only reached after lint hard-reject and tombstone/suppression checks
+         already pass (same order main() uses today) — never spend a daemon call on a candidate
+         that was going to be rejected/suppressed anyway:
          compile.semanticDedup.enabled? no → 3
-         query qmd daemon: vec search scoped to this project's wiki sub-collection,
+         query qmd daemon: vec search scoped to this project's wiki collection (already its own
+           qmd collection via find_wiki_collection — not a sub-collection filter),
            text = candidate.title + candidate.summary, topK = compile.semanticDedup.topK
          daemon unreachable/timeout/error → fail-open → 3 (log semanticCheck:"skipped_daemon_unreachable")
          top score >= compile.semanticDedup.threshold →
@@ -92,16 +95,34 @@ source markdown edit (unchanged: post_tool_source → queue → worker → extra
 ### New/changed components
 
 - **`core/wiki_compile.py`** (changed): insert the semantic gate between identity lookup and
-  new-page creation. Reuses the daemon query path already used by `core/recall.py` (same
-  daemon `/query` contract), scoped to the project's wiki sub-collection only.
+  new-page creation (see ordering note above). `wiki_compile.py` has no daemon client today —
+  `recall.py`'s `query_daemon` is a private closure, not an importable function, and
+  `wiki_compile.py` doesn't import `urllib.request` — so this is **new code** in `wiki_compile.py`,
+  following the same `/query` request shape `recall.py` uses (`collections: [wiki_collection_name]`),
+  not a shared/reused function. The `QMD_QUERY_FIXTURE` env-var fixture read needs the same
+  treatment: `recall.py`'s handling of it is file-local, so `wiki_compile.py` needs its own read of
+  the same env var (same JSON shape) purely for test parity — this is duplicating a *pattern*, not
+  reusing *code*.
+- **`core/wiki_compile.py`** (new function): a partial-frontmatter patcher, e.g.
+  `patch_frontmatter_fields(path: Path, updates: dict) -> None`, that rewrites only named frontmatter
+  keys (`status`, `supersededBy`, `supersedes`) on an existing page in place, leaving the managed
+  `<!-- qmd:auto:start -->` body untouched. Today's only update path (`main()`, ~577-596) replaces the
+  managed body via `AUTO_BLOCK_RE` and never touches arbitrary frontmatter keys — the `supersede`
+  action below needs this new, narrower function; it does not reuse `markdown_page()` or the existing
+  update path.
 - **`.auto-context/compile/merge-needed.jsonl`** (new queue file): one line per pending decision.
   Schema: `{ts, candidate, matchedPath, matchedScore, suggestedAction}` where `suggestedAction` is
   derived from `candidate.suggestedType` (`entity` → `merge`, `decision` → `supersede-or-new`).
-  Appended with the same single-`write()` atomic-append pattern as `core/dirty_queue.py`.
+  Appended with `wiki_compile.py`'s existing `append_jsonl()` helper (already used for
+  `candidates.jsonl` / `generated-manifest.jsonl`) — not `core/dirty_queue.py`, which is a
+  two-column `name\tpath` text format for an unrelated queue and doesn't apply here. `append_jsonl`
+  has no `flock` (unlike `dirty_queue.py`'s locked append); acceptable for Phase 1 since only
+  `wiki_compile.py` writes this file — revisit if that changes.
 - **`core/wiki_review.py`** (new script): reads pending entries, applies a resolution action by
-  calling into `wiki_compile.py`'s existing writer/frontmatter-patch functions (no duplicated
-  write logic), then rewrites the queue file with the resolved entry removed and unresolved
-  entries retained (mirrors the drain-and-preserve pattern in `index_worker.sh`).
+  calling `patch_frontmatter_fields` (new, above) for `supersede`/`separate`-into-merge cases and the
+  existing new-page path for `separate`-as-new, then rewrites the queue file with the resolved entry
+  removed and unresolved entries retained (follows the drain-and-preserve *pattern* in
+  `backend/index_worker.sh`'s writer-lock/requeue logic — a reference to follow, not code to import).
 - **`skills/wiki-review/`** (new manual skill): presents each pending item — candidate summary
   next to the matched existing page's content — and collects one of four actions:
   - `merge` (entities): update the matched page's managed generated section in place.
@@ -116,7 +137,11 @@ source markdown edit (unchanged: post_tool_source → queue → worker → extra
   constant — qmd's hybrid lex+vec score scale isn't independently calibrated for this use case yet,
   so the implementation plan should treat it as tunable and note it as such rather than final.
 - **Frontmatter schema**: add `supersedes` / `supersededBy` (optional string, path or canonicalKey)
-  and `superseded` to the `status` enum (`WIKI_STATUSES`).
+  and add `superseded` to the `WIKI_STATUSES` enum (`core/config.py:64`). Also add `superseded` to
+  the protected-status set that `is_auto_writable_page` checks (`core/wiki_compile.py:446-463`,
+  currently `{"reviewed","canon","manual"}`) — without this, a later candidate landing on the same
+  `canonicalKey` as a superseded page would be auto-rewritten by the unchanged identity-match path,
+  silently reviving/overwriting the superseded page instead of routing to `merge-needed`.
 - **Recall policy** (`core/config.py`): `lowPriorityStatuses` currently only accepts
   `{"generated","tentative"}` (hardcoded filter, `core/config.py:186`) — extend it to also accept
   `superseded`, so superseded decisions stay in default recall at lower priority rather than being
@@ -128,10 +153,10 @@ source markdown edit (unchanged: post_tool_source → queue → worker → extra
 - Daemon unreachable/timeout during the semantic gate → fail-open (identical result to
   `semanticDedup.enabled: false`); this must never turn into a wiki_compile.py failure or block a
   page write. Audit trail only (`candidates.jsonl`).
-- Wiki sub-collection not yet indexed (fresh project) → same fail-open path.
-- Concurrent `merge-needed.jsonl` writers → same atomic single-`write()` append already used for
-  the dirty queue; no lock file needed for appends (only `wiki_review.py`'s drain-and-rewrite needs
-  to hold a lock, matching `index_worker.sh`'s writer-lock pattern).
+- Wiki collection not yet indexed (fresh project) → same fail-open path.
+- Concurrent `merge-needed.jsonl` writers → appends go through `append_jsonl` (single `write()`, no
+  lock — same as `candidates.jsonl` today); only `wiki_review.py`'s drain-and-rewrite step needs a
+  lock, following `backend/index_worker.sh`'s writer-lock/requeue pattern.
 - `wiki-review` resolving an entry whose `matchedPath` no longer exists (deleted since queued) →
   treat as stale, fall back to `separate` (create the page), log a warning; never crash the skill.
 - Ambiguous scores near the threshold: no special handling in Phase 1 — single threshold, revisit
@@ -139,9 +164,9 @@ source markdown edit (unchanged: post_tool_source → queue → worker → extra
 
 ## Testing
 
-- Reuse the existing `QMD_QUERY_FIXTURE` pattern (already used by `core/recall.py` tests) to inject
-  fake daemon vec-search responses into `wiki_compile.py`'s semantic gate — fully deterministic,
-  no live daemon required.
+- Add the same `QMD_QUERY_FIXTURE` env-var read to `wiki_compile.py`'s new daemon-query code,
+  mirroring (not sharing) `core/recall.py`'s handling — they're separate modules — so tests can
+  inject fake vec-search responses fully deterministically, no live daemon required.
 - `wiki_compile.py`: identity match skips the semantic call entirely; score ≥ threshold queues to
   `merge-needed.jsonl` and writes no page; score < threshold writes a new page as today; fixture
   error/timeout falls back to today's identity-only behavior byte-for-byte.
@@ -150,6 +175,9 @@ source markdown edit (unchanged: post_tool_source → queue → worker → extra
   `matchedPath` falls back to `separate` without crashing.
 - `config.py`: `compile.semanticDedup` default/coercion (bad values fall back to defaults, same
   style as `compile.batch`); `lowPriorityStatuses` accepts `superseded`.
+- `wiki_compile.py`: a candidate whose `canonicalKey` matches a page with `status: superseded` is
+  treated as protected (routes to `merge-needed`, not auto-rewritten) — regression test for the
+  `is_auto_writable_page` guard extension.
 - Full `npm test` must stay green, including existing `wiki_compile.py` canonicalKey-identity tests
   (no regression to the untouched fast path).
 
