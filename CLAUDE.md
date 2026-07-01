@@ -57,7 +57,7 @@ backend/   ← qmd MCP HTTP 데몬(:8483) launcher + keepalive/logrotate/index w
 
 ### 코어 (`core/`)
 - `recall.py` — UserPromptSubmit 핵심. 흐름: `config.load_project_config(cwd)` → 키워드 추출(`keywords.py`) → 데몬 `/query`(lex+vec 하이브리드, 또는 `QMD_QUERY_FIXTURE`) → skipPaths/minScore 필터 → topN → `additionalContext` 포맷. **CLI fallback은 없음** — 데몬 죽었거나 timeout이면 graceful하게 빈 출력(에러 아님).
-- `update.sh` — SessionStart에서 qmd 인덱스 갱신. `--resolve-only`, `--migrate-config`, `--init-wiki`, `--enable-compile` 모드 있음(`--init-wiki`는 scaffold와 wiki collection/role/hierarchical recall 설정을, `--enable-compile`은 wiki scaffold + compile 설정까지 함께 적용).
+- `update.sh` — SessionStart에서 qmd 인덱스 갱신. canonical `.auto-context/settings.json`의 collection root가 사라진 경우 먼저 `qmd collection remove`를 호출하고 성공한 collection만 settings에서 원자 제거한 뒤 update를 계속한다. `--resolve-only`, `--migrate-config`, `--init-wiki`, `--enable-compile` 모드 있음(`--init-wiki`는 scaffold와 wiki collection/role/hierarchical recall 설정을, `--enable-compile`은 wiki scaffold + compile 설정까지 함께 적용).
 - `posttool.py` — 편집 후 연속성 힌트. `is_story_path`는 config의 `collectionPaths`로 판별(하드코딩 없음). 이벤트명 `PostToolUse`(claude/codex)와 `AfterTool`(gemini) **둘 다** 수용. 내부적으로 recall.py를 subprocess로 위임.
 - `config.py` — 사용자 로컬 optout marker(`~/.config/qmd/optout`)를 먼저 확인한 뒤, `.auto-context/settings.json`(없으면 레거시 `.auto-context.json`, `.agents/qmd-recall.json`) 로드 + 기본값 병합. 숫자 필드(minScore/topN/queryTimeout) 보수적 coercion, 실패 시 기본값. legacy novel 컬렉션명(`*-manuscript`/`*-plot`)은 `lexicalPatterns:["ep"]` 자동 활성화.
 - `resolve_paths.py` — collectionPaths→경로 매핑 + risky path / allowRoots traversal 검증.

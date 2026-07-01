@@ -103,7 +103,11 @@ test('update core: sessionStart disabled from .auto-context/settings.json skips 
   try {
     mkdirSync(join(work, '.auto-context'), { recursive: true });
     mkdirSync(bin, { recursive: true });
-    writeFileSync(join(work, '.auto-context', 'settings.json'), JSON.stringify({ collections: ['x'], events: ['userPromptSubmit'] }));
+    writeFileSync(join(work, '.auto-context', 'settings.json'), JSON.stringify({
+      collections: ['x'],
+      collectionPaths: { x: 'missing' },
+      events: ['userPromptSubmit'],
+    }));
     writeFileSync(join(bin, 'qmd'), `#!/usr/bin/env sh\necho "$@" >> "${qmdLog}"\nexit 0\n`, { mode: 0o755 });
 
     execFileSync('bash', [join(process.cwd(), 'core', 'update.sh'), '--worker', work], {
@@ -111,7 +115,285 @@ test('update core: sessionStart disabled from .auto-context/settings.json skips 
     });
 
     assert.throws(() => readFileSync(qmdLog, 'utf8'), 'qmd should not be invoked when sessionStart is disabled');
+    const cfg = JSON.parse(readFileSync(join(work, '.auto-context', 'settings.json'), 'utf8'));
+    assert.deepEqual(cfg.collections, ['x'], 'disabled sessionStart must not prune settings');
   } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('update core: missing settings collection root is pruned before qmd update', () => {
+  const work = repoTemp('qmd-update-prune-missing');
+  const bin = join(work, 'bin');
+  const fakeHome = join(work, 'fakehome');
+  const qmdLog = join(work, 'qmd.log');
+  const lockBase = join(work, 'locks');
+  try {
+    mkdirSync(join(work, '.auto-context'), { recursive: true });
+    mkdirSync(join(work, 'docs'), { recursive: true });
+    mkdirSync(bin, { recursive: true });
+    mkdirSync(fakeHome, { recursive: true });
+    writeFileSync(join(work, '.auto-context', 'settings.json'), JSON.stringify({
+      indexing: true,
+      collections: ['docs', 'gone'],
+      collectionPaths: { docs: 'docs', gone: 'missing' },
+      collectionRoles: { docs: 'raw', gone: 'wiki' },
+    }));
+    writeFileSync(join(bin, 'qmd'), [
+      '#!/usr/bin/env sh',
+      `log="${qmdLog}"`,
+      'echo "$@" >> "$log"',
+      'exit 0',
+    ].join('\n'), { mode: 0o755 });
+
+    execFileSync('bash', [join(process.cwd(), 'core', 'update.sh'), '--worker', work], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH}`,
+        HOME: fakeHome,
+        QMD_CACHE_DIR: fakeHome,
+        QMD_LOCK_BASE: lockBase,
+      },
+    });
+
+    const cfg = JSON.parse(readFileSync(join(work, '.auto-context', 'settings.json'), 'utf8'));
+    assert.deepEqual(cfg.collections, ['docs']);
+    assert.deepEqual(cfg.collectionPaths, { docs: 'docs' });
+    assert.deepEqual(cfg.collectionRoles, { docs: 'raw' });
+    const log = readFileSync(qmdLog, 'utf8');
+    assert.match(log, /collection remove gone/);
+    assert.doesNotMatch(log, /collection add .*missing --name gone/);
+    assert.match(log, /^update$/m);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('update core: failed qmd collection remove keeps settings collection for retry', () => {
+  const work = repoTemp('qmd-update-prune-remove-fail');
+  const bin = join(work, 'bin');
+  const fakeHome = join(work, 'fakehome');
+  const qmdLog = join(work, 'qmd.log');
+  const lockBase = join(work, 'locks');
+  try {
+    mkdirSync(join(work, '.auto-context'), { recursive: true });
+    mkdirSync(join(work, 'docs'), { recursive: true });
+    mkdirSync(bin, { recursive: true });
+    mkdirSync(fakeHome, { recursive: true });
+    writeFileSync(join(work, '.auto-context', 'settings.json'), JSON.stringify({
+      indexing: true,
+      collections: ['docs', 'gone'],
+      collectionPaths: { docs: 'docs', gone: 'missing' },
+      collectionRoles: { docs: 'raw', gone: 'wiki' },
+    }));
+    writeFileSync(join(bin, 'qmd'), [
+      '#!/usr/bin/env sh',
+      `log="${qmdLog}"`,
+      'echo "$@" >> "$log"',
+      'case "$1 $2" in',
+      '  "collection remove") exit 1 ;;',
+      '  *) exit 0 ;;',
+      'esac',
+    ].join('\n'), { mode: 0o755 });
+
+    execFileSync('bash', [join(process.cwd(), 'core', 'update.sh'), '--worker', work], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH}`,
+        HOME: fakeHome,
+        QMD_CACHE_DIR: fakeHome,
+        QMD_LOCK_BASE: lockBase,
+      },
+    });
+
+    const cfg = JSON.parse(readFileSync(join(work, '.auto-context', 'settings.json'), 'utf8'));
+    assert.deepEqual(cfg.collections, ['docs', 'gone']);
+    assert.deepEqual(cfg.collectionPaths, { docs: 'docs', gone: 'missing' });
+    assert.deepEqual(cfg.collectionRoles, { docs: 'raw', gone: 'wiki' });
+    assert.match(readFileSync(qmdLog, 'utf8'), /collection remove gone/);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('update core: pruning the last settings collection writes indexing false', () => {
+  const work = repoTemp('qmd-update-prune-last');
+  const bin = join(work, 'bin');
+  const fakeHome = join(work, 'fakehome');
+  const qmdLog = join(work, 'qmd.log');
+  const lockBase = join(work, 'locks');
+  try {
+    mkdirSync(join(work, '.auto-context'), { recursive: true });
+    mkdirSync(bin, { recursive: true });
+    mkdirSync(fakeHome, { recursive: true });
+    writeFileSync(join(work, '.auto-context', 'settings.json'), JSON.stringify({
+      indexing: true,
+      collections: ['gone'],
+      collectionPaths: { gone: 'missing' },
+      collectionRoles: { gone: 'wiki' },
+    }));
+    writeFileSync(join(bin, 'qmd'), [
+      '#!/usr/bin/env sh',
+      `log="${qmdLog}"`,
+      'echo "$@" >> "$log"',
+      'exit 0',
+    ].join('\n'), { mode: 0o755 });
+
+    execFileSync('bash', [join(process.cwd(), 'core', 'update.sh'), '--worker', work], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH}`,
+        HOME: fakeHome,
+        QMD_CACHE_DIR: fakeHome,
+        QMD_LOCK_BASE: lockBase,
+      },
+    });
+
+    const cfg = JSON.parse(readFileSync(join(work, '.auto-context', 'settings.json'), 'utf8'));
+    assert.equal(cfg.indexing, false);
+    assert.deepEqual(cfg.collections, []);
+    assert.deepEqual(cfg.collectionPaths, {});
+    assert.deepEqual(cfg.collectionRoles, {});
+    assert.match(readFileSync(qmdLog, 'utf8'), /collection remove gone/);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('update core: worker migration does not immediately prune missing legacy collection', () => {
+  const work = repoTemp('qmd-update-prune-legacy-migrated');
+  const bin = join(work, 'bin');
+  const fakeHome = join(work, 'fakehome');
+  const qmdLog = join(work, 'qmd.log');
+  const lockBase = join(work, 'locks');
+  try {
+    mkdirSync(bin, { recursive: true });
+    mkdirSync(fakeHome, { recursive: true });
+    writeFileSync(join(work, '.auto-context.json'), JSON.stringify({
+      indexing: true,
+      collections: ['gone'],
+      collectionPaths: { gone: 'missing' },
+    }));
+    writeFileSync(join(bin, 'qmd'), [
+      '#!/usr/bin/env sh',
+      `log="${qmdLog}"`,
+      'echo "$@" >> "$log"',
+      'exit 0',
+    ].join('\n'), { mode: 0o755 });
+
+    execFileSync('bash', [join(process.cwd(), 'core', 'update.sh'), '--worker', work], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH}`,
+        HOME: fakeHome,
+        QMD_CACHE_DIR: fakeHome,
+        QMD_LOCK_BASE: lockBase,
+      },
+    });
+
+    const cfg = JSON.parse(readFileSync(join(work, '.auto-context', 'settings.json'), 'utf8'));
+    assert.deepEqual(cfg.collections, ['gone']);
+    assert.deepEqual(cfg.collectionPaths, { gone: 'missing' });
+    assert.doesNotMatch(readFileSync(qmdLog, 'utf8'), /collection remove gone/);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('update core: missing root prune refuses symlinked .auto-context directory', () => {
+  const work = repoTemp('qmd-update-prune-symlink');
+  const outside = repoTemp('qmd-update-prune-symlink-outside');
+  const bin = join(work, 'bin');
+  const fakeHome = join(work, 'fakehome');
+  const qmdLog = join(work, 'qmd.log');
+  const lockBase = join(work, 'locks');
+  try {
+    mkdirSync(bin, { recursive: true });
+    mkdirSync(fakeHome, { recursive: true });
+    symlinkSync(outside, join(work, '.auto-context'), 'dir');
+    writeFileSync(join(outside, 'settings.json'), JSON.stringify({
+      indexing: true,
+      collections: ['gone'],
+      collectionPaths: { gone: 'missing' },
+    }));
+    writeFileSync(join(bin, 'qmd'), [
+      '#!/usr/bin/env sh',
+      `log="${qmdLog}"`,
+      'echo "$@" >> "$log"',
+      'exit 0',
+    ].join('\n'), { mode: 0o755 });
+
+    execFileSync('bash', [join(process.cwd(), 'core', 'update.sh'), '--worker', work], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH}`,
+        HOME: fakeHome,
+        QMD_CACHE_DIR: fakeHome,
+        QMD_LOCK_BASE: lockBase,
+      },
+    });
+
+    const cfg = JSON.parse(readFileSync(join(outside, 'settings.json'), 'utf8'));
+    assert.deepEqual(cfg.collections, ['gone']);
+    assert.doesNotMatch(readFileSync(qmdLog, 'utf8'), /collection remove gone/);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test('update core: settings write failure after remove aborts stale update', () => {
+  const work = repoTemp('qmd-update-prune-write-fail');
+  const bin = join(work, 'bin');
+  const fakeHome = join(work, 'fakehome');
+  const qmdLog = join(work, 'qmd.log');
+  const lockBase = join(work, 'locks');
+  try {
+    mkdirSync(join(work, '.auto-context'), { recursive: true });
+    mkdirSync(join(work, 'docs'), { recursive: true });
+    mkdirSync(bin, { recursive: true });
+    mkdirSync(fakeHome, { recursive: true });
+    writeFileSync(join(work, '.auto-context', 'settings.json'), JSON.stringify({
+      indexing: true,
+      collections: ['docs', 'gone'],
+      collectionPaths: { docs: 'docs', gone: 'missing' },
+    }));
+    writeFileSync(join(bin, 'qmd'), [
+      '#!/usr/bin/env sh',
+      `log="${qmdLog}"`,
+      'echo "$@" >> "$log"',
+      'case "$1 $2" in',
+      `  "collection remove") chmod 500 "${join(work, '.auto-context')}"; exit 0 ;;`,
+      '  *) exit 0 ;;',
+      'esac',
+    ].join('\n'), { mode: 0o755 });
+
+    execFileSync('bash', [join(process.cwd(), 'core', 'update.sh'), '--worker', work], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH}`,
+        HOME: fakeHome,
+        QMD_CACHE_DIR: fakeHome,
+        QMD_LOCK_BASE: lockBase,
+      },
+    });
+
+    const log = readFileSync(qmdLog, 'utf8');
+    assert.match(log, /collection remove gone/);
+    assert.doesNotMatch(log, /collection add .*missing --name gone/);
+    assert.doesNotMatch(log, /^update$/m);
+  } finally {
+    try {
+      execFileSync('chmod', ['700', join(work, '.auto-context')]);
+    } catch {
+      // ignore cleanup permission repair failures
+    }
     rmSync(work, { recursive: true, force: true });
   }
 });
