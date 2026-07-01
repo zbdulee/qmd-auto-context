@@ -868,7 +868,7 @@ test('wiki_review: merge updates the matched existing page managed section in pl
     writeFileSync(join(work, '.auto-context', 'wiki', 'entities', 'existing.md'), [
       '---', 'title: "Existing"', 'canonicalKey: "existing"', 'type: entity', 'status: generated',
       'createdBy: qmd-auto-context', '---', '',
-      '<!-- qmd:auto:start id="main" sourceHash="old" -->', '## Summary', 'Old summary.',
+      '<!-- qmd:auto:start id="main" sourceHash="deadbeef" -->', '## Summary', 'Old summary.',
       '<!-- qmd:auto:end -->', '',
     ].join('\n'));
     writeMergeNeeded(work, [{
@@ -899,7 +899,7 @@ test('wiki_review: supersede creates a new page and marks the old page supersede
     writeFileSync(join(work, '.auto-context', 'wiki', 'decisions', 'old-rule.md'), [
       '---', 'title: "Old rule"', 'canonicalKey: "old-rule"', 'type: decision', 'status: generated',
       'createdBy: qmd-auto-context', '---', '',
-      '<!-- qmd:auto:start id="main" sourceHash="old" -->', '## Summary', 'The old rule text.',
+      '<!-- qmd:auto:start id="main" sourceHash="deadbeef" -->', '## Summary', 'The old rule text.',
       '<!-- qmd:auto:end -->', '',
     ].join('\n'));
     writeMergeNeeded(work, [{
