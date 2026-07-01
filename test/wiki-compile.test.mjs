@@ -651,3 +651,163 @@ print(w.patch_frontmatter_fields(Path(${JSON.stringify(page)}), {"status": "supe
     rmSync(work, { recursive: true, force: true });
   }
 });
+
+test('wiki_compile: semantic gate queues merge-needed when no identity match but daemon reports a high-similarity hit', () => {
+  const work = repoTemp('wiki-compile-semantic-hit');
+  try {
+    writeSettings(work);
+    mkdirSync(join(work, '.auto-context', 'wiki', 'entities'), { recursive: true });
+    writeFileSync(
+      join(work, '.auto-context', 'wiki', 'entities', 'cctv-request.md'),
+      [
+        '---',
+        'title: "CCTV request"',
+        'canonicalKey: "cctv-request"',
+        'type: entity',
+        'status: generated',
+        'createdBy: qmd-auto-context',
+        '---',
+        '',
+        '<!-- qmd:auto:start id="main" sourceHash="abc" -->',
+        '## Summary',
+        'Someone requested CCTV footage from the building office.',
+        '<!-- qmd:auto:end -->',
+        '',
+      ].join('\n'),
+    );
+
+    const fixture = join(work, 'daemon-fixture.json');
+    writeFileSync(fixture, JSON.stringify({
+      results: [
+        { file: 'proj-wiki/entities/cctv-request.md', score: 0.9, title: 'CCTV request' },
+      ],
+    }));
+
+    const out = JSON.parse(runCompile(work, {
+      title: 'Second unknown call about luggage',
+      summary: 'An unrelated-looking phone call about luggage — possibly the same actor as the CCTV request.',
+      suggestedType: 'entity',
+      confidence: 'medium',
+    }, { QMD_QUERY_FIXTURE: fixture }));
+
+    assert.equal(out.action, 'queued_for_review');
+    assert.equal(out.matchedPath, '.auto-context/wiki/entities/cctv-request.md');
+    assert.equal(out.score, 0.9);
+
+    const mergeNeeded = readJsonl(join(work, '.auto-context', 'compile', 'merge-needed.jsonl'));
+    assert.equal(mergeNeeded.length, 1);
+    assert.equal(mergeNeeded[0].matchedPath, '.auto-context/wiki/entities/cctv-request.md');
+    assert.equal(mergeNeeded[0].suggestedAction, 'merge');
+    assert.equal(mergeNeeded[0].candidate.title, 'Second unknown call about luggage');
+
+    assert.equal(existsSync(join(work, '.auto-context', 'wiki', 'entities', 'second-unknown-call-about-luggage.md')), false);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('wiki_compile: semantic gate is skipped when identity already matched (no daemon call needed)', () => {
+  const work = repoTemp('wiki-compile-semantic-identity-bypass');
+  try {
+    writeSettings(work);
+    mkdirSync(join(work, '.auto-context', 'wiki', 'entities'), { recursive: true });
+    writeFileSync(
+      join(work, '.auto-context', 'wiki', 'entities', 'known.md'),
+      [
+        '---',
+        'title: "Known entity"',
+        'canonicalKey: "known-entity"',
+        'type: entity',
+        'status: generated',
+        'createdBy: qmd-auto-context',
+        '---',
+        '',
+        '<!-- qmd:auto:start id="main" sourceHash="abc" -->',
+        '## Summary',
+        'Old summary.',
+        '<!-- qmd:auto:end -->',
+        '',
+      ].join('\n'),
+    );
+
+    // No fixture set: if the gate were reached it would try (and fail) to reach a real
+    // daemon at localhost:8483 and fail-open. Identity match must short-circuit before that.
+    const out = JSON.parse(runCompile(work, {
+      title: 'Known entity',
+      summary: 'Updated summary via identity match.',
+      suggestedType: 'entity',
+      confidence: 'high',
+      canonicalKey: 'known-entity',
+    }));
+
+    assert.equal(out.action, 'updated');
+    assert.equal(existsSync(join(work, '.auto-context', 'compile', 'merge-needed.jsonl')), false);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('wiki_compile: semantic gate below threshold writes a new page as before', () => {
+  const work = repoTemp('wiki-compile-semantic-below-threshold');
+  try {
+    writeSettings(work);
+    mkdirSync(join(work, '.auto-context', 'wiki', 'entities'), { recursive: true });
+    writeFileSync(
+      join(work, '.auto-context', 'wiki', 'entities', 'unrelated.md'),
+      [
+        '---',
+        'title: "Unrelated entity"',
+        'canonicalKey: "unrelated-entity"',
+        'type: entity',
+        'status: generated',
+        'createdBy: qmd-auto-context',
+        '---',
+        '',
+        '<!-- qmd:auto:start id="main" sourceHash="abc" -->',
+        '## Summary',
+        'Something else entirely.',
+        '<!-- qmd:auto:end -->',
+        '',
+      ].join('\n'),
+    );
+
+    const fixture = join(work, 'daemon-fixture.json');
+    writeFileSync(fixture, JSON.stringify({
+      results: [
+        { file: 'proj-wiki/entities/unrelated.md', score: 0.2, title: 'Unrelated entity' },
+      ],
+    }));
+
+    const out = JSON.parse(runCompile(work, {
+      title: 'Brand new entity',
+      summary: 'A genuinely new fact.',
+      suggestedType: 'entity',
+      confidence: 'high',
+    }, { QMD_QUERY_FIXTURE: fixture }));
+
+    assert.equal(out.action, 'created');
+    assert.equal(existsSync(join(work, '.auto-context', 'wiki', 'entities', 'brand-new-entity.md')), true);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('wiki_compile: semantic gate fails open when QMD_QUERY_FIXTURE is malformed', () => {
+  const work = repoTemp('wiki-compile-semantic-fixture-error');
+  try {
+    writeSettings(work);
+    const fixture = join(work, 'bad-fixture.json');
+    writeFileSync(fixture, 'not json');
+
+    const out = JSON.parse(runCompile(work, {
+      title: 'New entity while fixture is broken',
+      summary: 'Should still be created — fail-open on any daemon/fixture problem.',
+      suggestedType: 'entity',
+      confidence: 'high',
+    }, { QMD_QUERY_FIXTURE: fixture }));
+
+    assert.equal(out.action, 'created');
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});

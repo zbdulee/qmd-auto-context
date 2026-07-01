@@ -10,6 +10,8 @@ import json
 import os
 import re
 import sys
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -478,6 +480,91 @@ def find_wiki_collection(config: dict) -> tuple[str | None, str | None]:
     return None, None
 
 
+def resolve_daemon_result_path(wiki_root: Path, uri: str, collection: str) -> Path | None:
+    if not isinstance(uri, str) or not uri:
+        return None
+    if uri.startswith("qmd://"):
+        rest = uri[len("qmd://"):]
+        if "/" not in rest:
+            return None
+        _, rel = rest.split("/", 1)
+    elif collection and uri.startswith(f"{collection}/"):
+        rel = uri[len(collection) + 1:]
+    else:
+        return None
+    candidate_path = (wiki_root / rel).resolve()
+    try:
+        candidate_path.relative_to(wiki_root)
+    except ValueError:
+        return None
+    return candidate_path if candidate_path.is_file() else None
+
+
+def query_wiki_similar(daemon_url: str, collection: str, text: str, top_k: int, timeout: float) -> list[dict] | None:
+    """Vector-search `text` against `collection`. Returns daemon `results` list, or
+    None on any failure — caller must fail-open on None, never raise."""
+    fixture_path = os.environ.get("QMD_QUERY_FIXTURE")
+    if fixture_path:
+        try:
+            with open(fixture_path, "r", encoding="utf-8") as f:
+                results = json.load(f).get("results", [])
+        except (OSError, json.JSONDecodeError):
+            return None
+        return results if isinstance(results, list) else []
+    payload = {
+        "searches": [{"type": "vec", "query": text}],
+        "collections": [collection],
+        "limit": max(1, top_k),
+        "minScore": 0,
+        "timeout": timeout,
+        "rerank": False,
+    }
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        f"{daemon_url}/query",
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8")
+        parsed = json.loads(body)
+        results = parsed.get("results", [])
+        return results if isinstance(results, list) else []
+    except (urllib.error.URLError, OSError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def find_wiki_semantic_match(
+    root: Path, wiki_root: Path, config: dict, candidate: dict, summary: str
+) -> tuple[Path | None, float | None]:
+    """Return (matched_path, score) for the top daemon hit above threshold, or
+    (None, top_score_or_None) if nothing qualifies or the daemon/fixture failed."""
+    compile_cfg = config.get("compile") if isinstance(config.get("compile"), dict) else {}
+    semantic_cfg = compile_cfg.get("semanticDedup") if isinstance(compile_cfg.get("semanticDedup"), dict) else {}
+    if not semantic_cfg.get("enabled", True):
+        return None, None
+    collection, _ = find_wiki_collection(config)
+    if not collection:
+        return None, None
+    text = f"{candidate.get('title') or ''} {summary}".strip()
+    if not text:
+        return None, None
+    daemon_url = os.environ.get("QMD_DAEMON_URL", "http://localhost:8483")
+    timeout = float(config.get("queryTimeout", 5.0) or 5.0)
+    results = query_wiki_similar(daemon_url, collection, text, int(semantic_cfg.get("topK", 3)), timeout)
+    if not results:
+        return None, None
+    top = max(results, key=lambda r: r.get("score", 0) if isinstance(r, dict) else 0)
+    score = top.get("score", 0) if isinstance(top, dict) else 0
+    threshold = float(semantic_cfg.get("threshold", 0.82))
+    if score < threshold:
+        return None, score
+    matched = resolve_daemon_result_path(wiki_root, top.get("file", "") if isinstance(top, dict) else "", collection)
+    return matched, score
+
+
 def is_auto_writable_page(path: Path) -> tuple[bool, list[str]]:
     try:
         text = path.read_text(encoding="utf-8")
@@ -535,7 +622,8 @@ def main() -> int:
     candidate_path = safe_compile_file(root, compile_dir, compile_cfg.get("candidatePath", ".auto-context/compile/candidates.jsonl"))
     tombstone_path = safe_compile_file(root, compile_dir, compile_cfg.get("tombstonePath", ".auto-context/compile/tombstones.jsonl"))
     manifest_path = safe_compile_file(root, compile_dir, compile_cfg.get("manifestPath", ".auto-context/compile/generated-manifest.jsonl"))
-    if candidate_path is None or tombstone_path is None or manifest_path is None:
+    merge_needed_path = safe_compile_file(root, compile_dir, compile_cfg.get("mergeNeededPath", ".auto-context/compile/merge-needed.jsonl"))
+    if candidate_path is None or tombstone_path is None or manifest_path is None or merge_needed_path is None:
         print(json.dumps({"action": "rejected", "reason": "unsafe_compile_path"}, ensure_ascii=False))
         return 1
 
@@ -604,6 +692,26 @@ def main() -> int:
         append_jsonl(candidate_path, record)
         print(json.dumps({"action": "candidate", "targetPath": record["targetPath"]}, ensure_ascii=False))
         return 0
+
+    if target_reason == "slug" and not target.exists():
+        matched_path, score = find_wiki_semantic_match(root, wiki_root, config, candidate, summary)
+        if matched_path is not None:
+            suggested_action = "supersede-or-new" if suggested_type == "decision" else "merge"
+            append_jsonl(merge_needed_path, {
+                "ts": now_iso(),
+                "candidate": record,
+                "matchedPath": matched_path.relative_to(root).as_posix(),
+                "matchedScore": score,
+                "suggestedAction": suggested_action,
+            })
+            record["action"] = "queued_for_review"
+            append_jsonl(candidate_path, record)
+            print(json.dumps({
+                "action": "queued_for_review",
+                "matchedPath": matched_path.relative_to(root).as_posix(),
+                "score": score,
+            }, ensure_ascii=False))
+            return 0
 
     status = compile_cfg.get("defaultStatus", "generated")
     target.parent.mkdir(parents=True, exist_ok=True)
