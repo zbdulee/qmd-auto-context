@@ -1,0 +1,25 @@
+.agents/plugins/marketplace.json
+  h_42d950683aaaea 8
+.claude-plugin/marketplace.json
+  h_42d950683aaaea 8
+.claude-plugin/plugin.json
+  h_42d950683aaaea 3
+.codex-plugin/plugin.json
+  h_42d950683aaaea 4
+skills/wiki-review/SKILL.md
+  h_42d950683aaaea 1-45
+skills/wiki-review/scripts/wiki-review.sh
+  h_42d950683aaaea 1-15
+test/manual-skills.test.mjs
+  h_42d950683aaaea 12,27-28
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "74a9b972daa5849188efe31b1132610aa9017e6e",
+  "prompts": {},
+  "humans": {
+    "h_42d950683aaaea": {
+      "author": "dulee@zigbang.com"
+    }
+  }
+}
