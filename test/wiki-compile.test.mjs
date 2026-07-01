@@ -577,7 +577,7 @@ test('patch_frontmatter_fields: rewrites only named scalar keys, leaves body and
   const work = repoTemp('wiki-compile-patch-frontmatter');
   try {
     const page = join(work, 'page.md');
-    writeFileSync(page, [
+    const originalFixture = [
       '---',
       'title: "Some Decision"',
       'canonicalKey: "some-decision"',
@@ -592,7 +592,8 @@ test('patch_frontmatter_fields: rewrites only named scalar keys, leaves body and
       'Body text that must survive untouched.',
       '<!-- qmd:auto:end -->',
       '',
-    ].join('\n'));
+    ].join('\n');
+    writeFileSync(page, originalFixture);
 
     const script = `
 import sys
@@ -606,11 +607,26 @@ print(ok)
     assert.equal(result, 'True');
 
     const text = readFileSync(page, 'utf8');
-    assert.match(text, /status: "superseded"/);
-    assert.match(text, /supersededBy: "\.auto-context\/wiki\/decisions\/new\.md"/);
-    assert.match(text, /canonicalKey: "some-decision"/);
-    assert.match(text, /- "Alt Name"/);
-    assert.match(text, /Body text that must survive untouched\./);
+
+    // Full-content equality: construct the expected file with only status and supersededBy changed/added
+    const expectedFullText = [
+      '---',
+      'title: "Some Decision"',
+      'canonicalKey: "some-decision"',
+      'aliases:',
+      '  - "Alt Name"',
+      'status: "superseded"',
+      'createdBy: qmd-auto-context',
+      'supersededBy: ".auto-context/wiki/decisions/new.md"',
+      '---',
+      '',
+      '<!-- qmd:auto:start id="main" sourceHash="deadbeef" -->',
+      '## Summary',
+      'Body text that must survive untouched.',
+      '<!-- qmd:auto:end -->',
+      '',
+    ].join('\n');
+    assert.equal(text, expectedFullText);
   } finally {
     rmSync(work, { recursive: true, force: true });
   }
