@@ -291,6 +291,48 @@ test('wiki_compile: protected existing identity match records merge-needed witho
   }
 });
 
+test('wiki_compile: superseded existing page is protected — records merge-needed instead of rewriting', () => {
+  const work = repoTemp('wiki-compile-superseded-protected');
+  try {
+    writeSettings(work);
+    mkdirSync(join(work, '.auto-context', 'wiki', 'decisions'), { recursive: true });
+    writeFileSync(
+      join(work, '.auto-context', 'wiki', 'decisions', 'old-principle.md'),
+      [
+        '---',
+        'title: "Old principle"',
+        'canonicalKey: "old-principle-rule"',
+        'type: decision',
+        'status: superseded',
+        'createdBy: qmd-auto-context',
+        '---',
+        '',
+        '<!-- qmd:auto:start id="main" sourceHash="abc123" -->',
+        '## Summary',
+        'Old text.',
+        '<!-- qmd:auto:end -->',
+        '',
+      ].join('\n'),
+    );
+
+    const out = JSON.parse(runCompile(work, {
+      title: 'Old principle, reworded',
+      summary: 'A later candidate that matches the same canonicalKey.',
+      suggestedType: 'decision',
+      confidence: 'high',
+      canonicalKey: 'old-principle-rule',
+    }));
+
+    assert.equal(out.action, 'merge-needed');
+    assert.deepEqual(out.findings, ['protected_status']);
+
+    const stillOld = readFileSync(join(work, '.auto-context', 'wiki', 'decisions', 'old-principle.md'), 'utf8');
+    assert.match(stillOld, /Old text\./);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
 test('wiki_compile: manual status page records merge-needed without overwriting auto block', () => {
   const work = repoTemp('wiki-compile-manual-status');
   try {

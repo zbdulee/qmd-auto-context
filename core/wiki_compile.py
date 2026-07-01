@@ -454,7 +454,7 @@ def is_auto_writable_page(path: Path) -> tuple[bool, list[str]]:
     findings = []
     if meta.get("reviewed") is True:
         findings.append("reviewed_true")
-    if str(meta.get("status") or "").strip().lower() in {"reviewed", "canon", "manual"}:
+    if str(meta.get("status") or "").strip().lower() in {"reviewed", "canon", "manual", "superseded"}:
         findings.append("protected_status")
     if meta.get("createdBy") != "qmd-auto-context":
         findings.append("non_qmd_created_by")
