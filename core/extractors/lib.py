@@ -35,13 +35,35 @@ Output RULES (strict):
 WIKI SCHEMA (for orientation):
 {schema}
 
-EXISTING WIKI INDEX (avoid duplicates):
-{index}
+{existing_context_section}
 
 SOURCE FILE: {path}
 SOURCE CONTENT:
 {content}
 """
+
+_SIMILAR_PAGES_TEMPLATE = """TOP MATCHING EXISTING WIKI PAGES (reuse canonicalKey/targetPath below if this source overlaps one):
+
+{pages}"""
+
+_INDEX_TEMPLATE = """EXISTING WIKI INDEX (avoid duplicates):
+{index}"""
+
+
+def render_existing_context_section(wiki: dict) -> str:
+    similar_pages = wiki.get("similarPages")
+    if isinstance(similar_pages, list) and similar_pages:
+        blocks = []
+        for page in similar_pages:
+            if not isinstance(page, dict):
+                continue
+            path = str(page.get("path", ""))
+            score = page.get("score", "")
+            content = str(page.get("content", ""))
+            blocks.append(f"### {path} (score: {score})\n{content}")
+        if blocks:
+            return _SIMILAR_PAGES_TEMPLATE.format(pages="\n\n".join(blocks))
+    return _INDEX_TEMPLATE.format(index=str(wiki.get("index", ""))[:4000])
 
 
 def read_payload() -> dict:
@@ -59,7 +81,7 @@ def build_prompt(payload: dict) -> str:
     return _PROMPT_TEMPLATE.format(
         types="/".join(ALLOWED_TYPES),
         schema=str(wiki.get("schema", ""))[:4000],
-        index=str(wiki.get("index", ""))[:4000],
+        existing_context_section=render_existing_context_section(wiki),
         path=str(source.get("path", "")),
         content=str(source.get("content", "")),
     )

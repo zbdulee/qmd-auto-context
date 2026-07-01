@@ -45,6 +45,61 @@ print(json.dumps({'has_body':'UNIQ_SRC_BODY' in p,'has_candidates':'candidates' 
   assert.equal(out.no_tools, true);
 });
 
+test('build_prompt renders similarPages section and omits EXISTING WIKI INDEX when present', () => {
+  const script = `
+import sys
+sys.path.insert(0, 'core/extractors')
+import lib
+payload = {
+    'source': {'path': 'docs/a.md', 'content': 'new source text'},
+    'wiki': {
+        'schema': 'SCHEMA',
+        'index': '- some/old/index/line.md - Old Title',
+        'similarPages': [
+            {'path': '.auto-context/wiki/entities/known.md', 'score': 0.91, 'content': '## Summary\\nThe known fact.'},
+        ],
+    },
+}
+print(lib.build_prompt(payload))
+`;
+  const out = execFileSync('python3', ['-c', script], { encoding: 'utf8' });
+  assert.match(out, /TOP MATCHING EXISTING WIKI PAGES/);
+  assert.match(out, /\.auto-context\/wiki\/entities\/known\.md/);
+  assert.match(out, /The known fact\./);
+  assert.doesNotMatch(out, /EXISTING WIKI INDEX/);
+  assert.doesNotMatch(out, /some\/old\/index\/line\.md/);
+});
+
+test('build_prompt falls back to EXISTING WIKI INDEX exactly as before when similarPages is absent', () => {
+  const scriptWithout = `
+import sys
+sys.path.insert(0, 'core/extractors')
+import lib
+payload = {
+    'source': {'path': 'docs/a.md', 'content': 'new source text'},
+    'wiki': {'schema': 'SCHEMA', 'index': '- some/old/index/line.md - Old Title'},
+}
+print(lib.build_prompt(payload))
+`;
+  const withoutSimilarPages = execFileSync('python3', ['-c', scriptWithout], { encoding: 'utf8' });
+  assert.match(withoutSimilarPages, /EXISTING WIKI INDEX \(avoid duplicates\):/);
+  assert.match(withoutSimilarPages, /some\/old\/index\/line\.md/);
+  assert.doesNotMatch(withoutSimilarPages, /TOP MATCHING EXISTING WIKI PAGES/);
+
+  const scriptEmpty = `
+import sys
+sys.path.insert(0, 'core/extractors')
+import lib
+payload = {
+    'source': {'path': 'docs/a.md', 'content': 'new source text'},
+    'wiki': {'schema': 'SCHEMA', 'index': '- some/old/index/line.md - Old Title', 'similarPages': []},
+}
+print(lib.build_prompt(payload))
+`;
+  const withEmptySimilarPages = execFileSync('python3', ['-c', scriptEmpty], { encoding: 'utf8' });
+  assert.equal(withEmptySimilarPages, withoutSimilarPages);
+});
+
 test('run_isolated injects QMD_SANDBOX=1 into the child env', () => {
   const py = `import sys; sys.path.insert(0,'core/extractors'); import lib
 out, code = lib.run_isolated(['bash','-lc','printf %s "$QMD_SANDBOX"'], 10)
