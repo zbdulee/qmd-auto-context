@@ -1,0 +1,13 @@
+docs/superpowers/specs/2026-07-01-wiki-extractor-similar-page-context-design.md
+  h_42d950683aaaea 1-139
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "b63d65e37fc28ed9e47ec7ed95d1ade372460ee1",
+  "prompts": {},
+  "humans": {
+    "h_42d950683aaaea": {
+      "author": "dulee@zigbang.com"
+    }
+  }
+}
