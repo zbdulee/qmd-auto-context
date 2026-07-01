@@ -1,0 +1,29 @@
+README.md
+  h_42d950683aaaea 131-134
+core/extractors/lib.py
+  h_42d950683aaaea 25-29
+core/wiki_compile.py
+  h_42d950683aaaea 53,100-257,262-266,273-274,288,290,336-348,364-365,369-378,387,446-465,492-493,517-520,526-532,542-552,579-589,591,593-595
+core/wiki_extract.py
+  h_42d950683aaaea 69,82,89,91-99,107-115
+docs/plans/2026-06-26-wiki-conversation-compile-todo.md
+  h_42d950683aaaea 43,68-69,89
+test/wiki-compile-worker.test.mjs
+  h_42d950683aaaea 262-303
+test/wiki-compile.test.mjs
+  h_42d950683aaaea 43-46,78-420
+test/wiki-extract.test.mjs
+  h_42d950683aaaea 68-92,102-103,115-116
+test/wiki-extractors.test.mjs
+  h_42d950683aaaea 40,44
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "25fab2cadb6764b4e258149fd5365436b6f7bf40",
+  "prompts": {},
+  "humans": {
+    "h_42d950683aaaea": {
+      "author": "dulee@zigbang.com"
+    }
+  }
+}
