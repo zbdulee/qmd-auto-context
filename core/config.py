@@ -42,6 +42,7 @@ DEFAULT_CONFIG = {
         "sourceQueuePath": ".auto-context/compile/source-queue.jsonl",
         "tombstonePath": ".auto-context/compile/tombstones.jsonl",
         "manifestPath": ".auto-context/compile/generated-manifest.jsonl",
+        "mergeNeededPath": ".auto-context/compile/merge-needed.jsonl",
         "excludeStatusesFromRecall": ["discarded", "contested"],
         "lowPriorityStatuses": ["generated", "tentative"],
         "triggers": [],
@@ -57,11 +58,16 @@ DEFAULT_CONFIG = {
             "idleSeconds": 90,
             "maxItems": 5,
         },
+        "semanticDedup": {
+            "enabled": True,
+            "threshold": 0.82,
+            "topK": 3,
+        },
     },
 }
 
 COMPILE_MODES = {"off", "candidates", "guarded", "auto-wiki"}
-WIKI_STATUSES = {"generated", "reviewed", "canon", "tentative", "contested", "discarded"}
+WIKI_STATUSES = {"generated", "reviewed", "canon", "tentative", "contested", "discarded", "superseded"}
 COMPILE_TRIGGERS = {
     "explicit_user_approval",
     "post_session_summary",
@@ -174,7 +180,7 @@ def compile_config(value):
     result["autoWrite"] = value.get("autoWrite") if isinstance(value.get("autoWrite"), bool) else defaults["autoWrite"]
     result["defaultStatus"] = value.get("defaultStatus") if value.get("defaultStatus") in WIKI_STATUSES else defaults["defaultStatus"]
     result["requireReviewForCanon"] = value.get("requireReviewForCanon") if isinstance(value.get("requireReviewForCanon"), bool) else defaults["requireReviewForCanon"]
-    for key in ("candidatePath", "sourceQueuePath", "tombstonePath", "manifestPath"):
+    for key in ("candidatePath", "sourceQueuePath", "tombstonePath", "manifestPath", "mergeNeededPath"):
         if isinstance(value.get(key), str):
             result[key] = value[key]
     result["excludeStatusesFromRecall"] = [
@@ -183,7 +189,7 @@ def compile_config(value):
     ]
     result["lowPriorityStatuses"] = [
         status for status in string_list(value.get("lowPriorityStatuses"), defaults["lowPriorityStatuses"])
-        if status in {"generated", "tentative"}
+        if status in {"generated", "tentative", "superseded"}
     ]
     result["triggers"] = [
         trigger for trigger in string_list(value.get("triggers"), defaults["triggers"])
@@ -212,6 +218,14 @@ def compile_config(value):
     result["batch"] = {
         "idleSeconds": coerce_int(batch.get("idleSeconds", 90), 90),
         "maxItems": coerce_int(batch.get("maxItems", 5), 5),
+    }
+    raw_semantic = value.get("semanticDedup")
+    semantic = raw_semantic if isinstance(raw_semantic, dict) else {}
+    default_semantic = defaults.get("semanticDedup", {"enabled": True, "threshold": 0.82, "topK": 3})
+    result["semanticDedup"] = {
+        "enabled": semantic.get("enabled") if isinstance(semantic.get("enabled"), bool) else default_semantic["enabled"],
+        "threshold": coerce_float(semantic.get("threshold", default_semantic["threshold"]), default_semantic["threshold"]),
+        "topK": coerce_int(semantic.get("topK", default_semantic["topK"]), default_semantic["topK"]),
     }
     return result
 
