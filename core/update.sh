@@ -200,6 +200,201 @@ except json.JSONDecodeError:
 normalized = qmd_config.normalize_config(parsed if isinstance(parsed, dict) else {})
 print("yes" if qmd_config.event_enabled(normalized, event) else "no")
 PY
+	}
+
+prune_missing_settings_collections() {
+  local workdir="$1"
+  local missing
+  missing=$(python3 - "$workdir" "$(dirname "$0")" <<'PY'
+import fnmatch
+import json
+import sys
+from pathlib import Path
+
+workdir = Path(sys.argv[1]).resolve()
+core_dir = Path(sys.argv[2]).resolve()
+sys.path.insert(0, str(core_dir))
+
+import config as qmd_config
+import resolve_paths as qmd_resolve_paths
+
+info = qmd_config.find_project_config(str(workdir))
+if info.get("configFormat") != "auto-context-dir":
+    sys.exit(0)
+
+settings = Path(info.get("configPath") or "")
+project_root = Path(info.get("projectRoot") or workdir).resolve()
+settings_dir = project_root / ".auto-context"
+expected = project_root / ".auto-context" / "settings.json"
+try:
+    if settings != expected or settings_dir.is_symlink() or settings.is_symlink():
+        sys.exit(0)
+    if settings.resolve() != expected:
+        sys.exit(0)
+except OSError:
+    sys.exit(0)
+
+try:
+    raw = json.loads(settings.read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    sys.exit(0)
+if not isinstance(raw, dict):
+    sys.exit(0)
+
+collections = [item for item in raw.get("collections", []) if isinstance(item, str)]
+collection_paths = raw.get("collectionPaths") if isinstance(raw.get("collectionPaths"), dict) else {}
+collection_paths = {key: value for key, value in collection_paths.items() if isinstance(key, str) and isinstance(value, str)}
+roots = qmd_resolve_paths.allowed_roots(raw)
+
+missing = []
+for collection in collections:
+    matched_path = "."
+    for pattern, value in collection_paths.items():
+        if fnmatch.fnmatch(collection, pattern):
+            matched_path = value
+            break
+    if not qmd_resolve_paths.safe_collection_path(project_root, matched_path, roots):
+        continue
+    candidate = Path(matched_path).expanduser()
+    if not candidate.is_absolute():
+        candidate = project_root / candidate
+    if not candidate.is_dir():
+        missing.append(collection)
+
+if not missing:
+    sys.exit(0)
+
+print("\n".join(missing))
+PY
+)
+  [ -z "$missing" ] && return 0
+
+  local successful
+  successful=""
+  while IFS= read -r name; do
+    [ -z "$name" ] && continue
+    log "PRUNE MISSING COLLECTION: $name"
+    if qmd collection remove "$name" >>"$LOG" 2>&1; then
+      successful="${successful}${name}
+"
+    else
+      log "PRUNE MISSING COLLECTION FAILED: $name"
+    fi
+  done <<EOF
+$missing
+EOF
+
+  [ -z "$successful" ] && return 0
+
+  local successful_json
+  successful_json=$(SUCCESSFUL_COLLECTIONS="$successful" python3 - <<'PY'
+import json
+import os
+
+names = [line for line in os.environ.get("SUCCESSFUL_COLLECTIONS", "").splitlines() if line]
+print(json.dumps(names, ensure_ascii=False))
+PY
+)
+
+  python3 - "$workdir" "$(dirname "$0")" "$successful_json" <<'PY'
+import fnmatch
+import json
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+workdir = Path(sys.argv[1]).resolve()
+core_dir = Path(sys.argv[2]).resolve()
+try:
+    removed = json.loads(sys.argv[3])
+except json.JSONDecodeError:
+    removed = []
+if not isinstance(removed, list):
+    sys.exit(0)
+removed = [item for item in removed if isinstance(item, str)]
+if not removed:
+    sys.exit(0)
+
+sys.path.insert(0, str(core_dir))
+import config as qmd_config
+
+info = qmd_config.find_project_config(str(workdir))
+if info.get("configFormat") != "auto-context-dir":
+    sys.exit(0)
+
+settings = Path(info.get("configPath") or "")
+project_root = Path(info.get("projectRoot") or workdir).resolve()
+settings_dir = project_root / ".auto-context"
+expected = project_root / ".auto-context" / "settings.json"
+try:
+    if settings != expected or settings_dir.is_symlink() or settings.is_symlink():
+        sys.exit(2)
+    if settings.resolve() != expected:
+        sys.exit(0)
+except OSError:
+    sys.exit(2)
+
+try:
+    raw = json.loads(settings.read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    sys.exit(2)
+if not isinstance(raw, dict):
+    sys.exit(2)
+
+collections = [item for item in raw.get("collections", []) if isinstance(item, str)]
+removed_set = set(removed)
+remaining = [collection for collection in collections if collection not in removed_set]
+raw["collections"] = remaining
+if not remaining:
+    raw["indexing"] = False
+
+if isinstance(raw.get("collectionPaths"), dict):
+    remaining_set = set(remaining)
+    pruned_paths = {}
+    for pattern, value in raw["collectionPaths"].items():
+        if not isinstance(pattern, str):
+            pruned_paths[pattern] = value
+            continue
+        if pattern in removed_set:
+            continue
+        if (
+            isinstance(value, str)
+            and any(ch in pattern for ch in "*?[")
+            and not any(fnmatch.fnmatch(collection, pattern) for collection in remaining_set)
+        ):
+            continue
+        pruned_paths[pattern] = value
+    raw["collectionPaths"] = pruned_paths
+
+if isinstance(raw.get("collectionRoles"), dict):
+    raw["collectionRoles"] = {
+        key: value
+        for key, value in raw["collectionRoles"].items()
+        if not isinstance(key, str) or key not in removed_set
+    }
+
+tmp_path = None
+try:
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(settings.parent),
+        prefix=settings.name + ".",
+        suffix=".tmp",
+        text=True,
+    )
+    tmp_path = Path(tmp_name)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(raw, handle, ensure_ascii=False, indent=2)
+        handle.write("\n")
+    os.replace(tmp_path, settings)
+except OSError:
+    if tmp_path is not None:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+    sys.exit(2)
+PY
 }
 
 run_update() {
@@ -216,6 +411,8 @@ run_update() {
   local migration_result
   migration_result=$(migrate_config_json "$workdir" 2>&1 || true)
   [ -n "$migration_result" ] && log "CONFIG MIGRATION: $migration_result"
+  local migrated
+  migrated=$(printf '%s' "$migration_result" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("migrated"))' 2>/dev/null || echo "False")
 
   # 1. read config from .agents/qmd-recall.json if exists
   local config_json
@@ -240,6 +437,20 @@ run_update() {
     exit 0
   fi
   trap 'release_lock' EXIT
+
+  if [ "$migrated" != "True" ]; then
+    if ! prune_missing_settings_collections "$workdir"; then
+      log "ABORT: failed to write pruned settings"
+      exit 0
+    fi
+  fi
+  config_json=$(load_config_json "$workdir")
+  resolved=$(echo "$config_json" | bash "$0" --resolve-only --cwd "$workdir" 2>/dev/null || echo '{"refused":true}')
+  refused=$(echo "$resolved" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("refused"))' 2>/dev/null || echo "")
+  if [ "$refused" = "True" ]; then
+    log "ABORT: resolve-only refused path '$workdir' after prune"
+    exit 0
+  fi
 
   preflight_remove_risky
 

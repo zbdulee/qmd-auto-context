@@ -174,6 +174,10 @@ tail -n 20 /tmp/qmd-recall.log
 
 로그의 `reason` 값으로 `no_collections`, `daemon_unreachable`, `query_failed`, `no_results_after_filter`, `selected` 등을 확인할 수 있습니다.
 
+### settings에 등록된 폴더를 지웠을 때
+
+`.auto-context/settings.json`의 `collectionPaths`가 가리키는 폴더 자체가 없어지면, 다음 SessionStart update가 먼저 `qmd collection remove`를 실행하고 성공한 collection만 settings에서 제거합니다. 폴더 안의 파일만 삭제한 경우에는 일반 `qmd update`가 삭제를 반영합니다.
+
 ### qmd backend가 궁금할 때
 
 `core/backend_manager.sh`가 qmd MCP HTTP daemon(`:8483`)을 확인하고 필요할 때 시작합니다. 훅은 qmd를 자동 설치하거나 업그레이드하지 않습니다. qmd가 없으면 자동 훅은 조용히 지나가고, 수동 skill은 설치 안내를 출력합니다.
