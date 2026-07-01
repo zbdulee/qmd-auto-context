@@ -171,6 +171,87 @@ test('wiki_review: unresolved entries before and after the resolved index are pr
   }
 });
 
+test('wiki_review: merge falls back to a new page when the matched target is not auto-writable (missing managed block)', () => {
+  const work = repoTemp('wiki-review-unwritable');
+  try {
+    writeSettings(work);
+    mkdirSync(join(work, '.auto-context', 'wiki', 'entities'), { recursive: true });
+    const originalText = [
+      '---', 'title: "Existing"', 'canonicalKey: "existing"', 'type: entity', 'status: generated',
+      'createdBy: qmd-auto-context', '---', '',
+      '## Summary', 'This page has no managed block at all (manually edited).', '',
+    ].join('\n');
+    writeFileSync(join(work, '.auto-context', 'wiki', 'entities', 'existing.md'), originalText);
+    writeMergeNeeded(work, [{
+      candidate: {
+        title: 'Existing candidate update', summary: 'Merged, richer summary.', suggestedType: 'entity',
+        confidence: 'high', canonicalKey: 'existing', targetPath: '.auto-context/wiki/entities/existing.md',
+      },
+      matchedPath: '.auto-context/wiki/entities/existing.md',
+      matchedScore: 0.9,
+      suggestedAction: 'merge',
+    }]);
+
+    const out = JSON.parse(runReview(work, 0, 'merge'));
+
+    // (a) existing page must be completely untouched
+    const afterText = readFileSync(join(work, '.auto-context', 'wiki', 'entities', 'existing.md'), 'utf8');
+    assert.equal(afterText, originalText);
+
+    // (b) a new independent page was created instead with the candidate's content
+    assert.equal(out.action, 'created');
+    assert.notEqual(out.targetPath, '.auto-context/wiki/entities/existing.md');
+    const newPagePath = join(work, out.targetPath);
+    assert.equal(existsSync(newPagePath), true);
+    const newText = readFileSync(newPagePath, 'utf8');
+    assert.match(newText, /Merged, richer summary\./);
+
+    // (c) result reports the fallback
+    assert.equal(out.fallback, 'target_not_writable');
+
+    // (d) queue entry is still removed
+    assert.deepEqual(readMergeNeeded(work), []);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('wiki_review: merge falls back to a new page when the matched target has a protected status', () => {
+  const work = repoTemp('wiki-review-protected');
+  try {
+    writeSettings(work);
+    mkdirSync(join(work, '.auto-context', 'wiki', 'entities'), { recursive: true });
+    const originalText = [
+      '---', 'title: "Existing"', 'canonicalKey: "existing"', 'type: entity', 'status: reviewed',
+      'createdBy: qmd-auto-context', '---', '',
+      '<!-- qmd:auto:start id="main" sourceHash="deadbeef" -->', '## Summary', 'Human-reviewed summary.',
+      '<!-- qmd:auto:end -->', '',
+    ].join('\n');
+    writeFileSync(join(work, '.auto-context', 'wiki', 'entities', 'existing.md'), originalText);
+    writeMergeNeeded(work, [{
+      candidate: {
+        title: 'Existing candidate update', summary: 'Merged, richer summary.', suggestedType: 'entity',
+        confidence: 'high', canonicalKey: 'existing', targetPath: '.auto-context/wiki/entities/existing.md',
+      },
+      matchedPath: '.auto-context/wiki/entities/existing.md',
+      matchedScore: 0.9,
+      suggestedAction: 'merge',
+    }]);
+
+    const out = JSON.parse(runReview(work, 0, 'merge'));
+
+    // existing protected page must be completely untouched
+    const afterText = readFileSync(join(work, '.auto-context', 'wiki', 'entities', 'existing.md'), 'utf8');
+    assert.equal(afterText, originalText);
+
+    assert.equal(out.action, 'created');
+    assert.equal(out.fallback, 'target_not_writable');
+    assert.deepEqual(readMergeNeeded(work), []);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
 test('wiki_review: stale matchedPath (deleted since queued) falls back to separate for merge/supersede', () => {
   const work = repoTemp('wiki-review-stale-match');
   try {

@@ -75,6 +75,15 @@ def resolve_entry(root: Path, wiki_root: Path, config: dict, entry: dict, action
         if not match_exists:
             target, _ = write_new_page(root, wiki_root, candidate)
             return {"action": "created", "targetPath": target.relative_to(root).as_posix(), "fallback": "stale_match"}
+        writable, findings = wc.is_auto_writable_page(matched_path)
+        if not writable:
+            target, _ = write_new_page(root, wiki_root, candidate)
+            return {
+                "action": "created",
+                "targetPath": target.relative_to(root).as_posix(),
+                "fallback": "target_not_writable",
+                "reason": findings,
+            }
         title = str(candidate.get("title") or "Untitled").strip() or "Untitled"
         summary, redactions = wc.redact(str(candidate.get("summary") or "").strip())
         h = wc.source_hash({**candidate, "summary": summary})
