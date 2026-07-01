@@ -1,0 +1,15 @@
+core/wiki_compile.py
+  h_42d950683aaaea 457
+test/wiki-compile.test.mjs
+  h_42d950683aaaea 294-335
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "e86029b43ee3bfa05820da446da363dcc1b9f477",
+  "prompts": {},
+  "humans": {
+    "h_42d950683aaaea": {
+      "author": "dulee@zigbang.com"
+    }
+  }
+}
