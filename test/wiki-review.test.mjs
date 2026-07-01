@@ -37,10 +37,10 @@ function readMergeNeeded(work) {
   return readFileSync(path, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l));
 }
 
-function runReview(work, index, action, extra = []) {
+function runReview(work, index, action, extra = [], env = {}) {
   return execFileSync('python3', [
     'core/wiki_review.py', '--cwd', work, '--index', String(index), '--action', action, ...extra,
-  ], { encoding: 'utf8' });
+  ], { encoding: 'utf8', env: { ...process.env, ...env } });
 }
 
 test('wiki_review: discard removes the entry, writes no page', () => {
@@ -384,6 +384,98 @@ test('wiki_review: a crash mid-resolve_entry leaves the queue exactly as it was 
     // was before the failed attempt.
     const after = readMergeNeeded(work);
     assert.deepEqual(after, before);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('wiki_review: separate enqueues the wiki collection for reindex after writing a new page (Finding: enqueue on resolve)', () => {
+  const work = repoTemp('wiki-review-enqueue-separate');
+  const dirtyQueue = join(work, 'dirty-queue');
+  try {
+    writeSettings(work);
+    writeMergeNeeded(work, [{
+      candidate: {
+        title: 'Independent fact', summary: 'Not actually related.', suggestedType: 'entity', confidence: 'high',
+      },
+      matchedPath: '.auto-context/wiki/entities/existing.md',
+      matchedScore: 0.83,
+      suggestedAction: 'merge',
+    }]);
+
+    const out = JSON.parse(runReview(work, 0, 'separate', [], { QMD_DIRTY_QUEUE: dirtyQueue }));
+    assert.equal(out.action, 'created');
+    assert.equal(existsSync(dirtyQueue), true);
+    assert.match(readFileSync(dirtyQueue, 'utf8'), /proj-wiki\t.*\.auto-context\/wiki/);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('wiki_review: discard does NOT enqueue anything (nothing was written)', () => {
+  const work = repoTemp('wiki-review-no-enqueue-discard');
+  const dirtyQueue = join(work, 'dirty-queue');
+  try {
+    writeSettings(work);
+    writeMergeNeeded(work, [{
+      candidate: { title: 'X', summary: 'Y', suggestedType: 'entity' },
+      matchedPath: '.auto-context/wiki/entities/existing.md',
+      matchedScore: 0.9,
+      suggestedAction: 'merge',
+    }]);
+
+    const out = JSON.parse(runReview(work, 0, 'discard', [], { QMD_DIRTY_QUEUE: dirtyQueue }));
+    assert.equal(out.action, 'discarded');
+    assert.equal(existsSync(dirtyQueue), false);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('wiki_review: stale matchedPath no-op path still enqueues since it falls back to writing a new page', () => {
+  // Note: the "stale match" case for merge/supersede *does* write a new page
+  // (fallback: stale_match), so it SHOULD enqueue. This test documents that
+  // the enqueue check is based on whether a file was actually written
+  // (action in {created, updated}), not naively on whether a match was stale.
+  const work = repoTemp('wiki-review-enqueue-stale-match');
+  const dirtyQueue = join(work, 'dirty-queue');
+  try {
+    writeSettings(work);
+    writeMergeNeeded(work, [{
+      candidate: { title: 'Orphaned candidate', summary: 'Its match vanished.', suggestedType: 'entity', confidence: 'high' },
+      matchedPath: '.auto-context/wiki/entities/gone.md',
+      matchedScore: 0.9,
+      suggestedAction: 'merge',
+    }]);
+
+    const out = JSON.parse(runReview(work, 0, 'merge', [], { QMD_DIRTY_QUEUE: dirtyQueue }));
+    assert.equal(out.action, 'created');
+    assert.equal(out.fallback, 'stale_match');
+    assert.equal(existsSync(dirtyQueue), true);
+    assert.match(readFileSync(dirtyQueue, 'utf8'), /proj-wiki\t.*\.auto-context\/wiki/);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('wiki_review: a truly stale-match no-op (malformed entry / index_out_of_range) does NOT enqueue', () => {
+  const work = repoTemp('wiki-review-no-enqueue-noop');
+  const dirtyQueue = join(work, 'dirty-queue');
+  try {
+    writeSettings(work);
+    writeMergeNeeded(work, [
+      { candidate: { title: 'A', summary: 'a', suggestedType: 'entity' }, matchedPath: 'x', matchedScore: 0.9, suggestedAction: 'merge' },
+    ]);
+
+    // index 5 is out of range: rejected with nothing written, must not enqueue.
+    let threw = false;
+    try {
+      runReview(work, 5, 'discard', [], { QMD_DIRTY_QUEUE: dirtyQueue });
+    } catch (e) {
+      threw = true;
+    }
+    assert.equal(threw, true);
+    assert.equal(existsSync(dirtyQueue), false);
   } finally {
     rmSync(work, { recursive: true, force: true });
   }

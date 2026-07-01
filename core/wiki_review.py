@@ -13,6 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.resolve()))
 import config as qmd_config
 import wiki_compile as wc
+from dirty_queue import enqueue_collections
 from wiki_compile_worker import claim_queue, requeue_lines
 
 ACTIONS = {"merge", "supersede", "separate", "discard"}
@@ -188,6 +189,11 @@ def main() -> int:
     remaining_raw = [r for i, (r, _) in enumerate(rows) if i != args.index]
     requeue_lines(queue_path, remaining_raw)
     claimed.unlink(missing_ok=True)
+
+    if result.get("action") in {"created", "updated"}:
+        collection, collection_path = wc.find_wiki_collection(config)
+        if collection and collection_path:
+            enqueue_collections({collection: str((root / collection_path).resolve())})
 
     print(json.dumps(result, ensure_ascii=False))
     return 0 if result.get("action") != "rejected" else 1
