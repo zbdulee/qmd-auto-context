@@ -1,0 +1,13 @@
+docs/superpowers/specs/2026-07-01-wiki-semantic-dedup-supersede-design.md
+  h_42d950683aaaea 79-81,83-84,98-112,116-120,122-125,140-144,156-159,167-169,178-180
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "1fb1aef7f6cf36d224f9514ba333e6b5d3ae359b",
+  "prompts": {},
+  "humans": {
+    "h_42d950683aaaea": {
+      "author": "dulee@zigbang.com"
+    }
+  }
+}
