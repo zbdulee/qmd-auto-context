@@ -55,6 +55,8 @@ longer fully see.
 | Relationship to `index.md` | The top-K similar-page section **replaces** the flat `EXISTING WIKI INDEX` dump — not both at once. Rationale: once the extractor has full bodies for the pages that actually matter, the flat title list adds prompt cost without adding grounding. |
 | Fallback when the daemon query fails or returns nothing | Fail open to **today's behavior** — render the flat `index.md` dump exactly as Phase 1-and-earlier did. Never block extraction on this query. |
 | Testing extractor input once it's no longer a static source file | Only the **payload-assembly** logic in `wiki_compile_worker.py` (source content → daemon query → `similarPages` list) is tested deterministically (via `QMD_QUERY_FIXTURE`, Phase 1's existing pattern). The host-CLI adapters (`claude_adapter.py`/`codex_adapter.py`/`hermes_adapter.py`) keep their existing mocked-CLI tests, asserting only "the payload was received and passed through" — they do not need to understand or assert on `similarPages` content. |
+| Minimum relevance to include a match | Reuse `compile.semanticDedup.threshold` (Phase 1's existing setting) as a floor — a daemon result below it is dropped, not included as a "similar" page. `query_wiki_similar`'s request sets `minScore: 0` (Phase 1, unchanged), so without this floor a near-zero-relevance result could still occupy a `topK` slot and replace the flat index with something less useful than the index was. Locked during a second-opinion review that flagged this as a gap in the first draft of this spec. |
+| Repeated daemon queries across retries/multiple sources | Accepted cost, not solved here. Every kept job in `process_job()` runs its own `gather_similar_pages` call; `dedup_jobs()` only collapses duplicate-source jobs within one drain, not across retries after a cooldown or across distinct sources. No new caching is added — this mirrors Phase 1's own tuning-later posture (see its "single threshold, revisit if practice warrants it" decision). Revisit only if real daemon load from this path turns out to matter. |
 
 ## Architecture
 
@@ -71,9 +73,11 @@ core/wiki_compile_worker.py::process_job() (existing, per queued source-file job
       results = wc.query_wiki_similar(daemon_url, collection, content, top_k, timeout)
         (existing Phase 1 function — same daemon /query contract, same QMD_QUERY_FIXTURE handling)
       daemon/fixture unreachable/malformed → query_wiki_similar already returns None → return None
-      for each result: resolve_daemon_result_path(wiki_root, result.file, collection) (existing, Phase 1)
+      drop any result with score < compile.semanticDedup.threshold (Phase 1's existing setting —
+        query_wiki_similar's request always sets minScore: 0, so this floor is applied here, not there)
+      for each remaining result: resolve_daemon_result_path(wiki_root, result.file, collection) (existing, Phase 1)
         → read full page text, capped at similarPageMaxChars
-      return list of {path, score, content} — or None if nothing resolved
+      return list of {path, score, content} — or None if nothing resolved (including "everything was below threshold")
   → payload["wiki"] = orientation(root)  (UNCHANGED call)
     if gather_similar_pages(...) returned a non-empty list:
       payload["wiki"]["similarPages"] = that list
@@ -98,8 +102,12 @@ core/extractors/lib.py::build_prompt(payload)
 - **`core/extractors/lib.py`** (changed): `build_prompt()` gains a branch. When `payload["wiki"].get("similarPages")`
   is a non-empty list, build a new prompt section listing each page's relative path, similarity score,
   and full body text (each already capped by the worker); this section replaces the existing
-  `EXISTING WIKI INDEX (avoid duplicates): {index}` line. When absent/empty, `build_prompt()`'s existing
-  code path runs completely unchanged (same 4000-char `index` slice, same wording).
+  `EXISTING WIKI INDEX (avoid duplicates): {index}` line. `_PROMPT_TEMPLATE` (currently a fixed string,
+  `core/extractors/lib.py:21-44`) needs an actual code change here — a conditional section (e.g. render
+  into a `{existing_context_section}` placeholder before `.format()`) rather than two branches inside
+  `.format()` itself. When `similarPages` is absent/empty, the **rendered prompt text** on that branch
+  must stay byte-identical to today's output (same 4000-char `index` slice, same wording) — the code
+  gains a branch, the output on the untaken branch does not change.
 - **Config** (`compile.semanticDedup`, extends Phase 1's block, one new key):
   `similarPageMaxChars: 12000` (default), coerced the same way Phase 1's `threshold`/`topK` are in
   `core/config.py::compile_config()`. No new top-level block.
@@ -121,13 +129,17 @@ core/extractors/lib.py::build_prompt(payload)
   function returns `None` (same fallback as "no matches found").
 - A single pathologically large matched page → truncated at `similarPageMaxChars`, never excluded
   entirely (a truncated grounding page is still more useful than none).
+- Every result below `compile.semanticDedup.threshold` → dropped before resolution (not just weakly
+  ranked); if that empties the result set, same fallback as "no matches found".
 
 ## Testing
 
 - New tests for `gather_similar_pages` in `core/wiki_compile_worker.py`'s test file, using the same
   `QMD_QUERY_FIXTURE` fixture pattern Phase 1 already established for `wiki_compile.py`: a fixture with
-  results above/below scoring, a fixture pointing at a since-deleted page, a missing/malformed fixture
-  (fail-open to `None`), `semanticDedup.enabled: false` (short-circuits without touching the daemon).
+  results above the threshold (included), a fixture with only below-threshold results (dropped, falls
+  back to `None` even though the daemon technically returned rows), a fixture pointing at a
+  since-deleted page, a missing/malformed fixture (fail-open to `None`), `semanticDedup.enabled: false`
+  (short-circuits without touching the daemon).
 - New tests for `build_prompt()` in `core/extractors/lib.py`'s test file: `similarPages` present and
   non-empty renders the new section and omits `EXISTING WIKI INDEX`; `similarPages` absent renders
   `EXISTING WIKI INDEX` exactly as today (byte-for-byte prompt text on the unchanged path — this is the
