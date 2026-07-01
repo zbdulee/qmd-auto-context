@@ -879,3 +879,54 @@ test('wiki_compile: semantic gate fails open when the daemon result score is nul
     rmSync(work, { recursive: true, force: true });
   }
 });
+
+test('wiki_compile: semantic gate resolves a daemon result path via the project-root-relative fallback when the primary (wiki-root-relative) interpretation misses (Finding 1 hardening)', () => {
+  const work = repoTemp('wiki-compile-semantic-fallback-path');
+  try {
+    writeSettings(work);
+    mkdirSync(join(work, '.auto-context', 'wiki', 'entities'), { recursive: true });
+    writeFileSync(
+      join(work, '.auto-context', 'wiki', 'entities', 'cctv-request.md'),
+      [
+        '---',
+        'title: "CCTV request"',
+        'canonicalKey: "cctv-request"',
+        'type: entity',
+        'status: generated',
+        'createdBy: qmd-auto-context',
+        '---',
+        '',
+        '<!-- qmd:auto:start id="main" sourceHash="abc" -->',
+        '## Summary',
+        'Someone requested CCTV footage from the building office.',
+        '<!-- qmd:auto:end -->',
+        '',
+      ].join('\n'),
+    );
+
+    const fixture = join(work, 'daemon-fixture.json');
+    // "rel" here (the part after qmd://proj-wiki/) is the project-root-relative
+    // path, INCLUDING the .auto-context/wiki/ prefix, not the wiki-root-relative
+    // path. wiki_root/rel would be wiki/.auto-context/wiki/entities/... (misses).
+    // root/rel is wiki/entities/... nested under wiki_root again by coincidence
+    // of this fixture shape and lands inside wiki_root, so the fallback catches it.
+    writeFileSync(fixture, JSON.stringify({
+      results: [
+        { file: 'qmd://proj-wiki/.auto-context/wiki/entities/cctv-request.md', score: 0.9, title: 'CCTV request' },
+      ],
+    }));
+
+    const out = JSON.parse(runCompile(work, {
+      title: 'Second unknown call about luggage',
+      summary: 'An unrelated-looking phone call about luggage — possibly the same actor as the CCTV request.',
+      suggestedType: 'entity',
+      confidence: 'medium',
+    }, { QMD_QUERY_FIXTURE: fixture }));
+
+    assert.equal(out.action, 'queued_for_review');
+    assert.equal(out.matchedPath, '.auto-context/wiki/entities/cctv-request.md');
+    assert.equal(out.score, 0.9);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});

@@ -480,7 +480,7 @@ def find_wiki_collection(config: dict) -> tuple[str | None, str | None]:
     return None, None
 
 
-def resolve_daemon_result_path(wiki_root: Path, uri: str, collection: str) -> Path | None:
+def resolve_daemon_result_path(root: Path, wiki_root: Path, uri: str, collection: str) -> Path | None:
     if not isinstance(uri, str) or not uri:
         return None
     if uri.startswith("qmd://"):
@@ -492,12 +492,15 @@ def resolve_daemon_result_path(wiki_root: Path, uri: str, collection: str) -> Pa
         rel = uri[len(collection) + 1:]
     else:
         return None
-    candidate_path = (wiki_root / rel).resolve()
-    try:
-        candidate_path.relative_to(wiki_root)
-    except ValueError:
-        return None
-    return candidate_path if candidate_path.is_file() else None
+    for candidate_root in (wiki_root, root):
+        candidate_path = (candidate_root / rel).resolve()
+        try:
+            candidate_path.relative_to(wiki_root)
+        except ValueError:
+            continue
+        if candidate_path.is_file():
+            return candidate_path
+    return None
 
 
 def query_wiki_similar(daemon_url: str, collection: str, text: str, top_k: int, timeout: float) -> list[dict] | None:
@@ -569,7 +572,7 @@ def find_wiki_semantic_match(
     threshold = float(semantic_cfg.get("threshold", 0.82))
     if score < threshold:
         return None, score
-    matched = resolve_daemon_result_path(wiki_root, top.get("file", "") if isinstance(top, dict) else "", collection)
+    matched = resolve_daemon_result_path(root, wiki_root, top.get("file", "") if isinstance(top, dict) else "", collection)
     return matched, score
 
 
