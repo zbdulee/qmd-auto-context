@@ -99,6 +99,7 @@ test('wiki recall 신규 필드는 additive로 normalize 된다', () => {
     sourceQueuePath: '.auto-context/compile/source-queue.jsonl',
     tombstonePath: '.auto-context/compile/tombstones.jsonl',
     manifestPath: '.auto-context/compile/generated-manifest.jsonl',
+    mergeNeededPath: '.auto-context/compile/merge-needed.jsonl',
     excludeStatusesFromRecall: ['discarded', 'contested'],
     lowPriorityStatuses: ['generated', 'tentative'],
     triggers: ['manual', 'post_session_summary', 'post_tool_source'],
@@ -107,6 +108,7 @@ test('wiki recall 신규 필드는 additive로 normalize 된다', () => {
     maxSourceChars: 12000,
     extractor: { argv: ['python3', 'scripts/extract.py'], timeout: 30, cooldownSeconds: 600 },
     batch: { idleSeconds: 90, maxItems: 5 },
+    semanticDedup: { enabled: true, threshold: 0.82, topK: 3 },
   });
 });
 
@@ -417,4 +419,29 @@ test('compile.batch normalizes idleSeconds and maxItems; defaults to 90/5 when o
     },
   }));
   assert.deepEqual(withDefaults.compile.batch, { idleSeconds: 90, maxItems: 5 });
+});
+
+test('compile.semanticDedup normalizes enabled/threshold/topK; defaults to true/0.82/3 when omitted', () => {
+  const withSemantic = loadConfig(JSON.stringify({
+    compile: { semanticDedup: { enabled: false, threshold: '0.5', topK: 7 } },
+  }));
+  assert.deepEqual(withSemantic.compile.semanticDedup, { enabled: false, threshold: 0.5, topK: 7 });
+
+  const withDefaults = loadConfig(JSON.stringify({ compile: {} }));
+  assert.deepEqual(withDefaults.compile.semanticDedup, { enabled: true, threshold: 0.82, topK: 3 });
+
+  const withBadValues = loadConfig(JSON.stringify({
+    compile: { semanticDedup: { enabled: 'nope', threshold: 'nan', topK: -1 } },
+  }));
+  assert.deepEqual(withBadValues.compile.semanticDedup, { enabled: true, threshold: 0.82, topK: 3 });
+});
+
+test('WIKI_STATUSES / lowPriorityStatuses accept superseded', () => {
+  const withSuperseded = loadConfig(JSON.stringify({
+    compile: { lowPriorityStatuses: ['generated', 'tentative', 'superseded', 'bogus'] },
+  }));
+  assert.deepEqual(withSuperseded.compile.lowPriorityStatuses, ['generated', 'tentative', 'superseded']);
+
+  const defaultStatusAccepted = loadConfig(JSON.stringify({ compile: { defaultStatus: 'superseded' } }));
+  assert.equal(defaultStatusAccepted.compile.defaultStatus, 'superseded');
 });

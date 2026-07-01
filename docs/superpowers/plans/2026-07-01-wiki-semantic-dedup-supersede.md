@@ -597,13 +597,21 @@ import urllib.request
 Add two new functions after `find_wiki_collection` (after line 443, before `is_auto_writable_page`):
 
 ```python
-def resolve_daemon_result_path(wiki_root: Path, uri: str) -> Path | None:
-    if not isinstance(uri, str) or not uri.startswith("qmd://"):
+def resolve_daemon_result_path(wiki_root: Path, uri: str, collection: str) -> Path | None:
+    # Real daemon/fixture responses use bare "<collection>/<relpath>" (see
+    # test/fixtures/daemon-response*.json), not "qmd://collection/relpath" — accept
+    # both, mirroring recall.py's resolve_wiki_result_path.
+    if not isinstance(uri, str) or not uri:
         return None
-    rest = uri[len("qmd://"):]
-    if "/" not in rest:
+    if uri.startswith("qmd://"):
+        rest = uri[len("qmd://"):]
+        if "/" not in rest:
+            return None
+        _, rel = rest.split("/", 1)
+    elif collection and uri.startswith(f"{collection}/"):
+        rel = uri[len(collection) + 1:]
+    else:
         return None
-    _, rel = rest.split("/", 1)
     candidate_path = (wiki_root / rel).resolve()
     try:
         candidate_path.relative_to(wiki_root)
@@ -673,7 +681,7 @@ def find_wiki_semantic_match(
     threshold = float(semantic_cfg.get("threshold", 0.82))
     if score < threshold:
         return None, score
-    matched = resolve_daemon_result_path(wiki_root, top.get("file", "") if isinstance(top, dict) else "")
+    matched = resolve_daemon_result_path(wiki_root, top.get("file", "") if isinstance(top, dict) else "", collection)
     return matched, score
 ```
 
@@ -860,7 +868,7 @@ test('wiki_review: merge updates the matched existing page managed section in pl
     writeFileSync(join(work, '.auto-context', 'wiki', 'entities', 'existing.md'), [
       '---', 'title: "Existing"', 'canonicalKey: "existing"', 'type: entity', 'status: generated',
       'createdBy: qmd-auto-context', '---', '',
-      '<!-- qmd:auto:start id="main" sourceHash="old" -->', '## Summary', 'Old summary.',
+      '<!-- qmd:auto:start id="main" sourceHash="deadbeef" -->', '## Summary', 'Old summary.',
       '<!-- qmd:auto:end -->', '',
     ].join('\n'));
     writeMergeNeeded(work, [{
@@ -891,7 +899,7 @@ test('wiki_review: supersede creates a new page and marks the old page supersede
     writeFileSync(join(work, '.auto-context', 'wiki', 'decisions', 'old-rule.md'), [
       '---', 'title: "Old rule"', 'canonicalKey: "old-rule"', 'type: decision', 'status: generated',
       'createdBy: qmd-auto-context', '---', '',
-      '<!-- qmd:auto:start id="main" sourceHash="old" -->', '## Summary', 'The old rule text.',
+      '<!-- qmd:auto:start id="main" sourceHash="deadbeef" -->', '## Summary', 'The old rule text.',
       '<!-- qmd:auto:end -->', '',
     ].join('\n'));
     writeMergeNeeded(work, [{
