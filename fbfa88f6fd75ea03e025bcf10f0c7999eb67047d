@@ -1,0 +1,15 @@
+core/wiki_review.py
+  h_42d950683aaaea 50-56,71-78,167-172,176-191
+test/wiki-review.test.mjs
+  h_42d950683aaaea 4,274-390
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "fbfa88f6fd75ea03e025bcf10f0c7999eb67047d",
+  "prompts": {},
+  "humans": {
+    "h_42d950683aaaea": {
+      "author": "dulee@zigbang.com"
+    }
+  }
+}
