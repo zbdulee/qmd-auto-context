@@ -45,9 +45,15 @@ def write_new_page(root: Path, wiki_root: Path, candidate: dict, extra_frontmatt
     suggested_type = candidate.get("suggestedType") if candidate.get("suggestedType") in wc.ALLOWED_TYPES else "concept"
     title = str(candidate.get("title") or "Untitled").strip() or "Untitled"
     slug = wc.re.sub(r"[^A-Za-z0-9가-힣]+", "-", title.lower()).strip("-") or "wiki-page"
-    target = (wiki_root / wc.TYPE_DIRS.get(suggested_type, "concepts") / f"{slug}.md").resolve()
     summary, redactions = wc.redact(str(candidate.get("summary") or "").strip())
     h = wc.source_hash({**candidate, "summary": summary})
+    type_dir = wc.TYPE_DIRS.get(suggested_type, "concepts")
+    target = (wiki_root / type_dir / f"{slug}.md").resolve()
+    if target.exists():
+        # Never silently clobber an unrelated page that happened to land on the
+        # same slug (e.g. a wiki-compile run created it after this candidate was
+        # queued). Disambiguate with a short hash suffix instead.
+        target = (wiki_root / type_dir / f"{slug}-{h[:8]}.md").resolve()
     page = wc.markdown_page(candidate, summary, "generated", redactions, h)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(page, encoding="utf-8")
@@ -62,6 +68,14 @@ def resolve_entry(root: Path, wiki_root: Path, config: dict, entry: dict, action
     candidate = entry.get("candidate") if isinstance(entry.get("candidate"), dict) else {}
     matched_rel = entry.get("matchedPath")
     matched_path = (root / matched_rel).resolve() if isinstance(matched_rel, str) and matched_rel else None
+    if matched_path is not None:
+        try:
+            matched_path.relative_to(wiki_root)
+        except ValueError:
+            # Queue entry points outside the wiki (hand-edited/corrupted
+            # merge-needed.jsonl). Never read or write outside the wiki root —
+            # treat exactly like a stale/missing match.
+            matched_path = None
     match_exists = matched_path is not None and matched_path.is_file()
 
     if action == "discard":
@@ -148,15 +162,33 @@ def main() -> int:
         return 1
 
     raw, entry = rows[args.index]
+
+    if entry is None:
+        # Unparseable garbage line: intentionally dropped from the queue, not
+        # a resolve_entry() failure, so this is excluded from the requeue
+        # exactly like the success path below.
+        remaining_raw = [r for i, (r, _) in enumerate(rows) if i != args.index]
+        requeue_lines(queue_path, remaining_raw)
+        claimed.unlink(missing_ok=True)
+        print(json.dumps({"action": "rejected", "reason": "malformed_entry"}, ensure_ascii=False))
+        return 1
+
+    # Ordering invariant: resolve_entry() must complete successfully BEFORE
+    # this entry is excluded from the requeue. If resolve_entry() raises
+    # (disk full, permission error, unexpected bug), the entry must still be
+    # sitting in the live queue afterward — never lost. Do not move the
+    # requeue_lines(...) call above this try/except.
+    try:
+        result = resolve_entry(root, wiki_root, config, entry, args.action)
+    except Exception:
+        requeue_lines(queue_path, [r for r, _ in rows])
+        claimed.unlink(missing_ok=True)
+        raise
+
     remaining_raw = [r for i, (r, _) in enumerate(rows) if i != args.index]
     requeue_lines(queue_path, remaining_raw)
     claimed.unlink(missing_ok=True)
 
-    if entry is None:
-        print(json.dumps({"action": "rejected", "reason": "malformed_entry"}, ensure_ascii=False))
-        return 1
-
-    result = resolve_entry(root, wiki_root, config, entry, args.action)
     print(json.dumps(result, ensure_ascii=False))
     return 0 if result.get("action") != "rejected" else 1
 

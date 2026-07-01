@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 
@@ -267,6 +267,123 @@ test('wiki_review: stale matchedPath (deleted since queued) falls back to separa
     assert.equal(out.action, 'created');
     assert.equal(out.fallback, 'stale_match');
     assert.equal(existsSync(join(work, '.auto-context', 'wiki', 'entities', 'orphaned-candidate.md')), true);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('wiki_review: separate never clobbers an unrelated existing page at the same slug path (Finding 1)', () => {
+  const work = repoTemp('wiki-review-slug-collision');
+  try {
+    writeSettings(work);
+    mkdirSync(join(work, '.auto-context', 'wiki', 'entities'), { recursive: true });
+    const unrelatedPath = join(work, '.auto-context', 'wiki', 'entities', 'shared-slug.md');
+    const unrelatedText = [
+      '---', 'title: "Totally unrelated page"', 'canonicalKey: "shared-slug"', 'type: entity', 'status: generated',
+      'createdBy: qmd-auto-context', '---', '',
+      '<!-- qmd:auto:start id="main" sourceHash="cafebabe" -->', '## Summary', 'This page has nothing to do with the candidate.',
+      '<!-- qmd:auto:end -->', '',
+    ].join('\n');
+    writeFileSync(unrelatedPath, unrelatedText);
+
+    writeMergeNeeded(work, [{
+      // Title slugifies to the same "shared-slug" path as the unrelated page above,
+      // but this candidate is a completely different topic (simulates a race where
+      // another wiki-compile run created an unrelated page at that slug in the meantime).
+      candidate: { title: 'Shared Slug', summary: 'A different topic entirely.', suggestedType: 'entity', confidence: 'high' },
+      matchedPath: '.auto-context/wiki/entities/other-existing.md',
+      matchedScore: 0.9,
+      suggestedAction: 'merge',
+    }]);
+
+    const out = JSON.parse(runReview(work, 0, 'separate'));
+
+    // The unrelated pre-existing page must be byte-unchanged.
+    const afterUnrelated = readFileSync(unrelatedPath, 'utf8');
+    assert.equal(afterUnrelated, unrelatedText);
+
+    // A new page was written at a different path (disambiguated), not clobbering the slug collision.
+    assert.equal(out.action, 'created');
+    assert.notEqual(out.targetPath, '.auto-context/wiki/entities/shared-slug.md');
+    const newPagePath = join(work, out.targetPath);
+    assert.equal(existsSync(newPagePath), true);
+    const newText = readFileSync(newPagePath, 'utf8');
+    assert.match(newText, /A different topic entirely\./);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('wiki_review: matchedPath escaping wiki_root is rejected and falls back like a stale match (Finding 2)', () => {
+  const work = repoTemp('wiki-review-path-escape');
+  try {
+    writeSettings(work);
+    // File that lives outside the wiki root (and outside the project root entirely),
+    // simulating a hand-edited/corrupted merge-needed.jsonl with a traversal path.
+    const outsideDir = repoTemp('wiki-review-path-escape-outside');
+    const outsidePath = join(outsideDir, 'outside.md');
+    const outsideText = 'this file must never be read or written by wiki_review\n';
+    writeFileSync(outsidePath, outsideText);
+
+    try {
+      writeMergeNeeded(work, [{
+        candidate: { title: 'Escaping candidate', summary: 'Tries to point outside wiki_root.', suggestedType: 'entity', confidence: 'high' },
+        matchedPath: `../${outsideDir.split('/').pop()}/outside.md`,
+        matchedScore: 0.9,
+        suggestedAction: 'merge',
+      }]);
+
+      const out = JSON.parse(runReview(work, 0, 'merge'));
+
+      // The outside file must be byte-identical — never touched.
+      const afterOutside = readFileSync(outsidePath, 'utf8');
+      assert.equal(afterOutside, outsideText);
+
+      // Falls back the same way a stale/missing match does: creates a new independent page.
+      assert.equal(out.action, 'created');
+      assert.equal(out.fallback, 'stale_match');
+      assert.equal(existsSync(join(work, '.auto-context', 'wiki', 'entities', 'escaping-candidate.md')), true);
+    } finally {
+      rmSync(outsideDir, { recursive: true, force: true });
+    }
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('wiki_review: a crash mid-resolve_entry leaves the queue exactly as it was (Finding 3)', () => {
+  const work = repoTemp('wiki-review-crash-preserve');
+  try {
+    writeSettings(work);
+    mkdirSync(join(work, '.auto-context', 'wiki'), { recursive: true });
+    writeMergeNeeded(work, [
+      { candidate: { title: 'A', summary: 'a', suggestedType: 'entity' }, matchedPath: 'x', matchedScore: 0.9, suggestedAction: 'merge' },
+      { candidate: { title: 'B', summary: 'b', suggestedType: 'entity' }, matchedPath: 'y', matchedScore: 0.9, suggestedAction: 'merge' },
+    ]);
+
+    const wikiRoot = join(work, '.auto-context', 'wiki');
+    const before = readMergeNeeded(work);
+    // Make the wiki root unwritable so write_new_page()'s mkdir/write_text
+    // inside resolve_entry() fails with a genuine PermissionError partway
+    // through, instead of a contrived/synthetic failure.
+    chmodSync(wikiRoot, 0o500); // read + execute only, no write
+    try {
+      let threw = false;
+      try {
+        runReview(work, 0, 'separate');
+      } catch (e) {
+        threw = true;
+      }
+      assert.equal(threw, true, 'expected resolve_entry to actually fail when the wiki root is not writable');
+    } finally {
+      chmodSync(wikiRoot, 0o755);
+    }
+
+    // The whole point of Finding 3: nothing is lost on a crash. The queue
+    // (including the entry that was being resolved) must be exactly as it
+    // was before the failed attempt.
+    const after = readMergeNeeded(work);
+    assert.deepEqual(after, before);
   } finally {
     rmSync(work, { recursive: true, force: true });
   }
