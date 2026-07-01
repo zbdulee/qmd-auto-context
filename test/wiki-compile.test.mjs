@@ -572,3 +572,66 @@ test('wiki_compile: compile audit paths are confined to project .auto-context/co
     rmSync(work, { recursive: true, force: true });
   }
 });
+
+test('patch_frontmatter_fields: rewrites only named scalar keys, leaves body and other fields untouched', () => {
+  const work = repoTemp('wiki-compile-patch-frontmatter');
+  try {
+    const page = join(work, 'page.md');
+    writeFileSync(page, [
+      '---',
+      'title: "Some Decision"',
+      'canonicalKey: "some-decision"',
+      'aliases:',
+      '  - "Alt Name"',
+      'status: generated',
+      'createdBy: qmd-auto-context',
+      '---',
+      '',
+      '<!-- qmd:auto:start id="main" sourceHash="deadbeef" -->',
+      '## Summary',
+      'Body text that must survive untouched.',
+      '<!-- qmd:auto:end -->',
+      '',
+    ].join('\n'));
+
+    const script = `
+import sys
+sys.path.insert(0, 'core')
+from pathlib import Path
+import wiki_compile as w
+ok = w.patch_frontmatter_fields(Path(${JSON.stringify(page)}), {"status": "superseded", "supersededBy": ".auto-context/wiki/decisions/new.md"})
+print(ok)
+`;
+    const result = execFileSync('python3', ['-c', script], { encoding: 'utf8' }).trim();
+    assert.equal(result, 'True');
+
+    const text = readFileSync(page, 'utf8');
+    assert.match(text, /status: "superseded"/);
+    assert.match(text, /supersededBy: "\.auto-context\/wiki\/decisions\/new\.md"/);
+    assert.match(text, /canonicalKey: "some-decision"/);
+    assert.match(text, /- "Alt Name"/);
+    assert.match(text, /Body text that must survive untouched\./);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('patch_frontmatter_fields: returns False for a page with no parseable frontmatter', () => {
+  const work = repoTemp('wiki-compile-patch-frontmatter-noop');
+  try {
+    const page = join(work, 'page.md');
+    writeFileSync(page, 'no frontmatter here\n');
+    const script = `
+import sys
+sys.path.insert(0, 'core')
+from pathlib import Path
+import wiki_compile as w
+print(w.patch_frontmatter_fields(Path(${JSON.stringify(page)}), {"status": "superseded"}))
+`;
+    const result = execFileSync('python3', ['-c', script], { encoding: 'utf8' }).trim();
+    assert.equal(result, 'False');
+    assert.equal(readFileSync(page, 'utf8'), 'no frontmatter here\n');
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});

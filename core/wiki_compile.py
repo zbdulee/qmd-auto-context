@@ -414,6 +414,41 @@ def markdown_page(candidate: dict, summary: str, status: str, redactions: list[s
     return "\n".join(lines)
 
 
+def patch_frontmatter_fields(path: Path, updates: dict[str, str]) -> bool:
+    """Rewrite only the named top-level scalar frontmatter keys in place.
+
+    Leaves every other frontmatter line and the managed body untouched. Used by
+    wiki_review.py's supersede action to flip an old page's status without
+    touching its generated summary block.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    match = FRONTMATTER_RE.match(text)
+    if not match:
+        return False
+    lines = match.group(1).splitlines()
+    seen = set()
+    new_lines = []
+    for line in lines:
+        key = None
+        if line and not line.startswith(" ") and ":" in line:
+            key = line.split(":", 1)[0].strip()
+        if key in updates:
+            new_lines.append(f"{key}: {yaml_scalar(updates[key])}")
+            seen.add(key)
+        else:
+            new_lines.append(line)
+    for key, value in updates.items():
+        if key not in seen:
+            new_lines.append(f"{key}: {yaml_scalar(value)}")
+    new_frontmatter = "\n".join(new_lines)
+    patched = text[: match.start(1)] + new_frontmatter + text[match.end(1) :]
+    path.write_text(patched, encoding="utf-8")
+    return True
+
+
 def update_index(wiki_root: Path, target: Path, title: str) -> None:
     index = wiki_root / "index.md"
     if not index.exists():
