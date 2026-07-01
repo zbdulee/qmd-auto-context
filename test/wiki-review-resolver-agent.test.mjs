@@ -39,3 +39,19 @@ test("wiki-review-resolver agent: body carries the Workflow and whole-run-stop p
   assert.match(block, /STOP\. Do not process any further/);
   assert.match(block, /not attempted this run/);
 });
+
+test("wiki-review-resolver agent and wiki-review SKILL.md share byte-identical Workflow text", () => {
+  const agent = readFileSync("agents/wiki-review-resolver.md", "utf8");
+  const skill = readFileSync("skills/wiki-review/SKILL.md", "utf8");
+  const agentBlock = workflowBlock(agent, "agents/wiki-review-resolver.md");
+  const skillBlock = workflowBlock(skill, "skills/wiki-review/SKILL.md");
+  assert.equal(agentBlock, skillBlock, "Workflow text must be verbatim-identical across both artifacts");
+});
+
+test("wiki-review SKILL.md documents host-agnostic subagent spawn for Codex/Hermes", () => {
+  const skill = readFileSync("skills/wiki-review/SKILL.md", "utf8");
+  assert.match(skill, /delegate_task/);
+  assert.match(skill, /role `leaf`/);
+  assert.match(skill, /agents\/wiki-review-resolver\.md/);
+  assert.match(skill, /spawn/i);
+});

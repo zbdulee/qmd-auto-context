@@ -43,3 +43,48 @@ automatically, because they looked similar to an existing wiki page but didn't s
 - Read-only for the queue in step 1 (`cat`); all mutation happens only through step 3's wrapper.
 - Never fabricate a resolution without showing the user the matched existing page content first.
 - This skill only resolves what the semantic gate already queued; it does not itself decide anything.
+
+## Semi-Autonomous Resolution (Codex / Hermes Agent, or on request)
+
+Claude Code ships this capability as a plugin-bundled agent (`agents/wiki-review-resolver.md`) that
+autonomously resolves the whole queue and reports afterward — Claude auto-delegates to it on trigger
+phrases like "wiki review 자동으로 처리해줘" without any further prompting from this file.
+
+Codex and Hermes Agent cannot bundle a persistent role the same way — their plugin manifests have no
+agent-role field (see `docs/superpowers/specs/2026-07-01-wiki-review-subagent-design.md`'s Architecture
+section for the source-level confirmation). On those hosts — or whenever the user explicitly wants the
+whole queue resolved on any host without per-entry approval — spawn a subagent right now, using your
+host's own delegation mechanism (Codex's multi-agent tool, Hermes's `delegate_task` tool with role `leaf`), with the following as the subagent's prompt verbatim:
+
+<!-- WORKFLOW:START -->
+1. Read `.auto-context/compile/merge-needed.jsonl` in the target project.
+   Empty or missing → report "nothing pending" and stop.
+2. For each entry (in file order):
+   a. Read the candidate (title/summary/suggestedType) already embedded in the entry.
+   b. Read the actual content at `matchedPath`.
+   c. Judge one action:
+      - Same fact/event, worth folding in → `merge`
+      - `decision`-type candidate that reverses/replaces the matched page's principle → `supersede`
+      - Looks unrelated on inspection (semantic gate false positive) → `separate`
+      - Not worth keeping at all → `discard`
+      - `matchedPath` unreadable/missing → still call the CLI with whatever action was judged;
+        `wiki_review.py`'s own stale-match fallback (→ `separate`) handles it. Do not special-case
+        this in the agent — that logic already exists and is already tested.
+   d. Run: `bash <plugin-root>/skills/wiki-review/scripts/wiki-review.sh <cwd> <index> <action>`
+      Re-derive `<index>` fresh before each call by re-reading the queue file — resolving one entry
+      removes it from the queue and shifts every later index down by one. Do not compute all indices
+      up front from a single initial read.
+   e. Record the CLI's JSON stdout (action/targetPath/etc.) for the final report.
+   f. If the command exits non-zero, or stdout is not valid JSON: STOP. Do not process any further
+      entries this run — you cannot tell from here whether the queue was already mutated before the
+      failure, and continuing risks skipping or double-processing entries against a stale index. Go
+      straight to step 3's table with this entry marked "resolution failed / not attempted" and every
+      remaining unprocessed entry marked "not attempted this run".
+3. Print a table: one row per entry reached — `title | judged action | targetPath | one-line reasoning`,
+   using "resolution failed" / "not attempted this run" per 2.f where applicable. If nothing was
+   pending at step 1, this table is just the "nothing pending" message. If the run stopped early via
+   2.f, say so plainly before the table so the human knows to re-run manually after investigating.
+<!-- WORKFLOW:END -->
+
+Do not run this workflow inline in the main thread yourself — spawn it as a subagent so its
+entry-by-entry judgment doesn't block on your own turn-by-turn confirmation.
