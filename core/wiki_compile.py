@@ -561,8 +561,11 @@ def find_wiki_semantic_match(
     results = query_wiki_similar(daemon_url, collection, text, int(semantic_cfg.get("topK", 3)), timeout)
     if not results:
         return None, None
-    top = max(results, key=lambda r: r.get("score", 0) if isinstance(r, dict) else 0)
-    score = top.get("score", 0) if isinstance(top, dict) else 0
+    def numeric_score(value) -> float:
+        return value if isinstance(value, (int, float)) else 0
+
+    top = max(results, key=lambda r: numeric_score(r.get("score", 0)) if isinstance(r, dict) else 0)
+    score = numeric_score(top.get("score", 0)) if isinstance(top, dict) else 0
     threshold = float(semantic_cfg.get("threshold", 0.82))
     if score < threshold:
         return None, score

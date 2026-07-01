@@ -831,3 +831,51 @@ test('wiki_compile: semantic gate fails open when QMD_QUERY_FIXTURE returns vali
     rmSync(work, { recursive: true, force: true });
   }
 });
+
+test('wiki_compile: semantic gate fails open when the daemon result score is non-numeric (string)', () => {
+  const work = repoTemp('wiki-compile-semantic-score-string');
+  try {
+    writeSettings(work);
+    const fixture = join(work, 'string-score-fixture.json');
+    writeFileSync(fixture, JSON.stringify({
+      results: [
+        { file: 'proj-wiki/entities/whatever.md', score: 'bad', title: 'Whatever' },
+      ],
+    }));
+
+    const out = JSON.parse(runCompile(work, {
+      title: 'New entity with a string score result',
+      summary: 'Should still be created — a non-numeric score must not crash the gate.',
+      suggestedType: 'entity',
+      confidence: 'high',
+    }, { QMD_QUERY_FIXTURE: fixture }));
+
+    assert.equal(out.action, 'created');
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('wiki_compile: semantic gate fails open when the daemon result score is null', () => {
+  const work = repoTemp('wiki-compile-semantic-score-null');
+  try {
+    writeSettings(work);
+    const fixture = join(work, 'null-score-fixture.json');
+    writeFileSync(fixture, JSON.stringify({
+      results: [
+        { file: 'proj-wiki/entities/whatever.md', score: null, title: 'Whatever' },
+      ],
+    }));
+
+    const out = JSON.parse(runCompile(work, {
+      title: 'New entity with a null score result',
+      summary: 'Should still be created — a null score must not crash the gate.',
+      suggestedType: 'entity',
+      confidence: 'high',
+    }, { QMD_QUERY_FIXTURE: fixture }));
+
+    assert.equal(out.action, 'created');
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
