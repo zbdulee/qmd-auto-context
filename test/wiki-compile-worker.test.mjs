@@ -546,3 +546,127 @@ test('dedup: repeated edits of same path collapse to one extraction', () => {
     assert.equal(readFileSync(counter, 'utf8'), '1');
   } finally { rmSync(project, { recursive: true, force: true }); }
 });
+
+function writeFixture(dir, results) {
+  const fixture = join(dir, 'daemon-fixture.json');
+  writeFileSync(fixture, JSON.stringify({ results }));
+  return fixture;
+}
+
+function callGatherSimilarPages(project, contentPath, env = {}) {
+  const script = `
+import sys
+sys.path.insert(0, 'core')
+import json
+from pathlib import Path
+import config as qmd_config
+import wiki_compile_worker as w
+found = qmd_config.find_project_config(${JSON.stringify(project)})
+root = Path(found['projectRoot']).resolve()
+cfg = found['config']
+wiki_root = (root / cfg.get('wikiPath', '.auto-context/wiki')).resolve()
+compile_cfg = cfg.get('compile', {})
+content = Path(${JSON.stringify(contentPath)}).read_text(encoding='utf-8')
+semantic = compile_cfg.get('semanticDedup', {})
+result = w.gather_similar_pages(root, wiki_root, cfg, compile_cfg, content, semantic.get('topK', 3), semantic.get('similarPageMaxChars', 12000))
+print(json.dumps(result, ensure_ascii=False))
+`;
+  return execFileSync('python3', ['-c', script], { encoding: 'utf8', env: { ...process.env, ...env } }).trim();
+}
+
+test('gather_similar_pages: above-threshold match is included with full page content', () => {
+  const project = setupProject();
+  try {
+    mkdirSync(join(project, '.auto-context', 'wiki', 'entities'), { recursive: true });
+    writeFileSync(join(project, '.auto-context', 'wiki', 'entities', 'known.md'), [
+      '---', 'title: "Known"', 'canonicalKey: "known"', 'type: entity', 'status: generated',
+      'createdBy: qmd-auto-context', '---', '',
+      '<!-- qmd:auto:start id="main" sourceHash="abc123" -->', '## Summary', 'The known fact.',
+      '<!-- qmd:auto:end -->', '',
+    ].join('\n'));
+    const sourcePath = join(project, 'docs', 'source.md');
+    const fixture = writeFixture(project, [
+      { file: 'proj-wiki/entities/known.md', score: 0.9 },
+    ]);
+
+    const out = JSON.parse(callGatherSimilarPages(project, sourcePath, { QMD_QUERY_FIXTURE: fixture }));
+    assert.equal(out.length, 1);
+    assert.equal(out[0].path, '.auto-context/wiki/entities/known.md');
+    assert.equal(out[0].score, 0.9);
+    assert.match(out[0].content, /The known fact\./);
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+});
+
+test('gather_similar_pages: below-threshold match is dropped, returns null', () => {
+  const project = setupProject();
+  try {
+    mkdirSync(join(project, '.auto-context', 'wiki', 'entities'), { recursive: true });
+    writeFileSync(join(project, '.auto-context', 'wiki', 'entities', 'weak.md'), [
+      '---', 'title: "Weak"', 'canonicalKey: "weak"', 'type: entity', 'status: generated',
+      'createdBy: qmd-auto-context', '---', '',
+      '<!-- qmd:auto:start id="main" sourceHash="abc123" -->', '## Summary', 'Barely related.',
+      '<!-- qmd:auto:end -->', '',
+    ].join('\n'));
+    const sourcePath = join(project, 'docs', 'source.md');
+    const fixture = writeFixture(project, [
+      { file: 'proj-wiki/entities/weak.md', score: 0.1 },
+    ]);
+
+    const out = callGatherSimilarPages(project, sourcePath, { QMD_QUERY_FIXTURE: fixture });
+    assert.equal(out, 'null');
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+});
+
+test('gather_similar_pages: a resolved match whose file was since deleted is skipped, not fatal', () => {
+  const project = setupProject();
+  try {
+    mkdirSync(join(project, '.auto-context', 'wiki'), { recursive: true });
+    const sourcePath = join(project, 'docs', 'source.md');
+    const fixture = writeFixture(project, [
+      { file: 'proj-wiki/entities/gone.md', score: 0.95 },
+    ]);
+
+    const out = callGatherSimilarPages(project, sourcePath, { QMD_QUERY_FIXTURE: fixture });
+    assert.equal(out, 'null');
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+});
+
+test('gather_similar_pages: malformed fixture fails open to null', () => {
+  const project = setupProject();
+  try {
+    const sourcePath = join(project, 'docs', 'source.md');
+    const fixture = join(project, 'bad-fixture.json');
+    writeFileSync(fixture, 'not json');
+
+    const out = callGatherSimilarPages(project, sourcePath, { QMD_QUERY_FIXTURE: fixture });
+    assert.equal(out, 'null');
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+});
+
+test('gather_similar_pages: semanticDedup.enabled false short-circuits without touching the daemon', () => {
+  const project = setupProject({ semanticDedup: { enabled: false } });
+  try {
+    mkdirSync(join(project, '.auto-context', 'wiki', 'entities'), { recursive: true });
+    writeFileSync(join(project, '.auto-context', 'wiki', 'entities', 'known.md'), [
+      '---', 'title: "Known"', 'canonicalKey: "known"', 'type: entity', 'status: generated',
+      'createdBy: qmd-auto-context', '---', '',
+      '<!-- qmd:auto:start id="main" sourceHash="abc123" -->', '## Summary', 'The known fact.',
+      '<!-- qmd:auto:end -->', '',
+    ].join('\n'));
+    const sourcePath = join(project, 'docs', 'source.md');
+    // No QMD_QUERY_FIXTURE set at all: if the code tried to reach a real daemon it would
+    // hit a real network call. enabled:false must short-circuit before that ever happens.
+    const out = callGatherSimilarPages(project, sourcePath);
+    assert.equal(out, 'null');
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+});
