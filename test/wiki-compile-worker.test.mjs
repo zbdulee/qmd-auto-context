@@ -670,3 +670,61 @@ test('gather_similar_pages: semanticDedup.enabled false short-circuits without t
     rmSync(project, { recursive: true, force: true });
   }
 });
+
+test('gather_similar_pages: non-numeric score in result does not crash, treated as below-threshold', () => {
+  const project = setupProject();
+  try {
+    mkdirSync(join(project, '.auto-context', 'wiki', 'entities'), { recursive: true });
+    // Write a valid wiki page that would be included if score were numeric
+    writeFileSync(join(project, '.auto-context', 'wiki', 'entities', 'numeric.md'), [
+      '---', 'title: "Numeric"', 'canonicalKey: "numeric"', 'type: entity', 'status: generated',
+      'createdBy: qmd-auto-context', '---', '',
+      '<!-- qmd:auto:start id="main" sourceHash="abc123" -->', '## Summary', 'A valid numeric score.',
+      '<!-- qmd:auto:end -->', '',
+    ].join('\n'));
+    // Write another page with bad score
+    writeFileSync(join(project, '.auto-context', 'wiki', 'entities', 'bad-score.md'), [
+      '---', 'title: "BadScore"', 'canonicalKey: "bad-score"', 'type: entity', 'status: generated',
+      'createdBy: qmd-auto-context', '---', '',
+      '<!-- qmd:auto:start id="main" sourceHash="abc123" -->', '## Summary', 'Should be skipped.',
+      '<!-- qmd:auto:end -->', '',
+    ].join('\n'));
+    const sourcePath = join(project, 'docs', 'source.md');
+    // First result has a non-numeric score (string)
+    const fixture = writeFixture(project, [
+      { file: 'proj-wiki/entities/bad-score.md', score: 'bad' },
+      { file: 'proj-wiki/entities/numeric.md', score: 0.9 },
+    ]);
+
+    const out = JSON.parse(callGatherSimilarPages(project, sourcePath, { QMD_QUERY_FIXTURE: fixture }));
+    // Should succeed (not crash) and include only the numeric score result
+    assert.equal(out.length, 1);
+    assert.equal(out[0].path, '.auto-context/wiki/entities/numeric.md');
+    assert.equal(out[0].score, 0.9);
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+});
+
+test('gather_similar_pages: null score in result does not crash, treated as below-threshold', () => {
+  const project = setupProject();
+  try {
+    mkdirSync(join(project, '.auto-context', 'wiki', 'entities'), { recursive: true });
+    writeFileSync(join(project, '.auto-context', 'wiki', 'entities', 'valid.md'), [
+      '---', 'title: "Valid"', 'canonicalKey: "valid"', 'type: entity', 'status: generated',
+      'createdBy: qmd-auto-context', '---', '',
+      '<!-- qmd:auto:start id="main" sourceHash="abc123" -->', '## Summary', 'Good score.',
+      '<!-- qmd:auto:end -->', '',
+    ].join('\n'));
+    const sourcePath = join(project, 'docs', 'source.md');
+    const fixture = writeFixture(project, [
+      { file: 'proj-wiki/entities/valid.md', score: null },
+    ]);
+
+    const out = callGatherSimilarPages(project, sourcePath, { QMD_QUERY_FIXTURE: fixture });
+    // Should not crash; null is below threshold, so returns null
+    assert.equal(out, 'null');
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+});

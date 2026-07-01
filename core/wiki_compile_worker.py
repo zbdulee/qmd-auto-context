@@ -147,7 +147,7 @@ def gather_similar_pages(
         if not isinstance(result, dict):
             continue
         score = result.get("score", 0)
-        if score < threshold:
+        if not isinstance(score, (int, float)) or score < threshold:
             continue
         path = wc.resolve_daemon_result_path(wiki_root, result.get("file", ""), collection)
         if path is None:
