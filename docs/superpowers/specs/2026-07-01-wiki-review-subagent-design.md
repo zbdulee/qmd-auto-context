@@ -81,9 +81,15 @@ spawn-instruction block for Codex/Hermes)
       removes it from the queue and shifts every later index down by one. Do not compute all indices
       up front from a single initial read.
    e. Record the CLI's JSON stdout (action/targetPath/etc.) for the final report.
-3. After the queue is empty, print a table: one row per resolved entry —
-   `title | judged action | targetPath | one-line reasoning`.
-   If nothing was pending at step 1, this table is just the "nothing pending" message.
+   f. If the command exits non-zero, or stdout is not valid JSON: STOP. Do not process any further
+      entries this run — you cannot tell from here whether the queue was already mutated before the
+      failure, and continuing risks skipping or double-processing entries against a stale index. Go
+      straight to step 3's table with this entry marked "resolution failed / not attempted" and every
+      remaining unprocessed entry marked "not attempted this run".
+3. Print a table: one row per entry reached — `title | judged action | targetPath | one-line reasoning`,
+   using "resolution failed" / "not attempted this run" per 2.f where applicable. If nothing was
+   pending at step 1, this table is just the "nothing pending" message. If the run stopped early via
+   2.f, say so plainly before the table so the human knows to re-run manually after investigating.
 ```
 
 ### Components
@@ -106,14 +112,20 @@ spawn-instruction block for Codex/Hermes)
 
 ## Error Handling
 
-- Every failure mode `wiki_review.py` already handles (stale match, path escape, unwritable target,
-  crash mid-resolve) is handled identically here, because this design never bypasses the CLI — it only
-  decides which `--action` to pass. No new error handling is introduced by this design; introducing
-  any would risk diverging from the already-hardened behavior in `core/wiki_review.py`.
-- If the CLI wrapper itself fails to run (e.g. `bash` invocation error, unexpected non-JSON stdout),
-  the agent should report that entry as "resolution failed" in the final table rather than silently
-  skipping it or retrying — visibility over the failure matters more than auto-retry here, since a
-  retry loop against a CLI that already failed once is unlikely to help and could mask a real bug.
+- Every failure mode `wiki_review.py` already handles *and reports as a clean JSON result* (stale
+  match → `separate` fallback, path escape, unwritable target, crash mid-resolve with requeue) is
+  handled identically here, because this design never bypasses the CLI — it only decides which
+  `--action` to pass and reads back the CLI's own JSON verdict. No new error handling is introduced
+  for these cases; introducing any would risk diverging from the already-hardened behavior in
+  `core/wiki_review.py`.
+- If the CLI wrapper itself fails to produce that clean result — non-zero exit, or stdout that isn't
+  valid JSON — the agent cannot tell from the outside whether `wiki_review.py` mutated the queue
+  (removed/rewrote the entry) before failing. Continuing to the next entry in that state risks
+  processing a stale index against a queue whose actual contents no longer match what the agent last
+  read, which can silently skip or double-process entries. **The agent must therefore stop resolving
+  entries for the rest of this run immediately** — do not proceed to the next queue entry — and report
+  the failing entry plus every entry not yet reached as "resolution failed / not attempted this run"
+  in the final table. This is a whole-run stop, not a per-entry skip.
 - No queue-level lock is needed beyond what `wiki_review.py`/`claim_queue` already provide (Phase 1) —
   this design calls the CLI sequentially, one entry at a time, never concurrently.
 
@@ -128,7 +140,11 @@ spawn-instruction block for Codex/Hermes)
      the stale-match entry correctly falling back to `separate`.
   3. Repeat the same scratch-queue scenario via Codex's own subagent spawn to confirm the SKILL.md's
      inlined instructions produce equivalent behavior without a persistent role file.
-  4. `npm test` must stay green (no code changed, but confirms nothing was accidentally touched).
+  4. Add one entry with a malformed/corrupt `merge-needed.jsonl` line, or temporarily rename
+     `wiki-review.sh` so the wrapper call itself fails (non-zero exit / non-JSON stdout), and confirm
+     the agent stops the whole run per the Error Handling 2.f policy — the table shows that entry and
+     every later entry as not attempted, rather than skipping past the failure and continuing.
+  5. `npm test` must stay green (no code changed, but confirms nothing was accidentally touched).
 - The implementation plan should include a task for checking whether an existing `test/manual-skills.test.mjs`-style
   structural check (e.g. "does `agents/wiki-review-resolver.md` exist and parse as valid frontmatter +
   body") is worth adding — this repo already asserts skill/manifest structure in tests, so a matching
