@@ -1,0 +1,13 @@
+docs/superpowers/plans/2026-07-01-wiki-semantic-dedup-supersede.md
+  h_42d950683aaaea 600-604,606-613,684
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "fdcd1ebf204aee26642d082fb586fe21c6de8e28",
+  "prompts": {},
+  "humans": {
+    "h_42d950683aaaea": {
+      "author": "dulee@zigbang.com"
+    }
+  }
+}
