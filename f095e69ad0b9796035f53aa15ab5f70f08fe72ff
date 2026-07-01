@@ -1,0 +1,13 @@
+docs/superpowers/specs/2026-07-01-wiki-review-subagent-design.md
+  h_42d950683aaaea 84-92,115-128,143-147
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "f095e69ad0b9796035f53aa15ab5f70f08fe72ff",
+  "prompts": {},
+  "humans": {
+    "h_42d950683aaaea": {
+      "author": "dulee@zigbang.com"
+    }
+  }
+}
