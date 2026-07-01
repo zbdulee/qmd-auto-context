@@ -16,6 +16,7 @@ test("manual skills expose enable-compile sync query update wiki-compile only; h
 
 test("plugin descriptions list manual skills without hint", () => {
   const files = [
+    "plugin.json",
     ".claude-plugin/plugin.json",
     ".codex-plugin/plugin.json",
     ".claude-plugin/marketplace.json",
