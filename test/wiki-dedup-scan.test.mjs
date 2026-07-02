@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 
@@ -49,6 +49,18 @@ function readDedupNeeded(work) {
   const path = join(work, '.auto-context', 'compile', 'dedup-needed.jsonl');
   if (!existsSync(path)) return [];
   return readFileSync(path, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l));
+}
+
+function readDedupSnapshot(stateDir) {
+  if (!existsSync(stateDir)) return null;
+  const file = readdirSync(stateDir).find((f) => f.endsWith('-wiki-dedup.json'));
+  if (!file) return null;
+  return JSON.parse(readFileSync(join(stateDir, file), 'utf8'));
+}
+
+function lastLogLine(logFile) {
+  const lines = readFileSync(logFile, 'utf8').trim().split('\n').filter(Boolean);
+  return lines[lines.length - 1];
 }
 
 function runScan(work, env = {}) {
@@ -223,6 +235,16 @@ test('wiki_dedup_scan: incremental run only re-examines changed/new pages', () =
     const entries = readDedupNeeded(work);
     assert.equal(entries.length, 1);
     assert.ok([entries[0].pageA, entries[0].pageB].includes('entities/page-b.md'));
+
+    // Prove page-a (unchanged since scan 1) was actually skipped this scan, not just
+    // "happened not to produce a pair": the second scan's log line must show only
+    // page-b was scanned (scanned_ok=1 out of pages=2).
+    const secondScanLog = lastLogLine(env.logFile);
+    assert.match(
+      secondScanLog,
+      /\bscanned_ok=1\b/,
+      `expected only the changed/new page (page-b) to be re-scanned on scan 2, got log line: ${secondScanLog}`,
+    );
   } finally {
     rmSync(work, { recursive: true, force: true });
   }
@@ -239,8 +261,30 @@ test('wiki_dedup_scan: maxPairsPerScan caps queuing per scan; overflow retried n
     // Every query returns a high-scoring match against a different partner so each of the 3
     // "new" pages would independently queue a pair if not capped.
     writeFileSync(fixture, JSON.stringify({ results: [{ file: 'proj-wiki/entities/page-a.md', score: 0.95 }] }));
-    runScan(work, { QMD_QUERY_FIXTURE: fixture });
-    assert.equal(readDedupNeeded(work).length, 1, 'must stop at maxPairsPerScan=1 for this scan');
+    const env = runScan(work, { QMD_QUERY_FIXTURE: fixture });
+    const afterScan1 = readDedupNeeded(work);
+    assert.equal(afterScan1.length, 1, 'must stop at maxPairsPerScan=1 for this scan');
+
+    // The page(s) skipped this scan purely due to the cap must NOT have had their snapshot
+    // entry advanced -- otherwise they'd never be retried. Prove it by re-running the scan
+    // (cooldown forced open) and checking that more pairs get queued, i.e. the overflow
+    // page(s) from scan 1 were re-examined and got their own chance to queue a pair.
+    runScan(work, {
+      QMD_QUERY_FIXTURE: fixture,
+      QMD_DEDUP_COOLDOWN_SECONDS: '0',
+      QMD_DEDUP_COOLDOWN_DIR: env.cooldownDir,
+      QMD_SYNC_STATE_DIR: env.stateDir,
+      QMD_DEDUP_LOG: env.logFile,
+    });
+    const afterScan2 = readDedupNeeded(work);
+    assert.ok(
+      afterScan2.length > afterScan1.length,
+      `expected the overflow page from scan 1 to queue a new pair on scan 2, got ${afterScan1.length} -> ${afterScan2.length} entries`,
+    );
+    assert.ok(
+      afterScan2.some((e) => [e.pageA, e.pageB].includes('entities/page-c.md')),
+      `expected page-c (never examined in scan 1 due to the cap) to be re-examined and queued on scan 2, got: ${JSON.stringify(afterScan2)}`,
+    );
   } finally {
     rmSync(work, { recursive: true, force: true });
   }
@@ -253,9 +297,36 @@ test('wiki_dedup_scan: daemon query failure leaves that page unadvanced for retr
     writePage(work, 'entities/page-a.md', { body: 'Content A.' });
     // No QMD_QUERY_FIXTURE and no real daemon reachable at QMD_DAEMON_URL -> query_wiki_similar
     // returns None (network failure). Must not raise, must still exit 0, must log the failure.
-    const { logFile } = runScan(work, { QMD_DAEMON_URL: 'http://127.0.0.1:1' });
+    const { logFile, stateDir, cooldownDir } = runScan(work, { QMD_DAEMON_URL: 'http://127.0.0.1:1' });
     assert.deepEqual(readDedupNeeded(work), []);
     assert.equal(existsSync(logFile), true);
+
+    // Prove the failed page's snapshot entry was never advanced -- read the snapshot
+    // directly instead of just inferring it from "nothing got queued".
+    const snapshotAfterFailure = readDedupSnapshot(stateDir);
+    const filesAfterFailure = (snapshotAfterFailure && snapshotAfterFailure.files) || {};
+    assert.ok(
+      !('entities/page-a.md' in filesAfterFailure),
+      `failed page must not have its snapshot entry advanced, got: ${JSON.stringify(snapshotAfterFailure)}`,
+    );
+
+    // Retry with a reachable daemon (fixture): the page should now be examined and
+    // get a snapshot entry, proving it was correctly retried rather than stuck forever.
+    const fixture = join(work, 'fixture.json');
+    writeFileSync(fixture, JSON.stringify({ results: [] }));
+    runScan(work, {
+      QMD_QUERY_FIXTURE: fixture,
+      QMD_DEDUP_COOLDOWN_SECONDS: '0',
+      QMD_DEDUP_COOLDOWN_DIR: cooldownDir,
+      QMD_SYNC_STATE_DIR: stateDir,
+      QMD_DEDUP_LOG: logFile,
+    });
+    const snapshotAfterRetry = readDedupSnapshot(stateDir);
+    const filesAfterRetry = (snapshotAfterRetry && snapshotAfterRetry.files) || {};
+    assert.ok(
+      'entities/page-a.md' in filesAfterRetry,
+      `expected page-a to be retried and advanced after a successful scan, got: ${JSON.stringify(snapshotAfterRetry)}`,
+    );
   } finally {
     rmSync(work, { recursive: true, force: true });
   }
