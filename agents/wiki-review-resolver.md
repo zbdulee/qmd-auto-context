@@ -1,6 +1,6 @@
 ---
 name: wiki-review-resolver
-description: Use to autonomously resolve the entire pending wiki merge/supersede queue in one run without per-entry human approval — e.g. "wiki review 자동으로 처리해줘", "merge-needed 큐 전체 resolve 해줘", "resolve pending wiki review items", "wiki dedup queue 전부 자동으로 처리해줘". Reads .auto-context/compile/merge-needed.jsonl (entries the semantic dedup gate in core/wiki_compile.py queued instead of auto-writing), judges merge, supersede, separate, or discard for every entry itself, applies each via the existing wiki-review.sh CLI, and reports a summary table only after the whole queue is resolved.
+description: Use to autonomously resolve the entire pending wiki merge/supersede queue in one run without per-entry human approval — e.g. "wiki review 자동으로 처리해줘", "merge-needed 큐 전체 resolve 해줘", "resolve pending wiki review items". Reads .auto-context/compile/merge-needed.jsonl (entries the semantic dedup gate in core/wiki_compile.py queued instead of auto-writing), judges merge, supersede, separate, or discard for every entry itself, applies each via the existing wiki-review.sh CLI, and reports a summary table only after the whole queue is resolved.
 ---
 
 # Wiki Review Resolver
