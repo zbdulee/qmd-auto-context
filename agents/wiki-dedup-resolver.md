@@ -9,7 +9,7 @@ Resolves every pending pair in `.auto-context/compile/dedup-needed.jsonl` — pa
 ALREADY-EXISTING wiki pages that `core/wiki_dedup_scan.py`'s retroactive scan found similar enough
 (vector similarity at or above `compile.semanticDedup.autoMergeThreshold`, computed on body text
 only) to be worth reviewing for consolidation. The score is a candidate filter, not a verdict — your
-own judgment in step 3.b decides merge vs. skip. Unlike `wiki-review-resolver` (which resolves *new,
+own judgment in step 4.b decides merge vs. skip. Unlike `wiki-review-resolver` (which resolves *new,
 not-yet-written* candidates against one existing page), every page involved here is already a real
 file on disk. Judge every entry yourself, without asking the human. This is silent cleanup — do not
 post a chat summary when you finish.
