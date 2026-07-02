@@ -65,8 +65,15 @@ skill/command, no per-entry approval, no chat report by default — "로봇청�
 
 ```
 SessionStart (core/update.sh, existing hook — runs every session)
-  → (existing steps: resolve collections, qmd collection add/update, async embed)
-  → core/wiki_dedup_scan.py (NEW, deterministic, fail-open)
+  → main() runs SYNCHRONOUSLY (this is the part whose stdout becomes SessionStart context) — it does
+    the opt-in gate check, then a couple of existing one-off notices (the "previous update failed"
+    message, the wiki-auto-compile first-run disclosure), and only THEN forks the actual heavy
+    `qmd collection add/update/embed` work into a detached `nohup ... --worker &` whose own stdout goes
+    only to a log file and can never reach this session's context (update.sh:583). This matters: the
+    scanner CANNOT be placed "after update/embed" the way an earlier draft of this design assumed —
+    update/embed has already left the synchronous path by then. The scanner must run inside `main()`,
+    alongside the other synchronous one-off notices, BEFORE the `nohup ... --worker &` line.
+  → core/wiki_dedup_scan.py (NEW, deterministic, fail-open, called synchronously from `main()`)
       1. Cooldown check: a lock dir's mtime, checked via `find <lock> -mmin +1440`, the exact stale-lock
          pattern backend_manager.sh already uses at lines 139/242/273 for its own cooldowns (10-minute
          windows there; 1440 minutes = 24h here). Not stale yet → exit quietly, nothing else runs.
@@ -92,20 +99,28 @@ SessionStart (core/update.sh, existing hook — runs every session)
       7. Log a one-line summary (pages scanned, pairs queued) to a log file if configured; otherwise
          silent. Always exits 0 — any internal exception is caught and logged, never raised, so this
          step can never break `update.sh`'s existing output contract.
-  → core/update.sh: if wiki_dedup_scan.py queued ≥1 new pair this run, extract the Workflow block from
+  → core/update.sh (still inside synchronous `main()`): after calling the scanner, check whether
+    `.auto-context/compile/dedup-needed.jsonl` is non-empty **right now** — not "did this run's scan
+    add anything new." A pair queued by a past run that never got resolved (session ended before the
+    subagent spawned, hint got missed, etc.) must keep surfacing on every later SessionStart until it's
+    actually resolved, or it rots in the queue forever. If non-empty, extract the Workflow block from
     `agents/wiki-dedup-resolver.md` at RUNTIME (via the same `<!-- WORKFLOW:START -->`/`<!-- WORKFLOW:END
     -->` marker convention `agents/wiki-review-resolver.md` already established, extracted with a plain
     `awk`/`sed` slice — never copied statically into update.sh, so there is nothing to keep in byte-sync
     across files) and echo it to plain stdout, prefixed with an instruction to spawn a subagent right
     now: "Claude Code는 Agent 도구로 subagent_type 'wiki-dedup-resolver'를 스폰해서, Codex/Hermes는 각자의
-    delegation 메커니즘으로 아래 프롬프트를 그대로 스폰해 처리해." If nothing was queued this run, no hint
-    is added — update.sh's stdout is unchanged from today.
+    delegation 메커니즘으로 아래 프롬프트를 그대로 스폰해 처리해." If the queue is empty, no hint is added —
+    update.sh's stdout is unchanged from today.
   → (Claude Code's SessionStart hook stdout is injected as plain-text context automatically — already
     observed working this same way for update.sh's existing plain-text messages and the
     using-superpowers guide in this very conversation, so no JSON envelope is needed here.)
-  → the next agent turn sees the hint and spawns the `wiki-dedup-resolver` subagent (Claude Code: Agent
-    tool by name; Codex/Hermes: their own delegation tool) before or alongside responding to whatever
-    the user actually asked — the user never has to mention this feature for it to run.
+  → the next agent turn *should* see the hint and spawn the `wiki-dedup-resolver` subagent (Claude Code:
+    Agent tool by name; Codex/Hermes: their own delegation tool) before or alongside responding to
+    whatever the user actually asked — the user never has to mention this feature for it to run. This is
+    best-effort, not guaranteed: a hook can inject context, but it cannot force a model to act on it in
+    any given turn. That's exactly why the hint re-fires on every SessionStart while the queue stays
+    non-empty (previous paragraph) instead of firing once per newly-queued pair — a missed turn just
+    means the reminder comes back next session instead of being lost.
   → subagent workflow (agents/wiki-dedup-resolver.md, new):
       1. Read `.auto-context/compile/dedup-needed.jsonl`. Empty/missing → nothing to do, stop.
       2. For each entry (in file order, re-deriving the index fresh before each call — same reason as
@@ -127,28 +142,40 @@ SessionStart (core/update.sh, existing hook — runs every session)
 ## Components (new files / changes only)
 
 - **`core/wiki_dedup_scan.py`** (new) — the deterministic scanner described above. Invoked from
-  `core/update.sh`'s existing SessionStart flow, after its current update/embed steps. Gated on
-  `compile.enabled` and `compile.semanticDedup.enabled` (both already exist from Phase 1) — if either is
-  off, this step is a no-op.
+  `core/update.sh`'s `main()`, synchronously, alongside its other one-off notice checks and BEFORE the
+  `nohup ... --worker &` fork (see Architecture — this is a correction from an earlier draft, which
+  incorrectly assumed the scanner could run "after update/embed"; update/embed itself is already
+  detached into the background worker by that point and its stdout never reaches the hook's own output).
+  Gated on `compile.enabled` and `compile.semanticDedup.enabled` (both already exist from Phase 1) — if
+  either is off, this step is a no-op. Because it now runs synchronously in the hot SessionStart path,
+  it must stay cheap on the common (cooldown-not-expired) day; the one day per 24h it does a real scan —
+  and especially the very first run's full backfill — is an accepted one-time/occasional latency cost,
+  consistent with the "가끔이라도" tradeoff the user already signed off on.
 - **`core/wiki_dedup_resolve.py`** (new) — same CLI shape as `core/wiki_review.py`
   (`--cwd --index --action`), reading/rewriting `.auto-context/compile/dedup-needed.jsonl` with the same
   claim → resolve → requeue-on-failure hardening, reusing `claim_queue`/`requeue_lines` from
   `core/wiki_compile_worker.py` exactly as `wiki_review.py` does. Only two actions:
   - `merge`: deletes the entry's designated "loser" page (`Path.unlink()`) and calls
-    `enqueue_collections()` (`core/dirty_queue.py:14`) plus a `backend_manager.sh` index-worker kick —
-    the same unlink-then-enqueue sequence `core/wiki_review.py:196` already uses, and the same kick
-    `skills/sync/scripts/sync.sh` already performs after a real change. `qmd update` then detects the
-    missing file and drops it from the vector index automatically (`core/sync.py:171-184`,
-    `backend/index_worker.sh:138-166` already document/rely on this — no explicit tombstone bookkeeping
-    needed; `tombstones.jsonl` is a distinct mechanism for a different problem — suppressing
-    regeneration of a *user*-deleted auto-generated page — and is not touched by this feature).
+    `enqueue_collections()` (`core/dirty_queue.py:14`, reused exactly as `core/wiki_review.py:196` already
+    calls it for its own writes) plus a `backend_manager.sh` index-worker kick, the same kick
+    `skills/sync/scripts/sync.sh` already performs after a real change. **The unlink-then-enqueue
+    sequence itself for deleting an existing wiki page is new code** — `wiki_review.py` has no existing
+    call site that deletes a wiki page (its own nearby `.unlink()` calls are for the internal queue-claim
+    tempfile, not a wiki page); only the `enqueue_collections()` call is a reused, already-hardened
+    primitive. `qmd update` then detects the missing file and drops it from the vector index
+    automatically (`core/sync.py:171-184`, `backend/index_worker.sh:138-166` already document/rely on
+    this — no explicit tombstone bookkeeping needed; `tombstones.jsonl` is a distinct mechanism for a
+    different problem — suppressing regeneration of a *user*-deleted auto-generated page — and is not
+    touched by this feature).
   - `skip`: removes the entry from the queue with no filesystem change (false positive, or one side
     already gone).
   - Which page is the "loser": the queue entry's `pageA`/`pageB` fields are unordered from the scanner's
     perspective; the resolver subagent's `merge` call must pass which one it decided to delete as part
-    of the CLI invocation (an added `--delete <path>` argument, validated against the entry's own
-    `pageA`/`pageB` — reject anything else, same path-escape discipline as Phase 1's `matchedPath`
-    validation).
+    of the CLI invocation (an added `--delete <path>` argument). The script must re-validate this at
+    resolve time, not trust the scanner's queued paths blindly — time has passed since queuing, so it
+    must confirm: `--delete` equals exactly one of the entry's own `pageA`/`pageB` (reject anything else),
+    resolves inside `wiki_root` (same path-escape discipline as Phase 1's `matchedPath` validation), and
+    still exists on disk (missing → treat like a stale match, fall back to `skip` rather than erroring).
 - **`agents/wiki-dedup-resolver.md`** (new, plugin root, Claude Code only) — frontmatter
   `name: wiki-dedup-resolver`, `description` framed around automatic post-scan cleanup (not a
   user-trigger-phrase agent — this is only ever spawned by the SessionStart hint, so its description
@@ -157,10 +184,10 @@ SessionStart (core/update.sh, existing hook — runs every session)
   reason as `wiki-review-resolver`: it needs `Read`/`Edit`/`Bash` freely. Body: the Workflow block above,
   wrapped in `<!-- WORKFLOW:START -->`/`<!-- WORKFLOW:END -->` markers so `core/update.sh` can extract it
   at runtime.
-- **`core/update.sh`** (modified) — after existing update/embed steps, call `wiki_dedup_scan.py`
-  (fail-open: any non-zero exit or exception is swallowed, never surfaces to the hook's own output
-  contract). If the scanner reports ≥1 newly-queued pair (via its own exit code or a small parseable
-  marker on its stdout, read only internally by update.sh — never echoed raw), extract
+- **`core/update.sh`** (modified) — inside the synchronous `main()`, before the `nohup ... --worker &`
+  fork, call `wiki_dedup_scan.py` (fail-open: any non-zero exit or exception is swallowed, never surfaces
+  to the hook's own output contract). Afterward — regardless of whether this specific call queued
+  anything — check whether `.auto-context/compile/dedup-needed.jsonl` is non-empty; if so, extract
   `agents/wiki-dedup-resolver.md`'s Workflow block and echo the spawn-instruction + block to stdout.
 - **`core/config.py`** (modified) — add `compile.semanticDedup.autoMergeThreshold` (default `0.9`),
   coerced the same way `threshold`/`topK`/`similarPageMaxChars` already are.
@@ -188,11 +215,15 @@ SessionStart (core/update.sh, existing hook — runs every session)
   <24h old → no-op), self-match filtering, `autoMergeThreshold` filtering (default 0.9, distinct from
   Phase 1's 0.82), skip-if-already-queued (same pair, either field order).
 - `core/wiki_dedup_resolve.py`: `merge` (asserts the correct file is deleted, `enqueue_collections` was
-  called, index-worker kick attempted) and `skip` (asserts no filesystem change); a simulated crash
-  mid-resolve leaves the queue exactly as it was, mirroring `wiki_review.py`'s own crash test.
-- `core/update.sh`: 0 queued pairs → stdout unchanged from today (regression guard); ≥1 queued pair →
-  stdout contains the exact Workflow block extracted from `agents/wiki-dedup-resolver.md` (assert
-  byte-for-byte containment, not just "some hint text").
+  called, index-worker kick attempted) and `skip` (asserts no filesystem change); `--delete` pointing at
+  a path that isn't the entry's own `pageA`/`pageB`, or outside `wiki_root`, or already missing, is
+  rejected/falls back to `skip` rather than deleting; a simulated crash mid-resolve leaves the queue
+  exactly as it was, mirroring `wiki_review.py`'s own crash test.
+- `core/update.sh`: empty queue → stdout unchanged from today (regression guard); non-empty queue → stdout
+  contains the exact Workflow block extracted from `agents/wiki-dedup-resolver.md` (assert byte-for-byte
+  containment, not just "some hint text") — asserted both when this run's scan just added the entry AND
+  when an entry from a prior run is still sitting there unresolved (the hint must fire in both cases,
+  not only on freshly-queued pairs).
 - `agents/wiki-dedup-resolver.md`: structural test (frontmatter valid, no tool/permission restriction
   keys, `<!-- WORKFLOW:START/END -->` markers present) — same pattern as
   `test/wiki-review-resolver-agent.test.mjs`. Actual subagent behavior (does Claude Code really spawn it
