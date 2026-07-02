@@ -503,9 +503,20 @@ def resolve_daemon_result_path(root: Path, wiki_root: Path, uri: str, collection
     return None
 
 
-def query_wiki_similar(daemon_url: str, collection: str, text: str, top_k: int, timeout: float) -> list[dict] | None:
+def query_wiki_similar(daemon_url: str, collection: str, text: str, top_k: int, timeout: float, rerank: bool = False) -> list[dict] | None:
     """Vector-search `text` against `collection`. Returns daemon `results` list, or
-    None on any failure — caller must fail-open on None, never raise."""
+    None on any failure — caller must fail-open on None, never raise.
+
+    `rerank` defaults to False, matching Phase 1's write-time semantic gate (the
+    only remaining synchronous, per-edit caller — rerank's latency cost isn't
+    worth paying on that hot path). With rerank=False the daemon's `score` field
+    is a reciprocal-rank value (1, 0.5, 0.33, ...) from result position, NOT a
+    semantic similarity. Every other caller runs off that hot path -- the
+    compile worker's similar-page lookup (backend_manager.sh forks it with
+    `&`) and the retroactive dedup scanner (runs inside update.sh's
+    background embed subshell, once per 24h) -- and must pass rerank=True
+    explicitly to get a real, threshold-comparable similarity score.
+    """
     fixture_path = os.environ.get("QMD_QUERY_FIXTURE")
     if fixture_path:
         try:
@@ -523,7 +534,7 @@ def query_wiki_similar(daemon_url: str, collection: str, text: str, top_k: int, 
         "limit": max(1, top_k),
         "minScore": 0,
         "timeout": timeout,
-        "rerank": False,
+        "rerank": rerank,
     }
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(

@@ -202,7 +202,12 @@ def run(cwd: str) -> None:
         body = extract_body_text(text)
         if not body:
             continue  # nothing to compare; leave unadvanced (retry once it has content)
-        results = wc.query_wiki_similar(daemon_url, collection, body, top_k, timeout)
+        # rerank=True: unlike the write-time gate (per-edit, latency-sensitive),
+        # this scan runs at most once per 24h in the background, so it can afford
+        # a real semantic score instead of query_wiki_similar's default
+        # reciprocal-rank value -- which would make autoMergeThreshold meaningless
+        # (rank-2 is always exactly 0.5 regardless of true similarity).
+        results = wc.query_wiki_similar(daemon_url, collection, body, top_k, timeout, rerank=True)
         if results is None:
             scanned_failed += 1
             continue  # query failed: leave unadvanced, retried next scan

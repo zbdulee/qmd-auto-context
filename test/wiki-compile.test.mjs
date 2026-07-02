@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync, spawn } from 'node:child_process';
+import { createServer } from 'node:http';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
@@ -37,6 +38,29 @@ function runCompile(work, payload, env = {}) {
     encoding: 'utf8',
     input: JSON.stringify(payload),
     env: { ...process.env, ...env },
+  });
+}
+
+function runCompileAsync(work, payload, env = {}) {
+  // execFileSync would block this process's event loop, starving the in-process
+  // mock HTTP server used by tests that need to observe the outgoing /query
+  // payload -- use async spawn instead so the server can actually respond.
+  return new Promise((resolve, reject) => {
+    const child = spawn('python3', ['core/wiki_compile.py', '--cwd', work], {
+      env: { ...process.env, ...env },
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => { stdout += chunk; });
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      if (code === 0) resolve(stdout);
+      else reject(new Error(`wiki_compile.py exited ${code}: ${stderr}`));
+    });
+    child.stdin.end(JSON.stringify(payload));
   });
 }
 
@@ -828,6 +852,44 @@ test('wiki_compile: semantic gate fails open when QMD_QUERY_FIXTURE returns vali
 
     assert.equal(out.action, 'created');
   } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('wiki_compile: semantic gate still queries with rerank=false (unchanged, latency-sensitive write-time path — only the retroactive dedup scanner opts into rerank=true)', async () => {
+  const work = repoTemp('wiki-compile-semantic-rerank-unchanged');
+  const requests = [];
+  const server = createServer((req, res) => {
+    if (req.method === 'POST' && req.url === '/query') {
+      let body = '';
+      req.setEncoding('utf8');
+      req.on('data', (chunk) => { body += chunk; });
+      req.on('end', () => {
+        requests.push(JSON.parse(body));
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ results: [] }));
+      });
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  try {
+    writeSettings(work);
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address();
+
+    await runCompileAsync(work, {
+      title: 'Brand new entity with no identity match',
+      summary: 'Should trigger the semantic gate to query the live daemon.',
+      suggestedType: 'entity',
+      confidence: 'high',
+    }, { QMD_DAEMON_URL: `http://127.0.0.1:${port}` });
+
+    assert.equal(requests.length, 1, 'expected exactly one /query call from the semantic gate');
+    assert.equal(requests[0].rerank, false, 'write-time gate must keep rerank=false (unchanged default)');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
     rmSync(work, { recursive: true, force: true });
   }
 });

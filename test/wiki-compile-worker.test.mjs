@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
+import { createServer } from 'node:http';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -573,6 +574,76 @@ print(json.dumps(result, ensure_ascii=False))
 `;
   return execFileSync('python3', ['-c', script], { encoding: 'utf8', env: { ...process.env, ...env } }).trim();
 }
+
+function callGatherSimilarPagesAsync(project, contentPath, env = {}) {
+  // execFileSync would block this process's event loop, starving the in-process
+  // mock HTTP server used by the rerank regression test below -- use async
+  // spawn instead so the server can actually respond.
+  const script = `
+import sys
+sys.path.insert(0, 'core')
+import json
+from pathlib import Path
+import config as qmd_config
+import wiki_compile_worker as w
+found = qmd_config.find_project_config(${JSON.stringify(project)})
+root = Path(found['projectRoot']).resolve()
+cfg = found['config']
+wiki_root = (root / cfg.get('wikiPath', '.auto-context/wiki')).resolve()
+compile_cfg = cfg.get('compile', {})
+content = Path(${JSON.stringify(contentPath)}).read_text(encoding='utf-8')
+semantic = compile_cfg.get('semanticDedup', {})
+result = w.gather_similar_pages(root, wiki_root, cfg, compile_cfg, content, semantic.get('topK', 3), semantic.get('similarPageMaxChars', 12000))
+print(json.dumps(result, ensure_ascii=False))
+`;
+  return new Promise((resolve, reject) => {
+    const child = spawn('python3', ['-c', script], { env: { ...process.env, ...env } });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => { stdout += chunk; });
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      if (code === 0) resolve(stdout.trim());
+      else reject(new Error(`gather_similar_pages exited ${code}: ${stderr}`));
+    });
+  });
+}
+
+test('gather_similar_pages: queries the daemon with rerank=true (async background worker, not the hot per-edit path)', async () => {
+  const project = setupProject();
+  const requests = [];
+  const server = createServer((req, res) => {
+    if (req.method === 'POST' && req.url === '/query') {
+      let body = '';
+      req.setEncoding('utf8');
+      req.on('data', (chunk) => { body += chunk; });
+      req.on('end', () => {
+        requests.push(JSON.parse(body));
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ results: [] }));
+      });
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  try {
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address();
+    const sourcePath = join(project, 'docs', 'source.md');
+
+    await callGatherSimilarPagesAsync(project, sourcePath, { QMD_DAEMON_URL: `http://127.0.0.1:${port}` });
+
+    assert.equal(requests.length, 1, 'expected exactly one /query call from gather_similar_pages');
+    assert.equal(requests[0].rerank, true, 'background worker lookup must opt into rerank=true');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(project, { recursive: true, force: true });
+  }
+});
 
 test('gather_similar_pages: above-threshold match is included with full page content', () => {
   const project = setupProject();

@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
+import { createServer } from 'node:http';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
@@ -61,6 +62,25 @@ function readDedupSnapshot(stateDir) {
 function lastLogLine(logFile) {
   const lines = readFileSync(logFile, 'utf8').trim().split('\n').filter(Boolean);
   return lines[lines.length - 1];
+}
+
+function runScanAsync(work, env = {}) {
+  // execFileSync would block this process's event loop, starving the in-process
+  // mock HTTP server used by tests that need to observe the outgoing /query
+  // payload -- use async spawn instead so the server can actually respond.
+  return new Promise((resolve, reject) => {
+    const child = spawn('python3', ['core/wiki_dedup_scan.py', '--cwd', work], {
+      env: { ...process.env, ...env },
+    });
+    let stderr = '';
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`wiki_dedup_scan.py exited ${code}: ${stderr}`));
+    });
+  });
 }
 
 function runScan(work, env = {}) {
@@ -343,6 +363,45 @@ test('wiki_dedup_scan: compile.enabled=false or semanticDedup.enabled=false is a
     runScan(work, { QMD_QUERY_FIXTURE: fixture });
     assert.deepEqual(readDedupNeeded(work), []);
   } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('wiki_dedup_scan: queries the daemon with rerank=true (query_wiki_similar defaults to false; the scanner must opt in explicitly)', async () => {
+  const work = repoTemp('dedup-scan-rerank-flag');
+  const requests = [];
+  const server = createServer((req, res) => {
+    if (req.method === 'POST' && req.url === '/query') {
+      let body = '';
+      req.setEncoding('utf8');
+      req.on('data', (chunk) => { body += chunk; });
+      req.on('end', () => {
+        requests.push(JSON.parse(body));
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ results: [] }));
+      });
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  try {
+    writeSettings(work);
+    writePage(work, 'entities/page-a.md', { body: 'Some content that needs a real similarity score.' });
+
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address();
+    await runScanAsync(work, {
+      QMD_DAEMON_URL: `http://127.0.0.1:${port}`,
+      QMD_DEDUP_COOLDOWN_DIR: join(work, 'dedup-cooldown'),
+      QMD_SYNC_STATE_DIR: join(work, 'sync-state'),
+      QMD_DEDUP_LOG: join(work, 'dedup.log'),
+    });
+
+    assert.equal(requests.length, 1, 'expected exactly one /query call for the one page');
+    assert.equal(requests[0].rerank, true, 'scanner must request rerank=true, not the query_wiki_similar default of false');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
     rmSync(work, { recursive: true, force: true });
   }
 });
