@@ -138,14 +138,7 @@ def gather_similar_pages(
         return None
     daemon_url = os.environ.get("QMD_DAEMON_URL", "http://localhost:8483")
     timeout = float(config.get("queryTimeout", 5.0) or 5.0)
-    # rerank=True: this runs from the async, backgrounded compile worker
-    # (backend_manager.sh kick-compile forks it with `&`), not on a synchronous
-    # per-edit path, so it can afford a real semantic score instead of
-    # query_wiki_similar's default reciprocal-rank value -- which made this
-    # function's threshold comparison meaningless (rank-1's reciprocal score of
-    # 1.0 always exceeds any reasonable threshold; rank-2's 0.5 almost never
-    # does, regardless of true similarity).
-    results = wc.query_wiki_similar(daemon_url, collection, content, top_k, timeout, rerank=True)
+    results = wc.query_wiki_similar(daemon_url, collection, content, top_k, timeout)
     if not results:
         return None
     threshold = float(semantic_cfg.get("threshold", 0.82))

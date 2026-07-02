@@ -595,6 +595,35 @@ PY
     fi
   fi
 
+  # Write-time semantic gate merge-review hint: same shape as the dedup hint
+  # above, but for merge-needed.jsonl -- the queue core/wiki_compile.py
+  # populates when a new candidate looks similar to an existing page instead
+  # of auto-writing it. Cheap file test + text extraction only, no daemon call.
+  # Unlike dedup-needed.jsonl (intentionally hardcoded), this path is
+  # configurable (compile.mergeNeededPath) and already read as such by both
+  # the producer (wiki_compile.py) and consumer (wiki_review.py) -- reuse the
+  # already-loaded $config_json rather than hardcode the default here too.
+  merge_needed_rel="$(printf '%s' "$config_json" | python3 -c 'import json,sys
+try:
+    cfg = json.load(sys.stdin)
+except Exception:
+    cfg = {}
+compile_cfg = cfg.get("compile") if isinstance(cfg.get("compile"), dict) else {}
+rel = compile_cfg.get("mergeNeededPath")
+print(rel if isinstance(rel, str) and rel else ".auto-context/compile/merge-needed.jsonl")' 2>/dev/null)"
+  [ -z "$merge_needed_rel" ] && merge_needed_rel=".auto-context/compile/merge-needed.jsonl"
+  merge_queue="$workdir/$merge_needed_rel"
+  if [ -s "$merge_queue" ]; then
+    review_agent_file="$(cd "$(dirname "$0")/.." && pwd)/agents/wiki-review-resolver.md"
+    if [ -f "$review_agent_file" ]; then
+      review_workflow="$(awk '/<!-- WORKFLOW:START -->/{f=1;next}/<!-- WORKFLOW:END -->/{f=0}f' "$review_agent_file")"
+      if [ -n "$review_workflow" ]; then
+        echo "Claude Code는 Agent 도구로 subagent_type 'wiki-review-resolver'를 스폰해서, Codex는 자체 multi-agent delegation으로 아래 프롬프트를 그대로 스폰해 처리해."
+        printf '%s\n' "$review_workflow"
+      fi
+    fi
+  fi
+
   # 헬스체크: config·reason 검사 통과 후, fork 직전 1회 실행 (main() 호출에서만).
   # --resolve-only 내부 재귀호출(--cwd 포함)과 --worker 경로에서는 실행 안 됨.
   qmd_healthcheck

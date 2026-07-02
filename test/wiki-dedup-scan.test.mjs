@@ -367,7 +367,7 @@ test('wiki_dedup_scan: compile.enabled=false or semanticDedup.enabled=false is a
   }
 });
 
-test('wiki_dedup_scan: queries the daemon with rerank=true (query_wiki_similar defaults to false; the scanner must opt in explicitly)', async () => {
+test('wiki_dedup_scan: queries the daemon with rerank=true', async () => {
   const work = repoTemp('dedup-scan-rerank-flag');
   const requests = [];
   const server = createServer((req, res) => {
@@ -399,7 +399,7 @@ test('wiki_dedup_scan: queries the daemon with rerank=true (query_wiki_similar d
     });
 
     assert.equal(requests.length, 1, 'expected exactly one /query call for the one page');
-    assert.equal(requests[0].rerank, true, 'scanner must request rerank=true, not the query_wiki_similar default of false');
+    assert.equal(requests[0].rerank, true, 'query_wiki_similar must always request rerank=true');
   } finally {
     await new Promise((resolve) => server.close(resolve));
     rmSync(work, { recursive: true, force: true });

@@ -856,8 +856,8 @@ test('wiki_compile: semantic gate fails open when QMD_QUERY_FIXTURE returns vali
   }
 });
 
-test('wiki_compile: semantic gate still queries with rerank=false (unchanged, latency-sensitive write-time path — only the retroactive dedup scanner opts into rerank=true)', async () => {
-  const work = repoTemp('wiki-compile-semantic-rerank-unchanged');
+test('wiki_compile: semantic gate queries with rerank=true (find_wiki_semantic_match only ever runs off the async compile worker or the manual wiki-compile skill, never a synchronous per-edit path)', async () => {
+  const work = repoTemp('wiki-compile-semantic-rerank-true');
   const requests = [];
   const server = createServer((req, res) => {
     if (req.method === 'POST' && req.url === '/query') {
@@ -887,7 +887,7 @@ test('wiki_compile: semantic gate still queries with rerank=false (unchanged, la
     }, { QMD_DAEMON_URL: `http://127.0.0.1:${port}` });
 
     assert.equal(requests.length, 1, 'expected exactly one /query call from the semantic gate');
-    assert.equal(requests[0].rerank, false, 'write-time gate must keep rerank=false (unchanged default)');
+    assert.equal(requests[0].rerank, true, 'semantic gate must use rerank=true for a real, threshold-comparable score');
   } finally {
     await new Promise((resolve) => server.close(resolve));
     rmSync(work, { recursive: true, force: true });

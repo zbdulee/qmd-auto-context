@@ -810,6 +810,121 @@ test('update core: dedup hint does not shell out to qmd or curl (file test + tex
   }
 });
 
+test('update core: merge-review hint absent when merge-needed.jsonl is empty/missing (regression guard)', () => {
+  const work = repoTemp('qmd-merge-hint-empty');
+  const bin = join(work, 'bin');
+  try {
+    mkdirSync(join(work, '.auto-context'), { recursive: true });
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(work, '.auto-context', 'settings.json'), JSON.stringify({
+      indexing: true, collections: ['x'],
+    }));
+    writeFileSync(join(bin, 'curl'), '#!/usr/bin/env sh\nexit 1\n', { mode: 0o755 });
+    writeFileSync(join(bin, 'qmd'), '#!/usr/bin/env sh\nexit 0\n', { mode: 0o755 });
+
+    const out = execFileSync('bash', [join(process.cwd(), 'core', 'update.sh')], {
+      encoding: 'utf8',
+      input: JSON.stringify({ cwd: work }),
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+    });
+    assert.doesNotMatch(out, /wiki-review-resolver/);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('update core: merge-review hint fires with the exact workflow block when the queue is non-empty', () => {
+  const work = repoTemp('qmd-merge-hint-nonempty');
+  const bin = join(work, 'bin');
+  try {
+    mkdirSync(join(work, '.auto-context', 'compile'), { recursive: true });
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(work, '.auto-context', 'settings.json'), JSON.stringify({
+      indexing: true, collections: ['x'],
+    }));
+    writeFileSync(
+      join(work, '.auto-context', 'compile', 'merge-needed.jsonl'),
+      JSON.stringify({ candidate: { title: 'a' }, matchedPath: 'entities/b.md', matchedScore: 0.95, suggestedAction: 'merge' }) + '\n',
+    );
+    writeFileSync(join(bin, 'curl'), '#!/usr/bin/env sh\nexit 1\n', { mode: 0o755 });
+    writeFileSync(join(bin, 'qmd'), '#!/usr/bin/env sh\nexit 0\n', { mode: 0o755 });
+
+    const out = execFileSync('bash', [join(process.cwd(), 'core', 'update.sh')], {
+      encoding: 'utf8',
+      input: JSON.stringify({ cwd: work }),
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+    });
+    assert.match(out, /wiki-review-resolver/);
+    const agentBody = readFileSync('agents/wiki-review-resolver.md', 'utf8');
+    const startMarker = '<!-- WORKFLOW:START -->';
+    const endMarker = '<!-- WORKFLOW:END -->';
+    const block = agentBody.slice(agentBody.indexOf(startMarker) + startMarker.length, agentBody.indexOf(endMarker)).trim();
+    assert.ok(out.includes(block), 'hint stdout must contain the exact workflow block, byte-for-byte');
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('update core: merge-review hint honors a custom compile.mergeNeededPath instead of the hardcoded default', () => {
+  const work = repoTemp('qmd-merge-hint-custom-path');
+  const bin = join(work, 'bin');
+  try {
+    mkdirSync(join(work, '.auto-context', 'compile'), { recursive: true });
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(work, '.auto-context', 'settings.json'), JSON.stringify({
+      indexing: true,
+      collections: ['x'],
+      compile: { mergeNeededPath: '.auto-context/compile/custom-merge-queue.jsonl' },
+    }));
+    // The default-named file is present but empty -- if the hint reads the hardcoded
+    // default path instead of the configured one, this proves it by staying silent.
+    writeFileSync(join(work, '.auto-context', 'compile', 'merge-needed.jsonl'), '');
+    writeFileSync(
+      join(work, '.auto-context', 'compile', 'custom-merge-queue.jsonl'),
+      JSON.stringify({ candidate: { title: 'a' }, matchedPath: 'entities/b.md', matchedScore: 0.95, suggestedAction: 'merge' }) + '\n',
+    );
+    writeFileSync(join(bin, 'curl'), '#!/usr/bin/env sh\nexit 1\n', { mode: 0o755 });
+    writeFileSync(join(bin, 'qmd'), '#!/usr/bin/env sh\nexit 0\n', { mode: 0o755 });
+
+    const out = execFileSync('bash', [join(process.cwd(), 'core', 'update.sh')], {
+      encoding: 'utf8',
+      input: JSON.stringify({ cwd: work }),
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+    });
+    assert.match(out, /wiki-review-resolver/, 'hint must fire by reading the configured mergeNeededPath, not the hardcoded default');
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('update core: merge-review hint does not shell out to qmd or curl (file test + text extraction only)', () => {
+  const work = repoTemp('qmd-merge-hint-no-daemon-call');
+  const bin = join(work, 'bin');
+  const qmdLog = join(work, 'qmd.log');
+  try {
+    mkdirSync(join(work, '.auto-context', 'compile'), { recursive: true });
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(work, '.auto-context', 'settings.json'), JSON.stringify({
+      indexing: true, collections: ['x'],
+    }));
+    writeFileSync(
+      join(work, '.auto-context', 'compile', 'merge-needed.jsonl'),
+      JSON.stringify({ candidate: { title: 'a' }, matchedPath: 'entities/b.md', matchedScore: 0.95, suggestedAction: 'merge' }) + '\n',
+    );
+    writeFileSync(join(bin, 'curl'), '#!/usr/bin/env sh\nexit 1\n', { mode: 0o755 });
+    writeFileSync(join(bin, 'qmd'), `#!/usr/bin/env sh\necho "$@" >> "${qmdLog}"\nexit 0\n`, { mode: 0o755 });
+
+    execFileSync('bash', [join(process.cwd(), 'core', 'update.sh')], {
+      encoding: 'utf8',
+      input: JSON.stringify({ cwd: work }),
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+    });
+    assert.equal(existsSync(qmdLog), false, 'this pending-style project makes no qmd calls before the merge hint runs, so any call here would have come from the hint logic');
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
 test('update core: dedup scanner is wired inside the embed subshell, after embed and the conditional reload', () => {
   const script = readFileSync(join(process.cwd(), 'core', 'update.sh'), 'utf8');
   const embedCallIdx = script.indexOf('"$QMD_BIN_RESOLVED" embed');

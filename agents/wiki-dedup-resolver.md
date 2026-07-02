@@ -1,17 +1,18 @@
 ---
 name: wiki-dedup-resolver
-description: Autonomous cleanup agent spawned only by the SessionStart hint when core/wiki_dedup_scan.py has queued near-duplicate wiki page pairs to .auto-context/compile/dedup-needed.jsonl. Not triggered by user request phrases -- judges each queued pair, folds any unique content into the page it keeps via its own edits, then deletes the duplicate through core/wiki_dedup_resolve.py. Runs silently; does not report to the user.
+description: Autonomous cleanup agent spawned only by the SessionStart hint when core/wiki_dedup_scan.py has queued candidate wiki page pairs to .auto-context/compile/dedup-needed.jsonl. Not triggered by user request phrases -- judges each queued pair, folds any unique content into the page it keeps via its own edits, then deletes the duplicate through core/wiki_dedup_resolve.py. Runs silently; does not report to the user.
 ---
 
 # Wiki Dedup Resolver
 
 Resolves every pending pair in `.auto-context/compile/dedup-needed.jsonl` — pairs of
-ALREADY-EXISTING wiki pages that `core/wiki_dedup_scan.py`'s retroactive scan found to be
-near-duplicates (vector similarity at or above `compile.semanticDedup.autoMergeThreshold`,
-computed on body text only). Unlike `wiki-review-resolver` (which resolves *new, not-yet-written*
-candidates against one existing page), every page involved here is already a real file on disk.
-Judge every entry yourself, without asking the human. This is silent cleanup — do not post a
-chat summary when you finish.
+ALREADY-EXISTING wiki pages that `core/wiki_dedup_scan.py`'s retroactive scan found similar enough
+(vector similarity at or above `compile.semanticDedup.autoMergeThreshold`, computed on body text
+only) to be worth reviewing for consolidation. The score is a candidate filter, not a verdict — your
+own judgment in step 3.b decides merge vs. skip. Unlike `wiki-review-resolver` (which resolves *new,
+not-yet-written* candidates against one existing page), every page involved here is already a real
+file on disk. Judge every entry yourself, without asking the human. This is silent cleanup — do not
+post a chat summary when you finish.
 
 ## Workflow
 
@@ -32,18 +33,19 @@ chat summary when you finish.
    queue file — resolving one entry removes it and shifts every later index down by one):
    a. Read BOTH pages' full content (paths are wiki-root-relative). Either file missing → the
       pair is stale; call the CLI with `--action skip` and move on.
-   b. Judge: are they genuinely the SAME fact/event — not merely related? All of the following mean
-      `skip`, not merge:
-      - Same entity or same storyline recurring across different episodes/sources (e.g. two
-        distinct incidents in one ongoing investigation) → skip.
-      - Same topic but each page records a different decision, state change, or point in time →
-        skip.
-      - You cannot state, in one sentence, why keeping both pages adds nothing over keeping one →
-        skip.
-   c. If (and only if) they are genuinely the same: pick the page to KEEP (normally the more
-      complete one). List every fact present in the page you will delete that is absent from the
-      keeper. If that list is non-empty, fold each fact into the keeper with your Edit tool first,
-      and re-read the keeper to confirm every listed fact is now present. Only then proceed.
+   b. Judge: do the two pages belong to the same category/topic (same mechanism, same event, same
+      sub-concept of a broader idea) such that consolidating them into one page keeps the wiki
+      readable? This is a lower bar than "identical fact" — differing specific details do NOT by
+      themselves mean skip. Skip only when:
+      - The two pages cover clearly different categories/topics, and merging would blend unrelated
+        content into one confusing page.
+      - You cannot state, in one sentence, what shared category/topic justifies merging them.
+   c. If (and only if) they share a category worth consolidating: pick the page to KEEP (normally
+      the more complete one). List every fact present in the page you will delete that is absent
+      from the keeper — this matters more here than for exact duplicates, since a category merge
+      usually combines genuinely different specific facts, not just repeated ones. Fold each fact
+      into the keeper with your Edit tool first, and re-read the keeper to confirm every listed fact
+      is now present. Only then proceed.
    d. Run: `python3 "$ROOT/core/wiki_dedup_resolve.py" --cwd <cwd> --index <n> --action merge
       --delete <wiki-root-relative path of the page being deleted>`
       (or `--action skip` with no `--delete` for non-duplicates).
