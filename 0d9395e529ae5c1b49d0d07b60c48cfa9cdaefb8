@@ -1,0 +1,23 @@
+core/wiki_compile.py
+  h_42d950683aaaea 506,508-519,537
+core/wiki_compile_worker.py
+  h_42d950683aaaea 141-148
+core/wiki_dedup_scan.py
+  h_42d950683aaaea 205-210
+test/wiki-compile-worker.test.mjs
+  h_42d950683aaaea 3-4,578-647
+test/wiki-compile.test.mjs
+  h_42d950683aaaea 3-4,44-66,859-896
+test/wiki-dedup-scan.test.mjs
+  h_42d950683aaaea 3-4,67-85,369-407
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "0d9395e529ae5c1b49d0d07b60c48cfa9cdaefb8",
+  "prompts": {},
+  "humans": {
+    "h_42d950683aaaea": {
+      "author": "dulee@zigbang.com"
+    }
+  }
+}
