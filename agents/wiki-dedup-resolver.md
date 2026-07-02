@@ -79,6 +79,6 @@ post a chat summary when you finish.
 ## Notes
 
 - Never edit `core/wiki_dedup_resolve.py`, `core/wiki_dedup_scan.py`, or the queue file directly —
-  every mutation goes through step 3.d's CLI call.
+  every mutation goes through step 4.d's CLI call.
 - This agent is only ever spawned from the `core/update.sh` SessionStart hint (see step 0's
   run-lock and the "no chat summary" rule above) — it has no user-facing trigger phrases.
