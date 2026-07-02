@@ -19,12 +19,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.resolve()))
 import config as qmd_config
 import wiki_compile as wc
+import wiki_dedup_scan as dedup_scan
 from dirty_queue import enqueue_collections
 from wiki_compile_worker import claim_queue, requeue_lines
 
 ACTIONS = {"merge", "skip"}
 DEDUP_NEEDED_REL = ".auto-context/compile/dedup-needed.jsonl"
 DEDUP_DELETED_REL = ".auto-context/compile/dedup-deleted.jsonl"
+DEDUP_SKIPPED_REL = ".auto-context/compile/dedup-skipped.jsonl"
 
 
 def now_iso() -> str:
@@ -47,13 +49,57 @@ def load_entries(claimed: Path) -> list[tuple[str, dict | None]]:
     return rows
 
 
+def record_skip(root: Path, wiki_root: Path, compile_dir: Path, entry: dict) -> bool:
+    """Append the skip judgment to dedup-skipped.jsonl so the scanner can
+    suppress re-queueing this pair while both bodies are unchanged.
+
+    Returns False -- recording NOTHING -- for stale skips: either page
+    missing, path-unsafe, or unreadable. A stale skip is not a content
+    judgment, and recording one would create a bogus permanent suppression.
+    Recording failure never fails the skip itself.
+
+    The hashes are computed HERE, by the CLI, at skip time -- never supplied
+    by the resolver agent (an agent-supplied hash would be nondeterministic).
+    """
+    page_a = entry.get("pageA")
+    page_b = entry.get("pageB")
+    if not (isinstance(page_a, str) and isinstance(page_b, str)) or page_a == page_b:
+        return False
+    texts: dict[str, str] = {}
+    for rel in (page_a, page_b):
+        target = (wiki_root / rel).resolve()
+        try:
+            target.relative_to(wiki_root)
+        except ValueError:
+            return False
+        if not target.is_file():
+            return False  # stale skip: no content judgment happened
+        try:
+            texts[rel] = target.read_text(encoding="utf-8")
+        except OSError:
+            return False
+    skipped_path = wc.safe_compile_file(root, compile_dir, DEDUP_SKIPPED_REL)
+    if skipped_path is None:
+        return False
+    first, second = sorted((page_a, page_b))  # order-independent pair key
+    wc.append_jsonl(skipped_path, {
+        "pageA": first,
+        "pageB": second,
+        "pageAHash": dedup_scan.body_hash(texts[first]),
+        "pageBHash": dedup_scan.body_hash(texts[second]),
+        "skippedAt": now_iso(),
+    })
+    return True
+
+
 def resolve_entry(root: Path, wiki_root: Path, compile_dir: Path, entry: dict, action: str, delete_rel: str | None) -> dict:
     page_a = entry.get("pageA")
     page_b = entry.get("pageB")
     valid_choices = {p for p in (page_a, page_b) if isinstance(p, str)}
 
     if action == "skip":
-        return {"action": "skipped"}
+        recorded = record_skip(root, wiki_root, compile_dir, entry)
+        return {"action": "skipped", "recorded": recorded}
 
     if action == "merge":
         if delete_rel not in valid_choices:

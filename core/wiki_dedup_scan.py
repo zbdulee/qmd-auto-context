@@ -14,6 +14,7 @@ exception is caught and logged rather than raised, so a scanner bug can
 never break the embed subshell that calls it.
 """
 import argparse
+import hashlib
 import os
 import re
 import sys
@@ -57,6 +58,21 @@ def extract_body_text(text: str) -> str:
     body = AUTO_MARKER_LINE_RE.sub("", body)
     body = SUMMARY_HEADING_RE.sub("", body)
     return body.strip()
+
+
+def body_hash(text: str) -> str:
+    """Stable content hash of a page's normalized body text.
+
+    Normalization is extract_body_text() plus a FIXED whitespace rule
+    (CRLF -> LF, per-line trailing-whitespace strip, outer strip), sha256
+    over UTF-8 bytes -- insensitive to line-ending/trailing-space churn.
+    Shared by this scanner's skip-suppression check and by
+    wiki_dedup_resolve.py's skip recording: the two sides MUST hash
+    identically or suppression never matches. Never duplicate this.
+    """
+    body = extract_body_text(text.replace("\r\n", "\n"))
+    normalized = "\n".join(line.rstrip() for line in body.split("\n")).strip()
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 def cooldown_dir(project_key: str) -> Path:

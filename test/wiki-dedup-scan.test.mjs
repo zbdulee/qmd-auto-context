@@ -405,3 +405,15 @@ test('wiki_dedup_scan: queries the daemon with rerank=true', async () => {
     rmSync(work, { recursive: true, force: true });
   }
 });
+
+test('wiki_dedup_scan: body_hash whitespace normalization (CRLF, trailing spaces) is fixed', () => {
+  const out = execFileSync('python3', ['-c', [
+    'import sys',
+    "sys.path.insert(0, 'core')",
+    'from wiki_dedup_scan import body_hash',
+    "a = '---\\ntitle: T\\n---\\n\\nLine one.\\nLine two.\\n'",
+    "b = '---\\ntitle: T\\n---\\n\\nLine one.   \\r\\nLine two.\\r\\n'",
+    'print(body_hash(a) == body_hash(b), end="")',
+  ].join('\n')], { encoding: 'utf8' });
+  assert.equal(out, 'True');
+});

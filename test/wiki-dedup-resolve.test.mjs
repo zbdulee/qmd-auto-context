@@ -49,6 +49,25 @@ function readDedupDeleted(work) {
   return readFileSync(path, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l));
 }
 
+function readDedupSkipped(work) {
+  const path = join(work, '.auto-context', 'compile', 'dedup-skipped.jsonl');
+  if (!existsSync(path)) return [];
+  return readFileSync(path, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l));
+}
+
+// Independent recomputation of the shared hash, through the scanner module --
+// asserting the CLI's recorded hash equals this cross-checks that both sides
+// of the suppression contract hash identically.
+function bodyHashOf(absPath) {
+  return execFileSync('python3', ['-c', [
+    'import sys',
+    "sys.path.insert(0, 'core')",
+    'from pathlib import Path',
+    'from wiki_dedup_scan import body_hash',
+    "print(body_hash(Path(sys.argv[1]).read_text(encoding='utf-8')), end='')",
+  ].join('\n'), absPath], { encoding: 'utf8' });
+}
+
 function runResolve(work, index, action, extra = [], env = {}) {
   return execFileSync('python3', [
     'core/wiki_dedup_resolve.py', '--cwd', work, '--index', String(index), '--action', action, ...extra,
@@ -161,6 +180,7 @@ test('wiki_dedup_resolve: --delete target already missing degrades to skip, not 
     assert.equal(out.action, 'skipped');
     assert.equal(out.reason, 'stale_target');
     assert.deepEqual(readDedupNeeded(work), []);
+    assert.deepEqual(readDedupSkipped(work), [], 'the merge stale_target degrade must record nothing');
   } finally {
     rmSync(work, { recursive: true, force: true });
   }
@@ -215,6 +235,52 @@ test('wiki_dedup_resolve: a crash mid-resolve leaves the queue exactly as it was
     }
     assert.equal(threw, true, 'unlink on a read-only directory must raise');
     assert.deepEqual(readDedupNeeded(work), before);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('wiki_dedup_resolve: skip on an intact pair records one sorted, hashed suppression record', () => {
+  const work = repoTemp('dedup-resolve-skip-record');
+  try {
+    writeSettings(work);
+    writeWikiPage(work, 'entities/a.md', '---\ntitle: A\n---\n\nA content.\n');
+    writeWikiPage(work, 'entities/b.md', '---\ntitle: B\n---\n\nB content.\n');
+    // Deliberately reversed order in the queue entry: the record must come out sorted,
+    // proving the pair key is order-independent.
+    writeDedupNeeded(work, [{ pageA: 'entities/b.md', pageB: 'entities/a.md', score: 0.91 }]);
+
+    const out = JSON.parse(runResolve(work, 0, 'skip'));
+    assert.equal(out.action, 'skipped');
+    assert.equal(out.recorded, true);
+
+    const skipped = readDedupSkipped(work);
+    assert.equal(skipped.length, 1);
+    assert.equal(skipped[0].pageA, 'entities/a.md', 'pair key must be sorted');
+    assert.equal(skipped[0].pageB, 'entities/b.md', 'pair key must be sorted');
+    assert.match(skipped[0].pageAHash, /^[0-9a-f]{64}$/);
+    assert.match(skipped[0].pageBHash, /^[0-9a-f]{64}$/);
+    assert.equal(skipped[0].pageAHash, bodyHashOf(join(work, '.auto-context', 'wiki', 'entities', 'a.md')));
+    assert.equal(skipped[0].pageBHash, bodyHashOf(join(work, '.auto-context', 'wiki', 'entities', 'b.md')));
+    assert.ok(skipped[0].skippedAt);
+    assert.deepEqual(readDedupNeeded(work), []);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('wiki_dedup_resolve: stale skip (either page missing) records nothing', () => {
+  const work = repoTemp('dedup-resolve-skip-stale');
+  try {
+    writeSettings(work);
+    writeWikiPage(work, 'entities/b.md', '---\ntitle: B\n---\n\nB content.\n');
+    writeDedupNeeded(work, [{ pageA: 'entities/gone.md', pageB: 'entities/b.md', score: 0.91 }]);
+
+    const out = JSON.parse(runResolve(work, 0, 'skip'));
+    assert.equal(out.action, 'skipped');
+    assert.equal(out.recorded, false);
+    assert.deepEqual(readDedupSkipped(work), [], 'a stale skip is not a content judgment; never record it');
+    assert.deepEqual(readDedupNeeded(work), []);
   } finally {
     rmSync(work, { recursive: true, force: true });
   }
