@@ -1,0 +1,13 @@
+test/wiki-dedup-scan.test.mjs
+  h_42d950683aaaea 4,54-65,238-247,264-287,300,303-329
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "28314aea4b2439b0cdb08a8c9e12ff87175dca4d",
+  "prompts": {},
+  "humans": {
+    "h_42d950683aaaea": {
+      "author": "dulee@zigbang.com"
+    }
+  }
+}
