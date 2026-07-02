@@ -1,0 +1,27 @@
+agents/wiki-dedup-resolver.md
+  h_42d950683aaaea 3,9-15,36-48
+core/update.sh
+  h_42d950683aaaea 598-626
+core/wiki_compile.py
+  h_42d950683aaaea 506,510-518,537
+core/wiki_compile_worker.py
+  h_42d950683aaaea 141
+core/wiki_dedup_scan.py
+  h_42d950683aaaea 205
+test/update.test.mjs
+  h_42d950683aaaea 813-927
+test/wiki-compile.test.mjs
+  h_42d950683aaaea 859-860,890
+test/wiki-dedup-scan.test.mjs
+  h_42d950683aaaea 370,402
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "bbaa52f1eb7bf3bff08f268a4665ecaf16262987",
+  "prompts": {},
+  "humans": {
+    "h_42d950683aaaea": {
+      "author": "dulee@zigbang.com"
+    }
+  }
+}
