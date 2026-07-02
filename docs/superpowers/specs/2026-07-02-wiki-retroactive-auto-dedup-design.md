@@ -1,17 +1,23 @@
 # Wiki Retroactive Auto-Dedup ("로봇청소기") — Design
 
 **Date**: 2026-07-02
-**Status**: approved (brainstorming → advisor review → 4-lens Fable panel review → revision 2; ready for implementation plan)
+**Status**: approved (brainstorming → advisor review → 4-lens Fable panel review → rev 2 → advisor
+re-review found rev 2's embed-timing fix still incomplete → revision 3; ready for implementation plan)
 **Builds on**: `2026-07-01-wiki-semantic-dedup-supersede-design.md` (Phase 1 — write-time semantic gate,
 `core/wiki_review.py`, `merge-needed.jsonl`), `2026-07-01-wiki-review-subagent-design.md` (semi-autonomous
 resolver pattern: plugin-bundled Claude agent + host-agnostic spawn instructions)
 **Review history**: rev 1 fixed three Codex-advisor findings (scanner placement vs. the nohup worker
 fork, hint-on-nonempty-queue instead of hint-on-fresh-queue, false `wiki_review.py:196` unlink-reuse
-claim). Rev 2 (this document) fixes the findings of a 4-lens panel review — architecture, safety,
-consistency, document quality — the most important being: scan must run *after* embed (worker path, not
-the synchronous hook path), superseded pages must be excluded from scanning, deletions need a content
-log, similarity must be computed on body text only, and Hermes provably cannot receive the SessionStart
-hint as currently coded.
+claim). Rev 2 fixed the findings of a 4-lens panel review — architecture, safety, consistency, document
+quality — the most important being: superseded pages must be excluded from scanning, deletions need a
+content log, similarity must be computed on body text only, and Hermes provably cannot receive the
+SessionStart hint as currently coded. Rev 2 also *attempted* to fix embed-timing by moving the scanner
+to "the end of the `--worker` path" — a second Codex advisor pass on rev 2 found that fix insufficient:
+`qmd embed` is itself launched via a second, nested `nohup ... &` inside `run_update()`
+(update.sh:477-499), so `--worker` returning does not mean embed has finished. Rev 3 (this document)
+places the scanner inside that nested embed subshell instead — the only point actually guaranteed to
+run after embed completes — and softens an overstated claim that the new delete-recovery log can never
+be swept into qmd's index.
 
 ## Problem
 
@@ -68,9 +74,15 @@ skill/command, no per-entry approval, no chat report by default — "로봇청�
 - No "superseded" historical trail for these pairs (contrast with Phase 1's `supersede` action). Once
   the resolver folds unique content into the canonical page, the duplicate is deleted outright — the
   user explicitly asked for this ("정보를 옮긴뒤에 기존껀 삭제 하고 싶어... 괜히 qmd db 에 들고 있을 필요도
-  없고"). The pre-delete content log (below) is a plain JSONL file, not a wiki page and not indexed by
-  qmd, so it does not violate this decision — it exists purely so a wrong autonomous call is not
-  permanently unrecoverable.
+  없고"). The pre-delete content log (below) is a plain JSONL file under `.auto-context/compile/`, not a
+  wiki page — it is not *intended* to be indexed by qmd, the same as `merge-needed.jsonl`/
+  `tombstones.jsonl` already living in that directory today. Whether it is *actually* excluded from any
+  given project's vector index depends on that project's own `collectionPaths` (an unusually broad
+  config — e.g. a collection rooted at the project root with no path filtering — could theoretically
+  sweep it in, exactly as it already could for the existing compile-queue JSONL files); this design does
+  not add new indexing-exclusion logic beyond what already exists for its sibling files. It exists
+  purely so a wrong autonomous call is not permanently unrecoverable, not to guarantee zero index
+  footprint.
 - No numeric cap on how many entries the *resolver* processes per run (same locked decision as
   `wiki-review-resolver`). The *scanner* does cap how many new pairs it queues per scan (see
   Architecture step 5) — that is pacing of a deletion-capable pipeline's intake, not a human-approval
@@ -94,17 +106,28 @@ SessionStart (core/update.sh, existing hook — runs every session)
     shape this design:
       (a) anything that must reach model context has to run in main(), and must be CHEAP — no daemon
           queries, no page reads;
-      (b) anything that needs the *updated/embedded* index has to run in the worker, AFTER the existing
-          `qmd update` + `qmd embed` steps — a page edited since the last session is not embedded until
-          then, and querying before embed would compare against stale vectors and (because the snapshot
-          would still advance) permanently skip that page from all future scans.
+      (b) anything that needs the *updated/embedded* index has to run strictly after `qmd embed`
+          finishes — a page edited since the last session is not embedded until then, and querying
+          before embed would compare against stale vectors and (because the snapshot would still
+          advance) permanently skip that page from all future scans.
+    Point (b) is stricter than "run inside `--worker`, after its `qmd update`/`qmd embed` steps": inside
+    `--worker`'s `run_update()`, `qmd update` runs synchronously, but `qmd embed` itself is launched via
+    a SECOND, nested `nohup bash -c '...' &` (update.sh:477-499) — `run_update()`/`--worker` returns
+    and the outer process exits well before that nested subshell's `embed` call actually completes. "End
+    of the `--worker` path" is therefore NOT "after embed" — it can run concurrently with, or before,
+    embed finishes. The scanner must instead run **inside that nested subshell**, after its own
+    `out=$("$QMD_BIN_RESOLVED" embed 2>&1)` line (and after the subsequent `backend_manager.sh reload`
+    call, if one happens — the daemon should be done restarting before the scanner queries it).
     Therefore:
       - main() gains ONLY: a queue check + hint echo (cheap file test + awk slice, no subprocess to the
         daemon), described below.
-      - the scanner itself runs at the END of the --worker path, strictly after `qmd update`/`qmd embed`
-        complete. Scan results therefore surface as a hint one session LATER at the earliest — accepted:
-        the hint logic keys off "queue non-empty now", not "queued this run", so nothing is lost, and a
-        24h-cadence cleaner does not need same-session delivery.
+      - the scanner call is appended inside the existing nested embed subshell in `run_update()`
+        (update.sh:477-499), after the embed output line and after the conditional reload block — not
+        appended after `--worker` returns, and not appended directly after the outer `retry qmd update`
+        call. This is the only placement that is actually guaranteed to run after this session's embed
+        has completed. Scan results therefore surface as a hint one session LATER at the earliest —
+        accepted: the hint logic keys off "queue non-empty now", not "queued this run", so nothing is
+        lost, and a 24h-cadence cleaner does not need same-session delivery.
   → main(), new hint step (synchronous, before the worker fork):
       If `.auto-context/compile/dedup-needed.jsonl` exists and is non-empty — regardless of when its
       entries were queued (this run's worker hasn't even started; these are from a PAST scan) — extract
@@ -118,8 +141,10 @@ SessionStart (core/update.sh, existing hook — runs every session)
       every SessionStart until resolved — a missed turn just means the reminder comes back next session.
       (This delivery is best-effort by nature: a hook can inject context but cannot force the model to
       act on it in a given turn. The re-fire property is what makes best-effort acceptable.)
-  → --worker path, new final step: core/wiki_dedup_scan.py (NEW, deterministic, fail-open, stdout-silent
-    per repo law — all its own reporting goes to its log file, never stdout):
+  → inside `run_update()`'s nested embed subshell (update.sh:477-499), appended after the embed call
+    and after the conditional reload — NOT after `--worker` returns: core/wiki_dedup_scan.py (NEW,
+    deterministic, fail-open, stdout-silent per repo law — all its own reporting goes to its log file;
+    the subshell's own stdout already only reaches `$LOG`, never the SessionStart hook):
       1. Config gate: `compile.enabled` and `compile.semanticDedup.enabled` both true, else no-op.
       2. Cooldown: per-project lock dir `~/.config/qmd/dedup-cooldown/<project_key>` where
          `project_key` reuses `core/sync.py`'s `project_key()`. Semantics (note: NOT the raw
@@ -217,9 +242,12 @@ plan can copy it, matching the sibling spec's convention)
 
 ## Components (new files / changes only)
 
-- **`core/wiki_dedup_scan.py`** (new) — the scanner described above. Invoked as the final step of
-  `core/update.sh`'s `--worker` path, strictly after `qmd update`/`qmd embed`. Stdout-silent; always
-  exits 0; logs to `$QMD_DEDUP_LOG` (default `~/.cache/qmd/dedup.log`).
+- **`core/wiki_dedup_scan.py`** (new) — the scanner described above. Invoked from inside
+  `core/update.sh`'s `run_update()`, appended within the existing nested embed subshell
+  (update.sh:477-499) after the `embed` call and the conditional reload — this is the only point in the
+  pipeline that is actually guaranteed to run after this session's `qmd embed` has completed; the end of
+  `--worker`/`run_update()` itself is not (embed is backgrounded a second time relative to that scope).
+  Stdout-silent; always exits 0; logs to `$QMD_DEDUP_LOG` (default `~/.cache/qmd/dedup.log`).
 - **`core/wiki_dedup_resolve.py`** (new) — same CLI conventions as `core/wiki_review.py` (read that
   file's contract: argparse `--cwd/--index/--action`, one JSON object on stdout, exit 1 on rejected
   input, claim → resolve → requeue-on-exception via `claim_queue`/`requeue_lines` from
@@ -232,9 +260,11 @@ plan can copy it, matching the sibling spec's convention)
     resolve inside `wiki_root` (same path-escape discipline as Phase 1's `matchedPath` validation), and
     if it no longer exists on disk the action degrades to `skip` (stale pair, not an error). Then:
     (1) append `{"deletedPath", "content" (full file text), "pairedWith", "score", "resolvedAt"}` to
-    `.auto-context/compile/dedup-deleted.jsonl` — the pre-delete recovery log; a plain JSONL, not a wiki
-    page, not indexed (real projects routinely carry uncommitted wiki files, so git alone is not a
-    recovery net); (2) `Path.unlink()` the page; (3) `enqueue_collections()` (`core/dirty_queue.py:14`)
+    `.auto-context/compile/dedup-deleted.jsonl` — the pre-delete recovery log; a plain JSONL alongside
+    the existing `merge-needed.jsonl`/`tombstones.jsonl` in the same directory, not a wiki page, not
+    intended to be indexed (see Non-Goals for the caveat that this isn't a guarantee against unusually
+    broad `collectionPaths` configs). Real projects routinely carry uncommitted wiki files, so git alone
+    is not a recovery net; (2) `Path.unlink()` the page; (3) `enqueue_collections()` (`core/dirty_queue.py:14`)
     for the wiki collection (re-derived via `find_wiki_collection()`) plus a `backend_manager.sh`
     index-worker kick, the same kick `skills/sync/scripts/sync.sh` performs after a real change. The
     unlink-then-enqueue sequence for deleting a wiki page is NEW code (`wiki_review.py` deletes no wiki
@@ -252,9 +282,10 @@ plan can copy it, matching the sibling spec's convention)
   requests to the WRONG resolver (merge-needed vs dedup-needed). Remove that one phrase from its
   description. No other change; the existing structural test's regexes don't assert that phrase.
 - **`core/update.sh`** (modified, two places) — (1) in synchronous `main()`, before the worker fork:
-  the queue check + hint echo (pure file test + awk slice; no daemon call, no page reads); (2) at the
-  end of the `--worker` function: invoke `wiki_dedup_scan.py`, fail-open (non-zero exit swallowed,
-  output to log only).
+  the queue check + hint echo (pure file test + awk slice; no daemon call, no page reads); (2) inside
+  `run_update()`'s nested embed subshell (update.sh:477-499), after the embed call and the conditional
+  reload: invoke `wiki_dedup_scan.py`, fail-open (non-zero exit swallowed, output to log only). Not
+  appended after `run_update()`/`--worker` itself returns — that point precedes embed completion.
 - **`core/config.py`** (modified) — add to `compile.semanticDedup`: `autoMergeThreshold` (default
   `0.9`, `coerce_float`) and `maxPairsPerScan` (default `10`, `coerce_int`), following the existing
   coercion pattern (config.py:223-231). `dedup-needed.jsonl`'s path stays hardcoded (unlike
