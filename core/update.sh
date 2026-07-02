@@ -484,7 +484,7 @@ run_update() {
     if ! mkdir "$EMBED_LOCK" 2>/dev/null; then
       log "EMBED: already running, skip"
     else
-      LOG="$LOG" EMBED_LOCK="$EMBED_LOCK" QMD_BIN_RESOLVED="$qmd_bin" QMD_DAEMON_PORT="${QMD_DAEMON_PORT:-8483}" QMD_BACKEND_MANAGER="${QMD_BACKEND_MANAGER:-}" nohup bash -c '
+      LOG="$LOG" EMBED_LOCK="$EMBED_LOCK" QMD_BIN_RESOLVED="$qmd_bin" QMD_DAEMON_PORT="${QMD_DAEMON_PORT:-8483}" QMD_BACKEND_MANAGER="${QMD_BACKEND_MANAGER:-}" WORKDIR="$workdir" CORE_DIR="$(dirname "$0")" nohup bash -c '
         echo "$$" > "$EMBED_LOCK/pid" 2>/dev/null || true
         trap "rm -f \"$EMBED_LOCK/pid\" 2>/dev/null; rmdir \"$EMBED_LOCK\" 2>/dev/null" EXIT
         out=$("$QMD_BIN_RESOLVED" embed 2>&1); printf "%s\n" "$out" >> "$LOG"
@@ -497,6 +497,9 @@ run_update() {
             printf "[%s] EMBED reload skipped: QMD_BACKEND_MANAGER unavailable\n" "$(date +%H:%M:%S)" >> "$LOG"
           fi
         fi
+        # Retroactive wiki dedup scan: must run strictly after embed completes
+        # (this line), never after run_update()/--worker itself returns.
+        python3 "$CORE_DIR/wiki_dedup_scan.py" --cwd "$WORKDIR" >> "$LOG" 2>&1 || true
       ' >/dev/null 2>&1 &
       log "EMBED: started in background (pid=$!)"
     fi
@@ -573,6 +576,22 @@ PY
       echo "      끄려면 .auto-context/settings.json의 compile.extractor 를 제거하세요."
       mkdir -p "$workdir/.auto-context/compile" 2>/dev/null || true
       : > "$marker" 2>/dev/null || true
+    fi
+  fi
+
+  # Retroactive wiki dedup hint: if a scan (this run's or a past one's) queued
+  # pairs that haven't been resolved yet, surface a spawn instruction. Cheap
+  # file test + text extraction only -- no daemon call -- since this runs in
+  # the hot synchronous SessionStart path.
+  dedup_queue="$workdir/.auto-context/compile/dedup-needed.jsonl"
+  if [ -s "$dedup_queue" ]; then
+    agent_file="$(cd "$(dirname "$0")/.." && pwd)/agents/wiki-dedup-resolver.md"
+    if [ -f "$agent_file" ]; then
+      dedup_workflow="$(awk '/<!-- WORKFLOW:START -->/{f=1;next}/<!-- WORKFLOW:END -->/{f=0}f' "$agent_file")"
+      if [ -n "$dedup_workflow" ]; then
+        echo "Claude Code는 Agent 도구로 subagent_type 'wiki-dedup-resolver'를 스폰해서, Codex는 자체 multi-agent delegation으로 아래 프롬프트를 그대로 스폰해 처리해."
+        printf '%s\n' "$dedup_workflow"
+      fi
     fi
   fi
 

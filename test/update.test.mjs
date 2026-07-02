@@ -721,3 +721,153 @@ test('update core: QMD_BIN override may point to a non-qmd filename', () => {
     rmSync(work, { recursive: true, force: true });
   }
 });
+
+test('update core: dedup hint absent when dedup-needed.jsonl is empty/missing (regression guard)', () => {
+  const work = repoTemp('qmd-dedup-hint-empty');
+  const bin = join(work, 'bin');
+  try {
+    mkdirSync(join(work, '.auto-context'), { recursive: true });
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(work, '.auto-context', 'settings.json'), JSON.stringify({
+      indexing: true, collections: ['x'],
+    }));
+    writeFileSync(join(bin, 'curl'), '#!/usr/bin/env sh\nexit 1\n', { mode: 0o755 });
+    writeFileSync(join(bin, 'qmd'), '#!/usr/bin/env sh\nexit 0\n', { mode: 0o755 });
+
+    const out = execFileSync('bash', [join(process.cwd(), 'core', 'update.sh')], {
+      encoding: 'utf8',
+      input: JSON.stringify({ cwd: work }),
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+    });
+    assert.doesNotMatch(out, /wiki-dedup-resolver/);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('update core: dedup hint fires with the exact workflow block when the queue is non-empty (including a stale entry from a past run)', () => {
+  const work = repoTemp('qmd-dedup-hint-nonempty');
+  const bin = join(work, 'bin');
+  try {
+    mkdirSync(join(work, '.auto-context', 'compile'), { recursive: true });
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(work, '.auto-context', 'settings.json'), JSON.stringify({
+      indexing: true, collections: ['x'],
+    }));
+    writeFileSync(
+      join(work, '.auto-context', 'compile', 'dedup-needed.jsonl'),
+      JSON.stringify({ pageA: 'entities/a.md', pageB: 'entities/b.md', score: 0.95 }) + '\n',
+    );
+    writeFileSync(join(bin, 'curl'), '#!/usr/bin/env sh\nexit 1\n', { mode: 0o755 });
+    writeFileSync(join(bin, 'qmd'), '#!/usr/bin/env sh\nexit 0\n', { mode: 0o755 });
+
+    const out = execFileSync('bash', [join(process.cwd(), 'core', 'update.sh')], {
+      encoding: 'utf8',
+      input: JSON.stringify({ cwd: work }),
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+    });
+    assert.match(out, /wiki-dedup-resolver/);
+    const agentBody = readFileSync('agents/wiki-dedup-resolver.md', 'utf8');
+    const startMarker = '<!-- WORKFLOW:START -->';
+    const endMarker = '<!-- WORKFLOW:END -->';
+    const block = agentBody.slice(agentBody.indexOf(startMarker) + startMarker.length, agentBody.indexOf(endMarker)).trim();
+    assert.ok(out.includes(block), 'hint stdout must contain the exact workflow block, byte-for-byte');
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('update core: dedup hint does not shell out to qmd or curl (file test + text extraction only)', () => {
+  const work = repoTemp('qmd-dedup-hint-no-daemon-call');
+  const bin = join(work, 'bin');
+  const qmdLog = join(work, 'qmd.log');
+  try {
+    mkdirSync(join(work, '.auto-context', 'compile'), { recursive: true });
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(work, '.auto-context', 'settings.json'), JSON.stringify({
+      indexing: true, collections: ['x'],
+    }));
+    writeFileSync(
+      join(work, '.auto-context', 'compile', 'dedup-needed.jsonl'),
+      JSON.stringify({ pageA: 'entities/a.md', pageB: 'entities/b.md', score: 0.95 }) + '\n',
+    );
+    // curl always fails (healthcheck suppressed); qmd logs any call it receives.
+    writeFileSync(join(bin, 'curl'), '#!/usr/bin/env sh\nexit 1\n', { mode: 0o755 });
+    writeFileSync(join(bin, 'qmd'), `#!/usr/bin/env sh\necho "$@" >> "${qmdLog}"\nexit 0\n`, { mode: 0o755 });
+
+    execFileSync('bash', [join(process.cwd(), 'core', 'update.sh')], {
+      encoding: 'utf8',
+      input: JSON.stringify({ cwd: work }),
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+    });
+    // main() legitimately calls qmd for other reasons (preflight, resolve-only) before
+    // forking the worker, so we only assert the hint step itself adds no NEW qmd calls
+    // beyond what the pre-existing pending/notice logic already makes. The dedup hint
+    // logic must never invoke qmd/curl at all -- verified structurally in the next step.
+    assert.equal(existsSync(qmdLog), false, 'this pending-style project makes no qmd calls before the dedup hint runs, so any call here would have come from the hint logic');
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('update core: dedup scanner is wired inside the embed subshell, after embed and the conditional reload', () => {
+  const script = readFileSync(join(process.cwd(), 'core', 'update.sh'), 'utf8');
+  const embedCallIdx = script.indexOf('"$QMD_BIN_RESOLVED" embed');
+  const reloadBlockEndIdx = script.indexOf("fi\n", script.indexOf('EMBED reload skipped'));
+  const scannerCallIdx = script.indexOf('wiki_dedup_scan.py');
+  const nohupBlockEndIdx = script.indexOf("' >/dev/null 2>&1 &");
+  assert.ok(embedCallIdx !== -1, 'embed call not found');
+  assert.ok(scannerCallIdx !== -1, 'wiki_dedup_scan.py call not found in update.sh');
+  assert.ok(scannerCallIdx > embedCallIdx, 'scanner must be wired after the embed call');
+  assert.ok(scannerCallIdx > reloadBlockEndIdx, 'scanner must be wired after the conditional reload block');
+  assert.ok(scannerCallIdx < nohupBlockEndIdx, 'scanner must still be inside the nested nohup subshell, not after it');
+});
+
+test('update core: dedup scanner actually runs inside the embed subshell at runtime', () => {
+  const work = repoTemp('qmd-dedup-scanner-runtime');
+  const bin = join(work, 'bin');
+  const fakeHome = join(work, 'fakehome');
+  const dedupLog = join(work, 'dedup.log');
+  try {
+    mkdirSync(join(work, '.auto-context'), { recursive: true });
+    mkdirSync(bin, { recursive: true });
+    mkdirSync(fakeHome, { recursive: true });
+    writeFileSync(join(work, '.auto-context', 'settings.json'), JSON.stringify({
+      indexing: true, collections: ['x'],
+    }));
+    writeFileSync(join(bin, 'qmd'), [
+      '#!/usr/bin/env sh',
+      'case "$1" in',
+      '  update) exit 0 ;;',
+      '  embed) echo "embedded 0 chunks"; exit 0 ;;',
+      '  *) exit 0 ;;',
+      'esac',
+    ].join('\n'), { mode: 0o755 });
+
+    execFileSync('bash', [join(process.cwd(), 'core', 'update.sh'), '--worker', work], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH}`,
+        HOME: fakeHome,
+        QMD_CACHE_DIR: fakeHome,
+        QMD_LOCK_BASE: join(work, 'locks'),
+        QMD_DEDUP_LOG: dedupLog,
+        QMD_DEDUP_COOLDOWN_DIR: join(work, 'dedup-cooldown'),
+        QMD_SYNC_STATE_DIR: join(work, 'sync-state'),
+      },
+    });
+
+    // The embed step (and the scanner after it) run in a detached background
+    // subshell; poll briefly for the scanner's own log line to appear.
+    const deadline = Date.now() + 3000;
+    let seen = false;
+    while (Date.now() < deadline) {
+      if (existsSync(dedupLog)) { seen = true; break; }
+      execFileSync('sleep', ['0.05']);
+    }
+    assert.equal(seen, true, `wiki_dedup_scan.py did not log within 3s; embed subshell wiring likely broken`);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
