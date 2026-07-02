@@ -29,7 +29,25 @@ post a chat summary when you finish.
    Every CLI call below uses `"$ROOT"` — never a bare relative path.
 2. Read `.auto-context/compile/dedup-needed.jsonl` in the target project.
    Empty or missing → release the run-lock and stop; nothing to do.
-3. For each entry (in file order; re-derive `<index>` fresh before each call by re-reading the
+3. Before resolving ANY entry, read the whole queue and group entries into clusters: two entries
+   belong to the same cluster when they share a page (e.g. (A,B) and (B,C) share B → one cluster
+   {A,B,C}). An entry sharing no page with any other entry is its own cluster and needs nothing
+   special — step 4 handles it as-is. For every multi-entry cluster, decide the cluster ONCE, up
+   front, before any CLI call:
+   a. Read every page in the cluster and apply step 4.b's judgment across the whole set: decide
+      which pages genuinely share one category/topic worth consolidating. Pages that do not belong
+      stay separate — their entries get `--action skip` in step 4.
+   b. Pick ONE final keeper for the pages being consolidated (normally the most complete page).
+      Never pick a per-pair keeper that a later pair in the same cluster would itself delete.
+   c. List every fact present in each page you will delete that is absent from the keeper, fold
+      ALL of them into the keeper with your Edit tool first, and re-read the keeper to confirm
+      every listed fact is now present. Only after the keeper holds everything do you start
+      deleting.
+   d. Then resolve the cluster's entries through step 4's normal per-entry loop: an entry pairing
+      the keeper with a page you decided to delete → `--action merge --delete <that page>`; an
+      entry pointing at a page you already deleted earlier in this run is now stale, and step
+      4.a's existing file-missing fallback handles it (`--action skip`) — do not re-judge it.
+4. For each entry (in file order; re-derive `<index>` fresh before each call by re-reading the
    queue file — resolving one entry removes it and shifts every later index down by one):
    a. Read BOTH pages' full content (paths are wiki-root-relative). Either file missing → the
       pair is stale; call the CLI with `--action skip` and move on.
@@ -44,8 +62,9 @@ post a chat summary when you finish.
       the more complete one). List every fact present in the page you will delete that is absent
       from the keeper — this matters more here than for exact duplicates, since a category merge
       usually combines genuinely different specific facts, not just repeated ones. Fold each fact
-      into the keeper with your Edit tool first, and re-read the keeper to confirm every listed fact
-      is now present. Only then proceed.
+      into the keeper with your Edit tool first, and re-read the keeper to confirm every listed
+      fact is now present. Only then proceed. (For a pair whose cluster you already folded in step
+      3.c, do not re-fold — go straight to 4.d.)
    d. Run: `python3 "$ROOT/core/wiki_dedup_resolve.py" --cwd <cwd> --index <n> --action merge
       --delete <wiki-root-relative path of the page being deleted>`
       (or `--action skip` with no `--delete` for non-duplicates).
@@ -54,7 +73,7 @@ post a chat summary when you finish.
       further entries. You cannot tell whether the queue mutated before the failure, and
       continuing risks double-processing against stale indices. Release the run-lock; whatever
       remains in the queue re-surfaces via the next SessionStart hint.
-4. Release the run-lock. Do NOT post a chat summary — this is silent cleanup.
+5. Release the run-lock. Do NOT post a chat summary — this is silent cleanup.
 <!-- WORKFLOW:END -->
 
 ## Notes

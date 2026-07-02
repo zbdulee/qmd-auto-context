@@ -41,6 +41,24 @@ test("wiki-dedup-resolver agent: workflow block has the run-lock, plugin-root re
   assert.match(block, /--delete/);
 });
 
+test("wiki-dedup-resolver agent: workflow block has the cluster pass before the per-entry loop", () => {
+  const agent = readFileSync("agents/wiki-dedup-resolver.md", "utf8");
+  const block = workflowBlock(agent, "agents/wiki-dedup-resolver.md");
+  assert.match(block, /cluster/i, "must instruct grouping shared-page entries into clusters");
+  assert.match(block, /ONE final keeper/, "must instruct picking one keeper per cluster");
+  assert.match(
+    block,
+    /already deleted earlier in this run/,
+    "must route post-merge stale entries to the existing file-missing fallback",
+  );
+  const clusterIdx = block.toLowerCase().indexOf("cluster");
+  const perEntryIdx = block.indexOf("For each entry");
+  assert.ok(
+    clusterIdx !== -1 && perEntryIdx !== -1 && clusterIdx < perEntryIdx,
+    "the cluster pass must come BEFORE the per-entry loop",
+  );
+});
+
 test("wiki-review-resolver agent: description no longer claims the wiki-dedup trigger phrase", () => {
   const agent = readFileSync("agents/wiki-review-resolver.md", "utf8");
   assert.doesNotMatch(agent, /wiki dedup queue 전부 자동으로 처리해줘/);
