@@ -2,7 +2,9 @@
 
 **Date**: 2026-07-02
 **Status**: approved (brainstorming → advisor review → 4-lens Fable panel review → rev 2 → advisor
-re-review found rev 2's embed-timing fix still incomplete → revision 3; ready for implementation plan)
+re-review found rev 2's embed-timing fix still incomplete → revision 3 (implemented) → revision 4:
+post-implementation dogfooding follow-ups — judgment-criteria sync, cluster handling, skip memory —
+see the "Revision 4" section at the end of this document)
 **Builds on**: `2026-07-01-wiki-semantic-dedup-supersede-design.md` (Phase 1 — write-time semantic gate,
 `core/wiki_review.py`, `merge-needed.jsonl`), `2026-07-01-wiki-review-subagent-design.md` (semi-autonomous
 resolver pattern: plugin-bundled Claude agent + host-agnostic spawn instructions)
@@ -17,7 +19,16 @@ to "the end of the `--worker` path" — a second Codex advisor pass on rev 2 fou
 (update.sh:477-499), so `--worker` returning does not mean embed has finished. Rev 3 (this document)
 places the scanner inside that nested embed subshell instead — the only point actually guaranteed to
 run after embed completes — and softens an overstated claim that the new delete-recovery log can never
-be swept into qmd's index.
+be swept into qmd's index. Rev 4 (2026-07-02, appended after rev 3 shipped) records three dogfooding
+findings from working the first real project queue (the novel wiki), settled through two independent
+advisor consults (Codex, then a Fable re-diagnosis): (1) the resolver's merge/skip judgment was
+relaxed from "same fact" to "same category/topic" at the user's explicit request — already live in
+`agents/wiki-dedup-resolver.md`, now synced into this spec; (2) shared-page pair chains
+((A,B),(B,C)) get a doc-only cluster pass in the resolver workflow — no CLI-side guard, per the Fable
+re-diagnosis that chains are delayed consolidation, not data loss; (3) `skip` decisions gain
+persistent memory (`dedup-skipped.jsonl` + scanner-side suppression) so an unchanged pair is never
+re-queued and re-judged. Rev 1-3 text below is preserved as history; where rev 4 changes behavior,
+the Revision 4 section is authoritative.
 
 ## Problem
 
@@ -201,6 +212,12 @@ SessionStart (core/update.sh, existing hook — runs every session)
 between its markers, and the exact text update.sh's hint echoes; written out here so the implementation
 plan can copy it, matching the sibling spec's convention)
 
+> **Historical (rev 3)**: the block below is preserved unmodified as revision history and no longer
+> matches `agents/wiki-dedup-resolver.md`. Step 3.b's judgment bar was relaxed on 2026-07-02 (see
+> Revision 4 §4.1), and rev 4 adds a cluster pass before the per-entry loop (see Revision 4 §4.2).
+> The authoritative block is the one in Revision 4 §4.2 — and, at runtime, always the live agent file
+> itself (`core/update.sh` extracts the block fresh via awk; nothing is byte-synced to this spec).
+
 ```
 <!-- WORKFLOW:START -->
 0. Acquire the per-project resolver run-lock before touching anything:
@@ -354,3 +371,248 @@ plan can copy it, matching the sibling spec's convention)
 - Actual subagent behavior (does the hint actually cause a spawn, does fold-before-delete happen) is
   manual/behavioral verification, not unit-tested — consistent with how `wiki-review-resolver` was
   scoped.
+
+---
+
+## Revision 4 (2026-07-02) — dogfooding follow-ups: judgment-criteria sync, cluster handling, skip memory
+
+**Status**: approved. Found while manually working the first real project's `dedup-needed.jsonl`
+(the novel wiki) on 2026-07-02, then settled through two independent advisor consults (Codex, then a
+Fable re-diagnosis). This revision documents the locked direction — it does not reopen it. Rev 1-3
+content above is preserved as history; where this revision changes behavior, the text below is
+authoritative. Implementation plan: `docs/superpowers/plans/2026-07-02-wiki-dedup-cluster-and-skip-memory.md`.
+
+| # | Change | Code change? |
+|---|---|---|
+| 4.1 | Spec-implementation divergence recorded: merge/skip judgment relaxed from "same fact" to "same category/topic" | No — already shipped in `agents/wiki-dedup-resolver.md`; the spec catches up |
+| 4.2 | Cluster/chain handling in the resolver workflow | No — doc-only (`agents/wiki-dedup-resolver.md` WORKFLOW block) |
+| 4.3 | Skip-decision memory: `dedup-skipped.jsonl` + scanner suppression | Yes — `core/wiki_dedup_resolve.py`, `core/wiki_dedup_scan.py` |
+
+Host coverage is unchanged from the rev-3 table (Claude/Codex hint delivery, Hermes scan-only). The
+24h cooldown, the 0.9 body-only threshold, the SessionStart-only entry point, and the no-manual-skill
+Non-Goals all stand.
+
+### 4.1 Divergence record: merge criteria were relaxed on 2026-07-02 (spec catches up to code)
+
+**What diverged.** Rev 3's verbatim WORKFLOW block (preserved above, now marked historical) framed
+step 3.b as: merge only pages that are "genuinely the SAME fact/event — not merely related", with
+three tests that each mean `skip` (same entity recurring across episodes → skip; same topic but
+different decision/state/point-in-time → skip; can't state in one sentence why keeping both adds
+nothing → skip). The shipped `agents/wiki-dedup-resolver.md:36-42` no longer says this. On
+2026-07-02, at the user's explicit request during real queue processing, the bar was rewritten to a
+**category/topic** test: merge when the two pages "belong to the same category/topic (same
+mechanism, same event, same sub-concept of a broader idea) such that consolidating them into one
+page keeps the wiki readable"; **differing specific details do NOT by themselves mean skip**; skip
+only when the pages cover clearly different categories/topics (merging would blend unrelated content
+into one confusing page), or when no one-sentence shared-category justification can be stated.
+
+**Why it changed.** The same-fact-only bar, applied to the real corpus, skipped almost everything:
+auto-compiled pages tend to record one small fact each, so a topic accumulates many near-neighbor
+single-fact pages that the strict bar kept separate forever. The wiki reads better — and recall
+retrieves better — as consolidated category pages. The user made this call explicitly while
+processing the queue; it is a product decision, not a drift accident.
+
+**Consequence already reflected in the shipped text.** Under category merges, fold-before-delete
+(workflow step on folding every absent fact into the keeper and re-reading to verify) matters MORE
+than under exact-duplicate merges, because a category merge combines genuinely different facts, not
+repeated ones. `agents/wiki-dedup-resolver.md:43-48` already carries this emphasis; rev 4 keeps it.
+
+**Spec bookkeeping.** The rev-3 verbatim block above stays unmodified as history with a
+"Historical (rev 3)" banner; the authoritative verbatim block is in §4.2 below and, at runtime,
+always the live agent file (update.sh's awk extraction — nothing is byte-synced to this spec).
+
+### 4.2 Cluster/chain handling (개선 1) — resolver workflow doc change only, no CLI guard
+
+**Problem.** The scanner queues at most ONE pair per scanned page — the first result at or above
+`autoMergeThreshold` wins and the page's result loop `break`s (`core/wiki_dedup_scan.py:229-231`).
+Different scanned pages can therefore queue pairs that share a page: (A,B) from scanning A, (B,C)
+from scanning C. The rev-3 per-entry workflow resolves (A,B) first; if it deletes B, entry (B,C) is
+left pointing at a deleted file.
+
+**Re-diagnosis (Fable, accepted as final).** This is **not data loss**: `merge` folds every unique
+fact into the keeper *before* `--delete` unlinks the loser, and workflow step "either file missing →
+stale → `--action skip`" already absorbs the (B,C) entry while C sits untouched on disk, with its
+full content, plus `dedup-deleted.jsonl` holding B's. The *actual* risk is softer: **consolidation
+is delayed** — C's overlap with the A/B keeper is dropped from the queue as stale, and if the
+surviving pages never change again, the scanner (snapshot advanced, bodies unchanged) may never
+re-detect the residual pair automatically.
+
+**Decision.** Fix it where the judgment lives: the resolver workflow reads the whole queue first and
+resolves clusters as units. **No loss-prevention guard is added to `core/wiki_dedup_resolve.py`** —
+a CLI guard was proposed in the first consult and explicitly rejected after the re-diagnosis as
+over-engineering (there is no loss to guard against; the CLI's existing re-validation — `--delete`
+∈ {pageA,pageB}, wiki_root containment, stale-target degrade — is unchanged and sufficient).
+
+**Authoritative verbatim WORKFLOW block (rev 4)** — the exact text `agents/wiki-dedup-resolver.md`
+carries between its markers after the rev-4 doc change; incorporates both §4.1's relaxed criteria
+(already live) and the new cluster pass (step 3; old steps 3/4 become 4/5):
+
+```
+<!-- WORKFLOW:START -->
+0. Acquire the per-project resolver run-lock before touching anything:
+   `mkdir ~/.config/qmd/dedup-resolve-lock/<project_key>` (create parents as needed; `<project_key>`
+   is not something you need to compute yourself — use the exact literal path segment
+   `mkdir -p ~/.config/qmd/dedup-resolve-lock/$(python3 -c "import hashlib,sys; print(hashlib.sha256((sys.argv[1]+chr(10)+sys.argv[2]).encode()).hexdigest())" "<absolute project root>" "<config path or empty string>")`).
+   If `mkdir` fails and the existing lock dir's mtime is under 60 minutes old, another resolver is
+   active — stop immediately, do nothing further. If it is 60+ minutes old, it is stale: remove it
+   and re-create it, then continue. Remove the lock dir when you finish, whatever the outcome.
+1. Resolve the plugin root the same way `wiki-review-resolver` does:
+   `ROOT="${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:-$(git rev-parse --show-toplevel)}}"`.
+   Every CLI call below uses `"$ROOT"` — never a bare relative path.
+2. Read `.auto-context/compile/dedup-needed.jsonl` in the target project.
+   Empty or missing → release the run-lock and stop; nothing to do.
+3. Before resolving ANY entry, read the whole queue and group entries into clusters: two entries
+   belong to the same cluster when they share a page (e.g. (A,B) and (B,C) share B → one cluster
+   {A,B,C}). An entry sharing no page with any other entry is its own cluster and needs nothing
+   special — step 4 handles it as-is. For every multi-entry cluster, decide the cluster ONCE, up
+   front, before any CLI call:
+   a. Read every page in the cluster and apply step 4.b's judgment across the whole set: decide
+      which pages genuinely share one category/topic worth consolidating. Pages that do not belong
+      stay separate — their entries get `--action skip` in step 4.
+   b. Pick ONE final keeper for the pages being consolidated (normally the most complete page).
+      Never pick a per-pair keeper that a later pair in the same cluster would itself delete.
+   c. List every fact present in each page you will delete that is absent from the keeper, fold
+      ALL of them into the keeper with your Edit tool first, and re-read the keeper to confirm
+      every listed fact is now present. Only after the keeper holds everything do you start
+      deleting.
+   d. Then resolve the cluster's entries through step 4's normal per-entry loop: an entry pairing
+      the keeper with a page you decided to delete → `--action merge --delete <that page>`; an
+      entry pointing at a page you already deleted earlier in this run is now stale, and step
+      4.a's existing file-missing fallback handles it (`--action skip`) — do not re-judge it.
+4. For each entry (in file order; re-derive `<index>` fresh before each call by re-reading the
+   queue file — resolving one entry removes it and shifts every later index down by one):
+   a. Read BOTH pages' full content (paths are wiki-root-relative). Either file missing → the
+      pair is stale; call the CLI with `--action skip` and move on.
+   b. Judge: do the two pages belong to the same category/topic (same mechanism, same event, same
+      sub-concept of a broader idea) such that consolidating them into one page keeps the wiki
+      readable? This is a lower bar than "identical fact" — differing specific details do NOT by
+      themselves mean skip. Skip only when:
+      - The two pages cover clearly different categories/topics, and merging would blend unrelated
+        content into one confusing page.
+      - You cannot state, in one sentence, what shared category/topic justifies merging them.
+   c. If (and only if) they share a category worth consolidating: pick the page to KEEP (normally
+      the more complete one). List every fact present in the page you will delete that is absent
+      from the keeper — this matters more here than for exact duplicates, since a category merge
+      usually combines genuinely different specific facts, not just repeated ones. Fold each fact
+      into the keeper with your Edit tool first, and re-read the keeper to confirm every listed
+      fact is now present. Only then proceed. (For a pair whose cluster you already folded in step
+      3.c, do not re-fold — go straight to 4.d.)
+   d. Run: `python3 "$ROOT/core/wiki_dedup_resolve.py" --cwd <cwd> --index <n> --action merge
+      --delete <wiki-root-relative path of the page being deleted>`
+      (or `--action skip` with no `--delete` for non-duplicates).
+   e. Record the CLI's JSON stdout for your own tracking.
+   f. If any CLI call exits non-zero or prints non-JSON: STOP the whole run — do not process
+      further entries. You cannot tell whether the queue mutated before the failure, and
+      continuing risks double-processing against stale indices. Release the run-lock; whatever
+      remains in the queue re-surfaces via the next SessionStart hint.
+5. Release the run-lock. Do NOT post a chat summary — this is silent cleanup.
+<!-- WORKFLOW:END -->
+```
+
+Interaction with §4.3, intentional: the stale skips produced by step 3.d/4.a are exactly the skips
+that `dedup-skipped.jsonl` must NOT record (no content judgment happened), so a cluster's dropped
+residual pair (e.g. the A/C overlap after B is folded and deleted) is still free to re-surface
+whenever either surviving page changes.
+
+### 4.3 Skip-decision memory (개선 2): `dedup-skipped.jsonl` + scanner suppression
+
+**Problem.** `core/wiki_dedup_resolve.py`'s `skip` action (`core/wiki_dedup_resolve.py:55-56`)
+removes the queue entry and leaves no persistent record. When either page of a skipped pair is later
+modified for an unrelated reason, its snapshot entry changes, the scanner re-queries it, the same
+partner comes back above 0.9, and the identical pair is re-queued — the resolver re-judges from
+scratch a decision a resolver already made. On a 24h-cadence pipeline this is pure waste, and on a
+wiki that keeps growing it compounds.
+
+**Design (both advisors' agreed shape, verbatim adopted):**
+
+- **New file** `.auto-context/compile/dedup-skipped.jsonl` — append-only JSONL, symmetric sibling of
+  `dedup-deleted.jsonl` (same directory, same not-intended-to-be-indexed caveat as the rev-3
+  Non-Goals state for its siblings). Schema, exhaustive:
+  `{"pageA": <rel>, "pageB": <rel>, "pageAHash": <sha256 hex>, "pageBHash": <sha256 hex>, "skippedAt": <UTC ISO8601 Z>}`
+  where `pageA`/`pageB` are the pair's wiki-root-relative paths **sorted lexicographically**
+  (order-independent pair key: (A,B) and (B,A) produce the identical record key) and the two hashes
+  are positional to that sorted order.
+- **Writer: the CLI, and only the CLI.** `wiki_dedup_resolve.py`'s `skip` action computes both
+  hashes itself at skip time. The resolver agent never supplies a hash and gets no new flag for it —
+  an LLM-supplied hash is nondeterministic and unverifiable. No new CLI arguments at all.
+- **Stale skips are never recorded.** If either page of the entry is missing at skip time (also:
+  unsafe path, unreadable file), no record is appended — including the `merge` action's existing
+  `stale_target` degrade-to-skip (`core/wiki_dedup_resolve.py:66-67`) and the cluster-produced stale
+  skips of §4.2. A stale skip is not a content judgment; recording one would create a bogus
+  permanent suppression for content that was never actually compared.
+- **Hash definition — one shared implementation.** `body_hash(text)` is added to
+  `core/wiki_dedup_scan.py` next to `extract_body_text()` (`core/wiki_dedup_scan.py:50-59`) and
+  imported by `wiki_dedup_resolve.py`; it is never duplicated (a second copy that drifts would
+  silently break suppression forever). Definition: `extract_body_text()` (frontmatter, banner,
+  `qmd:auto` markers, `## Summary` heading stripped) followed by a FIXED whitespace normalization —
+  CRLF→LF, per-line trailing-whitespace strip, outer strip — then sha256 hex over UTF-8 bytes. The
+  whitespace rule is pinned so line-ending/trailing-space churn never defeats suppression.
+- **Append-only ⇒ last record wins.** Multiple records may accumulate for one pair; every consumer
+  compares against **only the most recent (last-in-file) record** for that pair.
+- **Scanner suppression check, at queueing time.** In `wiki_dedup_scan.py`'s candidate loop, just
+  before appending a pair (after the existing `already_queued` check,
+  `core/wiki_dedup_scan.py:226-228`): compute the sorted pair key; if the latest skip record for
+  that key exists AND **both** pages' current `body_hash` values equal the recorded ones → suppress
+  (do not queue). If **either** hash differs, content genuinely changed since the judgment →
+  re-queueing is allowed, exactly as today.
+- **Snapshot still advances.** The existing advance-on-query-success rule
+  (`core/wiki_dedup_scan.py:210`) is unchanged: a page whose candidates were all suppressed still
+  gets its `mtimeNs`/`size` snapshot entry advanced. Leaving it unadvanced would re-query it on
+  every scan forever — suppression must not convert into permanent re-query waste.
+- **Fall-through, not give-up.** Today a page's result loop appends its first surviving candidate
+  and `break`s (`core/wiki_dedup_scan.py:229-231`). A suppressed candidate must NOT end the page's
+  loop: `continue` to the next-ranked result (same shape as the existing `already_queued` /
+  self-match / out-of-scope `continue`s); the `break` remains only after an actual append. A page
+  whose #1 neighbor was human-skipped can still surface its #2 neighbor.
+- **Not counted toward `maxPairsPerScan`.** Only actual appends increment the per-scan counter
+  (`queued_this_scan`, `core/wiki_dedup_scan.py:230`); a suppressed candidate queued nothing and
+  consumes none of the scan's pair budget.
+- **No config surface.** The file path is hardcoded like `dedup-needed.jsonl` (same rev-3 rationale);
+  no new `core/config.py` keys; no `core/update.sh` change; no retention/pruning logic (one small
+  record per human-judged skip — same growth class as `dedup-deleted.jsonl`).
+
+### Components delta (rev 4)
+
+- **`agents/wiki-dedup-resolver.md`** (modified, doc-only) — WORKFLOW block replaced with the §4.2
+  verbatim text (cluster pass as step 3; old 3/4 renumbered 4/5). `core/update.sh` needs no change:
+  it extracts the block between the markers at runtime, and `test/update.test.mjs`'s containment
+  assertion reads the live agent file, so both track the new text automatically.
+- **`core/wiki_dedup_scan.py`** (modified) — adds `body_hash()` (shared hash, next to
+  `extract_body_text()`), `DEDUP_SKIPPED_REL`, a last-record-wins loader for
+  `dedup-skipped.jsonl`, and the suppression check (with fall-through) in the candidate loop.
+  Fail-open/stdout-silent/exit-0 contract unchanged; the summary log line gains a `suppressed=`
+  counter.
+- **`core/wiki_dedup_resolve.py`** (modified) — `skip` action appends the hashed, sorted pair record
+  to `dedup-skipped.jsonl` when (and only when) both pages exist and are readable; stale/unsafe
+  cases skip without recording. Output JSON for `skip` gains an additive `"recorded": true|false`
+  field; `merge` behavior byte-identical.
+
+### Error handling delta (rev 4)
+
+- Recording failure must never block the skip itself: unreadable page, unsafe path, or an
+  unavailable `dedup-skipped.jsonl` path (`safe_compile_file` → None) all degrade to
+  "skip without record" (`recorded: false`), never to a rejected/failed CLI call. A genuinely
+  unexpected exception still follows the existing requeue-and-raise crash-safety path.
+- Malformed `dedup-skipped.jsonl` lines (non-JSON, missing/empty fields) are ignored by the scanner's
+  loader — fail-open, consistent with the scanner's end-to-end contract. Records whose pair happens
+  to be stored unsorted are normalized (key re-sorted, hashes re-ordered) rather than dropped.
+- A hash mismatch is never an error — it is the intended re-queue signal.
+
+### Testing delta (rev 4)
+
+- `agents/wiki-dedup-resolver.md` structural test: the WORKFLOW block contains the cluster pass
+  (cluster grouping, "ONE final keeper", stale-entries-after-deletion routed to the existing
+  fallback) and the cluster pass appears BEFORE the per-entry loop.
+- `core/wiki_dedup_resolve.py`: `skip` on an intact pair appends exactly one record with sorted
+  pair key + positional 64-hex hashes + `skippedAt` (asserted equal to `body_hash` computed
+  independently — cross-checks the CLI and scanner hash identically); a queue entry stored in
+  reverse order produces the identical sorted record; stale skip (either page missing) and `merge`'s
+  `stale_target` degrade record nothing.
+- `core/wiki_dedup_scan.py` (`QMD_QUERY_FIXTURE`-driven, deterministic): suppressed pair not
+  re-queued while both hashes match, AND the page's snapshot entry still advances; either page's
+  body changed → re-queued; suppressed top result falls through to the next-ranked result;
+  suppressed candidates consume no `maxPairsPerScan` budget; last-record-wins in both directions
+  (stale-then-current suppresses; current-then-stale re-queues); `body_hash` whitespace rule
+  (CRLF/trailing spaces) yields identical hashes.
+- End-to-end: a pair skipped through the real CLI is suppressed by the next real scan run (proves
+  the shared-hash contract across the two scripts on real page content).
