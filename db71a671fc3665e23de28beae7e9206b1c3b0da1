@@ -1,0 +1,13 @@
+docs/superpowers/specs/2026-07-02-wiki-retroactive-auto-dedup-design.md
+  h_42d950683aaaea 4,7-14,42-43,46,48-52,61-64,68-85,91-215,220-244,246-262,266-283,287-325
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "db71a671fc3665e23de28beae7e9206b1c3b0da1",
+  "prompts": {},
+  "humans": {
+    "h_42d950683aaaea": {
+      "author": "dulee@zigbang.com"
+    }
+  }
+}
