@@ -1,0 +1,13 @@
+docs/superpowers/plans/2026-07-02-wiki-retroactive-auto-dedup.md
+  h_42d950683aaaea 1-1577
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "63ad05cc2511c55dda0424eabb3046a32718d596",
+  "prompts": {},
+  "humans": {
+    "h_42d950683aaaea": {
+      "author": "dulee@zigbang.com"
+    }
+  }
+}
