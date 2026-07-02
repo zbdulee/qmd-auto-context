@@ -1,0 +1,13 @@
+agents/wiki-dedup-resolver.md
+  h_42d950683aaaea 82
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "76ce303802ecc26651d48bc237f865d54ff66b3a",
+  "prompts": {},
+  "humans": {
+    "h_42d950683aaaea": {
+      "author": "dulee@zigbang.com"
+    }
+  }
+}
