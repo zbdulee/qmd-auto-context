@@ -108,7 +108,7 @@ test('wiki recall 신규 필드는 additive로 normalize 된다', () => {
     maxSourceChars: 12000,
     extractor: { argv: ['python3', 'scripts/extract.py'], timeout: 30, cooldownSeconds: 600 },
     batch: { idleSeconds: 90, maxItems: 5 },
-    semanticDedup: { enabled: true, threshold: 0.82, topK: 3, similarPageMaxChars: 12000 },
+    semanticDedup: { enabled: true, threshold: 0.82, topK: 3, similarPageMaxChars: 12000, autoMergeThreshold: 0.9, maxPairsPerScan: 10 },
   });
 });
 
@@ -425,15 +425,15 @@ test('compile.semanticDedup normalizes enabled/threshold/topK; defaults to true/
   const withSemantic = loadConfig(JSON.stringify({
     compile: { semanticDedup: { enabled: false, threshold: '0.5', topK: 7 } },
   }));
-  assert.deepEqual(withSemantic.compile.semanticDedup, { enabled: false, threshold: 0.5, topK: 7, similarPageMaxChars: 12000 });
+  assert.deepEqual(withSemantic.compile.semanticDedup, { enabled: false, threshold: 0.5, topK: 7, similarPageMaxChars: 12000, autoMergeThreshold: 0.9, maxPairsPerScan: 10 });
 
   const withDefaults = loadConfig(JSON.stringify({ compile: {} }));
-  assert.deepEqual(withDefaults.compile.semanticDedup, { enabled: true, threshold: 0.82, topK: 3, similarPageMaxChars: 12000 });
+  assert.deepEqual(withDefaults.compile.semanticDedup, { enabled: true, threshold: 0.82, topK: 3, similarPageMaxChars: 12000, autoMergeThreshold: 0.9, maxPairsPerScan: 10 });
 
   const withBadValues = loadConfig(JSON.stringify({
     compile: { semanticDedup: { enabled: 'nope', threshold: 'nan', topK: -1 } },
   }));
-  assert.deepEqual(withBadValues.compile.semanticDedup, { enabled: true, threshold: 0.82, topK: 3, similarPageMaxChars: 12000 });
+  assert.deepEqual(withBadValues.compile.semanticDedup, { enabled: true, threshold: 0.82, topK: 3, similarPageMaxChars: 12000, autoMergeThreshold: 0.9, maxPairsPerScan: 10 });
 });
 
 test('compile.semanticDedup.similarPageMaxChars normalizes with a 12000 default', () => {
@@ -449,6 +449,36 @@ test('compile.semanticDedup.similarPageMaxChars normalizes with a 12000 default'
     compile: { semanticDedup: { similarPageMaxChars: 'not-a-number' } },
   }));
   assert.equal(withBadValue.compile.semanticDedup.similarPageMaxChars, 12000);
+});
+
+test('compile.semanticDedup.autoMergeThreshold normalizes with a 0.9 default', () => {
+  const withValue = loadConfig(JSON.stringify({
+    compile: { semanticDedup: { autoMergeThreshold: '0.95' } },
+  }));
+  assert.equal(withValue.compile.semanticDedup.autoMergeThreshold, 0.95);
+
+  const withDefaults = loadConfig(JSON.stringify({ compile: {} }));
+  assert.equal(withDefaults.compile.semanticDedup.autoMergeThreshold, 0.9);
+
+  const withBadValue = loadConfig(JSON.stringify({
+    compile: { semanticDedup: { autoMergeThreshold: 'nan' } },
+  }));
+  assert.equal(withBadValue.compile.semanticDedup.autoMergeThreshold, 0.9);
+});
+
+test('compile.semanticDedup.maxPairsPerScan normalizes with a 10 default', () => {
+  const withValue = loadConfig(JSON.stringify({
+    compile: { semanticDedup: { maxPairsPerScan: 3 } },
+  }));
+  assert.equal(withValue.compile.semanticDedup.maxPairsPerScan, 3);
+
+  const withDefaults = loadConfig(JSON.stringify({ compile: {} }));
+  assert.equal(withDefaults.compile.semanticDedup.maxPairsPerScan, 10);
+
+  const withBadValue = loadConfig(JSON.stringify({
+    compile: { semanticDedup: { maxPairsPerScan: -1 } },
+  }));
+  assert.equal(withBadValue.compile.semanticDedup.maxPairsPerScan, 10);
 });
 
 test('WIKI_STATUSES / lowPriorityStatuses accept superseded', () => {
