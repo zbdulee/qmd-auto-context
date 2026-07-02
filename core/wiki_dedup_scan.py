@@ -32,6 +32,7 @@ AUTO_MARKER_LINE_RE = re.compile(r"^<!-- qmd:auto:(start|end).*-->\n?", re.M)
 SUMMARY_HEADING_RE = re.compile(r"^## Summary\n+", re.M)
 EXCLUDED_STATUSES = {"superseded", "discarded"}
 DEDUP_NEEDED_REL = ".auto-context/compile/dedup-needed.jsonl"
+DEDUP_SKIPPED_REL = ".auto-context/compile/dedup-skipped.jsonl"
 
 
 def log_path() -> Path:
@@ -141,6 +142,37 @@ def already_queued(queue_path: Path, key: tuple[str, str]) -> bool:
     return False
 
 
+def load_skip_suppressions(skipped_path: Path | None) -> dict[tuple[str, str], tuple[str, str]]:
+    """Map sorted (pageA, pageB) -> (pageAHash, pageBHash), keeping only the
+    LAST record per pair -- the file is append-only, so later records simply
+    overwrite earlier ones during this in-order pass. Malformed rows are
+    ignored (fail-open); rows stored unsorted are normalized, not dropped."""
+    suppressions: dict[tuple[str, str], tuple[str, str]] = {}
+    if skipped_path is None:
+        return suppressions
+    for row in wc.read_jsonl(skipped_path):
+        page_a = row.get("pageA")
+        page_b = row.get("pageB")
+        hash_a = row.get("pageAHash")
+        hash_b = row.get("pageBHash")
+        if not all(isinstance(v, str) and v for v in (page_a, page_b, hash_a, hash_b)):
+            continue
+        key = pair_key(page_a, page_b)
+        suppressions[key] = (hash_a, hash_b) if key == (page_a, page_b) else (hash_b, hash_a)
+    return suppressions
+
+
+def current_body_hash(wiki_root: Path, rel: str, cache: dict[str, str | None]) -> str | None:
+    """body_hash of the page's CURRENT on-disk content, memoized per scan.
+    None (unreadable) never matches a recorded hash, so it re-queues."""
+    if rel not in cache:
+        try:
+            cache[rel] = body_hash((wiki_root / rel).read_text(encoding="utf-8"))
+        except OSError:
+            cache[rel] = None
+    return cache[rel]
+
+
 def run(cwd: str) -> None:
     found = qmd_config.find_project_config(cwd)
     root = Path(found["projectRoot"]).resolve()
@@ -199,6 +231,10 @@ def run(cwd: str) -> None:
         log("ABORT: unsafe_compile_path")
         return
 
+    skipped_path = wc.safe_compile_file(root, compile_dir, DEDUP_SKIPPED_REL)
+    suppressions = load_skip_suppressions(skipped_path)
+    hash_cache: dict[str, str | None] = {}
+
     daemon_url = os.environ.get("QMD_DAEMON_URL", "http://localhost:8483")
     timeout = float(config.get("queryTimeout", 5.0) or 5.0)
     top_k = int(semantic_cfg.get("topK", 3) or 3)
@@ -208,6 +244,7 @@ def run(cwd: str) -> None:
     queued_this_scan = 0
     scanned_ok = 0
     scanned_failed = 0
+    suppressed_this_scan = 0
     for rel, page, stat in to_scan:
         if queued_this_scan >= max_pairs:
             break  # overflow: leave unadvanced, retried next scan
@@ -242,13 +279,25 @@ def run(cwd: str) -> None:
             key = pair_key(rel, matched_rel)
             if already_queued(queue_path, key):
                 continue
+            recorded = suppressions.get(key)
+            if recorded is not None:
+                current = (
+                    current_body_hash(wiki_root, key[0], hash_cache),
+                    current_body_hash(wiki_root, key[1], hash_cache),
+                )
+                if None not in current and current == recorded:
+                    # Both bodies unchanged since a resolver's last skip judgment:
+                    # suppress re-queueing. Fall THROUGH to the next-ranked result
+                    # (continue, never break) and consume no maxPairsPerScan budget.
+                    suppressed_this_scan += 1
+                    continue
             wc.append_jsonl(queue_path, {"pageA": rel, "pageB": matched_rel, "score": score})
             queued_this_scan += 1
             break  # one queued pair per scanned page is enough for this pass
 
     snapshot = {"version": 1, "projectRoot": str(root), "files": current_files}
     qmd_sync.write_state_atomic(snap_path, snapshot)
-    log(f"pages={len(pages)} scanned_ok={scanned_ok} scanned_failed={scanned_failed} queued={queued_this_scan}")
+    log(f"pages={len(pages)} scanned_ok={scanned_ok} scanned_failed={scanned_failed} queued={queued_this_scan} suppressed={suppressed_this_scan}")
 
 
 def main() -> int:

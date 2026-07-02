@@ -52,6 +52,28 @@ function readDedupNeeded(work) {
   return readFileSync(path, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l));
 }
 
+function writeDedupSkipped(work, records) {
+  mkdirSync(join(work, '.auto-context', 'compile'), { recursive: true });
+  writeFileSync(
+    join(work, '.auto-context', 'compile', 'dedup-skipped.jsonl'),
+    records.map((r) => JSON.stringify(r)).join('\n') + '\n',
+  );
+}
+
+function bodyHashOf(absPath) {
+  return execFileSync('python3', ['-c', [
+    'import sys',
+    "sys.path.insert(0, 'core')",
+    'from pathlib import Path',
+    'from wiki_dedup_scan import body_hash',
+    "print(body_hash(Path(sys.argv[1]).read_text(encoding='utf-8')), end='')",
+  ].join('\n'), absPath], { encoding: 'utf8' });
+}
+
+function pageHash(work, rel) {
+  return bodyHashOf(join(work, '.auto-context', 'wiki', rel));
+}
+
 function readDedupSnapshot(stateDir) {
   if (!existsSync(stateDir)) return null;
   const file = readdirSync(stateDir).find((f) => f.endsWith('-wiki-dedup.json'));
@@ -416,4 +438,204 @@ test('wiki_dedup_scan: body_hash whitespace normalization (CRLF, trailing spaces
     'print(body_hash(a) == body_hash(b), end="")',
   ].join('\n')], { encoding: 'utf8' });
   assert.equal(out, 'True');
+});
+
+test('wiki_dedup_scan: skip-recorded pair with unchanged bodies is suppressed; snapshot still advances', () => {
+  const work = repoTemp('dedup-scan-suppressed');
+  try {
+    writeSettings(work);
+    writePage(work, 'entities/page-a.md', { body: 'Content A.' });
+    writePage(work, 'entities/page-b.md', { body: 'Content B.' });
+    writeDedupSkipped(work, [{
+      pageA: 'entities/page-a.md',
+      pageB: 'entities/page-b.md',
+      pageAHash: pageHash(work, 'entities/page-a.md'),
+      pageBHash: pageHash(work, 'entities/page-b.md'),
+      skippedAt: '2026-07-02T00:00:00Z',
+    }]);
+    const fixture = join(work, 'fixture.json');
+    writeFileSync(fixture, JSON.stringify({ results: [{ file: 'proj-wiki/entities/page-b.md', score: 0.95 }] }));
+    const { stateDir, logFile } = runScan(work, { QMD_QUERY_FIXTURE: fixture });
+
+    assert.deepEqual(readDedupNeeded(work), [], 'suppressed pair must not be re-queued');
+    assert.match(lastLogLine(logFile), /\bsuppressed=1\b/);
+
+    // The suppressed page's snapshot entry MUST advance anyway (query succeeded) --
+    // otherwise every future scan would re-query it forever.
+    const snapshot = readDedupSnapshot(stateDir);
+    const files = (snapshot && snapshot.files) || {};
+    assert.ok('entities/page-a.md' in files, `snapshot must advance despite suppression, got: ${JSON.stringify(snapshot)}`);
+    assert.ok('entities/page-b.md' in files, `snapshot must advance despite suppression, got: ${JSON.stringify(snapshot)}`);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('wiki_dedup_scan: a changed body on either side re-enables queueing', () => {
+  const work = repoTemp('dedup-scan-suppression-expired');
+  try {
+    writeSettings(work);
+    writePage(work, 'entities/page-a.md', { body: 'Content A.' });
+    writePage(work, 'entities/page-b.md', { body: 'Content B, original.' });
+    const staleHashB = pageHash(work, 'entities/page-b.md');
+    writeDedupSkipped(work, [{
+      pageA: 'entities/page-a.md',
+      pageB: 'entities/page-b.md',
+      pageAHash: pageHash(work, 'entities/page-a.md'),
+      pageBHash: staleHashB,
+      skippedAt: '2026-07-02T00:00:00Z',
+    }]);
+    // page-b's body changes AFTER the skip judgment -> the record no longer matches.
+    writePage(work, 'entities/page-b.md', { body: 'Content B, rewritten since the skip.' });
+    const fixture = join(work, 'fixture.json');
+    writeFileSync(fixture, JSON.stringify({ results: [{ file: 'proj-wiki/entities/page-b.md', score: 0.95 }] }));
+    runScan(work, { QMD_QUERY_FIXTURE: fixture });
+    assert.equal(readDedupNeeded(work).length, 1, 'a hash mismatch must allow normal re-queueing');
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('wiki_dedup_scan: suppressed top result falls through to the next-ranked result', () => {
+  const work = repoTemp('dedup-scan-fall-through');
+  try {
+    writeSettings(work);
+    writePage(work, 'entities/page-a.md', { body: 'Content A.' });
+    writePage(work, 'entities/page-b.md', { body: 'Content B.' });
+    writePage(work, 'entities/page-c.md', { body: 'Content C.' });
+    // Scan 1: empty results -> everything advances, nothing queued.
+    const fixture = join(work, 'fixture.json');
+    writeFileSync(fixture, JSON.stringify({ results: [] }));
+    const env = runScan(work, { QMD_QUERY_FIXTURE: fixture, QMD_DEDUP_COOLDOWN_SECONDS: '0' });
+
+    // Suppress (a,b); touch ONLY page-a (same body, new mtime) so scan 2 re-examines just page-a.
+    writeDedupSkipped(work, [{
+      pageA: 'entities/page-a.md',
+      pageB: 'entities/page-b.md',
+      pageAHash: pageHash(work, 'entities/page-a.md'),
+      pageBHash: pageHash(work, 'entities/page-b.md'),
+      skippedAt: '2026-07-02T00:00:00Z',
+    }]);
+    writePage(work, 'entities/page-a.md', { body: 'Content A.' });
+    writeFileSync(fixture, JSON.stringify({ results: [
+      { file: 'proj-wiki/entities/page-b.md', score: 0.95 },
+      { file: 'proj-wiki/entities/page-c.md', score: 0.93 },
+    ] }));
+    runScan(work, {
+      QMD_QUERY_FIXTURE: fixture,
+      QMD_DEDUP_COOLDOWN_SECONDS: '0',
+      QMD_DEDUP_COOLDOWN_DIR: env.cooldownDir,
+      QMD_SYNC_STATE_DIR: env.stateDir,
+      QMD_DEDUP_LOG: env.logFile,
+    });
+    const entries = readDedupNeeded(work);
+    assert.equal(entries.length, 1, 'the suppressed #1 result must fall through to the #2 result, not end the page');
+    assert.ok(
+      [entries[0].pageA, entries[0].pageB].includes('entities/page-a.md')
+        && [entries[0].pageA, entries[0].pageB].includes('entities/page-c.md'),
+      `expected the (page-a, page-c) pair, got: ${JSON.stringify(entries)}`,
+    );
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('wiki_dedup_scan: suppressed candidates consume no maxPairsPerScan budget', () => {
+  const work = repoTemp('dedup-scan-suppressed-budget');
+  try {
+    writeSettings(work, { semanticDedup: { maxPairsPerScan: 1 } });
+    writePage(work, 'entities/page-a.md', { body: 'Content A.' });
+    writePage(work, 'entities/page-b.md', { body: 'Content B.' });
+    writePage(work, 'entities/page-c.md', { body: 'Content C.' });
+    // Both of page-a's candidates are suppressed. If suppression consumed budget,
+    // scanning page-a would exhaust maxPairsPerScan=1 and page-b would never queue.
+    writeDedupSkipped(work, [
+      {
+        pageA: 'entities/page-a.md', pageB: 'entities/page-b.md',
+        pageAHash: pageHash(work, 'entities/page-a.md'), pageBHash: pageHash(work, 'entities/page-b.md'),
+        skippedAt: '2026-07-02T00:00:00Z',
+      },
+      {
+        pageA: 'entities/page-a.md', pageB: 'entities/page-c.md',
+        pageAHash: pageHash(work, 'entities/page-a.md'), pageBHash: pageHash(work, 'entities/page-c.md'),
+        skippedAt: '2026-07-02T00:00:00Z',
+      },
+    ]);
+    const fixture = join(work, 'fixture.json');
+    writeFileSync(fixture, JSON.stringify({ results: [
+      { file: 'proj-wiki/entities/page-b.md', score: 0.95 },
+      { file: 'proj-wiki/entities/page-c.md', score: 0.93 },
+    ] }));
+    runScan(work, { QMD_QUERY_FIXTURE: fixture });
+    const entries = readDedupNeeded(work);
+    assert.equal(entries.length, 1, 'page-b must still get its one budgeted pair');
+    assert.ok(
+      [entries[0].pageA, entries[0].pageB].includes('entities/page-b.md')
+        && [entries[0].pageA, entries[0].pageB].includes('entities/page-c.md'),
+      `expected the (page-b, page-c) pair, got: ${JSON.stringify(entries)}`,
+    );
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('wiki_dedup_scan: only the most recent skip record per pair counts (stale-then-current suppresses)', () => {
+  const work = repoTemp('dedup-scan-last-record-suppress');
+  try {
+    writeSettings(work);
+    writePage(work, 'entities/page-a.md', { body: 'Content A.' });
+    writePage(work, 'entities/page-b.md', { body: 'Content B.' });
+    writeDedupSkipped(work, [
+      { pageA: 'entities/page-a.md', pageB: 'entities/page-b.md', pageAHash: '0'.repeat(64), pageBHash: '0'.repeat(64), skippedAt: '2026-07-01T00:00:00Z' },
+      { pageA: 'entities/page-a.md', pageB: 'entities/page-b.md', pageAHash: pageHash(work, 'entities/page-a.md'), pageBHash: pageHash(work, 'entities/page-b.md'), skippedAt: '2026-07-02T00:00:00Z' },
+    ]);
+    const fixture = join(work, 'fixture.json');
+    writeFileSync(fixture, JSON.stringify({ results: [{ file: 'proj-wiki/entities/page-b.md', score: 0.95 }] }));
+    runScan(work, { QMD_QUERY_FIXTURE: fixture });
+    assert.deepEqual(readDedupNeeded(work), [], 'the LAST record matches -> suppressed');
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('wiki_dedup_scan: only the most recent skip record per pair counts (current-then-stale re-queues)', () => {
+  const work = repoTemp('dedup-scan-last-record-requeue');
+  try {
+    writeSettings(work);
+    writePage(work, 'entities/page-a.md', { body: 'Content A.' });
+    writePage(work, 'entities/page-b.md', { body: 'Content B.' });
+    writeDedupSkipped(work, [
+      { pageA: 'entities/page-a.md', pageB: 'entities/page-b.md', pageAHash: pageHash(work, 'entities/page-a.md'), pageBHash: pageHash(work, 'entities/page-b.md'), skippedAt: '2026-07-01T00:00:00Z' },
+      { pageA: 'entities/page-a.md', pageB: 'entities/page-b.md', pageAHash: '0'.repeat(64), pageBHash: '0'.repeat(64), skippedAt: '2026-07-02T00:00:00Z' },
+    ]);
+    const fixture = join(work, 'fixture.json');
+    writeFileSync(fixture, JSON.stringify({ results: [{ file: 'proj-wiki/entities/page-b.md', score: 0.95 }] }));
+    runScan(work, { QMD_QUERY_FIXTURE: fixture });
+    assert.equal(readDedupNeeded(work).length, 1, 'the LAST record mismatches -> re-queued (an older matching record must not suppress)');
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('wiki_dedup_scan: a pair skipped through the real CLI is suppressed on the next scan (end-to-end)', () => {
+  const work = repoTemp('dedup-scan-e2e-skip');
+  try {
+    writeSettings(work);
+    writePage(work, 'entities/page-a.md', { body: 'Content A.' });
+    writePage(work, 'entities/page-b.md', { body: 'Content B.' });
+    mkdirSync(join(work, '.auto-context', 'compile'), { recursive: true });
+    writeFileSync(
+      join(work, '.auto-context', 'compile', 'dedup-needed.jsonl'),
+      JSON.stringify({ pageA: 'entities/page-a.md', pageB: 'entities/page-b.md', score: 0.95 }) + '\n',
+    );
+    execFileSync('python3', ['core/wiki_dedup_resolve.py', '--cwd', work, '--index', '0', '--action', 'skip'], { encoding: 'utf8' });
+    assert.deepEqual(readDedupNeeded(work), []);
+
+    const fixture = join(work, 'fixture.json');
+    writeFileSync(fixture, JSON.stringify({ results: [{ file: 'proj-wiki/entities/page-b.md', score: 0.95 }] }));
+    runScan(work, { QMD_QUERY_FIXTURE: fixture });
+    assert.deepEqual(readDedupNeeded(work), [], 'CLI-recorded skip must suppress the scanner (shared body_hash contract)');
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
 });
