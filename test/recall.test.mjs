@@ -247,3 +247,96 @@ test('hierarchical recall: wiki frontmatter status를 prefix에 표시하고 dis
     assert.doesNotMatch(r.hookSpecificOutput.additionalContext, /discarded\.md/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+// 미검수 배지: RC3(오요약 카드를 캐논 근거로 오신뢰) 재발 방지.
+// wiki role 프로젝트를 만들고 카드 frontmatter로 검수 여부를 가른다.
+function wikiBadgeProject(dir, extraSettings = {}) {
+  mkdirSync(join(dir, '.auto-context', 'wiki', 'concepts'), { recursive: true });
+  writeFileSync(join(dir, '.auto-context', 'settings.json'), JSON.stringify({
+    indexing: true,
+    collections: ['proj-wiki'],
+    collectionPaths: { 'proj-wiki': '.auto-context/wiki' },
+    collectionRoles: { 'proj-wiki': 'wiki' },
+    topN: 3,
+    ...extraSettings,
+  }));
+}
+
+test('미검수 wiki 카드에 (미검수) 배지 + 안내 문구, reviewed:true 카드는 배지 없음', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'qmd-badge-'));
+  const fixture = join(dir, 'badge-fixture.json');
+  wikiBadgeProject(dir, { recallStrategy: 'hierarchical' });
+  writeFileSync(join(dir, '.auto-context', 'wiki', 'concepts', 'auto.md'),
+    '---\nstatus: generated\ncreatedBy: qmd-auto-context\nreviewed: false\n---\n# Auto\n');
+  writeFileSync(join(dir, '.auto-context', 'wiki', 'concepts', 'checked.md'),
+    '---\nstatus: generated\ncreatedBy: qmd-auto-context\nreviewed: true\n---\n# Checked\n');
+  writeFileSync(fixture, JSON.stringify({ results: [
+    { file: 'qmd://proj-wiki/concepts/auto.md', title: 'Auto wiki', score: 0.9 },
+    { file: 'qmd://proj-wiki/concepts/checked.md', title: 'Checked wiki', score: 0.8 },
+  ] }));
+  try {
+    const r = recall({ prompt: 'config layout decision 내용을 알려줘', cwd: dir }, { QMD_QUERY_FIXTURE: fixture });
+    assert.ok(r);
+    const ctx = r.hookSpecificOutput.additionalContext;
+    assert.match(ctx, /auto\.md - Auto wiki \(미검수\)/);
+    assert.doesNotMatch(ctx, /checked\.md - Checked wiki \(미검수\)/);
+    assert.match(ctx, /단독 캐논 근거로 인용 금지/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('검수 카드만 있으면 미검수 안내 문구가 붙지 않음', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'qmd-badge-clean-'));
+  const fixture = join(dir, 'clean-fixture.json');
+  wikiBadgeProject(dir, { recallStrategy: 'hierarchical' });
+  writeFileSync(join(dir, '.auto-context', 'wiki', 'concepts', 'canon.md'),
+    '---\nstatus: canon\ncreatedBy: qmd-auto-context\n---\n# Canon\n');
+  writeFileSync(fixture, JSON.stringify({ results: [
+    { file: 'qmd://proj-wiki/concepts/canon.md', title: 'Canon wiki', score: 0.9 },
+  ] }));
+  try {
+    const r = recall({ prompt: 'config layout decision 내용을 알려줘', cwd: dir }, { QMD_QUERY_FIXTURE: fixture });
+    assert.ok(r);
+    const ctx = r.hookSpecificOutput.additionalContext;
+    assert.doesNotMatch(ctx, /미검수/);
+    assert.match(ctx, /\[wiki:canon\]/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('lowPriorityStatuses 강등: 미검수 generated 카드는 topN 절단 전에 검수 카드에 밀림', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'qmd-badge-demote-'));
+  const fixture = join(dir, 'demote-fixture.json');
+  wikiBadgeProject(dir, { recallStrategy: 'hierarchical', topN: 1 });
+  writeFileSync(join(dir, '.auto-context', 'wiki', 'concepts', 'auto.md'),
+    '---\nstatus: generated\ncreatedBy: qmd-auto-context\nreviewed: false\n---\n# Auto\n');
+  writeFileSync(join(dir, '.auto-context', 'wiki', 'concepts', 'canon.md'),
+    '---\nstatus: reviewed\ncreatedBy: qmd-auto-context\n---\n# Reviewed\n');
+  writeFileSync(fixture, JSON.stringify({ results: [
+    { file: 'qmd://proj-wiki/concepts/auto.md', title: 'Auto wiki', score: 0.9 },
+    { file: 'qmd://proj-wiki/concepts/canon.md', title: 'Reviewed wiki', score: 0.5 },
+  ] }));
+  try {
+    const r = recall({ prompt: 'config layout decision 내용을 알려줘', cwd: dir }, { QMD_QUERY_FIXTURE: fixture });
+    assert.ok(r);
+    const ctx = r.hookSpecificOutput.additionalContext;
+    assert.match(ctx, /canon\.md/, '검수 카드가 저점수여도 topN 슬롯을 우선 확보');
+    assert.doesNotMatch(ctx, /auto\.md/, '미검수 generated 카드는 topN=1에서 탈락');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('flat 전략에서도 wiki role 컬렉션이면 미검수 배지 적용', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'qmd-badge-flat-'));
+  const fixture = join(dir, 'flat-fixture.json');
+  wikiBadgeProject(dir); // recallStrategy 미지정 = flat
+  writeFileSync(join(dir, '.auto-context', 'wiki', 'concepts', 'auto.md'),
+    '---\nstatus: generated\ncreatedBy: qmd-auto-context\nreviewed: false\n---\n# Auto\n');
+  writeFileSync(fixture, JSON.stringify({ results: [
+    { file: 'qmd://proj-wiki/concepts/auto.md', title: 'Auto wiki', score: 0.9 },
+  ] }));
+  try {
+    const r = recall({ prompt: 'config layout decision 내용을 알려줘', cwd: dir }, { QMD_QUERY_FIXTURE: fixture });
+    assert.ok(r);
+    const ctx = r.hookSpecificOutput.additionalContext;
+    assert.match(ctx, /auto\.md - Auto wiki \(미검수\)/);
+    assert.match(ctx, /단독 캐논 근거로 인용 금지/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

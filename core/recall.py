@@ -74,26 +74,46 @@ def resolve_wiki_result_path(result: dict, config: dict, cwd: str) -> Path | Non
             return candidate
     return None
 
-def read_wiki_status(result: dict, config: dict, cwd: str) -> str:
+# wiki_compile.is_auto_writable_page의 보호 status 집합과 동일 — reviewed 판정 기준 공유.
+REVIEWED_WIKI_STATUSES = {"reviewed", "canon", "manual", "superseded"}
+
+def read_wiki_meta(result: dict, config: dict, cwd: str) -> dict:
+    """wiki 결과의 frontmatter에서 status와 검수 여부를 읽는다.
+
+    검수 판정: reviewed:true, 보호 status, 또는 createdBy가 명시적으로
+    qmd-auto-context가 아닌 경우. createdBy 부재 시에는 status가 기준이다
+    (status 부재 기본값 generated = 미검수 — 기존 status 기본값 규약과 일치).
+    """
+    meta = {"status": "generated", "reviewed": False}
     path = resolve_wiki_result_path(result, config, cwd)
     if path is None:
-        return "generated"
+        return meta
     try:
         text = path.read_text(encoding="utf-8")[:4096]
     except OSError:
-        return "generated"
+        return meta
     if not text.startswith("---"):
-        return "generated"
+        return meta
     end = text.find("\n---", 3)
     if end == -1:
-        return "generated"
-    frontmatter = text[3:end]
-    for line in frontmatter.splitlines():
-        if line.strip().startswith("status:"):
-            status = line.split(":", 1)[1].strip().strip('"\'')
-            if status:
-                return status
-    return "generated"
+        return meta
+    fields = {}
+    for line in text[3:end].splitlines():
+        stripped = line.strip()
+        for key in ("status", "reviewed", "createdBy"):
+            if stripped.startswith(f"{key}:"):
+                value = stripped.split(":", 1)[1].strip().strip('"\'')
+                if value:
+                    fields[key] = value
+    if fields.get("status"):
+        meta["status"] = fields["status"]
+    created_by = fields.get("createdBy", "")
+    meta["reviewed"] = (
+        fields.get("reviewed", "").lower() == "true"
+        or meta["status"].lower() in REVIEWED_WIKI_STATUSES
+        or (created_by != "" and created_by != "qmd-auto-context")
+    )
+    return meta
 
 def ep_numbers(prompt: str) -> list[int]:
     nums: list[int] = []
@@ -132,23 +152,32 @@ def resolve_prefix_style(config: dict) -> str:
 def format_context(results: list[dict], prefix_style: str = "full", collection_roles: dict | None = None) -> str:
     collection_roles = collection_roles or {}
     lines = ["관련 문서:"]
+    has_unreviewed = False
     for result in results:
         uri = result.get("file", "")
         filepath = qmd_uri_to_filepath(uri)
         title = result.get("title", "")
         collection = result.get("_collection", "") or qmd_uri_to_collection(uri)
-        
+
         tag = collection_roles.get(collection, collection)
         if tag == "wiki" and result.get("_wiki_status"):
             tag = f"wiki:{result['_wiki_status']}"
         if collection not in collection_roles and prefix_style == "tag" and collection:
             tag = collection.rsplit("-", 1)[-1]
         prefix = f"[{tag}] " if tag else ""
-        
+
+        # 미검수 자동생성 wiki 카드 배지: 모델이 카드를 검수된 캐논으로 오신뢰하는 것 방지.
+        suffix = ""
+        if result.get("_wiki_status") and not result.get("_wiki_reviewed", False):
+            suffix = " (미검수)"
+            has_unreviewed = True
+
         if title:
-            lines.append(f"- {prefix}{filepath} - {title}")
+            lines.append(f"- {prefix}{filepath} - {title}{suffix}")
         else:
-            lines.append(f"- {prefix}{filepath}")
+            lines.append(f"- {prefix}{filepath}{suffix}")
+    if has_unreviewed:
+        lines.append("주의: (미검수) 표시는 자동 생성 요약 — 단독 캐논 근거로 인용 금지, 원문 대조 필요.")
     lines.append("필요시 참조.")
     return "\n".join(lines)
 
@@ -338,7 +367,9 @@ def main():
                 result["_collection"] = uri[len("qmd://"):].split("/", 1)[0]
         roles = config.get("collectionRoles", {}) if isinstance(config.get("collectionRoles"), dict) else {}
         if roles.get(result.get("_collection", "")) == "wiki":
-            result["_wiki_status"] = read_wiki_status(result, config, cwd)
+            wiki_meta = read_wiki_meta(result, config, cwd)
+            result["_wiki_status"] = wiki_meta["status"]
+            result["_wiki_reviewed"] = wiki_meta["reviewed"]
 
     if "ep" in config.get("lexicalPatterns", []):
         promote_ep_exact_matches(results, ep_numbers(prompt))
@@ -395,7 +426,9 @@ def main():
                     result["_collection"] = uri[len("qmd://"):].split("/", 1)[0]
             roles = config.get("collectionRoles", {}) if isinstance(config.get("collectionRoles"), dict) else {}
             if roles.get(result.get("_collection", "")) == "wiki":
-                result["_wiki_status"] = read_wiki_status(result, config, cwd)
+                wiki_meta = read_wiki_meta(result, config, cwd)
+                result["_wiki_status"] = wiki_meta["status"]
+                result["_wiki_reviewed"] = wiki_meta["reviewed"]
         if "ep" in config.get("lexicalPatterns", []):
             promote_ep_exact_matches(raw_results, ep_numbers(prompt))
         results = sorted(raw_results, key=lambda r: r.get("score", 0), reverse=True)
@@ -417,9 +450,10 @@ def main():
                 continue
             filtered_results.append(r)
 
+    compile_cfg = config.get("compile", {}) if isinstance(config.get("compile"), dict) else {}
+
     if config.get("recallStrategy") == "hierarchical":
         roles = config.get("collectionRoles", {})
-        compile_cfg = config.get("compile", {}) if isinstance(config.get("compile"), dict) else {}
         excluded_statuses = set(compile_cfg.get("excludeStatusesFromRecall", ["discarded", "contested"]))
         filtered_results = [
             r for r in filtered_results
@@ -428,6 +462,14 @@ def main():
         wiki_results = [r for r in filtered_results if roles.get(r.get("_collection", "")) == "wiki"]
         if wiki_results:
             filtered_results = wiki_results
+
+    # lowPriorityStatuses 강등: 미검수 low-priority wiki 카드를 topN 절단 전에 뒤로 보낸다.
+    # score 내림차순 위의 안정 정렬이라 그룹 내 순위는 유지되고, 검수 카드가
+    # 저점수여도 미검수 generated 카드에 topN 슬롯을 뺏기지 않는다.
+    low_priority = set(compile_cfg.get("lowPriorityStatuses", ["generated", "tentative"]))
+    filtered_results.sort(
+        key=lambda r: r.get("_wiki_status") in low_priority and not r.get("_wiki_reviewed", False)
+    )
 
     # Limit to topN
     top_n = int(config.get("topN", 3))

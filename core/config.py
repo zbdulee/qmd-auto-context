@@ -22,6 +22,7 @@ DEFAULT_CONFIG = {
     "minScore": 0.0,
     "topN": 3,
     "queryTimeout": 5,
+    "staleQueueThreshold": 20,
     "lexicalPatterns": [],
     "skipPaths": [],
     "collectionPaths": {},
@@ -273,6 +274,7 @@ def normalize_config(input_config):
     config["minScore"] = coerce_float(input_config.get("minScore", DEFAULT_CONFIG["minScore"]), DEFAULT_CONFIG["minScore"])
     config["topN"] = coerce_int(input_config.get("topN", DEFAULT_CONFIG["topN"]), DEFAULT_CONFIG["topN"])
     config["queryTimeout"] = coerce_float(input_config.get("queryTimeout", DEFAULT_CONFIG["queryTimeout"]), DEFAULT_CONFIG["queryTimeout"])
+    config["staleQueueThreshold"] = coerce_int(input_config.get("staleQueueThreshold", DEFAULT_CONFIG["staleQueueThreshold"]), DEFAULT_CONFIG["staleQueueThreshold"])
     config["skipPaths"] = string_list(input_config.get("skipPaths"), DEFAULT_CONFIG["skipPaths"])
     config["collectionPaths"] = string_map(input_config.get("collectionPaths"))
     config["allowRoots"] = string_list(input_config.get("allowRoots"), DEFAULT_CONFIG["allowRoots"])

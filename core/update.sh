@@ -53,6 +53,41 @@ qmd_healthcheck() {
   fi
   # 안내는 stderr(JSON 파싱 경로 보호). core/update.sh는 launchd를 직접 제어하지 않는다.
   echo "[qmd] 데몬 미응답(:${port}). backend manager가 준비되지 않았으면 이번 update는 건너뜁니다." >&2
+  # set -e 주의: 호출부는 반드시 조건문(if/||)으로 감쌀 것.
+  return 1
+}
+
+# SessionStart 이상 상태 알림: 무음 사망(RC7) 표면화. stdout이 additionalContext로
+# 주입되므로 이상 상태에서만 출력하고, marker mtime TTL로 반복 세션 잡음을 억제한다.
+# 조건이 해소되면 notice_clear로 재무장해 재발 시 다시 1회 알린다.
+# QMD_SUPPRESS_NOTICE=1(Hermes 등 stdout이 표면화되지 않는 호스트)이면 출력과
+# marker 기록을 모두 생략한다 — marker 선점으로 타 호스트 알림을 삼키지 않기 위함.
+_notice_marker() {
+  local key="$1" project="$2" hash
+  hash=$(printf '%s' "$project" | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest()[:16])' 2>/dev/null)
+  [ -z "$hash" ] && hash=default
+  printf '%s' "$_QMD_CACHE_DIR/notice-${key}-${hash}"
+}
+
+notice_once() {
+  local key="$1" project="$2" message="$3" marker ttl now mtime
+  [ -n "${QMD_SUPPRESS_NOTICE:-}" ] && return 0
+  marker="$(_notice_marker "$key" "$project")"
+  ttl="${QMD_NOTICE_TTL_SECS:-14400}"
+  case "$ttl" in ''|*[!0-9]*) ttl=14400 ;; esac
+  if [ -f "$marker" ]; then
+    now=$(date +%s)
+    mtime=$(stat -f %m "$marker" 2>/dev/null || stat -c %Y "$marker" 2>/dev/null || echo 0)
+    if [ $((now - mtime)) -lt "$ttl" ]; then
+      return 0
+    fi
+  fi
+  echo "$message"
+  : > "$marker" 2>/dev/null || true
+}
+
+notice_clear() {
+  rm -f "$(_notice_marker "$1" "$2")" 2>/dev/null || true
 }
 
 log() {
@@ -626,7 +661,51 @@ print(rel if isinstance(rel, str) and rel else ".auto-context/compile/merge-need
 
   # 헬스체크: config·reason 검사 통과 후, fork 직전 1회 실행 (main() 호출에서만).
   # --resolve-only 내부 재귀호출(--cwd 포함)과 --worker 경로에서는 실행 안 됨.
-  qmd_healthcheck
+  # 실패 시 stdout 1줄 표면화(무음 사망 방지, TTL 억제) — update fork는 계속 진행.
+  if qmd_healthcheck; then
+    notice_clear daemon-down "$workdir"
+  else
+    notice_once daemon-down "$workdir" "[qmd] 검색 데몬 미응답 — 이 세션은 문서 recall이 동작하지 않을 수 있습니다."
+  fi
+
+  # 색인 대기열 적체 표면화: 이 프로젝트 컬렉션 라인만 집계(데몬 호출 없는 파일 검사만 —
+  # 동기 SessionStart 경로 원칙). 임계는 config staleQueueThreshold(기본 20).
+  queue_file="${QMD_DIRTY_QUEUE:-$HOME/.config/qmd/dirty-queue}"
+  stale_msg=""
+  if [ -s "$queue_file" ]; then
+    # config는 argv로 전달(heredoc이 stdin을 차지하므로 pipe 불가 — config_event_enabled와 동일 패턴).
+    stale_msg=$(python3 - "$queue_file" "$config_json" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    cfg = json.loads(sys.argv[2])
+except Exception:
+    cfg = {}
+names = {c for c in cfg.get("collections", []) if isinstance(c, str)}
+try:
+    threshold = int(cfg.get("staleQueueThreshold", 20))
+except (TypeError, ValueError):
+    threshold = 20
+if threshold <= 0:
+    threshold = 20
+count = 0
+if names:
+    try:
+        with open(sys.argv[1], encoding="utf-8") as f:
+            for line in f:
+                if line.split("\t", 1)[0] in names:
+                    count += 1
+    except OSError:
+        pass
+if count >= threshold:
+    print(f"[qmd] 색인 대기열에 이 프로젝트 문서 {count}건 적체 — recall 결과가 오래됐을 수 있습니다.")
+PY
+)
+  fi
+  if [ -n "$stale_msg" ]; then
+    notice_once stale-queue "$workdir" "$stale_msg"
+  else
+    notice_clear stale-queue "$workdir"
+  fi
 
   nohup bash "$0" --worker "$workdir" </dev/null >>"$LOG" 2>&1 &
   exit 0
@@ -1096,7 +1175,8 @@ if [ "$1" = "--resolve-only" ]; then
     cwd="$2"
   else
     # 외부(직접) 호출만 헬스체크 실행. 내부 subprocess 호출(--cwd 포함)은 skip(JSON 파싱 보호).
-    qmd_healthcheck
+    # set -e 가드: 데몬 부재는 resolve-only 실패가 아니다.
+    qmd_healthcheck || true
   fi
   run_resolve_only "$cwd"
   exit 0

@@ -78,15 +78,19 @@ def _run(
     *,
     payload: Optional[dict] = None,
     timeout: float = DEFAULT_TIMEOUT,
+    extra_env: Optional[Dict[str, str]] = None,
 ) -> subprocess.CompletedProcess[str]:
     stdin = json.dumps(payload or {}, ensure_ascii=False) if payload is not None else None
+    env = _env()
+    if extra_env:
+        env.update(extra_env)
     return subprocess.run(
         argv,
         input=stdin,
         text=True,
         capture_output=True,
         timeout=timeout,
-        env=_env(),
+        env=env,
     )
 
 
@@ -212,7 +216,13 @@ def recall_context(
 
 
 def session_update(cwd: Optional[str] = None, **kwargs: Any) -> None:
-    """Hermes on_session_start hook: run qmd update through core/update.sh."""
+    """Hermes on_session_start hook: run qmd update through core/update.sh.
+
+    Hermes에는 session-start context 주입 채널이 없어(on_session_start 반환값
+    미사용) update.sh의 stdout notice가 표면화되지 않는다. QMD_SUPPRESS_NOTICE=1로
+    notice 출력·marker 기록을 모두 생략해, Hermes 실행이 TTL marker를 선점해서
+    이후 Claude/Codex 세션의 이상 상태 알림을 삼키는 것을 방지한다.
+    """
     try:
         if _is_noop_env():
             return None
@@ -221,7 +231,12 @@ def session_update(cwd: Optional[str] = None, **kwargs: Any) -> None:
         _run_quiet(["bash", manager, "warm"])
         _run_quiet(["bash", manager, "rotate"])
         payload = {"hook_event_name": "SessionStart", "cwd": _cwd(cwd, **kwargs)}
-        _run(["bash", str(_core_path("core", "update.sh"))], payload=payload, timeout=30.0)
+        _run(
+            ["bash", str(_core_path("core", "update.sh"))],
+            payload=payload,
+            timeout=30.0,
+            extra_env={"QMD_SUPPRESS_NOTICE": "1"},
+        )
     except Exception as exc:  # pragma: no cover - hook isolation
         logger.debug("qmd-auto-context session update failed: %s", exc)
 
