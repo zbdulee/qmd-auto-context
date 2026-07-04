@@ -360,3 +360,46 @@ test('flat 전략에서도 wiki role 컬렉션이면 미검수 배지 적용', (
     assert.match(ctx, /단독 캐논 근거로 인용 금지/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('verified 카드는 검수급 대우: 배지 없음 + lowPriority 강등 면제 + [wiki:verified] 태그', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'qmd-verified-'));
+  const fixture = join(dir, 'verified-fixture.json');
+  wikiBadgeProject(dir, { recallStrategy: 'hierarchical', topN: 1 });
+  writeFileSync(join(dir, '.auto-context', 'wiki', 'concepts', 'machine.md'),
+    '---\nstatus: verified\ncreatedBy: qmd-auto-context\nreviewed: false\nverifiedBy: claude\n---\n# Machine\n');
+  writeFileSync(join(dir, '.auto-context', 'wiki', 'concepts', 'auto.md'),
+    '---\nstatus: generated\ncreatedBy: qmd-auto-context\nreviewed: false\n---\n# Auto\n');
+  writeFileSync(fixture, JSON.stringify({ results: [
+    { file: 'qmd://proj-wiki/concepts/auto.md', title: 'Auto wiki', score: 0.9 },
+    { file: 'qmd://proj-wiki/concepts/machine.md', title: 'Machine wiki', score: 0.5 },
+  ] }));
+  try {
+    const r = recall({ prompt: 'config layout decision 내용을 알려줘', cwd: dir }, { QMD_QUERY_FIXTURE: fixture });
+    assert.ok(r);
+    const ctx = r.hookSpecificOutput.additionalContext;
+    assert.match(ctx, /\[wiki:verified\] .*machine\.md/, 'verified 카드가 저점수여도 topN 우선(강등 면제)');
+    assert.doesNotMatch(ctx, /미검수/, 'verified 카드에 미검수 배지 없음');
+    assert.doesNotMatch(ctx, /auto\.md/, '미검수 generated 카드는 topN=1에서 탈락');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('flat 전략에서도 contested/discarded 카드는 recall에서 제외 (누출 수정)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'qmd-flat-excl-'));
+  const fixture = join(dir, 'flat-excl-fixture.json');
+  wikiBadgeProject(dir); // flat
+  writeFileSync(join(dir, '.auto-context', 'wiki', 'concepts', 'contested.md'),
+    '---\nstatus: contested\ncreatedBy: qmd-auto-context\n---\n# Contested\n');
+  writeFileSync(join(dir, '.auto-context', 'wiki', 'concepts', 'ok.md'),
+    '---\nstatus: generated\ncreatedBy: qmd-auto-context\nreviewed: false\n---\n# OK\n');
+  writeFileSync(fixture, JSON.stringify({ results: [
+    { file: 'qmd://proj-wiki/concepts/contested.md', title: 'Contested wiki', score: 0.99 },
+    { file: 'qmd://proj-wiki/concepts/ok.md', title: 'OK wiki', score: 0.8 },
+  ] }));
+  try {
+    const r = recall({ prompt: 'config layout decision 내용을 알려줘', cwd: dir }, { QMD_QUERY_FIXTURE: fixture });
+    assert.ok(r);
+    const ctx = r.hookSpecificOutput.additionalContext;
+    assert.doesNotMatch(ctx, /contested\.md/, 'flat에서도 contested 제외');
+    assert.match(ctx, /ok\.md/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

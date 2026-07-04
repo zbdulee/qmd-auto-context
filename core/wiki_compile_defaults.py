@@ -60,4 +60,13 @@ def compile_block(root, engines=ENGINES) -> dict:
             "cooldownSeconds": 600,
         },
         "batch": {"idleSeconds": 90, "maxItems": 5},
+        "verify": {
+            "enabled": True,
+            "timeout": 120,
+            "onFail": "delete",
+            "queuePath": ".auto-context/compile/verify-queue.jsonl",
+            "logPath": ".auto-context/compile/verify-log.jsonl",
+            "cooldownSeconds": 600,
+            "maxPerRun": 3,
+        },
     }

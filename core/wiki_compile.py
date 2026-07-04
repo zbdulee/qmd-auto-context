@@ -760,6 +760,19 @@ def main() -> int:
         action = "updated"
     target.write_text(page, encoding="utf-8")
 
+    if action == "updated":
+        # updated 경로는 AUTO_BLOCK만 치환하고 기존 frontmatter를 보존하므로, 이전
+        # verified/contested 상태가 새 내용에 그대로 붙는 stale 검증이 된다 — 쓰기
+        # status(defaultStatus)로 명시 리셋해 재검증 대상으로 되돌린다.
+        old_meta, _ = parse_frontmatter(old)
+        old_status = str(old_meta.get("status") or "").strip()
+        if old_status and old_status != status:
+            updates = {"status": status}
+            if "verifiedBy" in old_meta or "verifiedAt" in old_meta:
+                updates["verifiedBy"] = ""
+                updates["verifiedAt"] = ""
+            patch_frontmatter_fields(target, updates)
+
     record["action"] = action
     append_jsonl(candidate_path, record)
     append_jsonl(manifest_path, {**record, "status": status})
@@ -769,6 +782,23 @@ def main() -> int:
     collection, collection_path = find_wiki_collection(config)
     if collection and collection_path:
         enqueue_collections({collection: str((root / collection_path).resolve())})
+
+    # 기계 검수(auto-verify) enqueue: generated로 쓰인 카드만 대상. verify worker가
+    # 카드 주장 vs 원문을 대조해 verified 승격 또는 (onFail) 삭제한다.
+    verify_cfg = compile_cfg.get("verify") if isinstance(compile_cfg.get("verify"), dict) else {}
+    if verify_cfg.get("enabled", True) and status == "generated":
+        verify_queue_path = safe_compile_file(
+            root, compile_dir, verify_cfg.get("queuePath", ".auto-context/compile/verify-queue.jsonl")
+        )
+        if verify_queue_path is not None:
+            append_jsonl(verify_queue_path, {
+                "ts": now_iso(),
+                "targetPath": record["targetPath"],
+                "sources": record["sources"],
+                "sourceHash": h,
+                "engine": candidate.get("engine") if isinstance(candidate.get("engine"), str) else "",
+                "trigger": record["trigger"],
+            })
 
     print(json.dumps({"action": action, "targetPath": record["targetPath"]}, ensure_ascii=False))
     return 0

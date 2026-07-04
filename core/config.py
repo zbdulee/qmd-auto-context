@@ -67,11 +67,21 @@ DEFAULT_CONFIG = {
             "autoMergeThreshold": 0.9,
             "maxPairsPerScan": 10,
         },
+        "verify": {
+            "enabled": True,
+            "timeout": 120,
+            "onFail": "delete",
+            "queuePath": ".auto-context/compile/verify-queue.jsonl",
+            "logPath": ".auto-context/compile/verify-log.jsonl",
+            "cooldownSeconds": 600,
+            "maxPerRun": 3,
+        },
     },
 }
 
 COMPILE_MODES = {"off", "candidates", "guarded", "auto-wiki"}
-WIKI_STATUSES = {"generated", "reviewed", "canon", "tentative", "contested", "discarded", "superseded"}
+WIKI_STATUSES = {"generated", "verified", "reviewed", "canon", "tentative", "contested", "discarded", "superseded"}
+VERIFY_ON_FAIL = {"delete", "contested", "none"}
 COMPILE_TRIGGERS = {
     "explicit_user_approval",
     "post_session_summary",
@@ -236,6 +246,18 @@ def compile_config(value):
         "similarPageMaxChars": coerce_int(semantic.get("similarPageMaxChars", default_semantic["similarPageMaxChars"]), default_semantic["similarPageMaxChars"]),
         "autoMergeThreshold": coerce_float(semantic.get("autoMergeThreshold", default_semantic["autoMergeThreshold"]), default_semantic["autoMergeThreshold"]),
         "maxPairsPerScan": coerce_int(semantic.get("maxPairsPerScan", default_semantic["maxPairsPerScan"]), default_semantic["maxPairsPerScan"]),
+    }
+    raw_verify = value.get("verify")
+    verify = raw_verify if isinstance(raw_verify, dict) else {}
+    default_verify = defaults["verify"]
+    result["verify"] = {
+        "enabled": verify.get("enabled") if isinstance(verify.get("enabled"), bool) else default_verify["enabled"],
+        "timeout": coerce_int(verify.get("timeout", default_verify["timeout"]), default_verify["timeout"]),
+        "onFail": verify.get("onFail") if verify.get("onFail") in VERIFY_ON_FAIL else default_verify["onFail"],
+        "queuePath": verify.get("queuePath") if isinstance(verify.get("queuePath"), str) and verify.get("queuePath") else default_verify["queuePath"],
+        "logPath": verify.get("logPath") if isinstance(verify.get("logPath"), str) and verify.get("logPath") else default_verify["logPath"],
+        "cooldownSeconds": coerce_int(verify.get("cooldownSeconds", default_verify["cooldownSeconds"]), default_verify["cooldownSeconds"]),
+        "maxPerRun": coerce_int(verify.get("maxPerRun", default_verify["maxPerRun"]), default_verify["maxPerRun"]),
     }
     return result
 

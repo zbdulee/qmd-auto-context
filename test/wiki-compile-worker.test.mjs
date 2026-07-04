@@ -538,7 +538,9 @@ test('dedup: repeated edits of same path collapse to one extraction', () => {
   const ex = join(mkdtempSync(join(tmpdir(), 'extractor-')), 'count.py');
   const counter = join(mkdtempSync(join(tmpdir(), 'count-')), 'n');
   writeFileSync(ex, `#!/usr/bin/env python3\nimport json,sys,os\np=${JSON.stringify(counter)}\nn=int(open(p).read()) if os.path.exists(p) else 0\nopen(p,'w').write(str(n+1))\nprint(json.dumps({'candidates':[{'title':'X','summary':'Durable: deduped repeated edits into a single extraction.','suggestedType':'concept','confidence':'high','targetPath':'.auto-context/wiki/concepts/x.md'}]}))\n`);
-  const project = setupProject({ extractor: { argv: ['python3', ex], timeout: 30 }, batch: { idleSeconds: 0, maxItems: 1 } });
+  // verify 비활성: 이 테스트는 compile dedup 카운트 검증이 목적 — verify 피기백이 같은
+  // argv를 verifier로 재호출하면 카운터가 오염된다.
+  const project = setupProject({ extractor: { argv: ['python3', ex], timeout: 30 }, batch: { idleSeconds: 0, maxItems: 1 }, verify: { enabled: false } });
   const row = (ts) => JSON.stringify({ ts, trigger: 'post_tool_source', engine: 'claude', cwd: project, source: { kind: 'file', path: 'docs/source.md', collection: 'proj-docs' } });
   writeFileSync(join(project, '.auto-context', 'compile', 'source-queue.jsonl'),
     row('2026-06-26T00:00:00Z') + '\n' + row('2026-06-26T00:00:01Z') + '\n' + row('2026-06-26T00:00:02Z') + '\n');

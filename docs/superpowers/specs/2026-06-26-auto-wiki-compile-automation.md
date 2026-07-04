@@ -26,8 +26,8 @@ qmd-auto-context가 대화와 작업 결과에서 장기 지식 후보를 자동
 ## 핵심 원칙
 
 1. **Auto-first, editable-always**: 자동으로 만들되, 결과는 plain markdown이라 사용자가 바로 수정 가능해야 한다.
-2. **Generated is not canon**: 자동 생성 문서는 기본 `status: generated`이며, 명시 승인/반복 검증 후 `reviewed` 또는 `canon`이 된다.
-3. **Recall respects status**: recall은 `canon/reviewed`를 우선하고 `generated/tentative`는 낮은 신뢰도로 다룬다. `discarded/contested`는 기본 제외한다.
+2. **Generated is not canon**: 자동 생성 문서는 기본 `status: generated`이며, 명시 승인/반복 검증 후 `reviewed` 또는 `canon`이 된다. 기계 검수(auto-verify)를 통과한 카드는 `verified`가 되어 recall에서는 검수급으로 대우받지만, `reviewed`/`canon`(사람 승인)과 구분되고 `requireReviewForCanon`은 불변이다.
+3. **Recall respects status**: recall은 `canon/reviewed/verified`를 우선하고 `generated/tentative`는 낮은 신뢰도로 다룬다. `discarded/contested`는 기본 제외한다.
 4. **No transcript dump**: 대화는 입력 source가 될 수 있지만 저장 대상은 정제된 결정/규칙/개념/설정 카드다.
 5. **Auditability**: 모든 자동 생성/수정/promotion은 `wiki/log.md` 또는 page frontmatter에 남긴다.
 6. **Rebuildable index**: qmd index/embedding은 cache다. 사용자가 wiki markdown을 고치면 index worker가 다시 반영한다.
@@ -314,6 +314,7 @@ Rules:
 |---|---|---|---|
 | none | generated | lint-clean auto write | default for automatic pages |
 | none | tentative | low confidence / brainstorm-like but durable | lower recall priority |
+| generated | verified | auto-verify worker: 카드 주장 vs 원문 소스 적대 대조 pass | 기계 검수 — `verifiedBy`/`verifiedAt` 기록. 쓰기 보호는 없어 소스 변경 시 자동 갱신되며 갱신되면 generated로 리셋 후 재검증. verify fail은 기본 카드 삭제(tombstone 없음 — 소스 수정 시 재생성 가능) |
 | generated/tentative | reviewed | explicit review command or user says the page is correct | set `reviewed:true` |
 | reviewed/generated/tentative | canon | direct user canon signal + lint clean + no conflict | set `reviewed:true`; never inferred from summaries |
 | generated/tentative/reviewed | contested | conflict with existing wiki/raw or user flags uncertainty | excluded from default recall |

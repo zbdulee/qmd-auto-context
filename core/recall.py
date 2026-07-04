@@ -74,8 +74,10 @@ def resolve_wiki_result_path(result: dict, config: dict, cwd: str) -> Path | Non
             return candidate
     return None
 
-# wiki_compile.is_auto_writable_page의 보호 status 집합과 동일 — reviewed 판정 기준 공유.
-REVIEWED_WIKI_STATUSES = {"reviewed", "canon", "manual", "superseded"}
+# recall에서 검수급으로 대우하는 status 집합. wiki_compile.is_auto_writable_page의
+# 보호 집합과 달리 verified를 포함한다(의도적 차이) — verified는 기계 검수 통과라
+# recall 신뢰는 얻지만 쓰기 보호는 받지 않아 소스 변경 시 자동 갱신·재검증이 계속된다.
+REVIEWED_WIKI_STATUSES = {"verified", "reviewed", "canon", "manual", "superseded"}
 
 def read_wiki_meta(result: dict, config: dict, cwd: str) -> dict:
     """wiki 결과의 frontmatter에서 status와 검수 여부를 읽는다.
@@ -454,13 +456,16 @@ def main():
 
     compile_cfg = config.get("compile", {}) if isinstance(config.get("compile"), dict) else {}
 
+    # excludeStatusesFromRecall은 전략 무관 적용: wiki role 결과는 status를 이미 읽었으므로
+    # flat 전략에서도 contested/discarded 카드가 recall로 새지 않는다.
+    roles = config.get("collectionRoles", {}) if isinstance(config.get("collectionRoles"), dict) else {}
+    excluded_statuses = set(compile_cfg.get("excludeStatusesFromRecall", ["discarded", "contested"]))
+    filtered_results = [
+        r for r in filtered_results
+        if roles.get(r.get("_collection", "")) != "wiki" or r.get("_wiki_status", "generated") not in excluded_statuses
+    ]
+
     if config.get("recallStrategy") == "hierarchical":
-        roles = config.get("collectionRoles", {})
-        excluded_statuses = set(compile_cfg.get("excludeStatusesFromRecall", ["discarded", "contested"]))
-        filtered_results = [
-            r for r in filtered_results
-            if roles.get(r.get("_collection", "")) != "wiki" or r.get("_wiki_status", "generated") not in excluded_statuses
-        ]
         wiki_results = [r for r in filtered_results if roles.get(r.get("_collection", "")) == "wiki"]
         if wiki_results:
             filtered_results = wiki_results

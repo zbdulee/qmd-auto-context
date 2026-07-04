@@ -109,7 +109,53 @@ test('wiki recall 신규 필드는 additive로 normalize 된다', () => {
     extractor: { argv: ['python3', 'scripts/extract.py'], timeout: 30, cooldownSeconds: 600 },
     batch: { idleSeconds: 90, maxItems: 5 },
     semanticDedup: { enabled: true, threshold: 0.82, topK: 3, similarPageMaxChars: 12000, autoMergeThreshold: 0.9, maxPairsPerScan: 10 },
+    verify: {
+      enabled: true,
+      timeout: 120,
+      onFail: 'delete',
+      queuePath: '.auto-context/compile/verify-queue.jsonl',
+      logPath: '.auto-context/compile/verify-log.jsonl',
+      cooldownSeconds: 600,
+      maxPerRun: 3,
+    },
   });
+});
+
+test('compile verify config: 커스텀 값 정규화 + 불량 값은 기본값 폴백', () => {
+  const cfg = loadConfig(JSON.stringify({
+    compile: {
+      enabled: true,
+      mode: 'auto-wiki',
+      verify: { enabled: false, timeout: 60, onFail: 'contested', maxPerRun: 5 },
+    },
+  }));
+  assert.equal(cfg.compile.verify.enabled, false);
+  assert.equal(cfg.compile.verify.timeout, 60);
+  assert.equal(cfg.compile.verify.onFail, 'contested');
+  assert.equal(cfg.compile.verify.maxPerRun, 5);
+
+  const bad = loadConfig(JSON.stringify({
+    compile: {
+      enabled: true,
+      verify: { enabled: 'yes', timeout: -1, onFail: 'explode', queuePath: 123 },
+    },
+  }));
+  assert.equal(bad.compile.verify.enabled, true);
+  assert.equal(bad.compile.verify.timeout, 120);
+  assert.equal(bad.compile.verify.onFail, 'delete');
+  assert.equal(bad.compile.verify.queuePath, '.auto-context/compile/verify-queue.jsonl');
+});
+
+test('WIKI_STATUSES에 verified 포함: defaultStatus/excludeStatusesFromRecall에 지정 가능', () => {
+  const cfg = loadConfig(JSON.stringify({
+    compile: {
+      enabled: true,
+      defaultStatus: 'verified',
+      excludeStatusesFromRecall: ['discarded', 'verified'],
+    },
+  }));
+  assert.equal(cfg.compile.defaultStatus, 'verified');
+  assert.deepEqual(cfg.compile.excludeStatusesFromRecall, ['discarded', 'verified']);
 });
 
 test('compile extractor config drops shell strings and invalid timeout', () => {

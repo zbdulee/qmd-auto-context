@@ -100,6 +100,53 @@ print(lib.build_prompt(payload))
   assert.equal(withEmptySimilarPages, withoutSimilarPages);
 });
 
+test('build_verify_prompt embeds card/sources and adversarial verdict instruction', () => {
+  const py = `import sys,json; sys.path.insert(0,'core/extractors'); import lib
+p=lib.build_verify_prompt({'task':'verify','card':{'path':'.auto-context/wiki/concepts/x.md','content':'CARD_BODY'},'sources':[{'path':'docs/src.md','content':'SRC_BODY','truncated':True}]})
+print(json.dumps({'has_card':'CARD_BODY' in p,'has_src':'SRC_BODY' in p,'has_trunc':'truncated: true' in p,'has_verdict':'"verdict"' in p,'has_refute':'REFUTE' in p,'no_tools':'Do NOT use any tools' in p}))`;
+  const out = JSON.parse(runLib(py, ''));
+  assert.equal(out.has_card, true);
+  assert.equal(out.has_src, true);
+  assert.equal(out.has_trunc, true);
+  assert.equal(out.has_verdict, true);
+  assert.equal(out.has_refute, true);
+  assert.equal(out.no_tools, true);
+});
+
+test('extract_verdict pulls last valid verdict object, ignores invalid verdict values', () => {
+  const py = `import sys,json; sys.path.insert(0,'core/extractors'); import lib
+text = 'thinking {"verdict":"maybe"} then\\n{"verdict":"fail","claims":[{"claim":"c","supported":False if 0 else False}],"reasons":["contradicts"]}'
+text = 'thinking {"verdict":"maybe"} then\\n' + json.dumps({"verdict":"fail","claims":[{"claim":"c","supported":False}],"reasons":["contradicts"]})
+print(json.dumps(lib.extract_verdict(text)))`;
+  const out = JSON.parse(runLib(py, ''));
+  assert.equal(out.verdict, 'fail');
+  assert.equal(out.reasons[0], 'contradicts');
+});
+
+test('claude adapter: task=verify payload → verify prompt 사용 + verdict JSON emit', () => {
+  const d = mkdtempSync(join(tmpdir(), 'claude-verify-'));
+  const promptLog = join(d, 'prompt.txt');
+  const fakeCli = join(d, 'fake-claude');
+  writeFileSync(fakeCli, `#!/usr/bin/env bash\nprintf '%s' "$@" > "${promptLog}"\necho '{"verdict":"pass","claims":[{"claim":"c1","supported":true,"quote":"q","sourcePath":"docs/s.md"}],"reasons":[]}'\n`, { mode: 0o755 });
+  const payload = JSON.stringify({
+    task: 'verify',
+    card: { path: '.auto-context/wiki/concepts/x.md', content: 'CARD_BODY' },
+    sources: [{ path: 'docs/s.md', content: 'SRC_BODY', truncated: false }],
+  });
+  const out = execFileSync('python3', ['core/extractors/claude_adapter.py'], {
+    cwd: process.cwd(), input: payload, encoding: 'utf8',
+    env: { ...process.env, QMD_EXTRACTOR_CLAUDE_BIN: fakeCli },
+  });
+  const parsed = JSON.parse(out);
+  assert.equal(parsed.verdict, 'pass');
+  assert.equal(parsed.claims[0].supported, true);
+  const prompt = readFileSync(promptLog, 'utf8');
+  assert.match(prompt, /REFUTE/);
+  assert.match(prompt, /CARD_BODY/);
+  assert.doesNotMatch(prompt, /wiki candidates/, 'extraction 프롬프트가 아님');
+  rmSync(d, { recursive: true, force: true });
+});
+
 test('run_isolated injects QMD_SANDBOX=1 into the child env', () => {
   const py = `import sys; sys.path.insert(0,'core/extractors'); import lib
 out, code = lib.run_isolated(['bash','-lc','printf %s "$QMD_SANDBOX"'], 10)

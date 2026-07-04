@@ -11,6 +11,7 @@ import json
 import os
 import subprocess
 import sys
+import traceback
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -439,6 +440,7 @@ def process_job(root: Path, config: dict, compile_cfg: dict, job: dict) -> tuple
             sources.append(file_source)
         candidate["sources"] = sources
         candidate.setdefault("trigger", job.get("trigger", "post_tool_source"))
+        candidate.setdefault("engine", job.get("engine", ""))
         result = compile_candidate(root, candidate)
         if not isinstance(result, dict) or result.get("action") in {"rejected", "conflict"}:
             failed_compile = True
@@ -446,6 +448,27 @@ def process_job(root: Path, config: dict, compile_cfg: dict, job: dict) -> tuple
         append_jsonl(cpath, bounded_failure("compile_failed", job, "writer_rejected"))
         return False, True
     return True, False
+
+
+def _run_verify_pass(root: Path, config: dict, compile_cfg: dict) -> None:
+    """Piggyback the auto-verify queue drain after compile work (fail-open).
+
+    verify must never break the compile worker — errors are swallowed after
+    leaving a trace in extractor.log (a systemic verify failure must not die
+    silently); the verify queue keeps its own claim/requeue semantics inside
+    run().
+    """
+    try:
+        import wiki_verify_worker
+        wiki_verify_worker.run(root, config, compile_cfg)
+    except Exception:
+        try:
+            log = root / ".auto-context" / "compile" / "extractor.log"
+            log.parent.mkdir(parents=True, exist_ok=True)
+            with log.open("a", encoding="utf-8") as handle:
+                handle.write("verify-pass-error: " + traceback.format_exc(limit=5)[-4000:] + "\n")
+        except OSError:
+            pass
 
 
 def main():
@@ -474,6 +497,7 @@ def main():
     if not rows:
         claimed.unlink(missing_ok=True)
         queue.touch(exist_ok=True)
+        _run_verify_pass(root, config, compile_cfg)
         return 0
 
     batch_cfg = compile_cfg.get("batch") if isinstance(compile_cfg.get("batch"), dict) else {}
@@ -488,6 +512,7 @@ def main():
         requeue_lines(queue, [raw for raw, _ in kept] + malformed)
         claimed.unlink(missing_ok=True)
         queue.touch(exist_ok=True)
+        _run_verify_pass(root, config, compile_cfg)
         if args.json:
             print(json.dumps({"processed": 0, "remaining": len(kept) + len(malformed)}, ensure_ascii=False))
         return 0
@@ -511,6 +536,7 @@ def main():
         requeue_lines(queue, remaining)
         claimed.unlink(missing_ok=True)
         queue.touch(exist_ok=True)
+    _run_verify_pass(root, config, compile_cfg)
     if args.json:
         print(json.dumps({"processed": processed_count, "remaining": len(remaining)}, ensure_ascii=False))
     return 0

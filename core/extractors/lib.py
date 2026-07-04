@@ -3,6 +3,9 @@
 Adapters are pure functions: read one payload JSON on stdin, run a host CLI in an
 isolated temp cwd with tools/writes disabled, emit {"candidates": [...]} on stdout.
 They never touch the project filesystem.
+
+The same adapters double as card verifiers: a payload with {"task": "verify"}
+switches to the adversarial verify prompt and emits {"verdict": ...} instead.
 """
 from __future__ import annotations
 
@@ -40,6 +43,33 @@ WIKI SCHEMA (for orientation):
 SOURCE FILE: {path}
 SOURCE CONTENT:
 {content}
+"""
+
+VERDICT_VALUES = ("pass", "fail", "inconclusive")
+
+_VERIFY_PROMPT_TEMPLATE = """You are an adversarial fact-checker for one auto-generated wiki card.
+
+Your job: try to REFUTE the card using only the SOURCE documents below.
+
+Output RULES (strict):
+- Output ONLY a single JSON object: {{"verdict": "pass"|"fail"|"inconclusive", "claims": [{{"claim": str, "supported": true|false|null, "quote": str, "sourcePath": str}}], "reasons": [str]}}. No prose, no code fence.
+- Decompose the card (title, summary, body) into its substantive factual claims.
+- For each claim, search the SOURCE content for evidence. "quote" MUST be a verbatim excerpt copied from the source ("" when none).
+- supported=false ONLY when the source CONTRADICTS the claim or states the opposite.
+- supported=null when the source neither confirms nor denies it.
+- verdict rules:
+  - "fail" if ANY substantive claim contradicts the source (some supported=false).
+  - "pass" if every substantive claim is backed by a verbatim quote (all supported=true).
+  - "inconclusive" otherwise — including when a source is marked truncated and the missing part could hold the evidence.
+- Frontmatter metadata and style are NOT claims. Judge only factual/semantic content.
+- Never include secrets, API keys, tokens, or credentials in output.
+- Do NOT use any tools. Do NOT read or write files. Answer directly.
+
+CARD FILE: {card_path}
+CARD CONTENT:
+{card_content}
+
+{sources_section}
 """
 
 _SIMILAR_PAGES_TEMPLATE = """TOP MATCHING EXISTING WIKI PAGES (reuse canonicalKey/targetPath below if this source overlaps one):
@@ -87,6 +117,23 @@ def build_prompt(payload: dict) -> str:
     )
 
 
+def build_verify_prompt(payload: dict) -> str:
+    card = payload.get("card") if isinstance(payload.get("card"), dict) else {}
+    sources = payload.get("sources") if isinstance(payload.get("sources"), list) else []
+    blocks = []
+    for src in sources:
+        if not isinstance(src, dict):
+            continue
+        path = str(src.get("path", ""))
+        truncated = " (truncated: true)" if src.get("truncated") else ""
+        blocks.append(f"SOURCE FILE: {path}{truncated}\nSOURCE CONTENT:\n{src.get('content', '')}")
+    return _VERIFY_PROMPT_TEMPLATE.format(
+        card_path=str(card.get("path", "")),
+        card_content=str(card.get("content", "")),
+        sources_section="\n\n".join(blocks) if blocks else "SOURCE CONTENT: (none provided)",
+    )
+
+
 def extract_candidates(text: str) -> dict:
     if not isinstance(text, str) or "candidates" not in text:
         return {}
@@ -108,6 +155,29 @@ def extract_candidates(text: str) -> dict:
             idx = start + 1
             continue
         if isinstance(obj, dict) and isinstance(obj.get("candidates"), list):
+            found = obj
+        idx = max(end, start + 1)
+    return found or {}
+
+
+def extract_verdict(text: str) -> dict:
+    """Last JSON object in stdout carrying a valid "verdict" — extract_candidates와 동일 스캔."""
+    if not isinstance(text, str) or "verdict" not in text:
+        return {}
+    decoder = json.JSONDecoder()
+    found = None
+    idx = 0
+    length = len(text)
+    while idx < length:
+        start = text.find("{", idx)
+        if start == -1:
+            break
+        try:
+            obj, end = decoder.raw_decode(text, start)
+        except json.JSONDecodeError:
+            idx = start + 1
+            continue
+        if isinstance(obj, dict) and obj.get("verdict") in VERDICT_VALUES:
             found = obj
         idx = max(end, start + 1)
     return found or {}
@@ -167,10 +237,23 @@ def emit(candidates_obj: dict) -> int:
     return 0
 
 
+def emit_verdict(verdict_obj: dict) -> int:
+    if not isinstance(verdict_obj, dict) or verdict_obj.get("verdict") not in VERDICT_VALUES:
+        return 1
+    out = {
+        "verdict": verdict_obj["verdict"],
+        "claims": verdict_obj.get("claims") if isinstance(verdict_obj.get("claims"), list) else [],
+        "reasons": verdict_obj.get("reasons") if isinstance(verdict_obj.get("reasons"), list) else [],
+    }
+    print(json.dumps(out, ensure_ascii=False))
+    return 0
+
+
 def run_adapter(cli_name: str, env_override: str, build_cmd) -> int:
     """Full adapter flow shared by all host adapters."""
     payload = read_payload()
-    prompt = build_prompt(payload)
+    is_verify = payload.get("task") == "verify"
+    prompt = build_verify_prompt(payload) if is_verify else build_prompt(payload)
     binary = resolve_bin(cli_name, env_override)
     if not binary:
         return CLI_ABSENT
@@ -180,4 +263,6 @@ def run_adapter(cli_name: str, env_override: str, build_cmd) -> int:
         return code
     if code != 0:
         return code
+    if is_verify:
+        return emit_verdict(extract_verdict(out))
     return emit(extract_candidates(out))

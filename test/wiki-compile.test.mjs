@@ -992,3 +992,85 @@ test('wiki_compile: semantic gate resolves a daemon result path via the project-
     rmSync(work, { recursive: true, force: true });
   }
 });
+
+// --- auto-verify enqueue (wiki_compile write 성공 → verify-queue) ---
+
+test('wiki_compile: generated 카드 write 성공 시 verify-queue에 잡 enqueue (engine/sourceHash 포함)', () => {
+  const work = repoTemp('verify-enq');
+  writeSettings(work, { semanticDedup: { enabled: false } });
+  try {
+    const out = JSON.parse(runCompile(work, {
+      title: 'Verify Enqueue Decision',
+      summary: 'Durable decision: verify queue records freshly written generated cards.',
+      suggestedType: 'decision',
+      confidence: 'high',
+      trigger: 'manual',
+      engine: 'claude',
+      sources: [{ kind: 'file', path: 'docs/source.md', collection: 'proj-docs' }],
+      targetPath: '.auto-context/wiki/decisions/verify-enqueue-decision.md',
+    }));
+    assert.equal(out.action, 'created');
+    const queue = readFileSync(join(work, '.auto-context', 'compile', 'verify-queue.jsonl'), 'utf8')
+      .trim().split('\n').map((l) => JSON.parse(l));
+    assert.equal(queue.length, 1);
+    assert.equal(queue[0].targetPath, '.auto-context/wiki/decisions/verify-enqueue-decision.md');
+    assert.equal(queue[0].engine, 'claude');
+    assert.ok(queue[0].sourceHash, 'sourceHash 포함');
+    assert.equal(queue[0].sources[0].path, 'docs/source.md');
+  } finally { rmSync(work, { recursive: true, force: true }); }
+});
+
+test('wiki_compile: verify.enabled=false면 enqueue 안 함', () => {
+  const work = repoTemp('verify-off');
+  writeSettings(work, { semanticDedup: { enabled: false }, verify: { enabled: false } });
+  try {
+    const out = JSON.parse(runCompile(work, {
+      title: 'No Verify Decision',
+      summary: 'Durable decision: verify disabled projects skip the verify queue.',
+      suggestedType: 'decision',
+      confidence: 'high',
+      trigger: 'manual',
+      targetPath: '.auto-context/wiki/decisions/no-verify-decision.md',
+    }));
+    assert.equal(out.action, 'created');
+    assert.equal(existsSync(join(work, '.auto-context', 'compile', 'verify-queue.jsonl')), false);
+  } finally { rmSync(work, { recursive: true, force: true }); }
+});
+
+test('wiki_compile: verified 카드가 auto-update되면 status가 generated로 리셋 + verify 필드 제거 + 재enqueue', () => {
+  const work = repoTemp('verify-reset');
+  writeSettings(work, { semanticDedup: { enabled: false } });
+  const payload = {
+    title: 'Reset Decision',
+    summary: 'Durable decision: updated cards drop stale verification.',
+    suggestedType: 'decision',
+    confidence: 'high',
+    trigger: 'manual',
+    engine: 'claude',
+    targetPath: '.auto-context/wiki/decisions/reset-decision.md',
+  };
+  try {
+    assert.equal(JSON.parse(runCompile(work, payload)).action, 'created');
+    const page = join(work, '.auto-context', 'wiki', 'decisions', 'reset-decision.md');
+    // verify 승격 시뮬레이션
+    execFileSync('python3', ['-c', `
+import sys; sys.path.insert(0, 'core')
+from pathlib import Path
+import wiki_compile as wc
+wc.patch_frontmatter_fields(Path(${JSON.stringify(page)}), {"status": "verified", "verifiedBy": "claude", "verifiedAt": "2026-07-04T00:00:00Z"})
+`], { encoding: 'utf8' });
+    assert.match(readFileSync(page, 'utf8'), /^status: "?verified"?$/m);
+    // 같은 identity로 재컴파일(내용 갱신) → updated 경로
+    const updated = JSON.parse(runCompile(work, {
+      ...payload,
+      summary: 'Durable decision: updated cards drop stale verification. Now with new wording.',
+    }));
+    assert.equal(updated.action, 'updated');
+    const text = readFileSync(page, 'utf8');
+    assert.match(text, /^status: "?generated"?$/m, '갱신된 카드는 재검증 대상으로 리셋');
+    assert.match(text, /^verifiedBy: ""?$/m, 'stale verifiedBy 제거');
+    const queue = readFileSync(join(work, '.auto-context', 'compile', 'verify-queue.jsonl'), 'utf8')
+      .trim().split('\n').map((l) => JSON.parse(l));
+    assert.equal(queue.length, 2, 'created + updated 각각 enqueue');
+  } finally { rmSync(work, { recursive: true, force: true }); }
+});
