@@ -1,0 +1,41 @@
+CLAUDE.md
+  h_42d950683aaaea 73
+core/config.py
+  h_42d950683aaaea 70-78,83-84,250-261
+core/extractors/lib.py
+  h_42d950683aaaea 6-8,48-74,120-136,163-185,240-251,255-256,266-267
+core/recall.py
+  h_42d950683aaaea 77-80,459-467
+core/wiki_compile.py
+  h_42d950683aaaea 763-775,786-802
+core/wiki_compile_defaults.py
+  h_42d950683aaaea 63-71
+core/wiki_compile_worker.py
+  h_42d950683aaaea 14,443,453-473,500,515,539
+core/wiki_verify_worker.py
+  h_42d950683aaaea 1-338
+docs/superpowers/specs/2026-06-26-auto-wiki-compile-automation.md
+  h_42d950683aaaea 29-30,317
+test/config.test.mjs
+  h_42d950683aaaea 112-120,124-160
+test/recall.test.mjs
+  h_42d950683aaaea 363-405
+test/wiki-compile-worker.test.mjs
+  h_42d950683aaaea 541-543
+test/wiki-compile.test.mjs
+  h_42d950683aaaea 995-1076
+test/wiki-extractors.test.mjs
+  h_42d950683aaaea 103-149
+test/wiki-verify-worker.test.mjs
+  h_42d950683aaaea 1-295
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "25e6c82fe7412a021190465e4e5ed6b8503a8868",
+  "prompts": {},
+  "humans": {
+    "h_42d950683aaaea": {
+      "author": "dulee@zigbang.com"
+    }
+  }
+}
