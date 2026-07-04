@@ -262,6 +262,26 @@ function wikiBadgeProject(dir, extraSettings = {}) {
   }));
 }
 
+// 회귀: 실데몬 /query는 file을 qmd:// 스킴 없이 "collection/path"로 반환한다.
+// 스킴 전제 파싱이면 _collection 미주입 → 배지/강등/exclude가 라이브에서 전부 no-op (2026-07-04 발견).
+test('plain-path(스킴 없는) 데몬 응답에도 wiki 메타·(미검수) 배지가 적용된다', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'qmd-plainpath-'));
+  const fixture = join(dir, 'plain-fixture.json');
+  wikiBadgeProject(dir, { recallStrategy: 'hierarchical' });
+  writeFileSync(join(dir, '.auto-context', 'wiki', 'concepts', 'auto.md'),
+    '---\nstatus: generated\ncreatedBy: qmd-auto-context\nreviewed: false\n---\n# Auto\n');
+  writeFileSync(fixture, JSON.stringify({ results: [
+    { file: 'proj-wiki/concepts/auto.md', title: 'Auto wiki', score: 0.9 },
+  ] }));
+  try {
+    const r = recall({ prompt: '곁눈으로만 보이는 존재의 관찰 원칙을 알려줘', cwd: dir }, { QMD_QUERY_FIXTURE: fixture });
+    assert.ok(r);
+    assert.match(r.hookSpecificOutput.additionalContext, /\[wiki:generated\]/);
+    assert.match(r.hookSpecificOutput.additionalContext, /\(미검수\)/);
+    assert.match(r.hookSpecificOutput.additionalContext, /단독 캐논 근거로 인용 금지/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('미검수 wiki 카드에 (미검수) 배지 + 안내 문구, reviewed:true 카드는 배지 없음', () => {
   const dir = mkdtempSync(join(tmpdir(), 'qmd-badge-'));
   const fixture = join(dir, 'badge-fixture.json');

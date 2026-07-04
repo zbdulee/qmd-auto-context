@@ -362,9 +362,11 @@ def main():
     # Inject _collection if missing
     for result in results:
         if "_collection" not in result:
-            uri = result.get("file", "")
-            if uri.startswith("qmd://"):
-                result["_collection"] = uri[len("qmd://"):].split("/", 1)[0]
+            # 데몬 /query는 file을 qmd:// 스킴 없이 "collection/path"로도 반환한다 —
+            # 스킴 전제 파싱이면 wiki 메타(배지·강등·exclude)가 라이브에서 전부 no-op가 된다.
+            collection_guess = qmd_uri_to_collection(result.get("file", ""))
+            if collection_guess:
+                result["_collection"] = collection_guess
         roles = config.get("collectionRoles", {}) if isinstance(config.get("collectionRoles"), dict) else {}
         if roles.get(result.get("_collection", "")) == "wiki":
             wiki_meta = read_wiki_meta(result, config, cwd)
@@ -421,9 +423,9 @@ def main():
             return 0
         for result in raw_results:
             if "_collection" not in result:
-                uri = result.get("file", "")
-                if uri.startswith("qmd://"):
-                    result["_collection"] = uri[len("qmd://"):].split("/", 1)[0]
+                collection_guess = qmd_uri_to_collection(result.get("file", ""))
+                if collection_guess:
+                    result["_collection"] = collection_guess
             roles = config.get("collectionRoles", {}) if isinstance(config.get("collectionRoles"), dict) else {}
             if roles.get(result.get("_collection", "")) == "wiki":
                 wiki_meta = read_wiki_meta(result, config, cwd)
