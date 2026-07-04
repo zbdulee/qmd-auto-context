@@ -1,0 +1,25 @@
+CLAUDE.md
+  h_42d950683aaaea 59-60,98
+core/config.py
+  h_42d950683aaaea 25,277
+core/recall.py
+  h_42d950683aaaea 77-87,90,94,96,99-116,155,161,168-174,176,178-180,370-372,429-431,453-454,466-473
+core/update.sh
+  h_42d950683aaaea 56-90,664-708,1178-1179
+hermes_adapter/core_bridge.py
+  h_42d950683aaaea 81,84-86,93,219-225,234-239
+test/healthcheck.test.mjs
+  h_42d950683aaaea 5-6,28-150
+test/recall.test.mjs
+  h_42d950683aaaea 250-342
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "f19dfcf15ca6f841cf9484c9cb86dec2ad3f5b83",
+  "prompts": {},
+  "humans": {
+    "h_42d950683aaaea": {
+      "author": "dulee@zigbang.com"
+    }
+  }
+}
