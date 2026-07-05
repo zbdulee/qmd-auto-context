@@ -45,6 +45,7 @@ TYPE_DIRS = {
     "plot-decision": "plot",
     "style": "style",
 }
+TYPE_DIR_NAMES = set(TYPE_DIRS.values())
 SECRET_PATTERNS = [
     re.compile(r"sk-[A-Za-z0-9_-]{16,}"),
     re.compile(r"(?i)(api[_-]?key|secret|token)\s*[:=]\s*[^\s]+"),
@@ -256,24 +257,63 @@ def lookup_identity(candidate: dict, identity_index: dict[str, set[Path]]) -> tu
     return "", []
 
 
+def classify_explicit_target(raw: str, wiki_root: Path, suggested_type: str) -> tuple[str, Path | None]:
+    """Decide how to treat an extractor-provided targetPath.
+
+    Extractors sometimes emit wiki-root-relative paths (``concepts/foo.md``)
+    instead of project-root-relative ones (``.auto-context/wiki/concepts/foo.md``).
+    Returns one of:
+    - ("use", path): wiki-root-relative path, normalized under wiki_root
+    - ("fallback", None): looks wiki-root-relative but untrusted (bad extension,
+      type mismatch, escapes wiki_root) — ignore it and resolve by identity
+    - ("legacy", None): treat as project-root-relative (original behavior)
+    """
+    segments = [s for s in raw.replace("\\", "/").split("/") if s and s != "."]
+    if raw.startswith("/") or not segments:
+        return "legacy", None
+    if any(s == ".." or s.startswith(".") for s in segments):
+        return "legacy", None
+    if segments[0] not in TYPE_DIR_NAMES:
+        return "legacy", None
+    if not segments[-1].endswith(".md"):
+        return "fallback", None
+    if segments[0] != TYPE_DIRS.get(suggested_type, "concepts"):
+        return "fallback", None
+    target = wiki_root.joinpath(*segments).resolve()
+    try:
+        target.relative_to(wiki_root)
+    except ValueError:
+        return "fallback", None
+    return "use", target
+
+
 def resolve_target(root: Path, wiki_root: Path, candidate: dict, suggested_type: str, identity_index: dict[str, set[Path]]) -> tuple[Path | None, str, list[Path]]:
     raw_target = candidate.get("targetPath")
     if isinstance(raw_target, str) and raw_target.strip():
-        target = (root / raw_target).resolve()
-    else:
-        match_reason, matches = lookup_identity(candidate, identity_index)
-        if len(matches) == 1:
-            return matches[0], match_reason, matches
-        if len(matches) > 1:
-            return None, f"ambiguous_{match_reason}", matches
-        title = str(candidate.get("title") or "wiki-page")
-        slug = re.sub(r"[^A-Za-z0-9가-힣]+", "-", title.lower()).strip("-") or "wiki-page"
-        target = (wiki_root / TYPE_DIRS.get(suggested_type, "concepts") / f"{slug}.md").resolve()
+        outcome, normalized = classify_explicit_target(raw_target.strip(), wiki_root, suggested_type)
+        if outcome == "use":
+            return normalized, "explicit", []
+        if outcome == "legacy":
+            target = (root / raw_target).resolve()
+            try:
+                target.relative_to(wiki_root)
+            except ValueError:
+                return None, "unsafe", []
+            return target, "explicit", []
+        # "fallback": untrusted wiki-relative targetPath — resolve by identity instead
+    match_reason, matches = lookup_identity(candidate, identity_index)
+    if len(matches) == 1:
+        return matches[0], match_reason, matches
+    if len(matches) > 1:
+        return None, f"ambiguous_{match_reason}", matches
+    title = str(candidate.get("title") or "wiki-page")
+    slug = re.sub(r"[^A-Za-z0-9가-힣]+", "-", title.lower()).strip("-") or "wiki-page"
+    target = (wiki_root / TYPE_DIRS.get(suggested_type, "concepts") / f"{slug}.md").resolve()
     try:
         target.relative_to(wiki_root)
     except ValueError:
         return None, "unsafe", []
-    return target, "explicit" if isinstance(raw_target, str) and raw_target.strip() else "slug", []
+    return target, "slug", []
 
 
 def redact(text: str) -> tuple[str, list[str]]:
@@ -658,7 +698,7 @@ def main() -> int:
         "suggestedStatus": compile_cfg.get("defaultStatus", "generated"),
         "confidence": candidate.get("confidence", "medium"),
         "sources": candidate.get("sources") if isinstance(candidate.get("sources"), list) else [],
-        "targetPath": str(candidate.get("targetPath") or (target.relative_to(root).as_posix() if target else "")),
+        "targetPath": target.relative_to(root).as_posix() if target else str(candidate.get("targetPath") or ""),
         "canonicalKey": clean_canonical_key(candidate.get("canonicalKey")),
         "aliases": clean_aliases(candidate.get("aliases")),
         "targetResolution": target_reason,
