@@ -1074,3 +1074,109 @@ wc.patch_frontmatter_fields(Path(${JSON.stringify(page)}), {"status": "verified"
     assert.equal(queue.length, 2, 'created + updated 각각 enqueue');
   } finally { rmSync(work, { recursive: true, force: true }); }
 });
+
+test('wiki_compile: normalizes wiki-root-relative targetPath under .auto-context/wiki', () => {
+  const work = repoTemp('wiki-compile-wikirel-target');
+  try {
+    writeSettings(work);
+    const out = runCompile(work, {
+      trigger: 'manual',
+      title: 'Relative Target Rule',
+      summary: 'Extractor emitted a wiki-root-relative targetPath; compile should normalize it under the wiki root.',
+      suggestedType: 'concept',
+      confidence: 'high',
+      targetPath: 'concepts/relative-target-rule.md',
+    });
+
+    assert.match(out, /created/);
+    assert.equal(existsSync(join(work, '.auto-context', 'wiki', 'concepts', 'relative-target-rule.md')), true);
+    assert.equal(existsSync(join(work, 'concepts')), false, 'must not write outside the wiki root');
+    const rows = readJsonl(join(work, '.auto-context', 'compile', 'candidates.jsonl'));
+    assert.equal(rows.at(-1).targetPath, '.auto-context/wiki/concepts/relative-target-rule.md');
+    assert.equal(rows.at(-1).targetResolution, 'explicit');
+    assert.deepEqual(rows.at(-1).lint.findings, []);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('wiki_compile: wiki-relative targetPath with type mismatch falls back to identity resolution', () => {
+  const work = repoTemp('wiki-compile-wikirel-mismatch');
+  try {
+    writeSettings(work);
+    runCompile(work, {
+      trigger: 'manual',
+      title: 'Mismatch Signal Rule',
+      canonicalKey: 'mismatch-signal-rule',
+      summary: 'Existing canonical page for the mismatch fallback test.',
+      suggestedType: 'concept',
+      confidence: 'high',
+    });
+    const out = runCompile(work, {
+      trigger: 'manual',
+      title: 'Mismatch Signal Rule',
+      canonicalKey: 'mismatch-signal-rule',
+      summary: 'Updated summary arriving with a decisions/ targetPath despite concept type.',
+      suggestedType: 'concept',
+      confidence: 'high',
+      targetPath: 'decisions/wrong-place.md',
+    });
+
+    assert.match(out, /updated/);
+    assert.equal(existsSync(join(work, '.auto-context', 'wiki', 'decisions', 'wrong-place.md')), false);
+    const page = readFileSync(join(work, '.auto-context', 'wiki', 'concepts', 'mismatch-signal-rule.md'), 'utf8');
+    assert.match(page, /Updated summary arriving/);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('wiki_compile: wiki-relative targetPath without .md extension is ignored in favor of slug', () => {
+  const work = repoTemp('wiki-compile-wikirel-badext');
+  try {
+    writeSettings(work);
+    const out = runCompile(work, {
+      trigger: 'manual',
+      title: 'Bad Extension Rule',
+      summary: 'A wiki-relative targetPath without the md extension must not be trusted.',
+      suggestedType: 'concept',
+      confidence: 'high',
+      targetPath: 'concepts/bad-extension.txt',
+    });
+
+    assert.match(out, /created/);
+    assert.equal(existsSync(join(work, '.auto-context', 'wiki', 'concepts', 'bad-extension.txt')), false);
+    assert.equal(existsSync(join(work, '.auto-context', 'wiki', 'concepts', 'bad-extension-rule.md')), true);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('wiki_compile: traversal, absolute, and hidden-segment targetPath are still rejected', () => {
+  const work = repoTemp('wiki-compile-unsafe-target');
+  try {
+    writeSettings(work);
+    const cases = [
+      '../outside.md',
+      'concepts/../../../escape.md',
+      '/tmp/evil-absolute.md',
+      'concepts/.hidden/foo.md',
+    ];
+    for (const targetPath of cases) {
+      const out = runCompile(work, {
+        trigger: 'manual',
+        title: 'Unsafe Target Attempt',
+        summary: 'Unsafe targetPath variants must keep rejecting.',
+        suggestedType: 'concept',
+        confidence: 'high',
+        targetPath,
+      });
+      assert.match(out, /rejected/, `expected reject for ${targetPath}`);
+      assert.match(out, /unsafe_target_path/, `expected unsafe_target_path for ${targetPath}`);
+    }
+    assert.equal(existsSync(join(work, 'concepts')), false);
+    assert.equal(existsSync(join(work, 'outside.md')), false);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
