@@ -1207,3 +1207,34 @@ print(cap['q'])
   assert.equal(out, 'line1 line2 line3 tail');
   assert.doesNotMatch(out, /\n/);
 });
+
+test('compact_manifest: same-identity 중복은 접되 최신 엔트리를 보존해 삭제감지(previous 조회)를 유지', () => {
+  // manifest는 삭제감지용으로 read되므로 size trim(카드 엔트리 통째 유실) 대신
+  // same_generated_identity로 중복만 접어야 한다. 핵심 불변식: compaction 후에도
+  // previous 조회가 살아있고 previous[-1] status(최신)가 유지되어야 한다.
+  const work = repoTemp('wiki-compile-compact-manifest');
+  const manifest = join(work, 'manifest.jsonl');
+  const rows = [
+    { targetPath: 'concepts/a.md', canonicalKey: 'ka', status: 'generated' },
+    { targetPath: 'concepts/b.md', canonicalKey: 'kb', status: 'generated' },
+    { targetPath: 'concepts/a.md', canonicalKey: 'ka', status: 'verified' }, // A 재생성(최신)
+  ].map((r) => JSON.stringify(r)).join('\n') + '\n';
+  writeFileSync(manifest, rows);
+  const script = `
+import sys
+sys.path.insert(0, 'core')
+from pathlib import Path
+import wiki_compile as w
+p = Path(${JSON.stringify(manifest)})
+w.compact_manifest(p, max_bytes=1)  # 임계 강제 트리거
+out = w.read_jsonl(p)
+assert len(out) == 2, out                     # A 중복 접힘 + B 유지 = 2
+prev = [r for r in out if w.same_generated_identity(r, {"targetPath": "concepts/a.md"})]
+assert len(prev) == 1 and prev[-1]["status"] == "verified", prev  # 삭제감지 생존 + 최신 status
+print("OK")
+`;
+  try {
+    const out = execFileSync('python3', ['-c', script], { encoding: 'utf8' }).trim();
+    assert.equal(out, 'OK');
+  } finally { rmSync(work, { recursive: true, force: true }); }
+});

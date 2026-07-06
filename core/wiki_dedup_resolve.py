@@ -123,6 +123,9 @@ def resolve_entry(root: Path, wiki_root: Path, compile_dir: Path, entry: dict, a
                 "score": entry.get("score"),
                 "resolvedAt": now_iso(),
             })
+            # write-only audit log storing full deleted-card bodies (KB each) --
+            # cap it so it can't grow unbounded.
+            wc.trim_jsonl(deleted_path)
         target.unlink()
         return {"action": "deleted", "deletedPath": delete_rel}
 
