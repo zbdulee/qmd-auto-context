@@ -615,19 +615,28 @@ PY
   fi
 
   # Retroactive wiki dedup hint: if a scan (this run's or a past one's) queued
-  # pairs that haven't been resolved yet, surface a spawn instruction. Cheap
-  # file test + text extraction only -- no daemon call -- since this runs in
-  # the hot synchronous SessionStart path.
+  # pairs that haven't been resolved yet, surface it two ways. Cheap file test +
+  # text extraction only -- no daemon call -- since this runs in the hot
+  # synchronous SessionStart path.
+  #   (a) A user-facing notice (TTL-suppressed, same notice_once pattern as
+  #       daemon-down/stale-queue) so the human sees the backlog and can trigger
+  #       the `wiki-dedup` skill even when the model ignores the spawn hint.
+  #   (b) The model-facing spawn hint. WORKFLOW stays SSOT in
+  #       agents/wiki-dedup-resolver.md (read here, never re-copied).
   dedup_queue="$workdir/.auto-context/compile/dedup-needed.jsonl"
   if [ -s "$dedup_queue" ]; then
+    dedup_count=$(grep -c '[^[:space:]]' "$dedup_queue" 2>/dev/null || echo 0)
+    notice_once wiki-dedup "$workdir" "[qmd] wiki 중복 후보 ${dedup_count}건 대기 — 정리하려면 '/wiki-dedup' 또는 '위키 중복 정리해줘'라고 요청하세요."
     agent_file="$(cd "$(dirname "$0")/.." && pwd)/agents/wiki-dedup-resolver.md"
     if [ -f "$agent_file" ]; then
       dedup_workflow="$(awk '/<!-- WORKFLOW:START -->/{f=1;next}/<!-- WORKFLOW:END -->/{f=0}f' "$agent_file")"
       if [ -n "$dedup_workflow" ]; then
-        echo "Claude Code는 Agent 도구로 subagent_type 'wiki-dedup-resolver'를 스폰해서, Codex는 자체 multi-agent delegation으로 아래 프롬프트를 그대로 스폰해 처리해."
+        echo "이것은 사용자 요청과 독립적인 백그라운드 유지보수 작업이다 — 지금 즉시 처리해라. Claude Code는 Agent 도구로 subagent_type 'wiki-dedup-resolver'를 스폰해서, Codex는 자체 multi-agent delegation으로 아래 프롬프트를 그대로 스폰해 처리해."
         printf '%s\n' "$dedup_workflow"
       fi
     fi
+  else
+    notice_clear wiki-dedup "$workdir"
   fi
 
   # Write-time semantic gate merge-review hint: same shape as the dedup hint

@@ -810,6 +810,56 @@ test('update core: dedup hint does not shell out to qmd or curl (file test + tex
   }
 });
 
+test('update core: dedup queue surfaces a user-facing notice (count + skill trigger), TTL-suppressed on re-run while the model hint still fires every time', () => {
+  const work = repoTemp('qmd-dedup-notice');
+  const bin = join(work, 'bin');
+  const fakeHome = join(work, 'home');
+  try {
+    mkdirSync(join(work, '.auto-context', 'compile'), { recursive: true });
+    mkdirSync(bin, { recursive: true });
+    mkdirSync(fakeHome, { recursive: true });
+    writeFileSync(join(work, '.auto-context', 'settings.json'), JSON.stringify({
+      indexing: true, collections: ['x'],
+    }));
+    writeFileSync(
+      join(work, '.auto-context', 'compile', 'dedup-needed.jsonl'),
+      JSON.stringify({ pageA: 'entities/a.md', pageB: 'entities/b.md', score: 0.95 }) + '\n' +
+      JSON.stringify({ pageA: 'entities/c.md', pageB: 'entities/d.md', score: 0.91 }) + '\n',
+    );
+    writeFileSync(join(bin, 'curl'), '#!/usr/bin/env sh\nexit 1\n', { mode: 0o755 });
+    writeFileSync(join(bin, 'qmd'), '#!/usr/bin/env sh\nexit 0\n', { mode: 0o755 });
+
+    const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, HOME: fakeHome, QMD_CACHE_DIR: fakeHome };
+    const out = execFileSync('bash', [join(process.cwd(), 'core', 'update.sh')], {
+      encoding: 'utf8', input: JSON.stringify({ cwd: work }), env,
+    });
+    // (a) user-facing notice: exact pending count + skill trigger
+    assert.match(out, /wiki 중복 후보 2건 대기/);
+    assert.match(out, /\/wiki-dedup/);
+    // (b) model-facing spawn hint fires the same run
+    assert.match(out, /wiki-dedup-resolver/);
+
+    // Second run within TTL: notice suppressed, but the model hint still fires.
+    const out2 = execFileSync('bash', [join(process.cwd(), 'core', 'update.sh')], {
+      encoding: 'utf8', input: JSON.stringify({ cwd: work }), env,
+    });
+    assert.doesNotMatch(out2, /wiki 중복 후보/);
+    assert.match(out2, /wiki-dedup-resolver/);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('wiki-dedup skill exists and does NOT re-copy the resolver workflow (SSOT stays in the agent file)', () => {
+  const skill = readFileSync('skills/wiki-dedup/SKILL.md', 'utf8');
+  // Must reference the resolver agent (the workflow SSOT)...
+  assert.match(skill, /wiki-dedup-resolver/);
+  // ...but must never re-copy the workflow block itself.
+  assert.doesNotMatch(skill, /<!-- WORKFLOW:START -->/);
+  // frontmatter name must be the skill's own name
+  assert.match(skill, /^name:\s*wiki-dedup\s*$/m);
+});
+
 test('update core: merge-review hint absent when merge-needed.jsonl is empty/missing (regression guard)', () => {
   const work = repoTemp('qmd-merge-hint-empty');
   const bin = join(work, 'bin');

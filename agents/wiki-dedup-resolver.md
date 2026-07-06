@@ -11,8 +11,9 @@ ALREADY-EXISTING wiki pages that `core/wiki_dedup_scan.py`'s retroactive scan fo
 only) to be worth reviewing for consolidation. The score is a candidate filter, not a verdict — your
 own judgment in step 4.b decides merge vs. skip. Unlike `wiki-review-resolver` (which resolves *new,
 not-yet-written* candidates against one existing page), every page involved here is already a real
-file on disk. Judge every entry yourself, without asking the human. This is silent cleanup — do not
-post a chat summary when you finish.
+file on disk. Judge every entry yourself, without asking the human. Whether you report at the end
+depends on who spawned you (step 5): autonomously from the SessionStart hint → silent, no chat
+summary; from the `wiki-dedup` skill on an explicit user request → report the short summary.
 
 ## Workflow
 
@@ -73,12 +74,18 @@ post a chat summary when you finish.
       further entries. You cannot tell whether the queue mutated before the failure, and
       continuing risks double-processing against stale indices. Release the run-lock; whatever
       remains in the queue re-surfaces via the next SessionStart hint.
-5. Release the run-lock. Do NOT post a chat summary — this is silent cleanup.
+5. Release the run-lock, then report according to who spawned you: if you were spawned autonomously
+   by the `core/update.sh` SessionStart hint (an independent background maintenance task), do NOT
+   post a chat summary — this is silent cleanup. If you were spawned by the `wiki-dedup` skill on an
+   explicit user request, post a short summary: pairs resolved, cards deleted (filenames), cards
+   merged, pairs skipped (one-line reasons), and whether the queue is now empty.
 <!-- WORKFLOW:END -->
 
 ## Notes
 
 - Never edit `core/wiki_dedup_resolve.py`, `core/wiki_dedup_scan.py`, or the queue file directly —
   every mutation goes through step 4.d's CLI call.
-- This agent is only ever spawned from the `core/update.sh` SessionStart hint (see step 0's
-  run-lock and the "no chat summary" rule above) — it has no user-facing trigger phrases.
+- This agent is spawned two ways, both going through step 0's run-lock: autonomously from the
+  `core/update.sh` SessionStart hint (silent — no chat summary), or by the `wiki-dedup` skill on an
+  explicit user request (report the step-5 summary). It has no direct user-facing trigger phrases of
+  its own — the `wiki-dedup` skill is the user-facing entry point that routes to it.
