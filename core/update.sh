@@ -25,7 +25,39 @@ mkdir -p "$_QMD_CACHE_DIR" "$_QMD_LOCK_BASE" 2>/dev/null || true
 LOG="${QMD_HOOK_LOG:-$_QMD_CACHE_DIR/hook.log}"
 # WRITER 락: index_worker.sh의 WRITER_LOCK(QMD_WRITER_LOCKDIR)과 기본값 공유 → 직렬화.
 LOCKDIR="${QMD_WRITER_LOCKDIR:-$_QMD_LOCK_BASE/qmd-update.lock.d}"
-STATUS="${QMD_UPDATE_STATUS:-$_QMD_CACHE_DIR/update-status.txt}"
+STATUS=""
+STATUS_WORKDIR=""
+
+status_path_for_workdir() {
+  if [ -n "${QMD_UPDATE_STATUS:-}" ]; then
+    printf '%s\n' "$QMD_UPDATE_STATUS"
+    return 0
+  fi
+  python3 - "$_QMD_CACHE_DIR" "$1" <<'PY'
+import hashlib
+import os
+import sys
+
+cache_dir, cwd = sys.argv[1:3]
+real = os.path.realpath(cwd)
+digest = hashlib.sha256(real.encode("utf-8")).hexdigest()[:16]
+print(os.path.join(cache_dir, f"update-status-{digest}.txt"))
+PY
+}
+
+canonical_workdir() {
+  python3 - "$1" <<'PY'
+import os
+import sys
+
+print(os.path.realpath(sys.argv[1]))
+PY
+}
+
+set_status_for_workdir() {
+  STATUS="$(status_path_for_workdir "$1")"
+  STATUS_WORKDIR="$(canonical_workdir "$1")"
+}
 
 # SessionStart 헬스체크: 데몬 포트 확인. 데몬 기동은 plugin-managed backend manager가 담당한다.
 qmd_health_timeout() {
@@ -169,6 +201,7 @@ write_failure_status() {
   local output="$2"
   {
     echo "FAIL at $(date '+%Y-%m-%d %H:%M:%S %Z')"
+    [ -n "$STATUS_WORKDIR" ] && echo "cwd: $STATUS_WORKDIR"
     echo "cmd: $cmd"
 
     local last_col
@@ -439,6 +472,7 @@ run_update() {
   qmd() { "$qmd_bin" "$@"; }
 
   workdir="$1"
+  set_status_for_workdir "$workdir"
   cd "$workdir" 2>/dev/null || exit 0
   
   log "START: cwd=$workdir"
@@ -548,6 +582,7 @@ main() {
   raw=$(cat)
   workdir=$(printf '%s' "$raw" | python3 -c 'import json,sys,os; print((json.load(sys.stdin).get("cwd") or os.getcwd()))' 2>/dev/null)
   [ -z "$workdir" ] && workdir="$PWD"
+  set_status_for_workdir "$workdir"
 
   config_json=$(load_config_json "$workdir")
   if [ "$(config_event_enabled sessionStart "$config_json")" != "yes" ]; then

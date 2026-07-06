@@ -2,7 +2,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -49,6 +50,11 @@ function runMain(d, env = {}) {
     encoding: 'utf8',
     env: { ...process.env, QMD_BACKEND_MANAGER: '/bin/true', ...env },
   });
+}
+
+function statusPathFor(cache, cwd) {
+  const digest = createHash('sha256').update(realpathSync(cwd)).digest('hex').slice(0, 16);
+  return join(cache, `update-status-${digest}.txt`);
 }
 
 test('update.sh main: 데몬 down → stdout 1회 알림, TTL 내 재실행은 무출력, marker 삭제 후 재알림', () => {
@@ -144,6 +150,27 @@ test('update.sh main: 이전 update 실패 status가 stdout으로 표면화 (회
   const env = { QMD_CACHE_DIR: cache, QMD_UPDATE_STATUS: statusFile, QMD_DIRTY_QUEUE: join(base, 'no-queue') };
   try {
     assert.match(runMain(d, env), /qmd previous update failed: FAIL 2026-07-04/);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('update.sh main: 이전 update 실패 status는 프로젝트별로만 표면화된다', () => {
+  const base = mkdtempSync(join(NOTICE_BASE, 'qmd-prevfail-scope-'));
+  const cache = join(base, 'cache');
+  mkdirSync(cache, { recursive: true });
+  const first = noticeProject(base);
+  const second = noticeProject(base);
+  const env = { QMD_CACHE_DIR: cache, QMD_DIRTY_QUEUE: join(base, 'no-queue') };
+  try {
+    writeFileSync(join(cache, 'update-status.txt'), 'FAIL legacy global status');
+    writeFileSync(statusPathFor(cache, first), 'FAIL scoped first project');
+
+    const other = runMain(second, env);
+    assert.doesNotMatch(other, /qmd previous update failed:/, '다른 프로젝트에 전역/타 프로젝트 실패가 새면 안 됨');
+
+    const same = runMain(first, env);
+    assert.match(same, /qmd previous update failed: FAIL scoped first project/);
   } finally {
     rmSync(base, { recursive: true, force: true });
   }
