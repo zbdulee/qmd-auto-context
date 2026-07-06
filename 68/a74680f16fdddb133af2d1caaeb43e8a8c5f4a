@@ -1,0 +1,35 @@
+.agents/plugins/marketplace.json
+  h_42d950683aaaea 9
+.claude-plugin/marketplace.json
+  h_42d950683aaaea 9
+.claude-plugin/plugin.json
+  h_42d950683aaaea 4
+.codex-plugin/plugin.json
+  h_42d950683aaaea 3
+core/recall.py
+  h_42d950683aaaea 136-148,411-414,461-463
+core/wiki_dedup_scan.py
+  h_42d950683aaaea 120-123
+package.json
+  h_42d950683aaaea 3
+plugin.json
+  h_42d950683aaaea 3
+plugin.yaml
+  h_42d950683aaaea 2
+test/probe-manifest.test.mjs
+  h_42d950683aaaea 18,39
+test/recall.test.mjs
+  h_42d950683aaaea 223-269
+test/wiki-dedup-scan.test.mjs
+  h_42d950683aaaea 213-228
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "68a74680f16fdddb133af2d1caaeb43e8a8c5f4a",
+  "prompts": {},
+  "humans": {
+    "h_42d950683aaaea": {
+      "author": "dulee@zigbang.com"
+    }
+  }
+}
