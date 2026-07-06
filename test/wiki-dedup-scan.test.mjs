@@ -210,6 +210,22 @@ test('wiki_dedup_scan: index.md is never scanned nor matched', () => {
   }
 });
 
+test('wiki_dedup_scan: log.md is never scanned nor matched', () => {
+  const work = repoTemp('dedup-scan-log-md');
+  try {
+    writeSettings(work);
+    mkdirSync(join(work, '.auto-context', 'wiki'), { recursive: true });
+    writeFileSync(join(work, '.auto-context', 'wiki', 'log.md'), '# Auto-context Wiki Log\n\n- created entities/page-a.md\n');
+    writePage(work, 'entities/page-a.md', { body: 'Some content.' });
+    const fixture = join(work, 'fixture.json');
+    writeFileSync(fixture, JSON.stringify({ results: [{ file: 'proj-wiki/log.md', score: 0.99 }] }));
+    runScan(work, { QMD_QUERY_FIXTURE: fixture });
+    assert.deepEqual(readDedupNeeded(work), []);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
 test('wiki_dedup_scan: already-queued pair (either field order) is not re-queued', () => {
   const work = repoTemp('dedup-scan-already-queued');
   try {

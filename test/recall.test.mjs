@@ -220,6 +220,53 @@ test('hierarchical recall: wiki 결과가 있으면 raw가 더 높아도 wiki만
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('hierarchical recall: wiki 메타파일(index.md/log.md)은 노이즈라 제외하고 실제 카드만 주입', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'qmd-rh-meta-'));
+  const fixture = join(dir, 'meta-fixture.json');
+  mkdirSync(join(dir, '.auto-context'), { recursive: true });
+  writeFileSync(join(dir, '.auto-context', 'settings.json'), JSON.stringify({
+    indexing: true,
+    collections: ['proj-wiki'],
+    collectionRoles: { 'proj-wiki': 'wiki' },
+    recallStrategy: 'hierarchical',
+    topN: 5,
+  }));
+  // Meta files score higher than the real card (they aggregate every card name),
+  // yet must be dropped so the real card survives.
+  writeFileSync(fixture, JSON.stringify({ results: [
+    { file: 'qmd://proj-wiki/log.md', title: 'Wiki Log', score: 0.99 },
+    { file: 'qmd://proj-wiki/index.md', title: 'Wiki Index', score: 0.95 },
+    { file: 'qmd://proj-wiki/.auto-context/wiki/concepts/real-card.md', title: 'Real card', score: 0.6 },
+  ] }));
+  try {
+    const r = recall({ prompt: '역순 금기 내용을 알려줘', cwd: dir }, { QMD_QUERY_FIXTURE: fixture });
+    assert.ok(r);
+    const ctx = r.hookSpecificOutput.additionalContext;
+    assert.match(ctx, /real-card\.md/);
+    assert.doesNotMatch(ctx, /log\.md/);
+    assert.doesNotMatch(ctx, /index\.md/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('recall: is_wiki_meta_noise는 wiki role에서만 index.md/log.md를 노이즈로 판정 (non-wiki·실제카드는 유지)', () => {
+  const script = `
+import sys
+sys.path.insert(0, 'core')
+import recall as r
+cfg = {"collectionRoles": {"w": "wiki", "raw": "raw"}}
+def t(coll, name):
+    return r.is_wiki_meta_noise({"_collection": coll, "file": f"qmd://{coll}/{name}"}, cfg)
+assert t("w", "log.md") is True
+assert t("w", "index.md") is True
+assert t("w", "concepts/real.md") is False       # 실제 카드
+assert t("raw", "index.md") is False             # non-wiki collection의 동명 파일은 유지
+assert t("w", "blog.md") is False                # substring 오탐 방지
+print("OK")
+`;
+  const out = execFileSync('python3', ['-c', script], { encoding: 'utf8' }).trim();
+  assert.equal(out, 'OK');
+});
+
 test('hierarchical recall: wiki frontmatter status를 prefix에 표시하고 discarded는 제외', () => {
   const dir = mkdtempSync(join(tmpdir(), 'qmd-rh-status-'));
   const fixture = join(dir, 'status-fixture.json');
