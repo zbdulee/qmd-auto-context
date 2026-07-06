@@ -568,8 +568,15 @@ def query_wiki_similar(daemon_url: str, collection: str, text: str, top_k: int, 
         except (OSError, json.JSONDecodeError):
             return None
         return results if isinstance(results, list) else []
+    # qmd's vec search rejects multi-line queries (store.js structuredSearch:
+    # "queries must be single-line. Remove newline characters.") with a 500.
+    # Card bodies are almost always multi-line, so passing them raw made every
+    # caller (write-time semantic gate, retroactive dedup scan, similar-page
+    # lookup) silently fail-open on any multi-line card -- the dominant cause of
+    # near-duplicate proliferation. Collapse all whitespace to single spaces.
+    single_line = " ".join(text.split())
     payload = {
-        "searches": [{"type": "vec", "query": text}],
+        "searches": [{"type": "vec", "query": single_line}],
         "collections": [collection],
         "limit": max(1, top_k),
         "minScore": 0,
