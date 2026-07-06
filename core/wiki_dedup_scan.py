@@ -117,7 +117,10 @@ def snapshot_path(project_key: str) -> Path:
 def scan_set(wiki_root: Path) -> list[Path]:
     pages = []
     for page in sorted(wiki_root.rglob("*.md")):
-        if page.name == "index.md":
+        # index.md (목차) / log.md (생성 이력) are auto-generated wiki metadata,
+        # not knowledge cards. They aggregate every card's name/title, so vec
+        # search matches them against almost any query -- pure dedup noise.
+        if page.name in ("index.md", "log.md"):
             continue
         try:
             text = page.read_text(encoding="utf-8")

@@ -133,6 +133,19 @@ def ep_file_matches(filepath: str, n: int) -> bool:
             return True
     return False
 
+
+def is_wiki_meta_noise(result: dict, config: dict) -> bool:
+    """index.md (목차) / log.md (생성 이력) are auto-generated wiki metadata that
+    aggregate every card's name/title, so vec search matches them against almost
+    any query -- pure recall noise. Scoped to wiki-role collections so a genuine
+    index.md/log.md in a non-wiki collection (e.g. a code repo README-style file)
+    is left untouched."""
+    roles = config.get("collectionRoles", {})
+    if not isinstance(roles, dict) or roles.get(result.get("_collection", "")) != "wiki":
+        return False
+    base = qmd_uri_to_filepath(result.get("file", "") or "").rsplit("/", 1)[-1]
+    return base in ("index.md", "log.md")
+
 def promote_ep_exact_matches(results: list[dict], nums: list[int]) -> None:
     if not nums:
         return
@@ -395,6 +408,10 @@ def main():
 
     for r in results:
         filepath = r.get("file", "")
+        # Drop wiki metadata files (index.md/log.md) -- aggregate noise.
+        if is_wiki_meta_noise(r, config):
+            dropped_skip += 1
+            continue
         # Check skip paths
         should_skip = False
         for skip in skip_paths:
@@ -441,6 +458,9 @@ def main():
         dropped_min_score = 0
         for r in results:
             filepath = r.get("file", "")
+            if is_wiki_meta_noise(r, config):
+                dropped_skip += 1
+                continue
             should_skip = False
             for skip in skip_paths:
                 if skip in filepath:
