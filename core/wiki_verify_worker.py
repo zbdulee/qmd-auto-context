@@ -31,7 +31,6 @@ VERIFY_QUEUE_DEFAULT = ".auto-context/compile/verify-queue.jsonl"
 VERIFY_LOG_DEFAULT = ".auto-context/compile/verify-log.jsonl"
 VERDICT_VALUES = {"pass", "fail", "inconclusive"}
 MAX_SOURCES = 3
-LOG_MAX_BYTES = 256 * 1024
 
 
 def verify_cfg_of(compile_cfg: dict) -> dict:
@@ -59,20 +58,9 @@ def set_verify_cooldown(root: Path, seconds: int) -> None:
     path.write_text(f"{expiry}\n", encoding="utf-8")
 
 
-def trim_jsonl(path: Path, max_bytes: int = LOG_MAX_BYTES) -> None:
-    """append-only 로그의 무한 누적 방지: 상한 초과 시 최근 절반만 유지."""
-    try:
-        if path.stat().st_size <= max_bytes:
-            return
-        lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
-        path.write_text("".join(lines[len(lines) // 2:]), encoding="utf-8")
-    except OSError:
-        pass
-
-
 def log_verdict(log_path: Path, payload: dict) -> None:
     wcw.append_jsonl(log_path, payload)
-    trim_jsonl(log_path)
+    wc.trim_jsonl(log_path)
 
 
 def reindex_wiki(root: Path, config: dict) -> None:

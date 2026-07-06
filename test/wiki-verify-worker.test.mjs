@@ -224,7 +224,7 @@ test('trim_jsonl: 상한 초과 시 최근 절반만 유지', () => {
 import sys
 sys.path.insert(0, 'core')
 from pathlib import Path
-import wiki_verify_worker as w
+import wiki_compile as w
 w.trim_jsonl(Path(${JSON.stringify(log)}), max_bytes=1024)
 `], { cwd: process.cwd(), encoding: 'utf8' });
     const rows = jsonl(log);

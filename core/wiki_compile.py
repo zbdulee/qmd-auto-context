@@ -375,6 +375,37 @@ def read_jsonl(path: Path) -> list[dict]:
     return rows
 
 
+LOG_MAX_BYTES = 256 * 1024
+
+
+def trim_jsonl(path: Path, max_bytes: int = LOG_MAX_BYTES) -> None:
+    """append-only 로그의 무한 누적 방지: 상한 초과 시 최근 절반만 유지.
+    순수 로그(candidates/dedup-deleted/verify-log)용 — 한 줄 유실은 무해.
+    correctness가 걸린 파일(manifest)엔 쓰지 말 것 — compact_manifest 사용."""
+    try:
+        if path.stat().st_size <= max_bytes:
+            return
+        lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+        path.write_text("".join(lines[len(lines) // 2:]), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def write_jsonl_atomic(path: Path, rows: list[dict]) -> None:
+    """temp + os.replace 원자적 재작성 (부분 쓰기/유실 방지)."""
+    tmp = path.with_suffix(path.suffix + ".compact.tmp")
+    try:
+        with tmp.open("w", encoding="utf-8") as handle:
+            for row in rows:
+                handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
 def same_generated_identity(row: dict, record: dict) -> bool:
     if row.get("targetPath") and row.get("targetPath") == record.get("targetPath"):
         return True
@@ -386,6 +417,31 @@ def same_generated_identity(row: dict, record: dict) -> bool:
     if canonical_key and row.get("canonicalKey") == canonical_key:
         return True
     return False
+
+
+def compact_manifest(path: Path, max_bytes: int = LOG_MAX_BYTES) -> None:
+    """generated-manifest 무한 누적 방지. size trim은 특정 카드 엔트리를 통째
+    날려 삭제감지(previous 조회)를 깨므로 쓰지 않고, same_generated_identity로
+    서로 매칭되는 오래된 중복만 접는다 — 각 identity의 최신 엔트리는 원순서로
+    보존해 previous[-1]/previousStatus 계약을 유지. 임계 초과 시에만 원자적
+    replace. worst case(동시 append와 cross-process race로 엔트리 1개 유실)는
+    그 카드가 다음 재컴파일 때 재생성되며 self-heal."""
+    try:
+        if path.stat().st_size <= max_bytes:
+            return
+    except OSError:
+        return
+    rows = read_jsonl(path)
+    n = len(rows)
+    keep = [True] * n
+    for i in range(n):
+        for j in range(i + 1, n):  # j가 i보다 최신(뒤에 append됨)
+            if same_generated_identity(rows[i], rows[j]) or same_generated_identity(rows[j], rows[i]):
+                keep[i] = False  # i는 같은 identity의 더 오래된 중복
+                break
+    kept = [rows[i] for i in range(n) if keep[i]]
+    if len(kept) != n:
+        write_jsonl_atomic(path, kept)
 
 
 def yaml_scalar(value) -> str:
@@ -696,6 +752,10 @@ def main() -> int:
         print(json.dumps({"action": "rejected", "reason": "unsafe_compile_path"}, ensure_ascii=False))
         return 1
 
+    # candidates.jsonl is a write-only audit log (every compile attempt appends a
+    # row, no reader) -- cap it up front so it can't grow unbounded.
+    trim_jsonl(candidate_path)
+
     record = {
         "ts": now_iso(),
         "trigger": candidate.get("trigger", "manual"),
@@ -823,6 +883,10 @@ def main() -> int:
     record["action"] = action
     append_jsonl(candidate_path, record)
     append_jsonl(manifest_path, {**record, "status": status})
+    # manifest is read for delete-detection (previous lookup); compact by folding
+    # same-identity duplicates rather than size-trimming (which would drop a card's
+    # entry and break tombstoning). Threshold-gated + atomic inside.
+    compact_manifest(manifest_path)
     update_index(wiki_root, target, title)
     append_log(wiki_root, action, target, title)
 
