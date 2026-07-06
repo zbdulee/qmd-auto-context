@@ -1180,3 +1180,30 @@ test('wiki_compile: traversal, absolute, and hidden-segment targetPath are still
     rmSync(work, { recursive: true, force: true });
   }
 });
+
+test('query_wiki_similar collapses a multi-line query into a single line (qmd vec search rejects newlines with a 500)', () => {
+  // Regression: card bodies are multi-line; qmd's structuredSearch throws
+  // "queries must be single-line" -> HTTP 500 -> fail-open, silently disabling
+  // the semantic gate/scan for every multi-line card. The query text sent to
+  // the daemon must have all whitespace (incl. newlines) collapsed to spaces.
+  const script = `
+import sys, json
+sys.path.insert(0, 'core')
+import urllib.request
+import wiki_compile as w
+cap = {}
+class R:
+    def __enter__(self): return self
+    def __exit__(self, *a): pass
+    def read(self): return json.dumps({"results": []}).encode()
+def fake(req, timeout=None):
+    cap['q'] = json.loads(req.data.decode())['searches'][0]['query']
+    return R()
+urllib.request.urlopen = fake
+w.query_wiki_similar('http://x', 'col', 'line1\\nline2\\n\\n  line3\\t tail ', 3, 5.0)
+print(cap['q'])
+`;
+  const out = execFileSync('python3', ['-c', script], { encoding: 'utf8' }).trim();
+  assert.equal(out, 'line1 line2 line3 tail');
+  assert.doesNotMatch(out, /\n/);
+});
