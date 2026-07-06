@@ -658,14 +658,21 @@ print(rel if isinstance(rel, str) and rel else ".auto-context/compile/merge-need
   [ -z "$merge_needed_rel" ] && merge_needed_rel=".auto-context/compile/merge-needed.jsonl"
   merge_queue="$workdir/$merge_needed_rel"
   if [ -s "$merge_queue" ]; then
+    # Symmetric with the dedup hint above: (a) user-facing notice so the human
+    # sees the backlog and can trigger the `wiki-review` skill, (b) model-facing
+    # spawn hint. WORKFLOW stays SSOT in agents/wiki-review-resolver.md.
+    merge_count=$(grep -c '[^[:space:]]' "$merge_queue" 2>/dev/null || echo 0)
+    notice_once wiki-review "$workdir" "[qmd] wiki 병합 검토 후보 ${merge_count}건 대기 — 정리하려면 '/wiki-review' 또는 'wiki review 해줘'라고 요청하세요."
     review_agent_file="$(cd "$(dirname "$0")/.." && pwd)/agents/wiki-review-resolver.md"
     if [ -f "$review_agent_file" ]; then
       review_workflow="$(awk '/<!-- WORKFLOW:START -->/{f=1;next}/<!-- WORKFLOW:END -->/{f=0}f' "$review_agent_file")"
       if [ -n "$review_workflow" ]; then
-        echo "Claude Code는 Agent 도구로 subagent_type 'wiki-review-resolver'를 스폰해서, Codex는 자체 multi-agent delegation으로 아래 프롬프트를 그대로 스폰해 처리해."
+        echo "이것은 사용자 요청과 독립적인 백그라운드 유지보수 작업이다 — 지금 즉시 처리해라. Claude Code는 Agent 도구로 subagent_type 'wiki-review-resolver'를 스폰해서, Codex는 자체 multi-agent delegation으로 아래 프롬프트를 그대로 스폰해 처리해."
         printf '%s\n' "$review_workflow"
       fi
     fi
+  else
+    notice_clear wiki-review "$workdir"
   fi
 
   # 헬스체크: config·reason 검사 통과 후, fork 직전 1회 실행 (main() 호출에서만).

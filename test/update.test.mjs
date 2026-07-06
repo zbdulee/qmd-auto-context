@@ -915,6 +915,43 @@ test('update core: merge-review hint fires with the exact workflow block when th
   }
 });
 
+test('update core: merge-needed queue surfaces a user-facing notice (count + skill trigger), TTL-suppressed on re-run while the model hint still fires every time', () => {
+  const work = repoTemp('qmd-merge-notice');
+  const bin = join(work, 'bin');
+  const fakeHome = join(work, 'home');
+  try {
+    mkdirSync(join(work, '.auto-context', 'compile'), { recursive: true });
+    mkdirSync(bin, { recursive: true });
+    mkdirSync(fakeHome, { recursive: true });
+    writeFileSync(join(work, '.auto-context', 'settings.json'), JSON.stringify({
+      indexing: true, collections: ['x'],
+    }));
+    writeFileSync(
+      join(work, '.auto-context', 'compile', 'merge-needed.jsonl'),
+      JSON.stringify({ candidate: { title: 'a' }, matchedPath: 'entities/b.md', matchedScore: 0.95, suggestedAction: 'merge' }) + '\n' +
+      JSON.stringify({ candidate: { title: 'c' }, matchedPath: 'entities/d.md', matchedScore: 0.91, suggestedAction: 'merge' }) + '\n',
+    );
+    writeFileSync(join(bin, 'curl'), '#!/usr/bin/env sh\nexit 1\n', { mode: 0o755 });
+    writeFileSync(join(bin, 'qmd'), '#!/usr/bin/env sh\nexit 0\n', { mode: 0o755 });
+
+    const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, HOME: fakeHome, QMD_CACHE_DIR: fakeHome };
+    const out = execFileSync('bash', [join(process.cwd(), 'core', 'update.sh')], {
+      encoding: 'utf8', input: JSON.stringify({ cwd: work }), env,
+    });
+    assert.match(out, /wiki 병합 검토 후보 2건 대기/);
+    assert.match(out, /\/wiki-review/);
+    assert.match(out, /wiki-review-resolver/);
+
+    const out2 = execFileSync('bash', [join(process.cwd(), 'core', 'update.sh')], {
+      encoding: 'utf8', input: JSON.stringify({ cwd: work }), env,
+    });
+    assert.doesNotMatch(out2, /wiki 병합 검토 후보/);
+    assert.match(out2, /wiki-review-resolver/);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
 test('update core: merge-review hint honors a custom compile.mergeNeededPath instead of the hardcoded default', () => {
   const work = repoTemp('qmd-merge-hint-custom-path');
   const bin = join(work, 'bin');
