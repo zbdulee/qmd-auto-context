@@ -78,6 +78,8 @@ backend/   ← qmd MCP HTTP 데몬(:8483) launcher + keepalive/logrotate/index w
 - `query` — hook recall과 동일한 `core/recall.py` 경로를 수동 실행한다. 실행 전 backend manager가 qmd/daemon을 확인한다. qmd 데몬 직접 호출을 중복 구현하지 말 것.
 - `update` — SessionStart update와 동일한 `core/update.sh` 경로를 수동 실행한다. 실행 전 backend manager가 qmd/daemon/warm/logrotate를 처리한다. qmd 인덱스 갱신 요청에는 이 skill을 쓴다.
 - `wiki-compile` — compact durable summary/candidate JSON을 `core/wiki_extract.py` → `core/wiki_compile.py`로 수동 실행한다. raw transcript를 입력하지 않으며 query-time hook에서는 쓰지 않는다.
+- `wiki-review` — write-time semantic gate가 auto-write 대신 `merge-needed.jsonl`에 큐한 신규 후보를 사람 판단으로 per-entry resolve한다(`wiki-review.sh`). 큐 전체 자율 처리는 `agents/wiki-review-resolver.md` 에이전트로 위임.
+- `wiki-dedup` — retroactive scan(`core/wiki_dedup_scan.py`)이 `dedup-needed.jsonl`에 큐한 **이미 존재하는** wiki 카드 쌍을 정리하는 user-facing 진입점. `agents/wiki-dedup-resolver.md` 에이전트를 스폰해 자율 판단한다(WORKFLOW는 에이전트가 SSOT — skill은 재복제하지 않음). 같은 큐를 SessionStart hint가 자동 스폰하며, hint는 대기 건수를 `notice_once`로 사용자에게 표면화한다. skill 경유(명시적 사용자 요청) 스폰은 요약을 반환하고 hint 경유 자동 스폰은 silent다(에이전트 step 5의 caller 조건부).
 - `hint`에 해당하는 skill은 만들지 않는다. PostToolUse posttool은 편집 직후 자동 실행되는 hook-only 연속성 힌트다.
 - `gate`에 해당하는 skill은 만들지 않는다. gate는 pending 프로젝트 편집 차단용 내부 안전장치다.
 
