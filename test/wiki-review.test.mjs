@@ -143,7 +143,7 @@ test('wiki_review: supersede creates a new page and marks the old page supersede
     assert.match(newText, /supersedes: "\.auto-context\/wiki\/decisions\/old-rule\.md"/);
 
     const oldText = readFileSync(join(work, '.auto-context', 'wiki', 'decisions', 'old-rule.md'), 'utf8');
-    assert.match(oldText, /status: "superseded"/);
+    assert.match(oldText, /^status: superseded$/m);
     assert.match(oldText, /supersededBy: "\.auto-context\/wiki\/decisions\/new-rule\.md"/);
     assert.match(oldText, /The old rule text\./); // managed body untouched
     assert.deepEqual(readMergeNeeded(work), []);

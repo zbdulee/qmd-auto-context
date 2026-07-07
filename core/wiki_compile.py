@@ -453,6 +453,13 @@ def yaml_scalar(value) -> str:
     return f'"{text}"'
 
 
+def frontmatter_patch_scalar(key: str, value) -> str:
+    text = str(value)
+    if key == "status" and text in qmd_config.WIKI_STATUSES and re.fullmatch(r"[A-Za-z0-9_-]+", text):
+        return text
+    return yaml_scalar(value)
+
+
 def markdown_page(candidate: dict, summary: str, status: str, redactions: list[str], h: str) -> str:
     created = today()
     suggested_type = str(candidate.get("suggestedType") or "concept")
@@ -534,13 +541,13 @@ def patch_frontmatter_fields(path: Path, updates: dict[str, str]) -> bool:
         if line and not line.startswith(" ") and ":" in line:
             key = line.split(":", 1)[0].strip()
         if key in updates:
-            new_lines.append(f"{key}: {yaml_scalar(updates[key])}")
+            new_lines.append(f"{key}: {frontmatter_patch_scalar(key, updates[key])}")
             seen.add(key)
         else:
             new_lines.append(line)
     for key, value in updates.items():
         if key not in seen:
-            new_lines.append(f"{key}: {yaml_scalar(value)}")
+            new_lines.append(f"{key}: {frontmatter_patch_scalar(key, value)}")
     new_frontmatter = "\n".join(new_lines)
     patched = text[: match.start(1)] + new_frontmatter + text[match.end(1) :]
     path.write_text(patched, encoding="utf-8")

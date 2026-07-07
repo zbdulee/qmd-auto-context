@@ -403,6 +403,8 @@ def main():
         
     filtered_results = []
     min_score = float(config.get("minScore", 0.0))
+    raw_fallback_min_score = float(config.get("rawFallbackMinScore", min_score))
+    active_min_score = min_score
     dropped_skip = 0
     dropped_min_score = 0
 
@@ -454,6 +456,7 @@ def main():
             promote_ep_exact_matches(raw_results, ep_numbers(prompt))
         results = sorted(raw_results, key=lambda r: r.get("score", 0), reverse=True)
         filtered_results = []
+        active_min_score = raw_fallback_min_score
         dropped_skip = 0
         dropped_min_score = 0
         for r in results:
@@ -469,7 +472,7 @@ def main():
             if should_skip:
                 dropped_skip += 1
                 continue
-            if r.get("score", 0) < min_score:
+            if r.get("score", 0) < raw_fallback_min_score:
                 dropped_min_score += 1
                 continue
             filtered_results.append(r)
@@ -511,7 +514,7 @@ def main():
         dropped_min_score=dropped_min_score,
         dropped_top_n=max(0, len(filtered_results) - len(final_results)),
         selected=len(final_results),
-        min_score=min_score,
+        min_score=active_min_score,
         top_n_limit=top_n,
         max_score=max((r.get("score", 0) for r in results), default=0),
     )

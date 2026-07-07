@@ -639,7 +639,7 @@ print(ok)
       'canonicalKey: "some-decision"',
       'aliases:',
       '  - "Alt Name"',
-      'status: "superseded"',
+      'status: superseded',
       'createdBy: qmd-auto-context',
       'supersededBy: ".auto-context/wiki/decisions/new.md"',
       '---',
@@ -651,6 +651,34 @@ print(ok)
       '',
     ].join('\n');
     assert.equal(text, expectedFullText);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('patch_frontmatter_fields: quotes unknown status values', () => {
+  const work = repoTemp('wiki-compile-patch-frontmatter-unknown-status');
+  try {
+    const page = join(work, 'page.md');
+    writeFileSync(page, [
+      '---',
+      'title: "Some Decision"',
+      'status: generated',
+      '---',
+      '',
+      'Body text.',
+      '',
+    ].join('\n'));
+    const script = `
+import sys
+sys.path.insert(0, 'core')
+from pathlib import Path
+import wiki_compile as w
+print(w.patch_frontmatter_fields(Path(${JSON.stringify(page)}), {"status": "needs review"}))
+`;
+    const result = execFileSync('python3', ['-c', script], { encoding: 'utf8' }).trim();
+    assert.equal(result, 'True');
+    assert.match(readFileSync(page, 'utf8'), /^status: "needs review"$/m);
   } finally {
     rmSync(work, { recursive: true, force: true });
   }
@@ -1059,7 +1087,7 @@ from pathlib import Path
 import wiki_compile as wc
 wc.patch_frontmatter_fields(Path(${JSON.stringify(page)}), {"status": "verified", "verifiedBy": "claude", "verifiedAt": "2026-07-04T00:00:00Z"})
 `], { encoding: 'utf8' });
-    assert.match(readFileSync(page, 'utf8'), /^status: "?verified"?$/m);
+    assert.match(readFileSync(page, 'utf8'), /^status: verified$/m);
     // 같은 identity로 재컴파일(내용 갱신) → updated 경로
     const updated = JSON.parse(runCompile(work, {
       ...payload,
@@ -1067,7 +1095,7 @@ wc.patch_frontmatter_fields(Path(${JSON.stringify(page)}), {"status": "verified"
     }));
     assert.equal(updated.action, 'updated');
     const text = readFileSync(page, 'utf8');
-    assert.match(text, /^status: "?generated"?$/m, '갱신된 카드는 재검증 대상으로 리셋');
+    assert.match(text, /^status: generated$/m, '갱신된 카드는 재검증 대상으로 리셋');
     assert.match(text, /^verifiedBy: ""?$/m, 'stale verifiedBy 제거');
     const queue = readFileSync(join(work, '.auto-context', 'compile', 'verify-queue.jsonl'), 'utf8')
       .trim().split('\n').map((l) => JSON.parse(l));

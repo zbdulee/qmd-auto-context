@@ -226,21 +226,33 @@ test('indexing 문자열 "true"/"false" 강제 (그 외는 null)', () => {
 test('config 숫자 타입은 보수적으로 coercion 하고 실패 시 기본값', () => {
   const cfg = loadConfig(JSON.stringify({
     minScore: '0.75',
+    rawFallbackMinScore: '0.7',
     topN: '2',
     queryTimeout: '4.5',
   }));
   assert.equal(cfg.minScore, 0.75);
+  assert.equal(cfg.rawFallbackMinScore, 0.7);
   assert.equal(cfg.topN, 2);
   assert.equal(cfg.queryTimeout, 4.5);
 
   const fallback = loadConfig(JSON.stringify({
     minScore: 'NaN',
+    rawFallbackMinScore: 'NaN',
     topN: 'NaN',
     queryTimeout: 'Infinity',
   }));
   assert.equal(fallback.minScore, 0.0);
+  assert.equal(fallback.rawFallbackMinScore, 0.0);
   assert.equal(fallback.topN, 3);
   assert.equal(fallback.queryTimeout, 5);
+});
+
+test('rawFallbackMinScore 누락 시 정규화된 minScore를 따른다', () => {
+  const cfg = loadConfig(JSON.stringify({
+    minScore: '0.7',
+  }));
+  assert.equal(cfg.minScore, 0.7);
+  assert.equal(cfg.rawFallbackMinScore, 0.7);
 });
 
 test('find_project_config: cwd .auto-context.json root/path 반환', () => {

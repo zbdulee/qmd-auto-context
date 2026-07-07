@@ -34,6 +34,10 @@ The main architectural rule is:
   or sandbox mode should skip context injection rather than break the user's turn.
 - **One core, many hosts.** Claude/Codex command hooks and Hermes Python hooks call
   the same `core/` scripts.
+- **User-facing control is agent-mediated.** Public docs should guide users to
+  ask the host agent in natural language or through exposed skills. Direct
+  `core/` and `skills/` shell commands are maintainer/debugging interfaces
+  unless a user explicitly asks for them.
 - **Queue first, work later.** Post-edit indexing and wiki compile are enqueued
   from hooks and drained by one-shot workers.
 - **Current state over historical plans.** `docs/plans/` and
@@ -430,11 +434,30 @@ equivalent persistence-off flag.
   `title`, and finally title slug;
 - protects reviewed/manual/non-managed pages from silent overwrite;
 - writes generated wiki files under `.auto-context/wiki`;
+- writes new or auto-updated cards as `status: generated` by default;
+- enqueues successful generated writes to the auto-verify queue;
 - logs merge-needed or rejected candidates under `.auto-context/compile`.
 
-Verify and dedup workers are maintenance paths around this generated wiki state.
-They are intentionally fail-open so wiki maintenance does not break normal
-agent turns.
+The verify worker is the automatic second filter for generated cards, not a
+human approval step. It rechecks the generated card against its source through
+the configured host extractor:
+
+- `pass` patches the card to `status: verified` with `verifiedBy` and
+  `verifiedAt`;
+- `fail` applies `compile.verify.onFail` (`delete` by default, or `contested` /
+  `none`);
+- missing CLIs, timeouts, stale jobs, or inconclusive verdicts preserve the
+  queue item or leave the card as `generated` according to the worker contract.
+
+Recall treats `generated` / `tentative` wiki cards as low-priority and labels
+unverified generated cards with `(미검수)`. `verified` is treated as reviewed
+grade for recall ranking and badges. Human-oriented review queues are reserved
+for semantic merge/supersede/separate/discard decisions when automatic writing
+would risk overwriting protected or ambiguous existing wiki pages.
+
+Verify, review, and dedup workers are maintenance paths around this generated
+wiki state. They are intentionally fail-open so wiki maintenance does not break
+normal agent turns.
 
 ## Backend Lifecycle
 
@@ -515,6 +538,12 @@ must remain fail-open relative to normal recall and indexing. A failed extractor
 missing host CLI, stale verify job, or dedup queue issue should leave an audit
 record and preserve or drop only the relevant queue item according to that
 worker's contract.
+
+In this context, `review` means resolving ambiguous merge decisions, while
+`verify` means automatic source-consistency checking of generated cards. The
+default user flow does not require manually approving every compiled wiki page:
+cards start as `generated`, automatic verification promotes good cards to
+`verified`, and only ambiguous merge cases enter the review queue.
 
 ## qmd Backend Boundary
 

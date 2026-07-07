@@ -20,6 +20,7 @@ DEFAULT_CONFIG = {
     "name": "",
     "collections": [],
     "minScore": 0.0,
+    "rawFallbackMinScore": 0.0,
     "topN": 3,
     "queryTimeout": 5,
     "staleQueueThreshold": 20,
@@ -294,6 +295,7 @@ def normalize_config(input_config):
     config["name"] = input_config.get("name", DEFAULT_CONFIG["name"]) if isinstance(input_config.get("name", ""), str) else DEFAULT_CONFIG["name"]
     config["collections"] = string_list(input_config.get("collections"), DEFAULT_CONFIG["collections"])
     config["minScore"] = coerce_float(input_config.get("minScore", DEFAULT_CONFIG["minScore"]), DEFAULT_CONFIG["minScore"])
+    config["rawFallbackMinScore"] = coerce_float(input_config.get("rawFallbackMinScore", config["minScore"]), config["minScore"])
     config["topN"] = coerce_int(input_config.get("topN", DEFAULT_CONFIG["topN"]), DEFAULT_CONFIG["topN"])
     config["queryTimeout"] = coerce_float(input_config.get("queryTimeout", DEFAULT_CONFIG["queryTimeout"]), DEFAULT_CONFIG["queryTimeout"])
     config["staleQueueThreshold"] = coerce_int(input_config.get("staleQueueThreshold", DEFAULT_CONFIG["staleQueueThreshold"]), DEFAULT_CONFIG["staleQueueThreshold"])

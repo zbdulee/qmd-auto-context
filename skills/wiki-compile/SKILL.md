@@ -60,5 +60,5 @@ Also supported: `{"candidates":[...]}` with the same compact fields.
 - Do not paste raw transcript, role-labeled chat logs, credentials, or temporary progress.
 - Query-time recall remains read-only; this skill is an explicit writer path.
 - The wrapper honors `.auto-context/settings.json` opt-in and `compile.enabled` through core config.
-- The writer emits `status: generated` by default; generated is not canon.
+- The writer emits `status: generated` by default; generated is not canon until auto-verify promotes it to `verified`.
 - If the compact input is transcript-shaped, the extractor/writer rejects it and redacts transcript text in the candidate queue.

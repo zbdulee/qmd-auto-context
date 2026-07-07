@@ -97,7 +97,7 @@ test('verify pass → status verified + verifiedBy/verifiedAt 패치 + 재인덱
     const out = JSON.parse(runVerifyWorker(project, { QMD_DIRTY_QUEUE: dirtyQueue }));
     assert.equal(out.processed, 1);
     const text = readFileSync(join(project, CARD_REL), 'utf8');
-    assert.match(text, /^status: "?verified"?$/m);
+    assert.match(text, /^status: verified$/m);
     assert.match(text, /^verifiedBy: "?claude"?$/m);
     assert.match(text, /^verifiedAt: /m);
     assert.match(text, /Durable claim/, '관리 블록 본문은 보존');
@@ -131,7 +131,7 @@ test('verify fail + onFail=contested → status contested 패치(파일 보존)'
   try {
     runVerifyWorker(project, { QMD_DIRTY_QUEUE: dirtyQueue });
     const text = readFileSync(join(project, CARD_REL), 'utf8');
-    assert.match(text, /^status: "?contested"?$/m);
+    assert.match(text, /^status: contested$/m);
   } finally { rmSync(project, { recursive: true, force: true }); }
 });
 
@@ -288,7 +288,7 @@ else:
     const page = join(dir, '.auto-context', 'wiki', 'decisions', 'e2e-decision.md');
     assert.equal(existsSync(page), true);
     const text = readFileSync(page, 'utf8');
-    assert.match(text, /^status: "?verified"?$/m, '한 번의 worker 실행에서 생성 직후 검증·승격');
+    assert.match(text, /^status: verified$/m, '한 번의 worker 실행에서 생성 직후 검증·승격');
     assert.match(text, /^verifiedBy: "?claude"?$/m);
     assert.equal(readFileSync(join(dir, '.auto-context', 'compile', 'verify-queue.jsonl'), 'utf8'), '');
   } finally { rmSync(dir, { recursive: true, force: true }); }
