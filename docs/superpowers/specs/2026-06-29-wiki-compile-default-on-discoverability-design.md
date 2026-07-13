@@ -120,9 +120,25 @@ New `core/update.sh` mode: `bash core/update.sh --enable-compile [<path>] [--eng
 ### D. First-run disclosure notice (runtime, not a gate)
 
 `core/update.sh main()` (SessionStart path): when `compile.extractor` is
-configured with backends AND a per-project once-marker
-(`.auto-context/compile/.notice-shown`) is absent, print a one-time notice to
-stdout and create the marker:
+configured with backends AND a project-keyed user-local once-marker is absent,
+print a one-time notice to stdout and create the marker. The key is the
+SHA-256 of `realpath(config.find_project_config(cwd)["projectRoot"])`, and the
+default marker location is:
+
+`~/.config/qmd/notice-state/wiki-auto-compile/<hash>.notice-shown`
+
+`QMD_NOTICE_STATE_DIR` may override the state directory for isolated tests.
+Hosts that set `QMD_SUPPRESS_NOTICE=1` skip both the notice and marker claim, so
+an observer-only host cannot consume the first user-visible notice.
+Nested cwd values that resolve to the same `projectRoot` share the marker;
+different roots, including separate worktrees, do not. A directory without a
+discovered qmd settings file is not a qmd project for this notice and receives
+no marker. The update path never creates a new project-local marker. For
+forward compatibility, an existing
+`<projectRoot>/.auto-context/compile/.notice-shown` is read-only legacy state:
+it suppresses the notice and is mirrored to the user-local marker when
+possible. A marker below a nested cwd is not legacy state. Marker write
+failures remain fail-open:
 
 > `[qmd] wiki auto-compile is active (engines: <list>). Editing .md files in
 > raw/session collections will run those CLIs in the background to draft wiki

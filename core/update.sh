@@ -122,6 +122,83 @@ notice_clear() {
   rm -f "$(_notice_marker "$1" "$2")" 2>/dev/null || true
 }
 
+wiki_compile_notice_info() {
+  local cwd="$1"
+  local core_dir="$2"
+  python3 - "$cwd" "$core_dir" <<'PY'
+import hashlib
+import json
+import os
+from pathlib import Path
+import sys
+
+try:
+    if os.environ.get("QMD_SUPPRESS_NOTICE"):
+        print(json.dumps({"engines": "", "show": False}))
+        raise SystemExit(0)
+
+    cwd = Path(sys.argv[1]).resolve()
+    core_dir = Path(sys.argv[2]).resolve()
+    sys.path.insert(0, str(core_dir))
+    import config as qmd_config
+
+    info = qmd_config.find_project_config(str(cwd))
+    config = info.get("config") if isinstance(info.get("config"), dict) else {}
+    compile_config = config.get("compile") if isinstance(config.get("compile"), dict) else {}
+    extractor = compile_config.get("extractor") if isinstance(compile_config.get("extractor"), dict) else {}
+    backends = extractor.get("backends") if isinstance(extractor.get("backends"), dict) else {}
+    builtins = extractor.get("builtins") if isinstance(extractor.get("builtins"), list) else []
+    engines = sorted(set(backends.keys()) | {engine for engine in builtins if isinstance(engine, str)})
+    if not engines:
+        print(json.dumps({"engines": "", "show": False}))
+        raise SystemExit(0)
+
+    # find_project_config is the source of truth for parent-config inheritance.
+    # resolve() makes symlink entry points share the same project identity.
+    project_root = Path(info.get("projectRoot") or cwd).resolve()
+    project_hash = hashlib.sha256(str(project_root).encode("utf-8")).hexdigest()
+    state_dir_value = os.environ.get("QMD_NOTICE_STATE_DIR")
+    state_dir = Path(state_dir_value).expanduser() if state_dir_value else (
+        Path.home() / ".config" / "qmd" / "notice-state" / "wiki-auto-compile"
+    )
+    local_marker = state_dir / f"{project_hash}.notice-shown"
+    legacy_marker = project_root / ".auto-context" / "compile" / ".notice-shown"
+
+    if local_marker.is_file():
+        show = False
+    elif legacy_marker.is_file():
+        # Legacy compatibility is read-only with respect to the project. The
+        # user-local marker is best-effort, so a state-dir failure is harmless.
+        try:
+            local_marker.parent.mkdir(parents=True, exist_ok=True)
+            local_marker.touch(exist_ok=True)
+        except OSError:
+            pass
+        show = False
+    else:
+        # Claim the first-run notice atomically where possible. If the state
+        # directory cannot be written, retain the old fail-open behavior and
+        # still emit the notice without failing the hook.
+        try:
+            local_marker.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        try:
+            fd = os.open(local_marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            os.close(fd)
+            show = True
+        except FileExistsError:
+            show = False
+        except OSError:
+            show = True
+
+    print(json.dumps({"engines": ",".join(engines), "show": show}))
+except Exception:
+    # A first-run disclosure must never break SessionStart.
+    print(json.dumps({"engines": "", "show": False}))
+PY
+}
+
 log() {
   printf "[%s] %s\n" "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >>"$LOG" 2>&1 || true
 }
@@ -623,30 +700,16 @@ main() {
     bash "$QMD_BACKEND_MANAGER" kick-wiki-compile "$workdir" --flush >/dev/null 2>&1 &
   fi
 
-  # First-run disclosure: extractor configured but not yet announced for this project.
-  notice_engines="$(python3 - "$workdir" "$(dirname "$0")" <<'PY' 2>/dev/null || true
-import json, sys
-from pathlib import Path
-sys.path.insert(0, sys.argv[2])
-import config as qmd_config
-cfg = qmd_config.find_project_config(sys.argv[1])["config"]
-comp = cfg.get("compile") if isinstance(cfg.get("compile"), dict) else {}
-ext = comp.get("extractor") if isinstance(comp.get("extractor"), dict) else {}
-backends = ext.get("backends") if isinstance(ext.get("backends"), dict) else {}
-builtins = ext.get("builtins") if isinstance(ext.get("builtins"), list) else []
-engines = sorted(set(backends.keys()) | {e for e in builtins if isinstance(e, str)})
-print(",".join(engines) if engines else "")
-PY
-)"
-  if [ -n "$notice_engines" ]; then
-    marker="$workdir/.auto-context/compile/.notice-shown"
-    if [ ! -f "$marker" ]; then
-      echo "[qmd] wiki auto-compile이 활성화되어 있습니다 (엔진: $notice_engines)."
-      echo "      raw/session 컬렉션의 .md를 편집하면 백그라운드로 해당 CLI를 실행해 wiki 초안(generated)을 만듭니다."
-      echo "      끄려면 .auto-context/settings.json의 compile.extractor 를 제거하세요."
-      mkdir -p "$workdir/.auto-context/compile" 2>/dev/null || true
-      : > "$marker" 2>/dev/null || true
-    fi
+  # First-run disclosure: extractor configured but not yet announced for this
+  # project. State is keyed by config.py's canonical projectRoot, never by
+  # the raw cwd, so nested sessions cannot create project-local marker files.
+  notice_info="$(wiki_compile_notice_info "$workdir" "$(dirname "$0")" 2>/dev/null || true)"
+  notice_engines="$(printf '%s' "$notice_info" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("engines") or "")' 2>/dev/null || true)"
+  notice_show="$(printf '%s' "$notice_info" | python3 -c 'import json,sys; print("yes" if json.load(sys.stdin).get("show") else "no")' 2>/dev/null || true)"
+  if [ -n "$notice_engines" ] && [ "$notice_show" = "yes" ]; then
+    echo "[qmd] wiki auto-compile이 활성화되어 있습니다 (엔진: $notice_engines)."
+    echo "      raw/session 컬렉션의 .md를 편집하면 백그라운드로 해당 CLI를 실행해 wiki 초안(generated)을 만듭니다."
+    echo "      끄려면 .auto-context/settings.json의 compile.extractor 를 제거하세요."
   fi
 
   # Retroactive wiki dedup hint: if a scan (this run's or a past one's) queued
