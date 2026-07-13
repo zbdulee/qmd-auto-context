@@ -1,23 +1,23 @@
 {
   "hooks": {
     "SessionStart": [
-      { "hooks": [ { "type": "command", "command": "\"${PLUGIN_ROOT}/hooks/run-hook\" update codex" } ] }
+      { "hooks": [ { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook\" update codex" } ] }
     ],
     "UserPromptSubmit": [
-      { "hooks": [ { "type": "command", "command": "\"${PLUGIN_ROOT}/hooks/run-hook\" recall codex" } ] }
+      { "hooks": [ { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook\" recall codex" } ] }
     ],
     "PreToolUse": [
       { "matcher": "apply_patch|Edit|Write",
         "hooks": [
-          { "type": "command", "command": "\"${PLUGIN_ROOT}/hooks/run-hook\" gate codex" }
+          { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook\" gate codex" }
         ] }
     ],
     "PostToolUse": [
       { "matcher": "apply_patch|Edit|Write",
         "hooks": [
-          { "type": "command", "command": "\"${PLUGIN_ROOT}/hooks/run-hook\" posttool codex" },
-          { "type": "command", "command": "\"${PLUGIN_ROOT}/hooks/run-hook\" index codex" },
-          { "type": "command", "command": "\"${PLUGIN_ROOT}/hooks/run-hook\" compile codex" }
+          { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook\" posttool codex" },
+          { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook\" index codex" },
+          { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook\" compile codex" }
         ] }
     ]
   }
