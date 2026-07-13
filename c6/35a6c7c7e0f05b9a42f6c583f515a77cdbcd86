@@ -1,0 +1,37 @@
+.agents/plugins/marketplace.json
+  h_42d950683aaaea 9
+.claude-plugin/marketplace.json
+  h_42d950683aaaea 9
+.claude-plugin/plugin.json
+  h_42d950683aaaea 4
+.codex-plugin/plugin.json
+  h_42d950683aaaea 3
+AGENTS.md
+  h_42d950683aaaea 91
+CLAUDE.md
+  h_42d950683aaaea 94
+hooks/hooks-codex.json
+  h_42d950683aaaea 4,7,12,18-20
+package.json
+  h_42d950683aaaea 3
+plugin.json
+  h_42d950683aaaea 3
+plugin.yaml
+  h_42d950683aaaea 2
+test/codex-hook-root.test.mjs
+  h_42d950683aaaea 1-143
+test/plugin-manifest.test.mjs
+  h_42d950683aaaea 29,33-38
+test/probe-manifest.test.mjs
+  h_42d950683aaaea 18,39
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "c635a6c7c7e0f05b9a42f6c583f515a77cdbcd86",
+  "prompts": {},
+  "humans": {
+    "h_42d950683aaaea": {
+      "author": "dulee@zigbang.com"
+    }
+  }
+}
