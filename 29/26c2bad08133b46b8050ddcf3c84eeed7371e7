@@ -1,0 +1,33 @@
+.agents/plugins/marketplace.json
+  h_42d950683aaaea 9
+.claude-plugin/marketplace.json
+  h_42d950683aaaea 9
+.claude-plugin/plugin.json
+  h_42d950683aaaea 4
+.codex-plugin/plugin.json
+  h_42d950683aaaea 3
+core/update.sh
+  h_42d950683aaaea 125-201,703-712
+docs/superpowers/specs/2026-06-29-wiki-compile-default-on-discoverability-design.md
+  h_42d950683aaaea 123-141
+package.json
+  h_42d950683aaaea 3
+plugin.json
+  h_42d950683aaaea 3
+plugin.yaml
+  h_42d950683aaaea 2
+test/probe-manifest.test.mjs
+  h_42d950683aaaea 18,39
+test/wiki-compile-notice.test.mjs
+  h_42d950683aaaea 3,5-13,17-64,67-88,91-155,157-172,174-178,180-261,264-268,270-274
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "2926c2bad08133b46b8050ddcf3c84eeed7371e7",
+  "prompts": {},
+  "humans": {
+    "h_42d950683aaaea": {
+      "author": "dulee@zigbang.com"
+    }
+  }
+}
