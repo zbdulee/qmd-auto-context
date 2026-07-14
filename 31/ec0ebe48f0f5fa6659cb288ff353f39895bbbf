@@ -1,0 +1,15 @@
+docs/improvement-proposals.md
+  h_42d950683aaaea 1-305
+docs/plans/2026-07-08-recall-verify-registry-stabilization.md
+  h_42d950683aaaea 1-829
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "31ec0ebe48f0f5fa6659cb288ff353f39895bbbf",
+  "prompts": {},
+  "humans": {
+    "h_42d950683aaaea": {
+      "author": "dulee@zigbang.com"
+    }
+  }
+}
