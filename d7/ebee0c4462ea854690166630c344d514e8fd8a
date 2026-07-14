@@ -1,0 +1,29 @@
+CLAUDE.md
+  h_42d950683aaaea 64-65
+core/hook_main.py
+  h_42d950683aaaea 1-53
+core/index_enqueue.py
+  h_42d950683aaaea 48-49
+core/posttool.py
+  h_42d950683aaaea 212-213
+core/preflight_gate.py
+  h_42d950683aaaea 82-83
+core/recall.py
+  h_42d950683aaaea 536-537
+core/update.sh
+  h_42d950683aaaea 666-671
+core/wiki_compile_enqueue.py
+  h_42d950683aaaea 172-173
+test/hook-main.test.mjs
+  h_42d950683aaaea 1-114
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "d7ebee0c4462ea854690166630c344d514e8fd8a",
+  "prompts": {},
+  "humans": {
+    "h_42d950683aaaea": {
+      "author": "dulee@zigbang.com"
+    }
+  }
+}
