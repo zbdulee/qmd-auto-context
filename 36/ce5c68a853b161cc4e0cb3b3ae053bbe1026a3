@@ -1,0 +1,15 @@
+core/preflight_gate.py
+  h_42d950683aaaea 55-62
+test/preflight-gate.test.mjs
+  h_42d950683aaaea 155-178
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "36ce5c68a853b161cc4e0cb3b3ae053bbe1026a3",
+  "prompts": {},
+  "humans": {
+    "h_42d950683aaaea": {
+      "author": "dulee@zigbang.com"
+    }
+  }
+}
