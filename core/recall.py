@@ -533,4 +533,5 @@ def main():
     return 0
 
 if __name__ == "__main__":
-    sys.exit(main())
+    import hook_main
+    sys.exit(hook_main.run(main))

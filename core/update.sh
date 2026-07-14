@@ -663,7 +663,12 @@ run_update() {
 
 main() {
   raw=$(cat)
-  workdir=$(printf '%s' "$raw" | python3 -c 'import json,sys,os; print((json.load(sys.stdin).get("cwd") or os.getcwd()))' 2>/dev/null)
+  # `|| true`가 없으면 set -e 아래에서 빈/비JSON stdin에 python3가 non-zero로
+  # 죽는 순간 command substitution 실패가 SessionStart hook 전체를 exit 1로
+  # 떨어뜨린다(호스트 UI "SessionStart hook (failed)"). Python 훅들이 빈/잘못된
+  # stdin을 no-op로 흘리는 것과 동일하게, 실패 시 빈 값으로 두고 아래 $PWD
+  # fallback이 처리하게 한다.
+  workdir=$(printf '%s' "$raw" | python3 -c 'import json,sys,os; print((json.load(sys.stdin).get("cwd") or os.getcwd()))' 2>/dev/null || true)
   [ -z "$workdir" ] && workdir="$PWD"
   set_status_for_workdir "$workdir"
 
