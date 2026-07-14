@@ -24,7 +24,7 @@ test('cleanup-legacy: codex 글로벌 adapters hook 제거, 비-qmd 보존', () 
 
     execFileSync('bash', [CLEANUP], {
       encoding: 'utf8',
-      env: { ...process.env, HOME: home, QMD_FAKE_PLATFORMS: 'codex' },
+      env: { ...process.env, HOME: home, CODEX_HOME: codexDir, QMD_FAKE_PLATFORMS: 'codex' },
     });
 
     const after = JSON.parse(readFileSync(join(codexDir, 'hooks.json'), 'utf8'));
@@ -49,7 +49,7 @@ test('cleanup-legacy: codex hooks.json이 깨진 JSON이면 덮지 않고 backen
 
     execFileSync('bash', [CLEANUP], {
       encoding: 'utf8',
-      env: { ...process.env, HOME: home, QMD_FAKE_PLATFORMS: 'codex' },
+      env: { ...process.env, HOME: home, CODEX_HOME: codexDir, QMD_FAKE_PLATFORMS: 'codex' },
     });
 
     assert.equal(readFileSync(join(codexDir, 'hooks.json'), 'utf8'), broken, '깨진 파일 원본 보존');
