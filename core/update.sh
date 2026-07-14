@@ -28,11 +28,10 @@ LOCKDIR="${QMD_WRITER_LOCKDIR:-$_QMD_LOCK_BASE/qmd-update.lock.d}"
 STATUS=""
 STATUS_WORKDIR=""
 
-status_path_for_workdir() {
-  if [ -n "${QMD_UPDATE_STATUS:-}" ]; then
-    printf '%s\n' "$QMD_UPDATE_STATUS"
-    return 0
-  fi
+# stdout: line1=canonical realpath, line2=status 파일 경로. realpath+sha256을
+# 한 프로세스에서 함께 계산해 canonical_workdir/status_path_for_workdir 각각의
+# 별도 python3 스폰(SessionStart 1회당 부기용 프로세스 4개)을 줄인다.
+resolve_workdir_meta() {
   python3 - "$_QMD_CACHE_DIR" "$1" <<'PY'
 import hashlib
 import os
@@ -41,22 +40,25 @@ import sys
 cache_dir, cwd = sys.argv[1:3]
 real = os.path.realpath(cwd)
 digest = hashlib.sha256(real.encode("utf-8")).hexdigest()[:16]
+print(real)
 print(os.path.join(cache_dir, f"update-status-{digest}.txt"))
 PY
 }
 
-canonical_workdir() {
-  python3 - "$1" <<'PY'
-import os
-import sys
-
-print(os.path.realpath(sys.argv[1]))
-PY
-}
-
 set_status_for_workdir() {
-  STATUS="$(status_path_for_workdir "$1")"
-  STATUS_WORKDIR="$(canonical_workdir "$1")"
+  if [ -n "${QMD_UPDATE_STATUS:-}" ] && [ -n "${QMD_CANONICAL_WORKDIR:-}" ]; then
+    STATUS="$QMD_UPDATE_STATUS"
+    STATUS_WORKDIR="$QMD_CANONICAL_WORKDIR"
+    return 0
+  fi
+  local meta
+  meta="$(resolve_workdir_meta "$1")"
+  STATUS_WORKDIR="$(printf '%s\n' "$meta" | sed -n 1p)"
+  if [ -n "${QMD_UPDATE_STATUS:-}" ]; then
+    STATUS="$QMD_UPDATE_STATUS"
+  else
+    STATUS="$(printf '%s\n' "$meta" | sed -n 2p)"
+  fi
 }
 
 # SessionStart 헬스체크: 데몬 포트 확인. 데몬 기동은 plugin-managed backend manager가 담당한다.
@@ -821,7 +823,10 @@ PY
     notice_clear stale-queue "$workdir"
   fi
 
-  nohup bash "$0" --worker "$workdir" </dev/null >>"$LOG" 2>&1 &
+  # main()이 이미 계산한 STATUS/STATUS_WORKDIR을 worker에 env로 넘겨 재계산을
+  # 없앤다(resolve_workdir_meta의 QMD_UPDATE_STATUS+QMD_CANONICAL_WORKDIR 단락).
+  QMD_UPDATE_STATUS="$STATUS" QMD_CANONICAL_WORKDIR="$STATUS_WORKDIR" \
+    nohup bash "$0" --worker "$workdir" </dev/null >>"$LOG" 2>&1 &
   exit 0
 }
 

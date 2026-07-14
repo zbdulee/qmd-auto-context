@@ -419,29 +419,101 @@ def same_generated_identity(row: dict, record: dict) -> bool:
     return False
 
 
+def _compact_stamp_path(path: Path) -> Path:
+    return path.with_suffix(path.suffix + ".compact-stamp")
+
+
+def _read_compact_stamp(path: Path) -> int | None:
+    try:
+        return int(_compact_stamp_path(path).read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _write_compact_stamp(path: Path, size: int) -> None:
+    try:
+        _compact_stamp_path(path).write_text(str(size), encoding="utf-8")
+    except OSError:
+        pass
+
+
+COMPACT_STAMP_GROWTH_RATIO = 1.25
+
+
 def compact_manifest(path: Path, max_bytes: int = LOG_MAX_BYTES) -> None:
     """generated-manifest 무한 누적 방지. size trim은 특정 카드 엔트리를 통째
     날려 삭제감지(previous 조회)를 깨므로 쓰지 않고, same_generated_identity로
     서로 매칭되는 오래된 중복만 접는다 — 각 identity의 최신 엔트리는 원순서로
     보존해 previous[-1]/previousStatus 계약을 유지. 임계 초과 시에만 원자적
     replace. worst case(동시 append와 cross-process race로 엔트리 1개 유실)는
-    그 카드가 다음 재컴파일 때 재생성되며 self-heal."""
+    그 카드가 다음 재컴파일 때 재생성되며 self-heal.
+
+    same_generated_identity(row, record)의 대칭 합집합 관계
+    (same(i,j) or same(j,i))는 정리하면 "targetPath 일치, 또는 (i·j 중
+    하나라도 explicit이 아닐 때) sourceHash/canonicalKey 일치"이므로, 최신
+    행부터 역순으로 훑으며 seen-set을 유지하는 O(n) 스캔으로 치환할 수
+    있다. seen_hashes_any/seen_keys_any는 이후(더 오래된) explicit이 아닌
+    행이 매치할 대상(최신 쪽 explicit 여부 무관), seen_*_nonexplicit는 이후
+    explicit 행이 매치할 대상(최신 쪽도 non-explicit이어야 함)이다.
+
+    "압축해도 줄지 않는" 상태의 재시도 폭주를 막기 위해 마지막 처리 후
+    파일 크기를 사이드카(.compact-stamp)에 기록해두고, 그 이후 크기가
+    COMPACT_STAMP_GROWTH_RATIO 이상 자라기 전까지는 재스캔을 건너뛴다.
+    사이드카 유실은 스캔 1회 추가로만 이어지므로 self-heal 성질을 해치지
+    않는다."""
     try:
-        if path.stat().st_size <= max_bytes:
-            return
+        size = path.stat().st_size
     except OSError:
+        return
+    if size <= max_bytes:
+        return
+    stamp = _read_compact_stamp(path)
+    if stamp is not None and stamp > 0 and size < stamp * COMPACT_STAMP_GROWTH_RATIO:
         return
     rows = read_jsonl(path)
     n = len(rows)
     keep = [True] * n
-    for i in range(n):
-        for j in range(i + 1, n):  # j가 i보다 최신(뒤에 append됨)
-            if same_generated_identity(rows[i], rows[j]) or same_generated_identity(rows[j], rows[i]):
-                keep[i] = False  # i는 같은 identity의 더 오래된 중복
-                break
+    seen_target_paths: set = set()
+    seen_hashes_any: set = set()
+    seen_keys_any: set = set()
+    seen_hashes_nonexplicit: set = set()
+    seen_keys_nonexplicit: set = set()
+    for i in range(n - 1, -1, -1):  # 최신 -> 과거 순
+        row = rows[i]
+        target_path = row.get("targetPath")
+        source_hash = row.get("sourceHash")
+        canonical_key = row.get("canonicalKey")
+        is_explicit = row.get("targetResolution") == "explicit"
+        if target_path and target_path in seen_target_paths:
+            keep[i] = False
+        elif is_explicit:
+            if (source_hash and source_hash in seen_hashes_nonexplicit) or (
+                canonical_key and canonical_key in seen_keys_nonexplicit
+            ):
+                keep[i] = False
+        else:
+            if (source_hash and source_hash in seen_hashes_any) or (
+                canonical_key and canonical_key in seen_keys_any
+            ):
+                keep[i] = False
+        if target_path:
+            seen_target_paths.add(target_path)
+        if source_hash:
+            seen_hashes_any.add(source_hash)
+            if not is_explicit:
+                seen_hashes_nonexplicit.add(source_hash)
+        if canonical_key:
+            seen_keys_any.add(canonical_key)
+            if not is_explicit:
+                seen_keys_nonexplicit.add(canonical_key)
     kept = [rows[i] for i in range(n) if keep[i]]
     if len(kept) != n:
         write_jsonl_atomic(path, kept)
+    try:
+        new_size = path.stat().st_size
+    except OSError:
+        new_size = size
+    _write_compact_stamp(path, new_size)
 
 
 def yaml_scalar(value) -> str:
@@ -708,6 +780,12 @@ def is_auto_writable_page(path: Path) -> tuple[bool, list[str]]:
     findings = []
     if meta.get("reviewed") is True:
         findings.append("reviewed_true")
+    # 주의: verified는 의도적으로 이 보호 집합에서 제외한다(recall.py
+    # REVIEWED_WIKI_STATUSES와 다름). verified는 기계 검수 통과라 recall
+    # 신뢰는 받지만 쓰기 보호는 받지 않는다 — 소스 변경 시 updated 경로가
+    # status를 defaultStatus(generated)로 리셋해 재검증 대상으로 되돌리기
+    # 위함이다. 여기에 verified를 추가하면 stale 카드가 영구히 verified로
+    # 남는다.
     if str(meta.get("status") or "").strip().lower() in {"reviewed", "canon", "manual", "superseded"}:
         findings.append("protected_status")
     if meta.get("createdBy") != "qmd-auto-context":

@@ -132,31 +132,30 @@ test("index action enqueues through core then kicks async worker", () => {
   }
 });
 
-test("index action stays silent if mktemp fails", () => {
-  const d = mkdtempSync(join(tmpdir(), "qmd-runhook-mktemp-"));
+test("index action stays silent if index_enqueue.py invocation fails, and still kicks the worker", () => {
+  // index는 compile과 달리 payload를 한 번만 읽으므로 tmp 버퍼링 없이 stdin을
+  // 직접 파이프한다 -- python3 호출 자체가 실패해도(스크립트 부재 등) `|| true`로
+  // 삼켜져 stdout/stderr silent + exit 0을 유지하고, kick-index는 그와 무관하게
+  // 실행돼야 한다(원래 tmp 버퍼링 경로와 동일한 무음 계약, mktemp 의존은 제거됨).
+  const d = mkdtempSync(join(tmpdir(), "qmd-runhook-index-fail-"));
   try {
     const managerLog = join(d, "manager.log");
-    const stdinLog = join(d, "stdin.json");
-    makeExecutable(join(d, "manager.sh"), `#!/usr/bin/env bash\necho "$@" >> "${managerLog}"\n`);
-    makeExecutable(join(d, "index_enqueue.py"), `#!/usr/bin/env python3\nimport sys\nopen("${stdinLog}", "w").write(sys.stdin.read())\n`);
-    makeExecutable(join(d, "mktemp"), "#!/usr/bin/env bash\necho mktemp failed >&2\nexit 1\n");
+    const manager = makeExecutable(join(d, "manager.sh"), `#!/usr/bin/env bash\necho "$@" >> "${managerLog}"\n`);
 
     const result = spawnSync("/bin/bash", ["hooks/run-hook", "index", "codex"], {
       input: "{}",
       encoding: "utf8",
       env: {
         ...process.env,
-        PATH: `${d}:${process.env.PATH}`,
-        QMD_BACKEND_MANAGER: join(d, "manager.sh"),
-        QMD_CORE_INDEX_SCRIPT: join(d, "index_enqueue.py"),
+        QMD_BACKEND_MANAGER: manager,
+        QMD_CORE_INDEX_SCRIPT: join(d, "nonexistent-index-enqueue.py"),
       },
     });
 
     assert.equal(result.status, 0);
     assert.equal(result.stdout, "");
     assert.equal(result.stderr, "");
-    assert.equal(existsSync(stdinLog), false);
-    assert.equal(existsSync(managerLog), false);
+    assert.equal(readFileSync(managerLog, "utf8"), "kick-index\n");
   } finally {
     rmSync(d, { recursive: true, force: true });
   }

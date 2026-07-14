@@ -1266,3 +1266,118 @@ print("OK")
     assert.equal(out, 'OK');
   } finally { rmSync(work, { recursive: true, force: true }); }
 });
+
+test('compact_manifest: O(n) 역방향 스캔이 pairwise oracle과 동일한 결과를 낸다 (explicit 가드 포함, 랜덤)', () => {
+  // compact_manifest는 O(n^2) pairwise 대칭 스캔에서 O(n) 역방향 seen-set
+  // 스캔으로 교체됐다. 옛 pairwise 로직을 oracle로 재구현해 무작위 manifest에
+  // 대해 두 결과(살아남는 행의 identity 집합)가 항상 같은지 검증한다.
+  const work = repoTemp('wiki-compile-compact-manifest-oracle');
+  const manifest = join(work, 'manifest.jsonl');
+  const script = `
+import sys, json, random
+sys.path.insert(0, 'core')
+from pathlib import Path
+import wiki_compile as w
+
+random.seed(20260714)
+
+def oracle_keep(rows):
+    n = len(rows)
+    keep = [True] * n
+    for i in range(n):
+        for j in range(i + 1, n):
+            if w.same_generated_identity(rows[i], rows[j]) or w.same_generated_identity(rows[j], rows[i]):
+                keep[i] = False
+                break
+    return keep
+
+TARGET_PATHS = [None, "", "a.md", "b.md", "c.md"]
+HASHES = [None, "", "h1", "h2", "h3"]
+KEYS = [None, "", "k1", "k2", "k3"]
+RESOLUTIONS = [None, "explicit", "inferred"]
+
+p = Path(${JSON.stringify(manifest)})
+for trial in range(200):
+    n = random.randint(1, 12)
+    rows = []
+    for idx in range(n):
+        row = {"id": idx}
+        tp = random.choice(TARGET_PATHS)
+        if tp is not None:
+            row["targetPath"] = tp
+        sh = random.choice(HASHES)
+        if sh is not None:
+            row["sourceHash"] = sh
+        ck = random.choice(KEYS)
+        if ck is not None:
+            row["canonicalKey"] = ck
+        res = random.choice(RESOLUTIONS)
+        if res is not None:
+            row["targetResolution"] = res
+        rows.append(row)
+    expected_keep = oracle_keep(rows)
+    expected_ids = sorted(rows[i]["id"] for i in range(n) if expected_keep[i])
+
+    p.write_text("\\n".join(json.dumps(r, sort_keys=True) for r in rows) + "\\n", encoding="utf-8")
+    stamp = p.with_suffix(p.suffix + ".compact-stamp")
+    if stamp.exists():
+        stamp.unlink()
+    w.compact_manifest(p, max_bytes=0)
+    actual_ids = sorted(r["id"] for r in w.read_jsonl(p))
+    assert actual_ids == expected_ids, (trial, rows, expected_ids, actual_ids)
+print("OK")
+`;
+  try {
+    const out = execFileSync('python3', ['-c', script], { encoding: 'utf8' }).trim();
+    assert.equal(out, 'OK');
+  } finally { rmSync(work, { recursive: true, force: true }); }
+});
+
+test('compact_manifest: 압축해도 줄지 않으면 stamp 사이드카가 다음 호출의 재스캔을 억제한다', () => {
+  const work = repoTemp('wiki-compile-compact-manifest-stamp');
+  const manifest = join(work, 'manifest.jsonl');
+  const rows = [
+    { targetPath: 'a.md', canonicalKey: 'ka', status: 'generated' },
+    { targetPath: 'b.md', canonicalKey: 'kb', status: 'generated' },
+  ].map((r) => JSON.stringify(r)).join('\n') + '\n';
+  writeFileSync(manifest, rows);
+  const script = `
+import sys
+sys.path.insert(0, 'core')
+from pathlib import Path
+import wiki_compile as w
+
+calls = {"n": 0}
+orig_read_jsonl = w.read_jsonl
+def counting_read_jsonl(path):
+    calls["n"] += 1
+    return orig_read_jsonl(path)
+w.read_jsonl = counting_read_jsonl
+
+p = Path(${JSON.stringify(manifest)})
+before = w.read_jsonl(p)  # counts as 1
+w.compact_manifest(p, max_bytes=1)  # 서로 다른 identity라 접힐 게 없음 -> read 1회 더
+assert calls["n"] == 2, calls
+after_first = w.read_jsonl(p)  # counts as 1 more
+assert after_first == before, after_first
+
+# 크기가 stamp 대비 충분히 자라지 않은 채 재호출하면 재스캔(read_jsonl) 없이
+# 스킵돼야 한다.
+calls["n"] = 0
+w.compact_manifest(p, max_bytes=1)
+assert calls["n"] == 0, calls
+
+# 파일이 stamp 대비 25% 이상 자라면 재스캔이 다시 일어나야 한다.
+import json as _json
+pad = "x" * p.stat().st_size  # 크기를 2배 이상으로
+with p.open("a", encoding="utf-8") as f:
+    f.write(_json.dumps({"targetPath": "pad.md", "status": "generated", "note": pad}) + "\\n")
+w.compact_manifest(p, max_bytes=1)
+assert calls["n"] == 1, calls
+print("OK")
+`;
+  try {
+    const out = execFileSync('python3', ['-c', script], { encoding: 'utf8' }).trim();
+    assert.equal(out, 'OK');
+  } finally { rmSync(work, { recursive: true, force: true }); }
+});
