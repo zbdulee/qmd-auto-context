@@ -445,7 +445,31 @@ def _candidate_configs(project_dir):
 
 
 def find_project_config(cwd):
-    """cwd→부모(HOME 경계)로 project config를 찾고 normalized config와 위치를 반환한다."""
+    """cwd→부모(HOME 경계)로 project config를 찾고 normalized config와 위치를 반환한다.
+
+    recall/posttool/index_enqueue/wiki_compile_enqueue/preflight_gate 등 여러 hook
+    entrypoint가 이 함수를 개별 try/except 없이 안전한 최종 경계로 기대하고 직접
+    호출한다. 샌드박스/권한 등 예상 못한 환경 차이로 경로 탐색이 실패해도 여기서
+    죽으면 hook 프로세스 자체가 non-zero exit로 죽어 host UI에 hook 실패로
+    표면화된다 -- "설정 없음"으로 fail-open해 호출자가 정상 종료하게 한다."""
+    try:
+        return _find_project_config_unsafe(cwd)
+    except Exception:
+        try:
+            project_root = str(Path(cwd).resolve())
+        except Exception:
+            project_root = str(cwd)
+        fallback = normalize_config({})
+        fallback["collections"] = []
+        return {
+            "config": fallback,
+            "configPath": None,
+            "configFormat": "none",
+            "projectRoot": project_root,
+        }
+
+
+def _find_project_config_unsafe(cwd):
     path = Path(cwd).resolve()
     local_optout = find_local_optout(path)
     if local_optout:

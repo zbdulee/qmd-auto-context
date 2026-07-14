@@ -368,6 +368,40 @@ test('find_project_config: no config returns null path and cwd root', () => {
   }
 });
 
+test('find_project_config: 내부 경로 탐색에서 예상 못한 예외가 나도 fail-open(빈 config)한다', () => {
+  // recall/posttool/index_enqueue/wiki_compile_enqueue/preflight_gate 등 여러 hook
+  // entrypoint가 find_project_config를 개별 try/except 없이 직접 호출한다. 샌드박스/
+  // 권한 등 환경 차이로 내부 탐색(_find_project_config_unsafe)이 죽어도, 공개 함수는
+  // 절대 raise하지 않고 "설정 없음"으로 fail-open해야 호출자가 non-zero exit로 죽지
+  // 않는다.
+  const home = mkdtempSync(join(tmpdir(), 'qmd-cfg-home-'));
+  const dir = join(home, 'proj');
+  mkdirSync(dir, { recursive: true });
+  try {
+    const code = `
+import json
+import config
+
+def boom(cwd):
+    raise PermissionError("simulated sandboxed fs error")
+config._find_project_config_unsafe = boom
+
+result = config.find_project_config(${JSON.stringify(dir)})
+print(json.dumps(result, ensure_ascii=False))
+`;
+    const out = execFileSync('python3', ['-c', code], {
+      encoding: 'utf8',
+      env: { ...process.env, PYTHONPATH: 'core', HOME: home },
+    });
+    const result = JSON.parse(out);
+    assert.equal(result.configPath, null);
+    assert.equal(result.configFormat, 'none');
+    assert.deepEqual(result.config.collections, []);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test('migrate_legacy_config moves .auto-context.json to .auto-context/settings.json and deletes old file', () => {
   const home = mkdtempSync(join(tmpdir(), 'qmd-cfg-home-'));
   const dir = join(home, 'proj');
