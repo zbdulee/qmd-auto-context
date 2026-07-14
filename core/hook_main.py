@@ -28,17 +28,25 @@ import traceback
 
 
 def run(main) -> int:
-    """Call main() and return its int exit code, coercing any exception to 0."""
+    """Run main() and ALWAYS return 0.
+
+    main()'s return value is intentionally discarded: every qmd hook main()
+    returns 0 on success, and the invariant is that the hook process exits 0
+    regardless of what main() returns or raises. We coerce EVERYTHING to 0 --
+    a non-zero/negative int return, or ANY exception including a SystemExit
+    raised deep in a call tree or a KeyboardInterrupt -- so the hook can never
+    surface as "hook (failed): exited with code N" to the host. A deny/block
+    decision must be expressed as JSON on stdout, never via exit code. The
+    exception (if any) is best-effort logged to QMD_RECALL_LOG.
+    """
     try:
-        rc = main()
-    except SystemExit:
-        # An explicit SystemExit is a deliberate exit request — honor its
-        # code, but never let it become an unhandled non-zero surprise.
-        raise
+        main()
     except BaseException:  # noqa: BLE001 — hooks must never crash the host
-        _log_exception()
-        return 0
-    return rc if isinstance(rc, int) else 0
+        try:
+            _log_exception()
+        except BaseException:  # noqa: BLE001 — logging must not resurrect a failure
+            pass
+    return 0
 
 
 def _log_exception() -> None:

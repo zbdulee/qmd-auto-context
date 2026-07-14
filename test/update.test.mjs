@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, mkdirSync, symlinkSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
@@ -1071,5 +1071,32 @@ test('update core: dedup scanner actually runs inside the embed subshell at runt
     assert.equal(seen, true, `wiki_dedup_scan.py did not log within 3s; embed subshell wiring likely broken`);
   } finally {
     rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('update.sh main: 빈/비JSON stdin에도 SessionStart hook은 exit 0 (set -e 아래 substitution 실패 방어)', () => {
+  // 히스토리 버그: main()의 stdin 파싱 substitution이 set -e 아래 python3 crash로
+  // 실패하면 SessionStart hook 전체가 exit 1 → 호스트 "SessionStart hook (failed)".
+  // main()은 set +e로 동기 경로 전체를 fail-open해야 한다. pending temp dir을 cwd로
+  // 줘 fork 없이 pending 안내 후 exit 0 하는 경로를 검증한다.
+  const home = repoTemp('update-emptystdin-home');
+  const proj = join(home, 'proj');
+  mkdirSync(proj, { recursive: true });
+  const env = {
+    ...process.env,
+    HOME: home,
+    QMD_CACHE_DIR: join(home, 'cache'),
+    QMD_DIRTY_QUEUE: join(home, 'dirty-queue'),
+    QMD_LOCK_BASE: join(home, 'locks'),
+  };
+  try {
+    for (const input of ['', 'not json {{{', '{}']) {
+      const res = spawnSync('bash', [join(process.cwd(), 'core', 'update.sh')], {
+        input, cwd: proj, env, encoding: 'utf8',
+      });
+      assert.equal(res.status, 0, `input=${JSON.stringify(input)} → exit ${res.status} (stderr: ${res.stderr})`);
+    }
+  } finally {
+    rmSync(home, { recursive: true, force: true });
   }
 });

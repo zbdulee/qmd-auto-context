@@ -662,13 +662,15 @@ run_update() {
 }
 
 main() {
+  # SessionStart hook은 항상 exit 0이어야 한다(hook_main.run과 동일한 불변식의
+  # bash판). 이 동기 경로는 notice 계산 + worker fork가 전부이고 모두 fail-open이
+  # 목표라, set -e를 꺼서 어떤 command substitution 실패(빈/비JSON stdin에 python3
+  # crash, cd 실패, notice 계산 중 파일 소실 등)도 hook 전체를 non-zero exit로
+  # 떨어뜨리지 못하게 한다. 실패는 빈 값/스킵으로 흘리고 아래 fallback·worker가
+  # 처리한다. worker(run_update)는 별도 프로세스 재실행이라 자체 set -e를 유지한다.
+  set +e
   raw=$(cat)
-  # `|| true`가 없으면 set -e 아래에서 빈/비JSON stdin에 python3가 non-zero로
-  # 죽는 순간 command substitution 실패가 SessionStart hook 전체를 exit 1로
-  # 떨어뜨린다(호스트 UI "SessionStart hook (failed)"). Python 훅들이 빈/잘못된
-  # stdin을 no-op로 흘리는 것과 동일하게, 실패 시 빈 값으로 두고 아래 $PWD
-  # fallback이 처리하게 한다.
-  workdir=$(printf '%s' "$raw" | python3 -c 'import json,sys,os; print((json.load(sys.stdin).get("cwd") or os.getcwd()))' 2>/dev/null || true)
+  workdir=$(printf '%s' "$raw" | python3 -c 'import json,sys,os; print((json.load(sys.stdin).get("cwd") or os.getcwd()))' 2>/dev/null)
   [ -z "$workdir" ] && workdir="$PWD"
   set_status_for_workdir "$workdir"
 

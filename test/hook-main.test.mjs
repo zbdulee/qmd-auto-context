@@ -49,10 +49,29 @@ print("rc=%d" % rc)
   }
 });
 
-test('hook_main.run: 정상 int 반환은 그대로 전달한다', () => {
+test('hook_main.run: 정상(0) 반환은 0', () => {
   const out = runPy(`
 import hook_main
 print("rc=%d" % hook_main.run(lambda: 0))
+`);
+  assert.equal(out, 'rc=0');
+});
+
+test('hook_main.run: non-zero/음수 int 반환도 0으로 강등한다 (항상 exit 0 불변식)', () => {
+  const out = runPy(`
+import hook_main
+vals = [hook_main.run(lambda: 1), hook_main.run(lambda: -1), hook_main.run(lambda: 7)]
+print("rcs=%s" % vals)
+`);
+  assert.equal(out, 'rcs=[0, 0, 0]');
+});
+
+test('hook_main.run: main()이 SystemExit(non-zero)를 던져도 0으로 삼킨다', () => {
+  const out = runPy(`
+import sys, hook_main
+def boom():
+    sys.exit(7)
+print("rc=%d" % hook_main.run(boom))
 `);
   assert.equal(out, 'rc=0');
 });
