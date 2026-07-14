@@ -1,0 +1,13 @@
+core/update.sh
+  h_42d950683aaaea 56-60,64
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "345486c9ca47b1320be588d6a5709e12c81dc00f",
+  "prompts": {},
+  "humans": {
+    "h_42d950683aaaea": {
+      "author": "dulee@zigbang.com"
+    }
+  }
+}
