@@ -1,0 +1,21 @@
+core/update.sh
+  h_42d950683aaaea 31-34,43,49-61,826-829
+core/wiki_compile.py
+  h_42d950683aaaea 422-442,449-463,465,468-472,476-508,512-516,783-788
+hooks/run-hook
+  h_42d950683aaaea 71-73
+test/run-hook-backend-manager.test.mjs
+  h_42d950683aaaea 135-140,143,150-151,158
+test/wiki-compile.test.mjs
+  h_42d950683aaaea 1269-1383
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "9e362843b9d888f95bb1caf6578af72f21b3c039",
+  "prompts": {},
+  "humans": {
+    "h_42d950683aaaea": {
+      "author": "dulee@zigbang.com"
+    }
+  }
+}
