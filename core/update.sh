@@ -53,11 +53,15 @@ set_status_for_workdir() {
   fi
   local meta
   meta="$(resolve_workdir_meta "$1")"
-  STATUS_WORKDIR="$(printf '%s\n' "$meta" | sed -n 1p)"
+  # STATUS(마지막 줄)를 먼저 tail로 떼어내고 나머지 전부를 STATUS_WORKDIR로
+  # 취급한다. STATUS는 해시 기반 파일명이라 항상 개행 없는 단일 줄이 보장되지만,
+  # STATUS_WORKDIR(cwd)는 이론상 경로에 개행이 섞인 pathological 케이스가 있을
+  # 수 있어 sed -n 1p/2p 같은 위치 기반 파싱은 그 경우 값이 어긋난다.
+  STATUS_WORKDIR="$(printf '%s\n' "$meta" | sed '$d')"
   if [ -n "${QMD_UPDATE_STATUS:-}" ]; then
     STATUS="$QMD_UPDATE_STATUS"
   else
-    STATUS="$(printf '%s\n' "$meta" | sed -n 2p)"
+    STATUS="$(printf '%s\n' "$meta" | tail -n 1)"
   fi
 }
 
