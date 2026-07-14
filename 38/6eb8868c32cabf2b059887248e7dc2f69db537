@@ -1,0 +1,13 @@
+test/install-cleanup.test.mjs
+  h_42d950683aaaea 27,52
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "386eb8868c32cabf2b059887248e7dc2f69db537",
+  "prompts": {},
+  "humans": {
+    "h_42d950683aaaea": {
+      "author": "dulee@zigbang.com"
+    }
+  }
+}
