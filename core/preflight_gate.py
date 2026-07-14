@@ -52,8 +52,14 @@ def main():
     if tool not in GATED_TOOLS:
         return 0  # Read/Bash 등은 차단 안 함 (matcher가 1차 필터, 여기 2차 방어)
     cwd = payload.get("cwd") or os.getcwd()
-    config = qmd_config.load_project_config(cwd)
-    result = rp.resolve_paths(cwd, json.dumps(config))
+    try:
+        config = qmd_config.load_project_config(cwd)
+        result = rp.resolve_paths(cwd, json.dumps(config))
+    except Exception:
+        # gate는 soft protection이지 하드 보안 경계가 아니다 -- 샌드박스/권한 등
+        # 예상 못한 환경 차이로 config 조회가 실패해도 hook 프로세스 자체가
+        # non-zero exit로 죽어 편집을 막는 것보다 fail-open이 낫다.
+        return 0
     reason = result.get("reason")
     # pending이 아니면(동의/거절/risky/정상) 통과. pending이어도 skip이면 통과.
     if reason != "pending":

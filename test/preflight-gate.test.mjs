@@ -152,3 +152,27 @@ test('TTL 만료된 마커 → deny + 마커 unlink', () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('config/resolve_paths 조회 중 예상 못한 예외가 나도 gate는 fail-open(exit 0, 무출력)한다', () => {
+  // gate는 soft protection이라, 샌드박스/권한 등 환경 차이로 config 조회 자체가
+  // 죽더라도(예: PermissionError) hook 프로세스가 non-zero exit로 죽어 편집을
+  // 막는 사고를 방지해야 한다. load_project_config를 강제로 raise시켜 검증한다.
+  const script = `
+import sys, json
+sys.path.insert(0, 'core')
+import config as qmd_config
+import preflight_gate as pg
+
+def boom(cwd):
+    raise PermissionError("simulated sandboxed fs error")
+qmd_config.load_project_config = boom
+
+import io
+sys.stdin = io.StringIO(json.dumps({"tool_name": "Edit", "tool_input": {"file_path": "/tmp/a.md"}, "cwd": "/tmp/does-not-matter"}))
+rc = pg.main()
+assert rc == 0, rc
+print("OK")
+`;
+  const out = execFileSync('python3', ['-c', script], { encoding: 'utf8', cwd: process.cwd() }).trim();
+  assert.equal(out, 'OK');
+});
