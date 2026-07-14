@@ -1,0 +1,19 @@
+core/hook_main.py
+  h_42d950683aaaea 31-41,43,45-49
+core/update.sh
+  h_42d950683aaaea 665-671,673
+test/hook-main.test.mjs
+  h_42d950683aaaea 52,60-78
+test/update.test.mjs
+  h_42d950683aaaea 3,1076-1102
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "57de6e4f337cca0a7a08c17315b9730756234b7b",
+  "prompts": {},
+  "humans": {
+    "h_42d950683aaaea": {
+      "author": "dulee@zigbang.com"
+    }
+  }
+}
