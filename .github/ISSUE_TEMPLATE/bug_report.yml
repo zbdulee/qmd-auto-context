@@ -1,0 +1,39 @@
+name: Bug report
+description: Report a reproducible qmd auto-context problem
+title: "[bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: "Remove credentials, private project content, and full prompts before submitting."
+  - type: input
+    id: plugin_version
+    attributes:
+      label: Plugin version or commit
+    validations:
+      required: true
+  - type: input
+    id: host
+    attributes:
+      label: Host and version
+      description: Claude Code, Codex, or Hermes Agent
+    validations:
+      required: true
+  - type: input
+    id: qmd
+    attributes:
+      label: qmd version and operating system
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Include the expected and actual behavior without private content.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Sanitized logs
+      description: Optional. Remove paths, prompts, tokens, and project content.
