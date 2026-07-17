@@ -18,6 +18,7 @@
 - Create: `CONTRIBUTING.md`
 - Create: `SECURITY.md`
 - Create: `CODE_OF_CONDUCT.md`
+- Create: `docs/privacy.md`
 - Create: `.github/ISSUE_TEMPLATE/bug_report.yml`
 - Create: `.github/pull_request_template.md`
 - Create: `.github/workflows/test.yml`
@@ -69,7 +70,7 @@ git commit -m "docs(oss): add public contribution baseline"
 ### Task 2: Archive superseded plans and specifications
 
 **Files:**
-- Move: `docs/plans/*` except the two 2026-07-17 OSS documents → `docs/history/plans/`
+- Move: `docs/plans/*` → `docs/history/plans/`
 - Move: `docs/superpowers/plans/*` → `docs/history/superpowers/plans/`
 - Move: `docs/superpowers/specs/*` → `docs/history/superpowers/specs/`
 - Create: `docs/history/README.md`
