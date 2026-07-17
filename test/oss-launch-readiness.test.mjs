@@ -54,3 +54,14 @@ test('history landing page makes current sources of truth explicit', () => {
   assert.match(history, /docs\/settings\.md/);
   assert.match(history, /docs\/architecture\.md/);
 });
+
+test('superseded plans and specifications live only under the history archive', () => {
+  assert.ok(existsSync('docs/history/plans/2026-06-18-sync-skill.md'));
+  assert.ok(existsSync('docs/history/superpowers/specs/2026-06-18-guided-optin-gate-design.md'));
+  assert.ok(!existsSync('docs/plans/2026-06-18-sync-skill.md'));
+  assert.ok(!existsSync('docs/superpowers/specs/2026-06-18-guided-optin-gate-design.md'));
+
+  const architecture = read('docs/architecture.md');
+  assert.match(architecture, /docs\/history\//);
+  assert.doesNotMatch(architecture, /`docs\/plans\/` and\s+`docs\/superpowers\/`/);
+});
