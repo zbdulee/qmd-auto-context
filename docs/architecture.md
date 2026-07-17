@@ -40,9 +40,9 @@ The main architectural rule is:
   unless a user explicitly asks for them.
 - **Queue first, work later.** Post-edit indexing and wiki compile are enqueued
   from hooks and drained by one-shot workers.
-- **Current state over historical plans.** `docs/plans/` and
-  `docs/superpowers/` explain design history. This document describes the code
-  paths that are intended to be true now.
+- **Current state over historical plans.** [docs/history/](history/) preserves
+  design history. This document describes the code paths that are intended to
+  be true now.
 
 ## Repository Map
 
