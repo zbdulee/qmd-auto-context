@@ -1,19 +1,15 @@
 {
-  "indexing": true,
+  "indexing": false,
   "name": "qmd-auto-context",
-  "collections": [
-    "qmd-auto-context-specs",
-    "qmd-auto-context-plans",
-    "qmd-auto-context-notes"
-  ],
-  "collectionPaths": {
-    "qmd-auto-context-specs": "docs/superpowers/specs",
-    "qmd-auto-context-plans": "docs/superpowers/plans",
-    "qmd-auto-context-notes": "docs/plans"
-  },
+  "collections": [],
+  "collectionPaths": {},
   "minScore": 0.5,
   "topN": 3,
   "queryTimeout": 3,
   "prefixStyle": "tag",
-  "events": ["sessionStart", "userPromptSubmit", "postToolUse"]
+  "events": [
+    "sessionStart",
+    "userPromptSubmit",
+    "postToolUse"
+  ]
 }
