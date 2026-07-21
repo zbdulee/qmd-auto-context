@@ -45,7 +45,10 @@ PY
 health() {
   local timeout
   timeout="$(qmd_health_timeout)"
-  curl -sf -m "$timeout" "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1
+  # localhost(not 127.0.0.1): qmd 데몬은 IPv6 ::1에만 바인딩된다. 127.0.0.1(IPv4)로
+  # 찌르면 refused → false-dead 판정 → 데몬 재시작 crash loop. curl localhost는
+  # ::1/127.0.0.1 둘 다 시도하므로 바인딩 계열과 무관하게 안전(recall.py·keepalive.sh와 일치).
+  curl -sf -m "$timeout" "http://localhost:${PORT}/health" >/dev/null 2>&1
 }
 
 qmd_version() {

@@ -86,7 +86,8 @@ qmd_healthcheck() {
   local port="${QMD_HEALTHCHECK_PORT:-8483}"
   local timeout
   timeout="$(qmd_health_timeout)"
-  if curl -sf -m "$timeout" "http://127.0.0.1:${port}/health" >/dev/null 2>&1; then
+  # localhost(not 127.0.0.1): 데몬은 IPv6 ::1 바인딩. IPv4로 찌르면 false-dead 판정 → "데몬 미응답" 오탐.
+  if curl -sf -m "$timeout" "http://localhost:${port}/health" >/dev/null 2>&1; then
     return 0
   fi
   # 안내는 stderr(JSON 파싱 경로 보호). core/update.sh는 launchd를 직접 제어하지 않는다.
