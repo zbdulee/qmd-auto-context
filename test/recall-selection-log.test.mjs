@@ -86,6 +86,20 @@ test('이벤트 비활성 시 reason="event_disabled" 기록', () => {
   });
 });
 
+test('wikiOnly + wiki role 없음 → fixture 경로에서도 reason="no_wiki_collections" + 빈 출력', () => {
+  // fixture 경로에서도 live와 동일하게 조기 종료해야 한다(수정 전엔 no_results_after_filter로 오탐).
+  withProject(
+    { collections: ['sample'], collectionRoles: { sample: 'raw' }, recallStrategy: 'wikiOnly' },
+    (dir, logPath) => {
+      const out = run({ prompt: PROMPT, cwd: dir }, { QMD_RECALL_LOG: logPath });
+      assert.equal(out, '', 'wiki role 없으면 wikiOnly는 무출력(raw 누출 금지)');
+      const ev = selectionEvents(logPath);
+      assert.equal(ev.length, 1);
+      assert.equal(ev[0].reason, 'no_wiki_collections');
+    },
+  );
+});
+
 test('QMD_RECALL_LOG 미설정이면 부작용 없이 정상 동작 (no-op)', () => {
   withProject({ collections: ['sample'] }, (dir) => {
     const out = run({ prompt: PROMPT, cwd: dir }); // QMD_RECALL_LOG 없음

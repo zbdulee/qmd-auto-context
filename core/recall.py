@@ -298,6 +298,14 @@ def main():
     if not collections:
         log_recall_event(log_path, "no_collections")
         return 0
+    # wikiOnly: wiki role 컬렉션이 하나도 없으면 surface할 게 없다. fixture/live 무관하게
+    # 여기서 조기 종료해 raw가 새지 않게 하고 진단 reason도 정확히 남긴다
+    # (fixture 경로에서 no_results_after_filter로 잘못 찍히던 오탐 방지).
+    if config.get("recallStrategy") == "wikiOnly":
+        _roles = config.get("collectionRoles", {}) if isinstance(config.get("collectionRoles"), dict) else {}
+        if not any(_roles.get(c) == "wiki" for c in collections):
+            log_recall_event(log_path, "no_wiki_collections")
+            return 0
     raw_collections = []
     queried_wiki_first = False
     daemon_url = os.environ.get("QMD_DAEMON_URL", DEFAULT_DAEMON_URL)
@@ -362,12 +370,9 @@ def main():
                     if results is None:
                         log_recall_event(log_path, "query_failed", daemon=daemon_url)
                         return 0
-                elif strategy == "wikiOnly":
-                    # wikiOnly: wiki role이 하나도 없으면 surface할 게 없다.
-                    # hierarchical과 달리 raw로 fallback하지 않는다(raw 누출 금지).
-                    log_recall_event(log_path, "no_wiki_collections")
-                    return 0
                 else:
+                    # hierarchical without wiki role → flat처럼 전 컬렉션 query.
+                    # (wikiOnly + wiki role 없음은 상단에서 이미 조기 종료됨)
                     results = query_daemon(collections)
             else:
                 results = query_daemon(collections)
