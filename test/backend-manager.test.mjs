@@ -374,6 +374,50 @@ test("kick-wiki-compile runs compile worker with explicit cwd and stays silent",
 });
 
 
+test("kick-wiki-compile kicks the index worker after the compile worker finishes (mid-session reindex)", () => {
+  const home = mkdtempSync(join(tmpdir(), "qmd-wiki-kick-index-"));
+  try {
+    const cwd = join(home, "project");
+    mkdirSync(cwd, { recursive: true });
+    const compileMarker = join(home, "compile-done");
+    const indexLog = join(home, "index.log");
+    const compileWorker = join(home, "compile-worker.sh");
+    const indexWorker = join(home, "index-worker.sh");
+    // compile worker: 잠깐 일한 뒤 마커 생성. sleep이 있어야 "kick_index가 compile
+    // 뒤"임을 인과적으로 증명한다(kick_index가 case 앞이면 index worker가 마커 전에 실행됨).
+    writeFileSync(compileWorker, `#!/usr/bin/env bash\nsleep 0.3\n: > "${compileMarker}"\n`, { mode: 0o755 });
+    // index worker: compile 마커가 이미 있으면(=compile 종료 후 kick됨) after-compile 기록
+    writeFileSync(indexWorker,
+      `#!/usr/bin/env bash\nif [ -f "${compileMarker}" ]; then echo after-compile >> "${indexLog}"; else echo before-compile >> "${indexLog}"; fi\n`,
+      { mode: 0o755 });
+    const result = run(["kick-wiki-compile", cwd], {
+      HOME: home,
+      QMD_BACKEND_STATE_DIR: home,
+      QMD_COMPILE_WORKER_SCRIPT: compileWorker,
+      QMD_INDEX_WORKER_SCRIPT: indexWorker,
+    });
+    assert.equal(result.status, 0);
+    assert.equal(result.stdout, "");
+    // compile sleep(0.3s) + python lock-hash + double fork + bash spawn 여유를 넉넉히.
+    for (let i = 0; i < 200 && !existsSync(indexLog); i++) {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+    }
+    assert.ok(existsSync(indexLog), "index worker가 kick 되어야 함");
+    assert.equal(readFileSync(indexLog, "utf8").trim(), "after-compile");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("kick_wiki_compile body kicks the index worker AFTER the compile worker (source anchor)", () => {
+  const src = readFileSync("core/backend_manager.sh", "utf8");
+  const body = src.slice(src.indexOf("kick_wiki_compile()"), src.indexOf("has_marker()"));
+  const caseIdx = body.indexOf("COMPILE_WORKER_SCRIPT");
+  const kickIdx = body.indexOf("kick_index");
+  assert.ok(caseIdx !== -1 && kickIdx !== -1, "compile worker 실행과 kick_index가 둘 다 있어야 함");
+  assert.ok(kickIdx > caseIdx, "kick_index는 compile worker 실행 뒤에 있어야 함(순서 회귀 방지)");
+});
+
 test("kick-wiki-compile --flush passes --flush-all to the worker", () => {
   const d = mkdtempSync(join(tmpdir(), 'bm-flush-'));
   const argsLog = join(d, 'args.txt');

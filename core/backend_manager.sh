@@ -288,6 +288,13 @@ PY
       *.sh|*.bash) bash "$COMPILE_WORKER_SCRIPT" --cwd "$cwd" $flush_arg >>"$MANAGER_LOG" 2>&1 || true ;;
       *) python3 "$COMPILE_WORKER_SCRIPT" --cwd "$cwd" $flush_arg >>"$MANAGER_LOG" 2>&1 || true ;;
     esac
+    # compile worker(+피기백 verify)가 dirty 큐에 enqueue한 wiki collection을 즉시 drain해
+    # 다음 SessionStart 전에 같은 세션에서 recall-visible하게 만든다. 편집 자신의 index
+    # kick은 배치/verify 지연 때문에 카드가 큐에 오르기 전에 이미 drain을 마쳐 놓친다.
+    # index_worker는 빈 큐에 no-op이고 KICK/WRITER 락으로 single-flight라 double-kick 무해.
+    # 알려진 bound: 이 시점 다른 kick이 KICK_LOCK을 쥐고 있으면 여기 kick은 busy로 drop된다.
+    # 그래도 큐는 보존되므로 다음 kick/SessionStart에 drain된다(기존엔 항상 SessionStart까지 대기).
+    kick_index
   ) >/dev/null 2>&1 &
 }
 
