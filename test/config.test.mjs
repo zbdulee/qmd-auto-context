@@ -61,11 +61,14 @@ test('신규 필드 파싱', () => {
   assert.equal(cfg.queryTimeout, 8);
 });
 
-test('recallStrategy wikiOnly는 유효값으로 통과하고 잘못된 값만 기본(flat)으로 coerce된다', () => {
+test('recallStrategy 유효값은 통과하고 잘못된/미지정 값은 기본(hierarchical)으로 coerce된다', () => {
   assert.equal(loadConfig(JSON.stringify({ recallStrategy: 'wikiOnly' })).recallStrategy, 'wikiOnly');
   assert.equal(loadConfig(JSON.stringify({ recallStrategy: 'hierarchical' })).recallStrategy, 'hierarchical');
   assert.equal(loadConfig(JSON.stringify({ recallStrategy: 'flat' })).recallStrategy, 'flat');
-  assert.equal(loadConfig(JSON.stringify({ recallStrategy: 'bogus' })).recallStrategy, 'flat');
+  // 알 수 없는 값 → DEFAULT_CONFIG(hierarchical). wiki role이 없으면 hierarchical은 flat과 동일 동작.
+  assert.equal(loadConfig(JSON.stringify({ recallStrategy: 'bogus' })).recallStrategy, 'hierarchical');
+  // 필드 자체 미지정도 동일하게 기본값.
+  assert.equal(loadConfig(JSON.stringify({ collections: ['x'] })).recallStrategy, 'hierarchical');
 });
 
 test('wiki recall 신규 필드는 additive로 normalize 된다', () => {

@@ -32,7 +32,7 @@ DEFAULT_CONFIG = {
     "events": ["sessionStart", "userPromptSubmit", "postToolUse"],
     "indexing": None,
     "collectionRoles": {},
-    "recallStrategy": "flat",
+    "recallStrategy": "hierarchical",
     "wikiPath": ".auto-context/wiki",
     "compile": {
         "enabled": False,
