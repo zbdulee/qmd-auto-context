@@ -419,6 +419,20 @@ def main():
     dropped_skip = 0
     dropped_min_score = 0
 
+    # excludeStatusesFromRecall(contested/discarded 등) wiki 카드 제거를 backfill 판정보다
+    # "먼저" 적용하기 위한 헬퍼. wiki 히트가 전부 제외 대상이면 filtered_results가 비어
+    # hierarchical backfill이 정상 트리거된다(예전엔 exclude가 backfill 뒤라 빈 출력이 됐다).
+    compile_cfg = config.get("compile", {}) if isinstance(config.get("compile"), dict) else {}
+    roles = config.get("collectionRoles", {}) if isinstance(config.get("collectionRoles"), dict) else {}
+    excluded_statuses = set(compile_cfg.get("excludeStatusesFromRecall", ["discarded", "contested"]))
+
+    def drop_excluded_statuses(items):
+        return [
+            r for r in items
+            if roles.get(r.get("_collection", "")) != "wiki"
+            or r.get("_wiki_status", "generated") not in excluded_statuses
+        ]
+
     for r in results:
         filepath = r.get("file", "")
         # Drop wiki metadata files (index.md/log.md) -- aggregate noise.
@@ -441,6 +455,10 @@ def main():
             continue
 
         filtered_results.append(r)
+
+    # 핵심 수정: exclude를 backfill 판정 "전"에 적용. 이래야 wiki 히트가 전부
+    # contested/discarded면 filtered_results가 비어 backfill이 트리거된다.
+    filtered_results = drop_excluded_statuses(filtered_results)
 
     if (
         config.get("recallStrategy") == "hierarchical"
@@ -487,17 +505,8 @@ def main():
                 dropped_min_score += 1
                 continue
             filtered_results.append(r)
-
-    compile_cfg = config.get("compile", {}) if isinstance(config.get("compile"), dict) else {}
-
-    # excludeStatusesFromRecall은 전략 무관 적용: wiki role 결과는 status를 이미 읽었으므로
-    # flat 전략에서도 contested/discarded 카드가 recall로 새지 않는다.
-    roles = config.get("collectionRoles", {}) if isinstance(config.get("collectionRoles"), dict) else {}
-    excluded_statuses = set(compile_cfg.get("excludeStatusesFromRecall", ["discarded", "contested"]))
-    filtered_results = [
-        r for r in filtered_results
-        if roles.get(r.get("_collection", "")) != "wiki" or r.get("_wiki_status", "generated") not in excluded_statuses
-    ]
+        # backfill된 raw 결과에도 동일 필터 적용(raw엔 no-op이나 일관성 유지).
+        filtered_results = drop_excluded_statuses(filtered_results)
 
     if config.get("recallStrategy") == "wikiOnly":
         # wikiOnly: raw는 절대 surface하지 않는다. 라이브 경로에선 wiki만 query해 이미

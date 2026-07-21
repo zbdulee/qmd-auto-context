@@ -40,7 +40,7 @@
 | `collections` | `[]` | qmd에 등록할 logical collection 이름 목록입니다. 비어 있으면 recall은 아무 것도 하지 않습니다. |
 | `collectionPaths` | `{}` | collection 이름별 프로젝트 상대 경로입니다. 일반 문서는 `docs`, wiki는 `.auto-context/wiki`처럼 지정합니다. |
 | `collectionRoles` | `{}` | collection 역할입니다. 허용값은 `raw`, `wiki`, `session`입니다. |
-| `recallStrategy` | `"flat"` | `flat`은 모든 collection을 같이 검색합니다. `hierarchical`은 wiki를 먼저 보고 부족할 때 raw를 fallback으로 봅니다. |
+| `recallStrategy` | `"hierarchical"` | `flat`은 모든 collection을 같이 검색합니다. `hierarchical`은 wiki를 먼저 보고 부족할 때 raw를 fallback으로 봅니다. `wikiOnly`는 wiki만 검색하고 raw fallback을 하지 않습니다(wiki에 없으면 무출력). wiki role collection이 없으면 `hierarchical`은 `flat`과 동일하게 동작합니다. |
 | `minScore` | `0.0` | recall 결과를 주입하기 위한 기본 score 하한입니다. qmd score는 환경에 따라 rank처럼 보일 수 있어 절대 유사도처럼 해석하면 안 됩니다. |
 | `rawFallbackMinScore` | `minScore` | `hierarchical`에서 wiki 결과가 없을 때 raw fallback 결과에 적용할 score 하한입니다. |
 | `topN` | `3` | 최종 컨텍스트에 넣을 최대 문서 수입니다. |

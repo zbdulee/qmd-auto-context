@@ -253,6 +253,72 @@ test('hierarchical recall does not duplicate raw backfill when raw also has no r
   }
 });
 
+test('hierarchical recall backfills raw when the only wiki hit is a contested card (exclude-before-backfill)', async () => {
+  const requests = [];
+  const server = createServer((req, res) => {
+    if (req.method === 'GET' && req.url === '/health') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end('{"ok":true}');
+      return;
+    }
+    if (req.method === 'POST' && req.url === '/query') {
+      let body = '';
+      req.setEncoding('utf8');
+      req.on('data', chunk => { body += chunk; });
+      req.on('end', () => {
+        const payload = JSON.parse(body);
+        requests.push(payload);
+        const isWiki = payload.collections.includes('proj-wiki');
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        // wiki는 contested 카드 하나만(minScore 통과, exclude 대상), raw는 정상 문서.
+        res.end(JSON.stringify({ results: isWiki ? [
+          { file: 'qmd://proj-wiki/concepts/contested.md', title: 'Contested card', score: 0.93 },
+        ] : [
+          { file: 'qmd://proj-docs/docs/raw-source.md', title: 'Raw source', score: 0.88 },
+        ] }));
+      });
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+
+  const tempDir = mkdtempSync(join(process.cwd(), '.tmp-qmd-http-hier-contested-'));
+  try {
+    mkdirSync(join(tempDir, '.auto-context', 'wiki', 'concepts'), { recursive: true });
+    writeFileSync(join(tempDir, '.auto-context', 'wiki', 'concepts', 'contested.md'),
+      '---\nstatus: contested\ncreatedBy: qmd-auto-context\n---\n# Contested\n');
+    writeFileSync(join(tempDir, '.auto-context', 'settings.json'), JSON.stringify({
+      indexing: true,
+      collections: ['proj-wiki', 'proj-docs'],
+      collectionPaths: { 'proj-wiki': '.auto-context/wiki', 'proj-docs': 'docs' },
+      collectionRoles: { 'proj-wiki': 'wiki', 'proj-docs': 'raw' },
+      recallStrategy: 'hierarchical',
+      wikiPath: '.auto-context/wiki',
+      queryTimeout: 1.25,
+    }));
+
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address();
+    const out = await runRecallAsync(
+      JSON.stringify({ prompt: 'config layout 근거를 찾아줘', cwd: tempDir }),
+      { ...process.env, QMD_DAEMON_URL: `http://127.0.0.1:${port}` },
+    );
+
+    // 수정 전엔 contested 카드가 filtered_results를 채워 backfill을 막고 이후 exclude로 비워져
+    // 빈 출력이 됐다. 이제 exclude가 backfill "전"이라 raw backfill(2번째 query)이 나간다.
+    assert.equal(requests.length, 2);
+    assert.deepEqual(requests[0].collections, ['proj-wiki']);
+    assert.deepEqual(requests[1].collections, ['proj-docs']);
+    const parsed = JSON.parse(out);
+    assert.match(parsed.hookSpecificOutput.additionalContext, /Raw source/);
+    assert.doesNotMatch(parsed.hookSpecificOutput.additionalContext, /Contested card/);
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test('wikiOnly recall queries only wiki collections and emits the wiki result', async () => {
   const requests = [];
   const server = createServer((req, res) => {
