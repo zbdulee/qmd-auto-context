@@ -243,17 +243,28 @@ reload() {
 kick_index() {
   if ! mkdir "$KICK_LOCK" 2>/dev/null; then
     if [ -n "$(find "$KICK_LOCK" -maxdepth 0 -mmin +10 2>/dev/null)" ]; then
-      rm -f "$KICK_LOCK/pid" 2>/dev/null || true
+      rm -f "$KICK_LOCK/pid" "$KICK_LOCK/rekick" 2>/dev/null || true
       rmdir "$KICK_LOCK" 2>/dev/null || true
       mkdir "$KICK_LOCK" 2>/dev/null || return 0
     else
+      # busy: 실행 중인 worker에게 재-drain 요청(lost-wakeup 방지). worker가 큐를
+      # 스냅샷한 뒤 enqueue된 항목이 다음 루프에서 처리된다. 이걸 안 하면 KICK_LOCK을
+      # 쥔 긴 embed(수 분) 동안 들어온 compile/verify 카드가 다음 SessionStart까지 대기.
+      : >"$KICK_LOCK/rekick" 2>/dev/null || true
       return 0
     fi
   fi
   (
-    trap 'rm -f "$KICK_LOCK/pid" 2>/dev/null; rmdir "$KICK_LOCK" 2>/dev/null || true' EXIT
+    # trap이 rekick도 지워야 rmdir(빈 디렉토리 요구)이 성공한다 — 안 지우면 lock 누수.
+    trap 'rm -f "$KICK_LOCK/pid" "$KICK_LOCK/rekick" 2>/dev/null; rmdir "$KICK_LOCK" 2>/dev/null || true' EXIT
     echo "$$" >"$KICK_LOCK/pid" 2>/dev/null || true
-    QMD_DAEMON_PORT="$PORT" QMD_BACKEND_MANAGER="$ROOT/core/backend_manager.sh" bash "$INDEX_WORKER_SCRIPT" >>"$MANAGER_LOG" 2>&1 || true
+    while :; do
+      # 이번 run이 커버할 것으로 간주하고 요청을 먼저 소비. run "도중" 들어온 rekick만
+      # 남아 다음 루프를 돈다(잔여 window = 마지막 체크~lock 해제 사이 마이크로초, self-heal).
+      rm -f "$KICK_LOCK/rekick" 2>/dev/null || true
+      QMD_DAEMON_PORT="$PORT" QMD_BACKEND_MANAGER="$ROOT/core/backend_manager.sh" bash "$INDEX_WORKER_SCRIPT" >>"$MANAGER_LOG" 2>&1 || true
+      [ -e "$KICK_LOCK/rekick" ] || break
+    done
   ) >/dev/null 2>&1 &
 }
 

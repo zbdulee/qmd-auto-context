@@ -460,6 +460,13 @@ def main():
     # contested/discarded면 filtered_results가 비어 backfill이 트리거된다.
     filtered_results = drop_excluded_statuses(filtered_results)
 
+    if queried_wiki_first:
+        # wiki-scoped 쿼리(hierarchical/wikiOnly가 wiki 컬렉션만 조회) 결과는 정의상 wiki다.
+        # _collection이 안 풀려 role이 wiki가 아닌 결과는 status 검증 불가 + raw prefix로
+        # 새거나 hierarchical backfill을 막을 수 있어 fail-closed로 drop한다(raw 누출 금지).
+        # backfill로 채운 raw 결과에는 적용하지 않는다(그건 정당한 raw다).
+        filtered_results = [r for r in filtered_results if roles.get(r.get("_collection", "")) == "wiki"]
+
     if (
         config.get("recallStrategy") == "hierarchical"
         and queried_wiki_first

@@ -319,6 +319,67 @@ test('hierarchical recall backfills raw when the only wiki hit is a contested ca
   }
 });
 
+test('hierarchical drops a wiki hit with unresolvable _collection and backfills raw (fail-closed)', async () => {
+  const requests = [];
+  const server = createServer((req, res) => {
+    if (req.method === 'GET' && req.url === '/health') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end('{"ok":true}');
+      return;
+    }
+    if (req.method === 'POST' && req.url === '/query') {
+      let body = '';
+      req.setEncoding('utf8');
+      req.on('data', chunk => { body += chunk; });
+      req.on('end', () => {
+        const payload = JSON.parse(body);
+        requests.push(payload);
+        const isWiki = payload.collections.includes('proj-wiki');
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        // wiki 히트의 file이 슬래시/스킴 없어 _collection이 안 풀린다(unresolvable).
+        res.end(JSON.stringify({ results: isWiki ? [
+          { file: 'orphan-card', title: 'Orphan wiki', score: 0.9 },
+        ] : [
+          { file: 'qmd://proj-docs/docs/raw-source.md', title: 'Raw source', score: 0.88 },
+        ] }));
+      });
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+
+  const tempDir = mkdtempSync(join(process.cwd(), '.tmp-qmd-http-hier-orphan-'));
+  try {
+    mkdirSync(join(tempDir, '.auto-context'), { recursive: true });
+    writeFileSync(join(tempDir, '.auto-context', 'settings.json'), JSON.stringify({
+      indexing: true,
+      collections: ['proj-wiki', 'proj-docs'],
+      collectionRoles: { 'proj-wiki': 'wiki', 'proj-docs': 'raw' },
+      recallStrategy: 'hierarchical',
+      queryTimeout: 1.25,
+    }));
+
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address();
+    const out = await runRecallAsync(
+      JSON.stringify({ prompt: 'config layout 근거를 찾아줘', cwd: tempDir }),
+      { ...process.env, QMD_DAEMON_URL: `http://127.0.0.1:${port}` },
+    );
+
+    // _collection 미해결 wiki 히트는 fail-closed로 drop → filtered 비어 raw backfill 트리거.
+    // 수정 전엔 non-wiki 취급돼 filtered를 채워 backfill을 막고 raw prefix로 샜다.
+    assert.equal(requests.length, 2);
+    assert.deepEqual(requests[1].collections, ['proj-docs']);
+    const parsed = JSON.parse(out);
+    assert.match(parsed.hookSpecificOutput.additionalContext, /Raw source/);
+    assert.doesNotMatch(parsed.hookSpecificOutput.additionalContext, /Orphan wiki/);
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test('wikiOnly recall queries only wiki collections and emits the wiki result', async () => {
   const requests = [];
   const server = createServer((req, res) => {

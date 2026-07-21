@@ -418,6 +418,55 @@ test("kick_wiki_compile body kicks the index worker AFTER the compile worker (so
   assert.ok(kickIdx > caseIdx, "kick_index는 compile worker 실행 뒤에 있어야 함(순서 회귀 방지)");
 });
 
+test("kick-index leaves a rekick request when the lock is busy (lost-wakeup guard)", () => {
+  const home = mkdtempSync(join(tmpdir(), "qmd-kick-rekick-"));
+  try {
+    const lockDir = join(home, "kick.lock.d");
+    mkdirSync(lockDir, { recursive: true }); // 다른 worker가 KICK_LOCK을 쥔 상태 시뮬레이션
+    const indexLog = join(home, "index.log");
+    const indexWorker = join(home, "index-worker.sh");
+    writeFileSync(indexWorker, `#!/usr/bin/env bash\necho ran >> "${indexLog}"\n`, { mode: 0o755 });
+    const result = run(["kick-index"], {
+      HOME: home,
+      QMD_BACKEND_STATE_DIR: home,
+      QMD_WORKER_KICK_LOCKDIR: lockDir,
+      QMD_INDEX_WORKER_SCRIPT: indexWorker,
+    });
+    assert.equal(result.status, 0);
+    assert.equal(result.stdout, "");
+    assert.ok(existsSync(join(lockDir, "rekick")), "busy면 rekick 요청 파일을 남겨야 함(lost-wakeup 방지)");
+    assert.ok(!existsSync(indexLog), "busy면 worker를 새로 돌리지 않음");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("kick-index re-drains when a rekick request arrives during the worker run", () => {
+  const home = mkdtempSync(join(tmpdir(), "qmd-kick-redrain-"));
+  try {
+    const lockDir = join(home, "kick.lock.d"); // kick_index가 직접 생성
+    const counter = join(home, "counter");
+    const indexWorker = join(home, "index-worker.sh");
+    // 첫 run에서 run 도중 enqueue(=rekick 요청)를 시뮬레이션 → 루프가 한 번 더 돈다.
+    writeFileSync(indexWorker,
+      `#!/usr/bin/env bash\nn=$(cat "${counter}" 2>/dev/null || echo 0)\nn=$((n+1))\necho "$n" > "${counter}"\n[ "$n" -eq 1 ] && : > "${lockDir}/rekick"\n`,
+      { mode: 0o755 });
+    const result = run(["kick-index"], {
+      HOME: home,
+      QMD_BACKEND_STATE_DIR: home,
+      QMD_WORKER_KICK_LOCKDIR: lockDir,
+      QMD_INDEX_WORKER_SCRIPT: indexWorker,
+    });
+    assert.equal(result.status, 0);
+    for (let i = 0; i < 100 && (!existsSync(counter) || readFileSync(counter, "utf8").trim() !== "2"); i++) {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+    }
+    assert.equal(readFileSync(counter, "utf8").trim(), "2", "rekick 요청이 있으면 worker가 두 번 돈다");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("kick-wiki-compile --flush passes --flush-all to the worker", () => {
   const d = mkdtempSync(join(tmpdir(), 'bm-flush-'));
   const argsLog = join(d, 'args.txt');
