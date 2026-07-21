@@ -304,7 +304,7 @@ def normalize_config(input_config):
     config["allowRoots"] = string_list(input_config.get("allowRoots"), DEFAULT_CONFIG["allowRoots"])
     config["prefixStyle"] = input_config.get("prefixStyle") if input_config.get("prefixStyle") in ("full", "tag") else DEFAULT_CONFIG["prefixStyle"]
     config["collectionRoles"] = collection_role_map(input_config.get("collectionRoles"), config["collections"])
-    config["recallStrategy"] = input_config.get("recallStrategy") if input_config.get("recallStrategy") in ("flat", "hierarchical") else DEFAULT_CONFIG["recallStrategy"]
+    config["recallStrategy"] = input_config.get("recallStrategy") if input_config.get("recallStrategy") in ("flat", "hierarchical", "wikiOnly") else DEFAULT_CONFIG["recallStrategy"]
     config["wikiPath"] = input_config.get("wikiPath") if isinstance(input_config.get("wikiPath"), str) else DEFAULT_CONFIG["wikiPath"]
     config["compile"] = compile_config(input_config.get("compile"))
     if "events" in input_config and isinstance(input_config.get("events"), list):

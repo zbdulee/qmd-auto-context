@@ -61,6 +61,13 @@ test('신규 필드 파싱', () => {
   assert.equal(cfg.queryTimeout, 8);
 });
 
+test('recallStrategy wikiOnly는 유효값으로 통과하고 잘못된 값만 기본(flat)으로 coerce된다', () => {
+  assert.equal(loadConfig(JSON.stringify({ recallStrategy: 'wikiOnly' })).recallStrategy, 'wikiOnly');
+  assert.equal(loadConfig(JSON.stringify({ recallStrategy: 'hierarchical' })).recallStrategy, 'hierarchical');
+  assert.equal(loadConfig(JSON.stringify({ recallStrategy: 'flat' })).recallStrategy, 'flat');
+  assert.equal(loadConfig(JSON.stringify({ recallStrategy: 'bogus' })).recallStrategy, 'flat');
+});
+
 test('wiki recall 신규 필드는 additive로 normalize 된다', () => {
   const cfg = loadConfig(JSON.stringify({
     collections: ['proj-docs', 'proj-wiki'],

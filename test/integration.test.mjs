@@ -253,6 +253,162 @@ test('hierarchical recall does not duplicate raw backfill when raw also has no r
   }
 });
 
+test('wikiOnly recall queries only wiki collections and emits the wiki result', async () => {
+  const requests = [];
+  const server = createServer((req, res) => {
+    if (req.method === 'GET' && req.url === '/health') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end('{"ok":true}');
+      return;
+    }
+    if (req.method === 'POST' && req.url === '/query') {
+      let body = '';
+      req.setEncoding('utf8');
+      req.on('data', chunk => { body += chunk; });
+      req.on('end', () => {
+        requests.push(JSON.parse(body));
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ results: [
+          { file: 'qmd://proj-wiki/.auto-context/wiki/decisions/config-layout.md', title: 'Config layout', score: 0.93 },
+        ] }));
+      });
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+
+  const tempDir = mkdtempSync(join(process.cwd(), '.tmp-qmd-http-wikionly-'));
+  try {
+    mkdirSync(join(tempDir, '.auto-context'), { recursive: true });
+    writeFileSync(join(tempDir, '.auto-context', 'settings.json'), JSON.stringify({
+      indexing: true,
+      collections: ['proj-wiki', 'proj-docs'],
+      collectionRoles: { 'proj-wiki': 'wiki', 'proj-docs': 'raw' },
+      recallStrategy: 'wikiOnly',
+      queryTimeout: 1.25,
+    }));
+
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address();
+    const out = await runRecallAsync(
+      JSON.stringify({ prompt: 'config layout decision 내용을 알려줘', cwd: tempDir }),
+      { ...process.env, QMD_DAEMON_URL: `http://127.0.0.1:${port}` },
+    );
+
+    assert.equal(requests.length, 1);
+    assert.deepEqual(requests[0].collections, ['proj-wiki']);
+    const parsed = JSON.parse(out);
+    assert.match(parsed.hookSpecificOutput.additionalContext, /Config layout/);
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test('wikiOnly recall does NOT backfill raw when wiki has no results (differs from hierarchical)', async () => {
+  const requests = [];
+  const server = createServer((req, res) => {
+    if (req.method === 'GET' && req.url === '/health') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end('{"ok":true}');
+      return;
+    }
+    if (req.method === 'POST' && req.url === '/query') {
+      let body = '';
+      req.setEncoding('utf8');
+      req.on('data', chunk => { body += chunk; });
+      req.on('end', () => {
+        requests.push(JSON.parse(body));
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ results: [] }));
+      });
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+
+  const tempDir = mkdtempSync(join(process.cwd(), '.tmp-qmd-http-wikionly-empty-'));
+  try {
+    mkdirSync(join(tempDir, '.auto-context'), { recursive: true });
+    writeFileSync(join(tempDir, '.auto-context', 'settings.json'), JSON.stringify({
+      indexing: true,
+      collections: ['proj-wiki', 'proj-docs'],
+      collectionRoles: { 'proj-wiki': 'wiki', 'proj-docs': 'raw' },
+      recallStrategy: 'wikiOnly',
+      queryTimeout: 1.25,
+    }));
+
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address();
+    const out = await runRecallAsync(
+      JSON.stringify({ prompt: 'config layout 근거를 찾아줘', cwd: tempDir }),
+      { ...process.env, QMD_DAEMON_URL: `http://127.0.0.1:${port}` },
+    );
+
+    // 결정적 차이: hierarchical이면 여기서 raw backfill(2번째 query)이 나가지만 wikiOnly는 안 나간다.
+    assert.equal(requests.length, 1);
+    assert.deepEqual(requests[0].collections, ['proj-wiki']);
+    assert.equal(out, '');
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test('wikiOnly recall makes no query and emits nothing when no wiki role is configured', async () => {
+  const requests = [];
+  const server = createServer((req, res) => {
+    if (req.method === 'GET' && req.url === '/health') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end('{"ok":true}');
+      return;
+    }
+    if (req.method === 'POST' && req.url === '/query') {
+      let body = '';
+      req.setEncoding('utf8');
+      req.on('data', chunk => { body += chunk; });
+      req.on('end', () => {
+        requests.push(JSON.parse(body));
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ results: [
+          { file: 'qmd://proj-docs/docs/raw-source.md', title: 'Raw source', score: 0.99 },
+        ] }));
+      });
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+
+  const tempDir = mkdtempSync(join(process.cwd(), '.tmp-qmd-http-wikionly-norole-'));
+  try {
+    mkdirSync(join(tempDir, '.auto-context'), { recursive: true });
+    writeFileSync(join(tempDir, '.auto-context', 'settings.json'), JSON.stringify({
+      indexing: true,
+      collections: ['proj-docs'],
+      collectionRoles: { 'proj-docs': 'raw' },
+      recallStrategy: 'wikiOnly',
+      queryTimeout: 1.25,
+    }));
+
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address();
+    const out = await runRecallAsync(
+      JSON.stringify({ prompt: 'raw source 내용을 알려줘', cwd: tempDir }),
+      { ...process.env, QMD_DAEMON_URL: `http://127.0.0.1:${port}` },
+    );
+
+    // wiki role이 없으면 query 자체를 만들지 않고(raw 누출 금지) 무출력.
+    assert.equal(requests.length, 0);
+    assert.equal(out, '');
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test('hierarchical recall backfills raw when wiki results are below minScore', async () => {
   const requests = [];
   const server = createServer((req, res) => {

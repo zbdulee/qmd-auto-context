@@ -351,7 +351,8 @@ def main():
                 except (urllib.error.URLError, OSError, ValueError, json.JSONDecodeError):
                     return None
 
-            if config.get("recallStrategy") == "hierarchical":
+            strategy = config.get("recallStrategy")
+            if strategy in ("hierarchical", "wikiOnly"):
                 roles = config.get("collectionRoles", {})
                 wiki_collections = [c for c in collections if roles.get(c) == "wiki"]
                 raw_collections = [c for c in collections if roles.get(c) != "wiki"]
@@ -361,6 +362,11 @@ def main():
                     if results is None:
                         log_recall_event(log_path, "query_failed", daemon=daemon_url)
                         return 0
+                elif strategy == "wikiOnly":
+                    # wikiOnly: wiki role이 하나도 없으면 surface할 게 없다.
+                    # hierarchical과 달리 raw로 fallback하지 않는다(raw 누출 금지).
+                    log_recall_event(log_path, "no_wiki_collections")
+                    return 0
                 else:
                     results = query_daemon(collections)
             else:
@@ -488,7 +494,11 @@ def main():
         if roles.get(r.get("_collection", "")) != "wiki" or r.get("_wiki_status", "generated") not in excluded_statuses
     ]
 
-    if config.get("recallStrategy") == "hierarchical":
+    if config.get("recallStrategy") == "wikiOnly":
+        # wikiOnly: raw는 절대 surface하지 않는다. 라이브 경로에선 wiki만 query해 이미
+        # wiki뿐이지만, fixture 등으로 raw가 섞여 들어와도 여기서 엄격 제거한다.
+        filtered_results = [r for r in filtered_results if roles.get(r.get("_collection", "")) == "wiki"]
+    elif config.get("recallStrategy") == "hierarchical":
         wiki_results = [r for r in filtered_results if roles.get(r.get("_collection", "")) == "wiki"]
         if wiki_results:
             filtered_results = wiki_results
