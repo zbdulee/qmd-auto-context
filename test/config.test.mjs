@@ -112,6 +112,7 @@ test('wiki recall 신규 필드는 additive로 normalize 된다', () => {
     mergeNeededPath: '.auto-context/compile/merge-needed.jsonl',
     excludeStatusesFromRecall: ['discarded', 'contested'],
     lowPriorityStatuses: ['generated', 'tentative'],
+    recallVerifiedOnly: true,
     triggers: ['manual', 'post_session_summary', 'post_tool_source'],
     canonSignals: ['확정'],
     maxAutoPageLines: 80,
@@ -129,6 +130,15 @@ test('wiki recall 신규 필드는 additive로 normalize 된다', () => {
       maxPerRun: 3,
     },
   });
+});
+
+test('compile recallVerifiedOnly: 기본 true, bool 커스텀 존중, 불량 값은 기본값 폴백', () => {
+  // 미설정 → 기본 true
+  assert.equal(loadConfig(JSON.stringify({ compile: { enabled: true } })).compile.recallVerifiedOnly, true);
+  // 명시 false 존중
+  assert.equal(loadConfig(JSON.stringify({ compile: { recallVerifiedOnly: false } })).compile.recallVerifiedOnly, false);
+  // 불량 값(문자열)은 기본값 true로 폴백
+  assert.equal(loadConfig(JSON.stringify({ compile: { recallVerifiedOnly: 'yes' } })).compile.recallVerifiedOnly, true);
 });
 
 test('compile verify config: 커스텀 값 정규화 + 불량 값은 기본값 폴백', () => {

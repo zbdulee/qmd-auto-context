@@ -124,6 +124,10 @@ test('hierarchical recall queries wiki collections before raw backfill', async (
       collectionRoles: { 'proj-wiki': 'wiki', 'proj-docs': 'raw' },
       recallStrategy: 'hierarchical',
       queryTimeout: 1.25,
+      // wiki-first 라우팅 + generated 배지 검증: 디스크에 카드 파일이 없어 status가
+      // generated로 판정되므로, 기본 recallVerifiedOnly(true)면 제외돼 backfill이 돌아
+      // 라우팅 검증이 무너진다. 미검수 경로 검증이라 flag를 끈다.
+      compile: { recallVerifiedOnly: false },
     }));
 
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -196,6 +200,69 @@ test('hierarchical recall backfills raw collections when wiki has no results', a
     const parsed = JSON.parse(out);
     assert.match(parsed.hookSpecificOutput.additionalContext, /\[raw\]/);
     assert.match(parsed.hookSpecificOutput.additionalContext, /Raw source/);
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test('recallVerifiedOnly 기본(true): wiki가 미검수 generated뿐이면 live raw backfill로 안전 degrade', async () => {
+  // 핵심 신규 동작의 live 경로 검증: wiki 쿼리는 generated 카드를 돌려주지만
+  // 디스크에 카드 파일이 없어 미검수로 판정 → drop → filtered_results 빔 →
+  // raw 컬렉션 backfill이 트리거돼 원문이 surface된다(미검수 요약 대신 원문).
+  const requests = [];
+  const server = createServer((req, res) => {
+    if (req.method === 'GET' && req.url === '/health') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end('{"ok":true}');
+      return;
+    }
+    if (req.method === 'POST' && req.url === '/query') {
+      let body = '';
+      req.setEncoding('utf8');
+      req.on('data', chunk => { body += chunk; });
+      req.on('end', () => {
+        const payload = JSON.parse(body);
+        requests.push(payload);
+        const isWiki = payload.collections.includes('proj-wiki');
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ results: isWiki ? [
+          { file: 'qmd://proj-wiki/.auto-context/wiki/decisions/config-layout.md', title: 'Config layout', score: 0.93 },
+        ] : [
+          { file: 'qmd://proj-docs/docs/raw-source.md', title: 'Raw source', score: 0.7 },
+        ] }));
+      });
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+
+  const tempDir = mkdtempSync(join(process.cwd(), '.tmp-qmd-http-vonly-bf-'));
+  try {
+    mkdirSync(join(tempDir, '.auto-context'), { recursive: true });
+    writeFileSync(join(tempDir, '.auto-context', 'settings.json'), JSON.stringify({
+      indexing: true,
+      collections: ['proj-wiki', 'proj-docs'],
+      collectionRoles: { 'proj-wiki': 'wiki', 'proj-docs': 'raw' },
+      recallStrategy: 'hierarchical',
+      queryTimeout: 1.25,
+      // recallVerifiedOnly 미설정 → 기본 true
+    }));
+
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address();
+    const out = await runRecallAsync(
+      JSON.stringify({ prompt: 'config layout decision 내용을 알려줘', cwd: tempDir }),
+      { ...process.env, QMD_DAEMON_URL: `http://127.0.0.1:${port}` },
+    );
+
+    assert.equal(requests.length, 2, 'wiki 쿼리 후 미검수 drop → raw backfill 쿼리까지 2회');
+    assert.deepEqual(requests[0].collections, ['proj-wiki']);
+    assert.deepEqual(requests[1].collections, ['proj-docs']);
+    const parsed = JSON.parse(out);
+    assert.match(parsed.hookSpecificOutput.additionalContext, /Raw source/, '미검수 wiki 대신 raw 원문 surface');
+    assert.doesNotMatch(parsed.hookSpecificOutput.additionalContext, /config-layout/, '미검수 generated 카드는 제외');
   } finally {
     await new Promise(resolve => server.close(resolve));
     rmSync(tempDir, { recursive: true, force: true });
@@ -414,6 +481,9 @@ test('wikiOnly recall queries only wiki collections and emits the wiki result', 
       collectionRoles: { 'proj-wiki': 'wiki', 'proj-docs': 'raw' },
       recallStrategy: 'wikiOnly',
       queryTimeout: 1.25,
+      // wikiOnly 라우팅 검증: 디스크에 카드 파일이 없어 status가 generated로 판정되므로,
+      // 기본 recallVerifiedOnly(true)면 제외돼 빈 출력이 된다. 미검수 경로 검증이라 flag를 끈다.
+      compile: { recallVerifiedOnly: false },
     }));
 
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));

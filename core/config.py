@@ -47,6 +47,7 @@ DEFAULT_CONFIG = {
         "mergeNeededPath": ".auto-context/compile/merge-needed.jsonl",
         "excludeStatusesFromRecall": ["discarded", "contested"],
         "lowPriorityStatuses": ["generated", "tentative"],
+        "recallVerifiedOnly": True,
         "triggers": [],
         "canonSignals": [],
         "maxAutoPageLines": 120,
@@ -206,6 +207,11 @@ def compile_config(value):
         status for status in string_list(value.get("lowPriorityStatuses"), defaults["lowPriorityStatuses"])
         if status in {"generated", "tentative", "superseded"}
     ]
+    result["recallVerifiedOnly"] = (
+        value.get("recallVerifiedOnly")
+        if isinstance(value.get("recallVerifiedOnly"), bool)
+        else defaults["recallVerifiedOnly"]
+    )
     result["triggers"] = [
         trigger for trigger in string_list(value.get("triggers"), defaults["triggers"])
         if trigger in COMPILE_TRIGGERS

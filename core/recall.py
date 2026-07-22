@@ -425,13 +425,29 @@ def main():
     compile_cfg = config.get("compile", {}) if isinstance(config.get("compile"), dict) else {}
     roles = config.get("collectionRoles", {}) if isinstance(config.get("collectionRoles"), dict) else {}
     excluded_statuses = set(compile_cfg.get("excludeStatusesFromRecall", ["discarded", "contested"]))
+    # recallVerifiedOnly(기본 True): 검수급(_wiki_reviewed) wiki 카드만 surface하고
+    # 미검수 generated/tentative는 exclude와 동일하게 backfill 판정 "전"에 제거한다.
+    # 이러면 wiki 히트가 전부 미검수여도 filtered_results가 비어 hierarchical backfill이
+    # raw 원문으로 정상 fallback한다(미검수 요약 대신 원문 소스 노출 — 의도된 안전 degrade).
+    verified_only = bool(compile_cfg.get("recallVerifiedOnly", True))
+    # verified_only 필터로 drop된 미검수 wiki 카드 수. 빈 출력이 "미검수 제외" 때문인지
+    # 진단 가능하게 log에 노출한다(경로 해석 실패로 검수 카드가 fail-closed drop된
+    # misconfiguration도 여기 잡혀 no_results_after_filter의 원인을 특정할 수 있다).
+    unverified_counter = [0]
 
     def drop_excluded_statuses(items):
-        return [
-            r for r in items
-            if roles.get(r.get("_collection", "")) != "wiki"
-            or r.get("_wiki_status", "generated") not in excluded_statuses
-        ]
+        kept = []
+        for r in items:
+            if roles.get(r.get("_collection", "")) != "wiki":
+                kept.append(r)
+                continue
+            if r.get("_wiki_status", "generated") in excluded_statuses:
+                continue
+            if verified_only and not r.get("_wiki_reviewed", False):
+                unverified_counter[0] += 1
+                continue
+            kept.append(r)
+        return kept
 
     for r in results:
         filepath = r.get("file", "")
@@ -543,6 +559,7 @@ def main():
         candidates=len(results),
         dropped_skip=dropped_skip,
         dropped_min_score=dropped_min_score,
+        dropped_unverified=unverified_counter[0],
         dropped_top_n=max(0, len(filtered_results) - len(final_results)),
         selected=len(final_results),
         min_score=active_min_score,
