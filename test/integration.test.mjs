@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { createServer } from 'node:http';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 
 function runRecallAsync(input, env) {
@@ -668,6 +668,8 @@ test('hierarchical recall backfills raw when wiki results are below minScore', a
 });
 
 test('hierarchical recall applies rawFallbackMinScore to raw backfill results', async () => {
+  // 임계 이상 raw 후보가 0건이면 순위 폴백도 아무것도 살리지 않는다 — 사용자가 임계로
+  // 명시적으로 차단한 것이므로 0건이 정답이다(docs/settings.md 의 rawFallbackMinScore 계약).
   const requests = [];
   const server = createServer((req, res) => {
     if (req.method === 'GET' && req.url === '/health') {
@@ -709,15 +711,23 @@ test('hierarchical recall applies rawFallbackMinScore to raw backfill results', 
 
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
     const { port } = server.address();
+    const logPath = join(tempDir, 'recall.log');
     const out = await runRecallAsync(
       JSON.stringify({ prompt: 'config layout 근거를 찾아줘', cwd: tempDir }),
-      { ...process.env, QMD_DAEMON_URL: `http://127.0.0.1:${port}` },
+      { ...process.env, QMD_DAEMON_URL: `http://127.0.0.1:${port}`, QMD_RECALL_LOG: logPath },
     );
 
     assert.equal(requests.length, 2);
     assert.deepEqual(requests[0].collections, ['proj-wiki']);
     assert.deepEqual(requests[1].collections, ['proj-docs']);
-    assert.equal(out, '');
+    assert.equal(out, '', 'raw fallback 임계가 실제로 차단해야 함');
+    const selection = readFileSync(logPath, 'utf8')
+      .trim().split('\n').map(line => JSON.parse(line))
+      .find(e => e.event === 'qmd_recall_selection');
+    assert.equal(selection.selected, 0);
+    assert.equal(selection.dropped_min_score, 1, '컷 탈락 수는 그대로 기록');
+    assert.equal(selection.rank_fallback_used, false, '컷 자체를 무효화하면 안 된다');
+    assert.equal(selection.min_score, 0.7, 'active min_score는 rawFallbackMinScore');
   } finally {
     await new Promise(resolve => server.close(resolve));
     rmSync(tempDir, { recursive: true, force: true });

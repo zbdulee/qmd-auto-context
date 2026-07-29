@@ -11,7 +11,8 @@ Usage: shadow_probe.py '<options json>'
   options: {
     "prompt": str,
     "scenario": "default" | "lex-dead" | "wiki-empty" | "filtered-out"
-                | "ep-deep" | "fail-after-first" | "slow-after-first",
+                | "all-unverified" | "ep-deep" | "ep-rescue" | "raw-ranked"
+                | "fail-after-first" | "slow-after-first",
     "shadow": bool,      # set QMD_SHADOW_QUERY=1
     "log": bool,         # set QMD_RECALL_LOG to a temp file
     "fixture": bool,     # run through QMD_QUERY_FIXTURE instead of the daemon
@@ -45,6 +46,28 @@ FILTERED_OUT_WIKI = [
     {"file": "qmd://proj-wiki/concepts/card.md", "title": "Card", "score": 0.5},
     {"file": "qmd://proj-wiki/concepts/card2.md", "title": "Card 2", "score": 0.33},
 ]
+# 후보 전체가 미검수(generated)인 경우 — 순위 폴백이 여기서는 아무것도 살리지 않아야
+# 한다(recallVerifiedOnly 의도 보존: 미검수 카드를 캐논 근거로 쓰지 않는다).
+ALL_UNVERIFIED_WIKI = [
+    {"file": "qmd://proj-wiki/concepts/gen.md", "title": "Generated", "score": 1},
+    {"file": "qmd://proj-wiki/concepts/gen2.md", "title": "Generated 2", "score": 0.5},
+    {"file": "qmd://proj-wiki/concepts/gen3.md", "title": "Generated 3", "score": 0.33},
+]
+# promotion + rescue 동시 발생: 1위(미검수)와 3위 EP 카드(미검수, promotion으로 score
+# 1.0)가 모두 hard filter로 떨어지고, 데몬 2위인 검수 카드가 구제된다. 재정렬 후 위치는
+# 3이지만 로그의 rescued_original_rank 는 promotion 전 데몬 순위(2)여야 한다.
+EP_RESCUE_WIKI = [
+    {"file": "qmd://proj-wiki/concepts/gen.md", "title": "Generated", "score": 1},
+    {"file": "qmd://proj-wiki/concepts/card.md", "title": "Card", "score": 0.5},
+    {"file": "qmd://proj-wiki/concepts/ep-99.md", "title": "EP 99", "score": 0.33},
+]
+# raw 후보에 순위 차이를 준다(RAW_HITS 는 동점 score 전제를 검증하는 다른 테스트가 써서
+# 그대로 둔다). raw phase 의 순위 폴백/차단을 보려면 서로 다른 score 가 필요하다.
+RAW_RANKED = [
+    {"file": "qmd://proj/raw.md", "title": "Raw doc", "score": 1},
+    {"file": "qmd://proj/other.md", "title": "Other", "score": 0.5},
+    {"file": "qmd://proj/third.md", "title": "Third", "score": 0.33},
+]
 # EP exact-match promotion 검증용: EP 파일이 4위(0.25)로 절단 밖에 있다.
 EP_DEEP_WIKI = [
     {"file": "qmd://proj-wiki/concepts/card.md", "title": "Card", "score": 1},
@@ -66,6 +89,12 @@ def _results_for(payload: dict) -> list[dict]:
         return []
     if scenario == "filtered-out" and is_wiki:
         return FILTERED_OUT_WIKI
+    if scenario == "all-unverified" and is_wiki:
+        return ALL_UNVERIFIED_WIKI
+    if scenario == "ep-rescue" and is_wiki:
+        return EP_RESCUE_WIKI
+    if scenario == "raw-ranked":
+        return [] if is_wiki else RAW_RANKED
     if scenario == "ep-deep" and is_wiki:
         return EP_DEEP_WIKI
     return WIKI_HIT if is_wiki else RAW_HITS
@@ -121,6 +150,10 @@ def _write_project(project_dir: pathlib.Path, overrides: dict) -> None:
     (wiki / "ep-12.md").write_text("---\nstatus: verified\n---\n# EP 12\n", encoding="utf-8")
     # 미검수 → recallVerifiedOnly가 drop (dropped_unverified 카운트).
     (wiki / "gen.md").write_text("---\nstatus: generated\n---\n# Generated\n", encoding="utf-8")
+    (wiki / "gen2.md").write_text("---\nstatus: generated\n---\n# Generated 2\n", encoding="utf-8")
+    (wiki / "gen3.md").write_text("---\nstatus: generated\n---\n# Generated 3\n", encoding="utf-8")
+    # 미검수 EP 카드 — promotion 은 되지만 recallVerifiedOnly 가 drop 한다.
+    (wiki / "ep-99.md").write_text("---\nstatus: generated\n---\n# EP 99\n", encoding="utf-8")
     docs = project_dir / "docs"
     docs.mkdir()
     (docs / "raw.md").write_text("# Raw doc\n", encoding="utf-8")

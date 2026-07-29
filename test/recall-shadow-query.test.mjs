@@ -111,31 +111,51 @@ test('shadow on: rank 포함 진단 라인 + lex/vec 분리 질의 + raw 대조'
   }]);
 });
 
-test('shadow: 데몬은 결과를 냈지만 후속 필터로 전멸한 경우를 판정이 잡는다', () => {
+test('shadow: 필터 곱셈으로 전멸한 라이브 케이스가 순위 폴백으로 1건 구제된다', () => {
   // 라이브 재현: 후보 3건 → 1위는 미검수(generated), 2·3위는 minScore 순위 컷.
+  // 순위 폴백 도입 전에는 최종 0건이었다(docs/plans 5.0). 이제 컷 밖의 첫 eligible
+  // (2위, verified)을 정확히 1건만 살린다.
   const r = probe({
     log: true,
     shadow: true,
     scenario: 'filtered-out',
     settings: { minScore: 0.8 },
   });
-  assert.equal(r.stdout.trim(), '', '최종 0건이면 빈 출력');
+  assert.match(r.stdout, /card\.md/, '컷 밖 검수 카드가 구제되어야 함');
+  assert.doesNotMatch(r.stdout, /gen\.md/, '미검수 1위는 여전히 surface 금지');
   const s = shadowLine(r)[0];
 
-  // 데몬은 분명히 결과를 냈다 — 이전 verdict(primary.count===0)는 여기서 false였다.
   assert.equal(s.primary.count, 3, '데몬 후보는 존재');
   assert.equal(s.primary.top[0].status, 'generated');
   assert.equal(s.raw.count, 3);
-  assert.equal(s.selected.length, 0);
+  assert.equal(s.selected.length, 1, '정확히 1건만 구제');
   assert.equal(
-    s.verdict.selected_empty_raw_nonempty, true,
-    '필터 곱셈으로 0건이 된 손실을 잡아야 함 (이 케이스가 MAJOR 회귀)',
+    s.verdict.selected_empty_raw_nonempty, false,
+    '구제됐으므로 더 이상 손실이 아니다',
   );
 
-  // 라인 하나로 "왜 0건인가"가 읽혀야 한다.
+  // dropped_* 는 최초 cutoff/drop 수를 그대로 유지한다(집계 호환) — rescue는 별도 필드.
+  assert.equal(s.selection_reason, 'selected');
+  assert.equal(s.dropped_min_score, 2, 'minScore 0.8 = 1위만 통과 → 2건 탈락(그대로 기록)');
+  assert.equal(s.dropped_unverified, 1, '남은 1위가 미검수라 제거(그대로 기록)');
+  assert.equal(s.rank_fallback_used, true);
+  assert.equal(s.rescued_original_rank, 2, '구제된 결과의 원래 순위');
+  assert.equal(s.fallback_phase, 'wiki');
+});
+
+test('shadow: 후보 전체가 미검수면 순위 폴백도 아무것도 살리지 않는다', () => {
+  const r = probe({
+    log: true,
+    shadow: true,
+    scenario: 'all-unverified',
+    settings: { minScore: 0.8 },
+  });
+  assert.equal(r.stdout.trim(), '', '미검수 카드는 rescue 대상이 아니므로 0건 유지');
+  const s = shadowLine(r)[0];
+  assert.equal(s.primary.count, 3, '데몬 후보는 존재');
   assert.equal(s.selection_reason, 'no_results_after_filter');
-  assert.equal(s.dropped_min_score, 2, 'minScore 0.8 = 1위만 통과 → 2건 탈락');
-  assert.equal(s.dropped_unverified, 1, '남은 1위가 미검수라 제거');
+  assert.equal(s.rank_fallback_used, false);
+  assert.equal('fallback_phase' in s, false);
 });
 
 test('shadow: EP promotion으로 절단 밖에서 올라온 결과의 원래 rank가 남는다', () => {

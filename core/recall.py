@@ -408,6 +408,7 @@ def log_shadow_diagnostics(
     dropped_min_score: int,
     dropped_unverified: int,
     dropped_top_n: int,
+    fallback_fields: dict | None = None,
 ) -> None:
     """recall 품질 손실을 정량화하는 한 줄 JSON(`qmd_recall_shadow`)을 기록한다.
 
@@ -480,6 +481,9 @@ def log_shadow_diagnostics(
             dropped_min_score=dropped_min_score,
             dropped_unverified=dropped_unverified,
             dropped_top_n=dropped_top_n,
+            # 순위 폴백(rescue): cutoff 밖 eligible 1건을 살렸는지 여부·원래 rank·phase.
+            # dropped_* 와 함께 보면 "필터 곱셈으로 0건 → 1건 구제"가 이 라인에서 읽힌다.
+            **(fallback_fields or {}),
             # rerank=False라 score는 1/rank다. 서로 다른 query의 score를 비교하는 것은
             # 무의미하므로(각 query 안에서만 순위 의미) 판정에는 rank/count만 쓴다.
             score_model="1/rank (rerank=false)",
@@ -579,7 +583,8 @@ def main():
     shadow_on = shadow_diagnostics_enabled()
     shadow_primary = None
     shadow_raw = None
-    shadow_rank_index: dict[str, int] = {}
+    # 데몬 반환 순위(promotion·정렬 전) map. shadow 진단과 순위 폴백이 공유한다.
+    rank_index: dict[str, int] = {}
 
     # lex/vec 쿼리 문자열은 순수 계산이라 fixture 경로에서도 만들어 둔다(진단 로그용).
     lexical_query = " ".join(deduped_lexical_terms)
@@ -672,12 +677,14 @@ def main():
             result["_wiki_status"] = wiki_meta["status"]
             result["_wiki_reviewed"] = wiki_meta["reviewed"]
 
-    # shadow 진단용 primary 스냅샷: 데몬이 돌려준 "순서"와 원래 score를 여기서 굳힌다.
-    # 아래 ep promotion이 score를 1.0으로 덮어쓰고 정렬이 순서를 바꾸므로, 그 전에
-    # 떠 놓지 않으면 rank 정보가 소실된다. 추가 query 0건(이미 받은 결과 재사용).
+    # 데몬이 돌려준 "원래 순위"를 promotion/정렬 전에 굳힌다. ep promotion이 score를
+    # 1.0으로 덮어쓰고 재정렬이 순서를 바꾸므로 여기서 떠 놓지 않으면 복원할 수 없다.
+    # shadow 진단(selected[].original_rank)과 순위 폴백(rescued_original_rank)이
+    # **같은 map**을 써야 한 로그 줄 안에서 두 rank가 어긋나지 않는다.
+    rank_index = build_rank_index(results)
+    # shadow 진단용 primary 스냅샷(추가 query 0건 — 이미 받은 결과 재사용).
     if shadow_on:
         shadow_primary = summarize_shadow_results(results)
-        shadow_rank_index = build_rank_index(results)
 
     if "ep" in config.get("lexicalPatterns", []):
         promote_ep_exact_matches(results, ep_numbers(prompt))
@@ -692,79 +699,144 @@ def main():
     if ".auto-context-ignore" not in skip_paths:
         skip_paths.append(".auto-context-ignore")
         
-    filtered_results = []
     min_score = float(config.get("minScore", 0.0))
     raw_fallback_min_score = float(config.get("rawFallbackMinScore", min_score))
     active_min_score = min_score
-    dropped_skip = 0
-    dropped_min_score = 0
 
     # excludeStatusesFromRecall(contested/discarded 등) wiki 카드 제거를 backfill 판정보다
-    # "먼저" 적용하기 위한 헬퍼. wiki 히트가 전부 제외 대상이면 filtered_results가 비어
+    # "먼저" 적용한다. wiki 히트가 전부 제외 대상이면 cutoff 통과 집합이 비어
     # hierarchical backfill이 정상 트리거된다(예전엔 exclude가 backfill 뒤라 빈 출력이 됐다).
     compile_cfg = config.get("compile", {}) if isinstance(config.get("compile"), dict) else {}
     roles = config.get("collectionRoles", {}) if isinstance(config.get("collectionRoles"), dict) else {}
     excluded_statuses = set(compile_cfg.get("excludeStatusesFromRecall", ["discarded", "contested"]))
     # recallVerifiedOnly(기본 True): 검수급(_wiki_reviewed) wiki 카드만 surface하고
     # 미검수 generated/tentative는 exclude와 동일하게 backfill 판정 "전"에 제거한다.
-    # 이러면 wiki 히트가 전부 미검수여도 filtered_results가 비어 hierarchical backfill이
+    # 이러면 wiki 히트가 전부 미검수여도 cutoff 통과 집합이 비어 hierarchical backfill이
     # raw 원문으로 정상 fallback한다(미검수 요약 대신 원문 소스 노출 — 의도된 안전 degrade).
     verified_only = bool(compile_cfg.get("recallVerifiedOnly", True))
+    strategy = config.get("recallStrategy")
+    wiki_only = strategy == "wikiOnly"
+
     # verified_only 필터로 drop된 미검수 wiki 카드 수. 빈 출력이 "미검수 제외" 때문인지
     # 진단 가능하게 log에 노출한다(경로 해석 실패로 검수 카드가 fail-closed drop된
     # misconfiguration도 여기 잡혀 no_results_after_filter의 원인을 특정할 수 있다).
-    unverified_counter = [0]
+    # at_cutoff: score >= cutoff 인 후보 수(자격 판정 무관). 순위 폴백 허용 조건이다 —
+    # 아래 rescue_one docstring 참조. phase마다 새로 계산한다(= 대입).
+    counters = {"skip": 0, "min_score": 0, "unverified": 0, "at_cutoff": 0}
 
-    def drop_excluded_statuses(items):
-        kept = []
-        for r in items:
-            if roles.get(r.get("_collection", "")) != "wiki":
-                kept.append(r)
-                continue
+    def classify(r, *, wiki_scoped: bool) -> str:
+        """minScore(순위 컷)를 **제외한** hard filter 판정 — "eligible" 자격만 본다.
+
+        반환: "skip" | "non_wiki" | "excluded" | "unverified" | "eligible".
+        순위 컷과 분리한 이유: rerank=False 경로의 score는 1/rank라 minScore는 사실상
+        순위 컷이고(rank1=1.0, rank2=0.5), 그 1건이 이 hard filter에서 떨어지면 recall이
+        통째로 0건이 됐다. 자격 판정을 전 후보에 대해 따로 계산해 두면 cutoff 밖에서
+        eligible 1건을 구제(rescue)할 수 있다.
+        """
+        if is_wiki_meta_noise(r, config):
+            # Drop wiki metadata files (index.md/log.md) -- aggregate noise.
+            return "skip"
+        filepath = r.get("file", "")
+        for skip in skip_paths:
+            if skip in filepath:
+                return "skip"
+        is_wiki = roles.get(r.get("_collection", "")) == "wiki"
+        if (wiki_scoped or wiki_only) and not is_wiki:
+            # wiki-scoped 쿼리(hierarchical/wikiOnly가 wiki 컬렉션만 조회) 결과는 정의상
+            # wiki다. _collection이 안 풀려 role이 wiki가 아닌 결과는 status 검증 불가 +
+            # raw prefix로 새거나 hierarchical backfill을 막을 수 있어 fail-closed로
+            # drop한다(raw 누출 금지). backfill로 채운 raw 결과에는 적용하지 않는다.
+            return "non_wiki"
+        if is_wiki:
             if r.get("_wiki_status", "generated") in excluded_statuses:
-                continue
+                return "excluded"
             if verified_only and not r.get("_wiki_reviewed", False):
-                unverified_counter[0] += 1
+                return "unverified"
+        return "eligible"
+
+    def apply_cutoff(items, cutoff, *, wiki_scoped: bool):
+        """순위 컷(minScore) + hard filter를 기존 순서대로 적용한다.
+
+        카운터 증가 순서(skip → 순위 컷 → unverified)는 이전 구현과 동일하게 유지한다 —
+        `dropped_*` 집계 호환을 위해서다(rescue 사실은 별도 필드로만 기록한다).
+        """
+        kept = []
+        counters["at_cutoff"] = sum(1 for r in items if r.get("score", 0) >= cutoff)
+        for r in items:
+            verdict = classify(r, wiki_scoped=wiki_scoped)
+            if verdict == "skip":
+                counters["skip"] += 1
+                continue
+            if r.get("score", 0) < cutoff:
+                counters["min_score"] += 1
+                continue
+            if verdict == "unverified":
+                counters["unverified"] += 1
+                continue
+            if verdict != "eligible":
                 continue
             kept.append(r)
         return kept
 
-    for r in results:
-        filepath = r.get("file", "")
-        # Drop wiki metadata files (index.md/log.md) -- aggregate noise.
-        if is_wiki_meta_noise(r, config):
-            dropped_skip += 1
-            continue
-        # Check skip paths
-        should_skip = False
-        for skip in skip_paths:
-            if skip in filepath:
-                should_skip = True
-                break
-        if should_skip:
-            dropped_skip += 1
-            continue
+    def prefer_wiki(items):
+        """hierarchical: wiki 히트가 하나라도 있으면 raw는 내린다."""
+        if strategy != "hierarchical":
+            return items
+        wiki_items = [r for r in items if roles.get(r.get("_collection", "")) == "wiki"]
+        return wiki_items or items
 
-        # Check minScore
-        if r.get("score", 0) < min_score:
-            dropped_min_score += 1
-            continue
+    def rescue_allowed() -> bool:
+        """순위 폴백은 **컷을 통과한 후보가 있었지만 hard filter로 전멸한 경우**만 허용한다.
 
-        filtered_results.append(r)
+        두 경우를 구분해야 한다:
+        (a) cutoff 이상 후보가 애초에 0건 → 사용자가 임계로 명시적으로 차단한 것이다.
+            `minScore: 999`, `rawFallbackMinScore: 1.01`(= raw fallback 차단, docs/settings.md)
+            같은 설정이 실제로 차단하려면 **0건이 정답**이다. 폴백하면 계약 위반이다.
+        (b) cutoff 이상 후보는 있었지만 skip/미검수/exclude로 전멸 → 이때만 구제한다.
+        """
+        return counters["at_cutoff"] > 0
 
-    # 핵심 수정: exclude를 backfill 판정 "전"에 적용. 이래야 wiki 히트가 전부
-    # contested/discarded면 filtered_results가 비어 backfill이 트리거된다.
-    filtered_results = drop_excluded_statuses(filtered_results)
+    def rescue_one(items, *, wiki_scoped: bool):
+        """cutoff 밖에서 eligible 결과를 **정확히 1건만** 살린다.
 
-    if queried_wiki_first:
-        # wiki-scoped 쿼리(hierarchical/wikiOnly가 wiki 컬렉션만 조회) 결과는 정의상 wiki다.
-        # _collection이 안 풀려 role이 wiki가 아닌 결과는 status 검증 불가 + raw prefix로
-        # 새거나 hierarchical backfill을 막을 수 있어 fail-closed로 drop한다(raw 누출 금지).
-        # backfill로 채운 raw 결과에는 적용하지 않는다(그건 정당한 raw다).
-        filtered_results = [r for r in filtered_results if roles.get(r.get("_collection", "")) == "wiki"]
+        호출 시점 전제: `rescue_allowed()`가 참이고 cutoff 통과 집합이 비었다 → eligible
+        후보는 모두 cutoff 밖이다(cutoff 안의 eligible이 있었다면 apply_cutoff가 이미
+        반환했다). 따라서 여기서 cutoff를 다시 비교하지 않는다.
+        점수 기준: EP exact promotion(promote_ep_exact_matches, score→1.0) **이후** 값을
+        쓴다 — apply_cutoff와 동일 시점이라 promotion된 결과는 애초에 cutoff를 통과해
+        rescue 대상이 되지 않는다. 단 로그에 남기는 rank는 promotion **전** 데몬 순위
+        (`rank_index`)다 — shadow의 `selected[].original_rank`와 같은 map을 써야 한 줄
+        안에서 두 값이 어긋나지 않는다.
+        skipped/excluded/unverified는 절대 살리지 않는다(recallVerifiedOnly 의도 보존:
+        후보 전체가 미검수면 0건이 올바른 동작이다).
+        hierarchical은 wiki 후보를 먼저 훑어 raw backfill보다 wiki rescue가 앞서게 한다.
+        """
+        accepts = []
+        if strategy == "hierarchical":
+            accepts.append(lambda r: roles.get(r.get("_collection", "")) == "wiki")
+        accepts.append(lambda r: True)
+        for accept in accepts:
+            for position, r in enumerate(items, start=1):
+                if not accept(r):
+                    continue
+                if classify(r, wiki_scoped=wiki_scoped) == "eligible":
+                    return r, rank_index.get(r.get("file", ""), position)
+        return None, None
+
+    # rescue 기록(로그 전용): (원래 rank, phase). phase는 wiki-scoped primary는 "wiki",
+    # raw backfill은 "raw", 그 밖의 flat primary는 "primary".
+    rank_fallback: tuple[int, str] | None = None
+
+    filtered_results = prefer_wiki(apply_cutoff(results, min_score, wiki_scoped=queried_wiki_first))
+    if not filtered_results and rescue_allowed():
+        rescued, rescued_rank = rescue_one(results, wiki_scoped=queried_wiki_first)
+        if rescued is not None:
+            filtered_results = [rescued]
+            is_wiki_hit = roles.get(rescued.get("_collection", "")) == "wiki"
+            rank_fallback = (rescued_rank, "wiki" if (queried_wiki_first or is_wiki_hit) else "primary")
 
     if (
-        config.get("recallStrategy") == "hierarchical"
+        strategy == "hierarchical"
         and queried_wiki_first
         and raw_collections
         and not filtered_results
@@ -779,51 +851,32 @@ def main():
                 collection_guess = qmd_uri_to_collection(result.get("file", ""))
                 if collection_guess:
                     result["_collection"] = collection_guess
-            roles = config.get("collectionRoles", {}) if isinstance(config.get("collectionRoles"), dict) else {}
             if roles.get(result.get("_collection", "")) == "wiki":
                 wiki_meta = read_wiki_meta(result, config, cwd)
                 result["_wiki_status"] = wiki_meta["status"]
                 result["_wiki_reviewed"] = wiki_meta["reviewed"]
+        # backfill이면 최종 선택은 raw에서 나오므로 original_rank도 raw 기준이다.
+        rank_index.update(build_rank_index(raw_results))
         # backfill이 이미 raw를 질의했으면 shadow는 그 결과를 재사용한다(중복 query 방지).
         if shadow_on:
             shadow_raw = summarize_shadow_results(raw_results)
-            # backfill이면 최종 선택은 raw에서 나오므로 original_rank도 raw 기준이다.
-            shadow_rank_index.update(build_rank_index(raw_results))
         if "ep" in config.get("lexicalPatterns", []):
             promote_ep_exact_matches(raw_results, ep_numbers(prompt))
         results = sorted(raw_results, key=lambda r: r.get("score", 0), reverse=True)
-        filtered_results = []
         active_min_score = raw_fallback_min_score
-        dropped_skip = 0
-        dropped_min_score = 0
-        for r in results:
-            filepath = r.get("file", "")
-            if is_wiki_meta_noise(r, config):
-                dropped_skip += 1
-                continue
-            should_skip = False
-            for skip in skip_paths:
-                if skip in filepath:
-                    should_skip = True
-                    break
-            if should_skip:
-                dropped_skip += 1
-                continue
-            if r.get("score", 0) < raw_fallback_min_score:
-                dropped_min_score += 1
-                continue
-            filtered_results.append(r)
-        # backfill된 raw 결과에도 동일 필터 적용(raw엔 no-op이나 일관성 유지).
-        filtered_results = drop_excluded_statuses(filtered_results)
-
-    if config.get("recallStrategy") == "wikiOnly":
-        # wikiOnly: raw는 절대 surface하지 않는다. 라이브 경로에선 wiki만 query해 이미
-        # wiki뿐이지만, fixture 등으로 raw가 섞여 들어와도 여기서 엄격 제거한다.
-        filtered_results = [r for r in filtered_results if roles.get(r.get("_collection", "")) == "wiki"]
-    elif config.get("recallStrategy") == "hierarchical":
-        wiki_results = [r for r in filtered_results if roles.get(r.get("_collection", "")) == "wiki"]
-        if wiki_results:
-            filtered_results = wiki_results
+        # backfill phase는 자체 skip/순위 컷 집계를 쓴다(기존 동작 유지 — unverified는
+        # wiki phase 집계를 그대로 이어받는다).
+        counters["skip"] = 0
+        counters["min_score"] = 0
+        # backfill된 raw 결과에도 동일 hard filter 적용(raw엔 대체로 no-op이나 일관성 유지).
+        filtered_results = prefer_wiki(
+            apply_cutoff(results, raw_fallback_min_score, wiki_scoped=False)
+        )
+        if not filtered_results and rescue_allowed():
+            rescued, rescued_rank = rescue_one(results, wiki_scoped=False)
+            if rescued is not None:
+                filtered_results = [rescued]
+                rank_fallback = (rescued_rank, "raw")
 
     # lowPriorityStatuses 강등: 미검수 low-priority wiki 카드를 topN 절단 전에 뒤로 보낸다.
     # score 내림차순 위의 안정 정렬이라 그룹 내 순위는 유지되고, 검수 카드가
@@ -840,18 +893,25 @@ def main():
     # Record why recall produced (or withheld) output — file-only, never stdout.
     selection_reason = "selected" if final_results else "no_results_after_filter"
     dropped_top_n = max(0, len(filtered_results) - len(final_results))
+    # rescue 사실은 별도 필드로만 남긴다 — dropped_* 는 최초 cutoff/drop 수를 그대로
+    # 유지해야 기존 집계 소비자가 깨지지 않는다(rescue는 그 뒤에 일어난 구제다).
+    fallback_fields = {"rank_fallback_used": rank_fallback is not None}
+    if rank_fallback is not None:
+        fallback_fields["rescued_original_rank"] = rank_fallback[0]
+        fallback_fields["fallback_phase"] = rank_fallback[1]
     log_recall_event(
         log_path,
         selection_reason,
         candidates=len(results),
-        dropped_skip=dropped_skip,
-        dropped_min_score=dropped_min_score,
-        dropped_unverified=unverified_counter[0],
+        dropped_skip=counters["skip"],
+        dropped_min_score=counters["min_score"],
+        dropped_unverified=counters["unverified"],
         dropped_top_n=dropped_top_n,
         selected=len(final_results),
         min_score=active_min_score,
         top_n_limit=top_n,
         max_score=max((r.get("score", 0) for r in results), default=0),
+        **fallback_fields,
     )
 
     # Output formatted JSON. shadow 진단보다 "먼저" 출력해, 진단이 어떤 이유로 지연·
@@ -878,14 +938,15 @@ def main():
             raw_collections=raw_collections,
             primary=shadow_primary or {"status": "no_primary"},
             raw=shadow_raw,
-            selected_entries=describe_selected(final_results, shadow_rank_index),
+            selected_entries=describe_selected(final_results, rank_index),
             active_min_score=active_min_score,
             top_n=top_n,
             selection_reason=selection_reason,
-            dropped_skip=dropped_skip,
-            dropped_min_score=dropped_min_score,
-            dropped_unverified=unverified_counter[0],
+            dropped_skip=counters["skip"],
+            dropped_min_score=counters["min_score"],
+            dropped_unverified=counters["unverified"],
             dropped_top_n=dropped_top_n,
+            fallback_fields=fallback_fields,
         )
     return 0
 

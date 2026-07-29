@@ -51,7 +51,9 @@ test('결과 선택 시 reason="selected" 기록', () => {
   });
 });
 
-test('minScore로 전부 탈락 시 reason="no_results_after_filter" + dropped_min_score', () => {
+test('minScore가 모든 후보를 컷하면 결과를 완전히 차단한다 (순위 폴백도 안 살림)', () => {
+  // 임계 이상 후보가 애초에 0건이면 사용자가 명시적으로 차단한 것이다 → 0건이 정답.
+  // 순위 폴백은 "컷을 통과한 후보가 hard filter로 전멸한" 경우만 구제한다.
   withProject({ collections: ['sample'], minScore: 999 }, (dir, logPath) => {
     const out = run({ prompt: PROMPT, cwd: dir }, { QMD_RECALL_LOG: logPath });
     assert.equal(out, '', 'minScore 전탈락이면 빈 출력');
@@ -60,6 +62,53 @@ test('minScore로 전부 탈락 시 reason="no_results_after_filter" + dropped_m
     assert.equal(ev[0].reason, 'no_results_after_filter');
     assert.ok(ev[0].dropped_min_score > 0, 'minScore 탈락 수가 잡혀야 함');
     assert.equal(ev[0].selected, 0);
+    assert.equal(ev[0].rank_fallback_used, false, '컷 자체를 무효화하면 안 된다');
+  });
+});
+
+test('컷 통과 후보가 hard filter로 전멸하면 컷 밖 eligible 1건을 rescue', () => {
+  // (b) 케이스: 1위는 컷을 통과했지만 skipPaths로 제거 → 2위를 구제한다.
+  // dropped_* 는 최초 cutoff/drop 수를 그대로 유지한다(집계 호환).
+  const fixtureBody = JSON.stringify({ results: [
+    { file: 'sample/docs/skipme.md', title: 'Skip me', score: 1 },
+    { file: 'sample/docs/keep.md', title: 'Keep me', score: 0.5 },
+  ] });
+  withProject({ collections: ['sample'], minScore: 0.8, skipPaths: ['skipme'] }, (dir, logPath) => {
+    const fixture = join(dir, 'fixture.json');
+    writeFileSync(fixture, fixtureBody);
+    const out = run({ prompt: PROMPT, cwd: dir }, { QMD_RECALL_LOG: logPath, QMD_QUERY_FIXTURE: fixture });
+    assert.match(out, /keep\.md/, '컷 밖 eligible 1건이 구제되어야 함');
+    assert.doesNotMatch(out, /skipme/, 'skip 대상은 어떤 경로로도 surface 금지');
+    const ev = selectionEvents(logPath);
+    assert.equal(ev[0].reason, 'selected');
+    assert.equal(ev[0].selected, 1, '정확히 1건만 rescue');
+    assert.equal(ev[0].dropped_skip, 1);
+    assert.equal(ev[0].dropped_min_score, 1, '최초 순위 컷 탈락 수는 그대로 기록');
+    assert.equal(ev[0].rank_fallback_used, true);
+    assert.equal(ev[0].rescued_original_rank, 2);
+    assert.equal(ev[0].fallback_phase, 'primary', 'flat 전략의 primary phase rescue');
+  });
+});
+
+test('skipPaths로 전부 탈락하면 rescue 없이 0건 (skip은 절대 살리지 않는다)', () => {
+  withProject({ collections: ['sample'], skipPaths: ['docs/guide.md'] }, (dir, logPath) => {
+    const out = run({ prompt: PROMPT, cwd: dir }, { QMD_RECALL_LOG: logPath });
+    assert.equal(out, '', 'skip 대상은 rescue 대상이 아니므로 빈 출력');
+    const ev = selectionEvents(logPath);
+    assert.equal(ev[0].reason, 'no_results_after_filter');
+    assert.equal(ev[0].dropped_skip, 1);
+    assert.equal(ev[0].rank_fallback_used, false);
+    assert.equal('rescued_original_rank' in ev[0], false, 'rescue 없으면 필드도 없다');
+  });
+});
+
+test('cutoff 안에 eligible이 있으면 rescue가 일어나지 않는다 (회귀 방지)', () => {
+  withProject({ collections: ['sample'], minScore: 0.5 }, (dir, logPath) => {
+    const out = run({ prompt: PROMPT, cwd: dir }, { QMD_RECALL_LOG: logPath });
+    assert.ok(out);
+    const ev = selectionEvents(logPath);
+    assert.equal(ev[0].reason, 'selected');
+    assert.equal(ev[0].rank_fallback_used, false, '정상 경로는 폴백을 쓰지 않아야 함');
   });
 });
 
