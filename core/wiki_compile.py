@@ -607,6 +607,40 @@ def frontmatter_patch_scalar(key: str, value) -> str:
     return yaml_scalar(value)
 
 
+def source_flow_entries(sources) -> list:
+    """`sources` 후보 목록 → frontmatter에 쓸 flow mapping 표기 목록.
+
+    **`path` 키가 있으면 비어 있지 않은 문자열이어야 하고, 아니면 그 항목을 버린다.**
+    candidate는 extractor(모델) 출력이라 `{"kind": "file", "path": False}` 같은 값이 올 수
+    있고, 그러면 표기가 `path: false`로 나가 읽는 쪽에서 문자열 `"false"`가 된다 — `false`
+    라는 이름의 파일이 있으면 그것이 원문으로 주입되고 진단에는 정상(drop 0)으로 남는다.
+    `"false"`로 강제하는 것은 무의미한 경로를 만드는 것이므로 항목 자체를 버린다.
+    **`path`가 애초에 없는 항목은 그대로 쓴다** — `{kind: "session", ref: "session:local"}`
+    처럼 파일이 아닌 출처 레코드가 정상 형태다(수동 compile 경로 `wiki_extract`가 이걸
+    쓴다). 주입 대상이 아닐 뿐(읽기 쪽이 kind/path로 거른다) 카드의 출처 기록이므로
+    지우면 감사 추적이 사라진다.
+    비문자 **값 일반**의 방어는 `yaml_scalars.dump_flow_mapping`에 있다(키가 조용히 빠진다).
+    여기서 항목 단위로 한 번 더 보는 이유는, `path` 키만 조용히 빠지면 "소스가 있다고
+    주장하지만 경로가 없는" 레코드가 카드에 남기 때문이다.
+    남는 항목이 없으면 호출부가 `{kind: unknown}` 센티넬을 쓴다.
+    """
+    entries = []
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        if "path" in source:
+            path_value = source.get("path")
+            if not isinstance(path_value, str) or not path_value.strip():
+                continue
+        # 값은 yaml_scalar로 인용되지만 **키도 모델이 준다** — 개행이 든 키는 flow mapping을
+        # 벗어나 새 줄을 만들 수 있다. 키는 닫힌 스키마(kind/path/collection)이므로 안전한
+        # 식별자만 통과시킨다. emit/parse 쌍은 yaml_scalars가 SSOT다(읽는 쪽은 recall).
+        flow = yaml_scalars.dump_flow_mapping(source)
+        if flow:
+            entries.append(flow)
+    return entries
+
+
 def markdown_page(candidate: dict, summary: str, status: str, redactions: list[str], h: str) -> str:
     created = today()
     # candidate는 **extractor(모델) 출력**이다. frontmatter로 나가는 모든 모델 제공 값은
@@ -646,17 +680,8 @@ def markdown_page(candidate: dict, summary: str, status: str, redactions: list[s
         "reviewed: false",
         "sources:",
     ])
-    if sources:
-        for source in sources:
-            if isinstance(source, dict):
-                # 값은 yaml_scalar로 인용되지만 **키도 모델이 준다** — 개행이 든 키는
-                # flow mapping을 벗어나 새 줄을 만들 수 있다. 키는 닫힌 스키마
-                # (kind/path/collection)이므로 안전한 식별자만 통과시킨다.
-                # emit/parse 쌍은 yaml_scalars가 SSOT다(읽는 쪽은 recall).
-                flow = yaml_scalars.dump_flow_mapping(source)
-                lines.append(f"  - {flow}" if flow else "  - {kind: unknown}")
-    else:
-        lines.append("  - {kind: unknown}")
+    source_lines = [f"  - {flow}" for flow in source_flow_entries(sources)]
+    lines.extend(source_lines if source_lines else ["  - {kind: unknown}"])
     lines.append("triggers:")
     if triggers:
         for trigger in triggers:

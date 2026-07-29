@@ -380,6 +380,13 @@ def frontmatter_source_entries(block: str) -> list[str]:
     훑을 뿐이고(frontmatter는 카드당 수십 줄) 파일 읽기는 늘지 않는다 —
     `read_wiki_meta`의 "카드당 I/O 1회" 계약을 유지한다.
     다른 top-level 키가 나오면 즉시 sources 구역을 벗어난다(항목이 새는 것을 막는다).
+
+    **`sources: [ ... ]`(한 줄 flow 시퀀스)는 그 값을 항목 하나로 낸다.** 우리 writer는
+    이 형태를 쓰지 않지만 사람·resolver가 표준 YAML로 쓸 수 있고, 예전엔 이 형태가
+    `entries=[]`가 되어 **사유 없이 0건**이 됐다 — 로그에서 "소스 없는 카드"와 구분할 수
+    없는 무흔적 실패다(이 저장소에서 반복된 클래스). 값을 그대로 흘려 보내면
+    `resolve_source_path`가 `[`로 시작하는 항목을 `inline_sequence`로 신호한다.
+    `sources: []`(빈 목록)는 "소스 없음"의 정상 표기라 항목을 만들지 않는다.
     """
     entries: list[str] = []
     in_sources = False
@@ -388,6 +395,10 @@ def frontmatter_source_entries(block: str) -> list[str]:
             continue
         if not line[0].isspace():
             in_sources = line.startswith("sources:")
+            if in_sources:
+                inline = line.split(":", 1)[1].strip()
+                if inline and inline != "[]":
+                    entries.append(inline)
             continue
         if not in_sources:
             continue
@@ -397,27 +408,76 @@ def frontmatter_source_entries(block: str) -> list[str]:
     return entries
 
 
+# sources 항목 중 원문 경로로 쓸 수 있는 유일한 kind. `wiki_verify_worker.load_sources`가
+# 같은 판정(`src.get("kind") != "file"`)을 쓴다 — **두 곳이 갈리면 안 된다**: 한쪽은 원문을
+# 검증에 쓰고 다른 한쪽은 그 경로를 모델에게 제시하므로, 서로 다른 집합을 보면 "검증되지
+# 않은 종류의 소스"가 주입된다.
+SOURCE_KIND_FILE = "file"
+# 주입할 경로 문자열 상한. title(160)·본문(600)에는 상한이 있는데 경로만 무제한이면
+# 토큰 절감 목표에 구멍이 남는다(실측: 822자 경로가 축자 주입됐다. 최악 topN 3 × 상한
+# 3경로 × 1000자 ≈ 9KB). 근거: 실코퍼스 876항목의 경로 길이는 상대 median 53 / p95 69 /
+# max 92자이고, 절대 표시(project prefix 포함)는 median 91 / p95 107 / max 130자다.
+# 200이면 관측 최악(절대 130)의 1.5배 여유이고 최악 주입은 9줄 × 204자 ≈ 1.8KB로 유계다.
+# **넘으면 자르지 않고 버린다** — 잘린 경로는 열 수 없어 없는 파일을 열게 만든다(개행 든
+# 경로를 정규화하지 않고 버리는 것과 같은 논리다).
+MAX_SOURCE_PATH_CHARS = 200
+# load_flow_mapping의 issue → drop 사유. 형태별로 갈라 두는 이유: 사유 하나로 뭉치면
+# 로그만 보고 "카드를 어떻게 고쳐야 하는지"를 알 수 없다.
+SOURCE_PARSE_REASONS = {
+    "unterminated": "multiline_flow",     # 여러 줄 flow mapping(첫 줄만 보인다) 또는 잘린 항목
+    "trailing_garbage": "parse_failed",
+    "unbalanced_quote": "parse_failed",
+    "empty": "parse_failed",              # 쓸 수 있는 키가 없다(예: `{nope!: 1}`)
+}
+# `- kind: file` 처럼 block mapping으로 쓴 항목. 지원하지 않고(파서를 두 벌로 만들지
+# 않는다) 사유로만 남긴다 — 로그의 이 값이 곧 "flow mapping으로 다시 쓰라"는 지시다.
+BLOCK_MAPPING_ENTRY_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]*\s*:")
+
+
+def source_parse_reason(entry: str, issue: str) -> str:
+    """파싱 실패 항목의 **형태**를 사유로 돌려준다(무흔적 실패 금지)."""
+    if entry.startswith("["):
+        return "inline_sequence"
+    if issue == "not_flow_mapping":
+        return "block_mapping" if BLOCK_MAPPING_ENTRY_RE.match(entry) else "parse_failed"
+    return SOURCE_PARSE_REASONS.get(issue, "parse_failed")
+
+
 def resolve_source_path(entry: str, project_root: Path, cwd: str,
                         allow_roots: list[Path]) -> tuple[str, str]:
     """sources 항목 하나 → (모델이 Read할 수 있는 표시 경로, 실패 사유).
 
-    `sources[].path`는 **extractor(모델) 출력**이므로 신뢰 입력이 아니다. 세 가지를 본다:
-    1. traversal — `resolve_paths.contained_path`가 resolve **후** project_root(또는
+    `sources[].path`는 **extractor(모델) 출력**이므로 신뢰 입력이 아니다. 다섯 가지를 본다:
+    1. kind — `file`만 원문 경로로 쓴다(`kind_not_file`). `{kind:"url", path:"docs/x.md"}`
+       처럼 로컬 경로 모양의 값이면 원문으로 주입돼 버리고, 반대로 실제 url/slack 소스는
+       `missing`으로 빠져 **사유가 틀린 채** 집계된다 — `source_missing` 정책(로드맵 3단계)이
+       그 신호를 근거로 삼으므로 "파일이 아닌 것"이 섞이면 판단이 오염된다.
+    2. path 타입·존재 — 비어 있지 않은 문자열이어야 한다(`no_path`). 파서가 문자열만
+       돌려주므로 타입 검사는 이중 방어다(쓰기 쪽 불변식은 `wiki_compile.source_flow_entries`).
+    3. 길이 — `MAX_SOURCE_PATH_CHARS` 초과는 버린다(`too_long`). 자르지 않는 이유는 상수
+       주석 참고.
+    4. traversal — `resolve_paths.contained_path`가 resolve **후** project_root(또는
        allowRoots) 안인지 본다. `../../../etc/passwd`와 밖을 가리키는 심볼릭 링크가
        여기서 걸린다. 검증을 재구현하지 않고 collectionPath와 같은 함수를 쓴다.
-    2. 존재 — 없는 경로를 주면 모델이 Read에 실패하고 헛돈다(stale 링크). `is_file()`
-       실패는 주입하지 않는다.
-    3. 프레임 — 표시 문자열이 `sanitize_inline`으로 바뀐다면(개행·탭·zero-width) 그 값은
-       한 줄을 벗어날 수 있고, 접은 문자열은 실제 파일을 가리키지 않는다. 경로를 조용히
-       고쳐 주입하는 대신 버린다(공백 1개가 든 정상 경로는 접혀도 그대로라 통과한다).
+    5. 존재·프레임 — 없는 경로를 주면 모델이 Read에 실패하고 헛돈다(`missing`). 표시
+       문자열이 `sanitize_inline`으로 바뀐다면(개행·탭·zero-width) 한 줄을 벗어날 수 있고
+       접은 문자열은 실제 파일을 가리키지 않으므로 버린다(`not_inline` — 공백 1개가 든
+       정상 경로는 접혀도 그대로라 통과한다).
     기준 base가 project_root인 이유: `wiki_compile_enqueue._source_record`가 경로를
     project_root 상대 POSIX로 기록한다(cwd 상대가 아니다).
     """
     fields, issue = yaml_scalars.load_flow_mapping(entry)
-    raw_path = fields.get("path", "") if isinstance(fields.get("path"), str) else ""
-    if not raw_path:
+    raw_path = fields.get("path") if isinstance(fields.get("path"), str) else ""
+    if not raw_path or not raw_path.strip():
+        if issue:
+            return "", source_parse_reason(entry, issue)
         # `{kind: unknown}`(소스 없음)이 여기 온다 — 정상 카드이므로 사유만 세고 넘어간다.
-        return "", "parse_failed" if issue and issue != "empty" else "no_path"
+        return "", "no_path"
+    if fields.get("kind") != SOURCE_KIND_FILE:
+        return "", "kind_not_file"
+    if len(raw_path) > MAX_SOURCE_PATH_CHARS:
+        # resolve/stat 전에 본다 — 비정상 길이 입력에 syscall을 쓰지 않는다.
+        return "", "too_long"
     resolved = qmd_resolve_paths.contained_path(project_root, raw_path, allow_roots)
     if resolved is None:
         return "", "outside_root"
@@ -427,6 +487,10 @@ def resolve_source_path(entry: str, project_root: Path, cwd: str,
     except OSError:
         return "", "missing"
     display = display_card_path(resolved, cwd)
+    # 표시가 절대경로면 project prefix가 붙어 상대 경로보다 길어진다 — 실제 주입되는
+    # 문자열을 기준으로 다시 본다(토큰 예산은 주입 문자열의 함수다).
+    if len(display) > MAX_SOURCE_PATH_CHARS:
+        return "", "too_long"
     if sanitize_inline(display) != display:
         return "", "not_inline"
     return display, ""
@@ -448,8 +512,15 @@ def collect_source_paths(block: str, project_root: Path, cwd: str, limit: int,
     # 주입 예산의 상수배로 유계다(실코퍼스 849장에는 애초에 max 4항목이다).
     scan_limit = limit * 2
     for index, entry in enumerate(entries):
-        if len(paths) >= limit or index >= scan_limit:
+        # 두 상한을 **다른 사유**로 남긴다: `over_cap`은 "쓸 만한 경로가 상한만큼 이미
+        # 찼다"(설정을 올리면 늘어난다), `over_scan_budget`은 "조사 예산이 소진됐다"
+        # (= 앞쪽 항목이 대량으로 버려졌다는 신호이므로 카드를 봐야 한다). 뭉치면 로그로
+        # 둘을 구분할 수 없다.
+        if len(paths) >= limit:
             reasons["over_cap"] = reasons.get("over_cap", 0) + 1
+            continue
+        if index >= scan_limit:
+            reasons["over_scan_budget"] = reasons.get("over_scan_budget", 0) + 1
             continue
         display, reason = resolve_source_path(entry, project_root, cwd, allow_roots)
         if not display:

@@ -171,17 +171,27 @@ def load(raw: str) -> str:
 
 
 def dump_flow_mapping(mapping) -> str:
-    """`{k: "v", ...}` flow mapping 표기를 낸다. 안전한 키가 하나도 없으면 빈 문자열.
+    """`{k: "v", ...}` flow mapping 표기를 낸다. 쓸 수 있는 항목이 없으면 빈 문자열.
 
     `sources:` 항목이 이 표기다(`- {kind: "raw", path: "docs/a.md"}`). **읽는 쪽
     (`load_flow_mapping`)과 쌍으로 여기 둔다** — 이 저장소는 emit/parse가 갈려 두 번
     깨졌다(title 이스케이프 규칙 8/731장 오염, `qmd:auto` 마커 정규식). 값은 전부 `dump`를
     거치므로 `,`·`}`·개행·인용부호가 들어도 표기를 벗어나지 못하고, 키는 SAFE_KEY_RE
     화이트리스트다.
+
+    **값은 문자열만 낸다(비문자 값은 그 항목 키를 버린다).** 이유는 왕복 타입 안정성이다:
+    `load_flow_mapping`은 텍스트 파서라 무엇을 넣어도 문자열만 돌려준다. 그래서 비문자
+    값을 받아 주면 `{"path": False}` → `path: false` → 되읽어 `"false"`가 되어, **`false`
+    라는 이름의 파일이 원문으로 주입되고 진단에는 정상으로 남는다**(drop 0, injected 1).
+    타입 안정성을 이 쌍 안에서 보장하지 않으면 호출부마다 같은 함정이 재발한다.
+    호출부(`wiki_compile.markdown_page`)는 여기에 의존하지 말고 **항목 단위로** 필수 필드를
+    검증한다 — 키만 빠지면 경로가 조용히 사라진 항목이 남기 때문이다.
     """
     parts = []
     for key, value in mapping.items():
         if not isinstance(key, str) or not SAFE_KEY_RE.fullmatch(key):
+            continue
+        if not isinstance(value, str):
             continue
         parts.append(f"{key}: {dump(value)}")
     return "{" + ", ".join(parts) + "}" if parts else ""
@@ -228,18 +238,65 @@ def _split_flow_items(inner: str) -> list[str] | None:
     return items
 
 
+def _flow_mapping_body(text: str) -> tuple[str, str]:
+    """`{...}` 본문과 문제를 낸다. 닫는 `}`는 **인용부호 밖**에서 찾는다.
+
+    `text.endswith("}")`로 판정하면 두 경우를 놓친다 — (1) `{…} # 주석`처럼 뒤에 무언가
+    붙은 형태를 통째로 거부하고, (2) 값이 `}`로 끝나는 잘린 항목(`{path: "a}`)을 정상으로
+    본다. 둘 다 사람이 손으로 고친 카드에서 나올 수 있는 형태이므로 구분해서 신호한다.
+    """
+    if not text.startswith("{"):
+        return "", "not_flow_mapping"
+    quote = ""
+    index = 1
+    length = len(text)
+    while index < length:
+        char = text[index]
+        if quote:
+            if quote == '"' and char == "\\":
+                index += 2
+                continue
+            if char == quote:
+                quote = ""
+            index += 1
+            continue
+        if char in ('"', "'"):
+            quote = char
+            index += 1
+            continue
+        if char == "}":
+            tail = text[index + 1:].strip()
+            # 표준 YAML에서 flow mapping 뒤에 올 수 있는 것은 주석뿐이다.
+            if tail and not tail.startswith("#"):
+                return "", "trailing_garbage"
+            return text[1:index], ""
+        index += 1
+    # 닫는 `}`를 못 봤다. 인용부호가 열린 채 끝났으면 값이 잘린 것이고(그 안의 `}`를
+    # 닫는 괄호로 오인하지 않은 결과다), 아니면 여러 줄 flow mapping의 첫 줄이다.
+    return "", "unbalanced_quote" if quote else "unterminated"
+
+
 def load_flow_mapping(raw: str) -> tuple[dict, str]:
     """`{k: "v", ...}` → (dict, 문제). `dump_flow_mapping`의 역함수.
 
-    문제 값: `not_flow_mapping`(중괄호로 감싸이지 않음) / `unbalanced_quote`(값이 잘렸다)
-    / `empty`(키가 하나도 없음). fail-open이 원칙이라 파싱한 키는 문제와 함께 그대로
-    돌려준다 — 읽기 경로(recall)는 한 항목이 이상해도 나머지를 살려야 한다.
+    문제 값: `not_flow_mapping`(`{`로 시작하지 않음) / `unterminated`(닫는 `}`가 없음 —
+    여러 줄 flow이거나 잘린 항목) / `trailing_garbage`(`}` 뒤에 주석 아닌 내용) /
+    `unbalanced_quote`(값이 잘렸다) / `empty`(쓸 수 있는 키가 하나도 없음).
+    fail-open이 원칙이라 파싱한 키는 문제와 함께 그대로 돌려준다 — 읽기 경로(recall)는
+    한 항목이 이상해도 나머지를 살려야 한다.
     중복 키는 first-wins다(`parse_frontmatter_scalars`와 같은 규약).
+
+    **키는 인용부호를 허용한다**(`{"kind": "file"}`). emit은 인용하지 않지만 표준 YAML은
+    허용하고, wiki 카드의 `sources`는 사람과 dedup/review resolver 에이전트가 손으로
+    이식하는 필드다(CLAUDE.md 계약) — 표준 YAML로 쓴 카드를 못 읽으면 그 카드의 원문
+    링크가 통째로 사라진다. 인용을 벗긴 뒤 SAFE_KEY_RE로 검증하므로 허용 범위는 넓어지지
+    않고(개행·구두점이 든 키는 여전히 거부), 왕복 성질도 유지된다(emit 결과의 상위집합).
     """
     text = raw.strip()
-    if not (text.startswith("{") and text.endswith("}")) or len(text) < 2:
-        return {}, "not_flow_mapping"
-    items = _split_flow_items(text[1:-1])
+    body, issue = _flow_mapping_body(text)
+    if issue:
+        return {}, issue
+    items = _split_flow_items(body)
     if items is None:
         return {}, "unbalanced_quote"
     fields: dict[str, str] = {}
@@ -248,8 +305,10 @@ def load_flow_mapping(raw: str) -> tuple[dict, str]:
         if not item.strip():
             continue
         key, sep, value = item.partition(":")
-        key = key.strip()
-        if not sep or not SAFE_KEY_RE.fullmatch(key) or key in fields:
+        if not sep:
+            continue
+        key, key_issue = load_with_issue(key)
+        if key_issue or not SAFE_KEY_RE.fullmatch(key) or key in fields:
             continue
         parsed, value_issue = load_with_issue(value)
         if value_issue:

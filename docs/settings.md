@@ -219,9 +219,34 @@ fail-closed drop된 경우(`path_unresolved`)를 진짜 미검수 카드와 구�
 
 | 검증 | 이유 |
 |---|---|
+| `kind`가 `file`인가 | `{kind: "url", path: "docs/x.md"}`처럼 로컬 경로 모양의 비파일 소스가 원문으로 주입되는 것을 막습니다. 반대로 실제 url/slack 소스가 `missing`으로 집계되면 **사유가 틀립니다** — `source_missing` 정책 판단이 그 신호를 근거로 삼기 때문입니다. `wiki_verify_worker`가 검증에 쓰는 kind 집합과 같습니다. |
+| `path`가 비어 있지 않은 문자열인가 | `{"path": false}`가 표기 `path: false`로 나가면 되읽어 문자열 `"false"`가 되고, 그런 이름의 파일이 있으면 원문으로 주입됩니다. 쓰기 쪽에서 그 항목을 아예 쓰지 않고(`wiki_compile.source_flow_entries`), 읽기 쪽에서도 검사합니다. |
+| 길이가 상한(200자) 이하인가 | title(160)·본문(600)에는 상한이 있는데 경로만 무제한이면 토큰 목표에 구멍이 남습니다(822자 경로가 축자 주입된 사례). **자르지 않고 버립니다** — 잘린 경로는 열 수 없어 없는 파일을 열게 만듭니다. 판정은 실제 주입되는 표시 문자열 기준이라, 같은 카드가 하위 cwd(절대 표시)에서는 상한을 넘어 빠질 수 있습니다. |
 | project root(또는 `allowRoots`) 안으로 해석되는가 | `../../../etc/passwd`를 "이 프로젝트 파일"로 제시하지 않기 위함입니다. `resolve()` **후** 판정하므로 밖을 가리키는 심볼릭 링크도 걸립니다. `collectionPaths` 검증과 같은 함수(`resolve_paths.contained_path`)를 씁니다. |
 | 실제 파일로 존재하는가 | 없는 경로를 주면 모델이 Read에 실패하고 헛돕니다(stale 링크). |
 | 한 줄로 표시 가능한가 | 개행·탭·zero-width가 들어가면 주입 프레임의 새 줄을 만들 수 있고, 접은 문자열은 실제 파일을 가리키지 않습니다. |
+
+`path`가 **없는** 항목(`{kind: "session", ref: "session:local"}` 같은 비파일 출처 레코드)은
+카드에 그대로 남습니다. 주입 대상이 아닐 뿐 카드의 출처 기록이기 때문입니다.
+
+### 읽는 sources 표기
+
+카드의 `sources`는 사람과 dedup/review resolver 에이전트가 손으로 이식하는 필드이므로
+(CLAUDE.md 계약) 우리 writer가 쓰는 표기 외에 표준 YAML 변형도 읽습니다.
+
+| 표기 | 동작 |
+|---|---|
+| `- {kind: "file", path: "docs/a.md"}` (writer 표기) | 읽습니다 |
+| `- {"kind": "file", "path": "docs/a.md"}` (인용 키) | 읽습니다 |
+| `- {kind: 'file', path: 'docs/a.md'}` (single quote) | 읽습니다 |
+| `- {…}  # 주석` | 읽습니다 |
+| `sources: [{…}]` (한 줄 flow 시퀀스) | 제외 + 사유 `inline_sequence` |
+| `- kind: file` / `  path: …` (block mapping) | 제외 + 사유 `block_mapping` |
+| 여러 줄 flow mapping | 제외 + 사유 `multiline_flow` |
+
+지원하지 않는 형태를 **파싱하지 않고 사유만 남기는** 이유는 파서를 두 벌로 만들지 않기
+위함입니다(이 저장소는 emit/parse가 갈려 두 번 깨졌습니다). 사유 값이 곧 "flow mapping으로
+다시 쓰라"는 지시이며, 어떤 형태도 **흔적 없이** 사라지지 않습니다.
 
 base는 `cwd`가 아니라 **project root**입니다 — `sources[].path`는 project root 상대
 POSIX 경로로 기록되므로(`wiki_compile_enqueue`), 하위 디렉터리 세션에서 `cwd`를 base로
@@ -254,10 +279,22 @@ median 1 / p95 1 / max 4입니다. `3`이면 848/849(99.9%)가 절단 없이 들
 주입·drop 여부는 `QMD_RECALL_LOG`의 `qmd_recall_selection` 줄에서 확인합니다 —
 `inject_source_paths_per_card` / `source_entries`(본 항목 수) / `sources_injected` /
 `sources_dropped` / `source_drop_reasons`. 사유 값: `missing`(존재하지 않음),
+`kind_not_file`(파일 소스가 아님 — url/slack 등), `too_long`(경로 길이 상한 초과),
 `outside_root`(루트 밖), `not_inline`(한 줄로 표시 불가), `duplicate`(중복 제거),
-`over_cap`(상한 초과), `parse_failed`(flow mapping 파싱 실패),
-`no_path`(`{kind: unknown}` 등 경로 없는 항목). `missing`은 소스가 이동·삭제된
-**stale 링크**를 뜻합니다(dogfooding 849장에서 876항목 중 34건).
+`over_cap`(카드당 상한만큼 이미 채움), `over_scan_budget`(항목 조사 예산 소진 — 앞쪽
+항목이 대량으로 버려졌다는 신호), `no_path`(경로 없는 항목: `{kind: unknown}`,
+`{kind: "session", ref: …}`), 그리고 표기 형태별 `inline_sequence` / `block_mapping` /
+`multiline_flow` / `parse_failed`.
+
+`missing`은 소스가 이동·삭제된 **stale 링크**를 뜻합니다(dogfooding 849장 876항목 중
+32건). `kind_not_file` 2건은 실제 url/slack 소스입니다 — 예전에는 이 2건이 `missing`에
+섞여 stale 링크 집계를 오염시켰습니다.
+
+**`missing`·`kind_not_file`·`duplicate`로 빠진 카드에는 `↳` 줄이 아예 붙지 않습니다**
+(의도된 동작입니다). 깨진 경로를 주면 모델이 열어 보고 실패한 뒤 복구해야 하고, "원문
+없음" 표식을 붙이면 stale 카드마다 토큰만 늘고 모델이 할 수 있는 일은 없습니다.
+`duplicate`는 같은 경로가 상위 카드 아래에 이미 있으므로 손실이 아닙니다. stale 링크는
+주입에서 감추는 것이 아니라 소스 쪽에서 고쳐야 하는 문제입니다(로드맵 3단계).
 
 ### minScore는 유사도가 아니라 순위입니다
 

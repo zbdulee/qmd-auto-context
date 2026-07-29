@@ -35,9 +35,11 @@ function sourceLines(ctx) {
   return ctx.split('\n').filter((l) => l.startsWith(SOURCE_PREFIX)).map((l) => l.slice(SOURCE_PREFIX.length));
 }
 
+// 가장 **마지막** selection 줄을 본다(한 로그에 여러 번 실행하는 테스트가 있다).
 function selection(logPath) {
-  return readFileSync(logPath, 'utf8').trim().split('\n').map(JSON.parse)
-    .find((l) => l.event === 'qmd_recall_selection');
+  const lines = readFileSync(logPath, 'utf8').trim().split('\n').map(JSON.parse)
+    .filter((l) => l.event === 'qmd_recall_selection');
+  return lines[lines.length - 1];
 }
 
 // 카드 1장. sources 는 실제 compile 산출물과 같은 flow mapping 표기를 쓴다.
@@ -107,8 +109,12 @@ function withProject(opts, fn) {
   }
 }
 
-function py(code) {
-  return JSON.parse(execFileSync('python3', ['-c', ['import json, sys', 'sys.path.insert(0, "core")', ...code].join('\n')], { encoding: 'utf8' }));
+// python 헬퍼. `arg` 를 주면 argv[1] 로 넘어간다(JS 문자열을 python 리터럴로 끼워 넣다가
+// 인용부호가 겹치는 것을 피한다 — 이 파일은 sources 표기 자체를 다루므로 인용부호가 많다).
+function py(code, arg) {
+  const args = ['-c', ['import json, sys', 'sys.path.insert(0, "core")', ...code].join('\n')];
+  if (arg !== undefined) args.push(arg);
+  return JSON.parse(execFileSync('python3', args, { encoding: 'utf8' }));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -177,11 +183,10 @@ test('wiki_compile 이 쓴 sources 를 recall 이 그대로 읽는다 (쓰기/�
     'print(json.dumps({"entries": entries, "paths": [p.get("path", "") for p, _ in parsed],',
     '                  "issues": [i for _, i in parsed]}, ensure_ascii=False))',
   ]);
-  assert.equal(r.entries.length, 2, 'writer 가 쓴 항목 수를 reader 가 그대로 본다');
+  // path 없는 항목(`{"nope!": "x"}`)은 원문 추적에 쓸 수 없어 writer 가 버린다.
+  assert.equal(r.entries.length, 1, 'writer 가 쓴 항목 수를 reader 가 그대로 본다');
   assert.equal(r.paths[0], 'docs/쉼표, "인용".md', '값이 역이스케이프돼 원래 경로가 복원된다');
-  // 안전하지 않은 키만 있던 항목은 writer 가 `{kind: unknown}` 센티넬로 쓴다.
-  assert.equal(r.entries[1], '{kind: unknown}');
-  assert.deepEqual(r.issues, ['', ''], 'writer 산출물에는 파싱 문제가 없어야 한다');
+  assert.deepEqual(r.issues, [''], 'writer 산출물에는 파싱 문제가 없어야 한다');
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -333,6 +338,206 @@ test('경로에 개행이 있으면 주입 프레임이 깨지지 않는다 (한
   });
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// (3-2) 리뷰 라운드: 타입 안정성 · kind 게이트 · 길이 상한 · 형태별 사유
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('비문자 path 는 왕복에서 문자열이 되지 않는다 (writer 가 항목을 버린다)', () => {
+  // `{"path": False}` 가 인용 없이 `path: false` 로 나가면 되읽어 문자열 "false" 가 되고,
+  // `false` 라는 이름의 파일이 있으면 그것이 원문으로 주입되며 진단은 정상으로 남는다.
+  const r = py([
+    'import wiki_compile as wc, yaml_scalars as ys, recall',
+    'page = wc.markdown_page({"title": "t", "sources": [',
+    '  {"kind": "file", "path": False}, {"kind": "file", "path": 12},',
+    '  {"kind": "file", "path": None}, {"kind": "slack"}, {"kind": "file", "path": "  "},',
+    '  {"kind": "file", "path": "docs/ok.md"}]}, "s", "verified", [], "h")',
+    'block = page[3:page.index("\\n---", 3)]',
+    'entries = recall.frontmatter_source_entries(block)',
+    'print(json.dumps({"entries": entries,',
+    '                  "bool_emit": ys.dump_flow_mapping({"kind": "file", "path": False}),',
+    '                  "int_emit": ys.dump_flow_mapping({"path": 12})}, ensure_ascii=False))',
+  ]);
+  assert.deepEqual(r.entries, ['{kind: "slack"}', '{kind: "file", path: "docs/ok.md"}'],
+    'path 가 비문자·공백인 항목은 버리고, path 가 없는 출처 레코드는 그대로 쓴다');
+  assert.doesNotMatch(r.bool_emit, /false/, 'emit 이 비문자 값을 내면 왕복 타입이 깨진다');
+  assert.equal(r.int_emit, '', '쓸 수 있는 값이 없으면 빈 표기(호출부가 센티넬을 쓴다)');
+});
+
+test('kind 가 file 이 아닌 소스는 제외하고 사유를 kind_not_file 로 남긴다', () => {
+  // 라이브 실측: kind 분포 file 874 / url 1 / slack 1. 예전엔 그 2건이 `missing` 으로
+  // 집계돼 사유가 틀렸고, 3단계 source_missing 정책의 신호를 오염시켰다.
+  withProject({
+    cards: {
+      'card.md': card('카드', '본문.', [
+        '{kind: "url", path: "https://github.com/x/y/pull/1"}',
+        '{kind: "slack", path: "https://x.slack.com/archives/C1/p1"}',
+        '{kind: "url", path: "docs/looks-local.md"}',
+        '{path: "docs/no-kind.md"}',
+        fileEntry('docs/ok.md'),
+      ]),
+    },
+    raw: { 'docs/ok.md': 'ok\n', 'docs/looks-local.md': 'x\n', 'docs/no-kind.md': 'x\n' },
+  }, ({ log, write, run }) => {
+    write([{ file: 'proj-wiki/decisions/card.md', title: 'Summary', score: 1 }]);
+    const ctx = run();
+    assert.deepEqual(sourceLines(ctx), ['docs/ok.md']);
+    assert.doesNotMatch(ctx, /looks-local|no-kind|github|slack/,
+      'kind 가 file 이 아니면 로컬 경로 모양이어도 주입하지 않는다');
+    const reasons = selection(log).source_drop_reasons;
+    assert.equal(reasons.kind_not_file, 4);
+    assert.equal(reasons.missing, undefined, 'url/slack 이 missing 으로 오집계되면 안 된다');
+  });
+});
+
+test('wiki_verify_worker 와 kind 판정이 갈리지 않는다 (같은 file 집합)', () => {
+  const r = py([
+    'import recall, wiki_verify_worker, inspect',
+    'src = inspect.getsource(wiki_verify_worker.load_sources)',
+    'print(json.dumps({"kind": recall.SOURCE_KIND_FILE, "worker_uses": "kind\\") != \\"file\\"" in src}))',
+  ]);
+  assert.equal(r.kind, 'file');
+  assert.equal(r.worker_uses, true, 'verify worker 가 같은 kind 집합을 쓴다');
+});
+
+test('상한을 넘는 경로는 존재하더라도 버린다 (자르면 못 여는 경로가 된다)', () => {
+  const deep = Array.from({ length: 8 }, (_, i) => `dir${i}${'x'.repeat(20)}`).join('/');
+  const long = `docs/${deep}/file.md`;
+  assert.ok(long.length > 200, `테스트 경로가 상한을 넘어야 함: ${long.length}`);
+  withProject({
+    cards: { 'card.md': card('카드', '본문.', [fileEntry(long), fileEntry('docs/ok.md')]) },
+    raw: { [long]: 'x\n', 'docs/ok.md': 'ok\n' },
+  }, ({ log, write, run }) => {
+    write([{ file: 'proj-wiki/decisions/card.md', title: 'Summary', score: 1 }]);
+    const ctx = run();
+    assert.deepEqual(sourceLines(ctx), ['docs/ok.md']);
+    assert.doesNotMatch(ctx, /dir0/, '절단된 경로가 주입되면 없는 파일을 열게 된다');
+    assert.equal(selection(log).source_drop_reasons.too_long, 1);
+  });
+});
+
+test('상한은 실제 주입되는 표시 문자열 기준이다 (절대 표시로 넘으면 drop)', () => {
+  // 같은 카드가 cwd=project 에서는 상대경로로 통과하고, 하위 cwd 에서는 절대 표시가
+  // 상한을 넘어 drop 된다 — 토큰 예산은 주입 문자열의 함수이므로 의도된 비대칭이다.
+  const base = mkdtempSync(join(homedir(), '.qmd-src-cap-'));
+  try {
+    // 절대 표시가 딱 상한을 넘도록 상대 경로 길이를 base 길이에서 역산한다.
+    const relLen = Math.min(190, 201 - base.length - 1);
+    assert.ok(relLen > 20, `임시 경로가 너무 길어 검증 불가: ${base.length}`);
+    const name = 'a'.repeat(relLen - 'docs/'.length - '.md'.length);
+    const rel = `docs/${name}.md`;
+    project(base, {
+      cards: { 'card.md': card('카드', '본문.', [fileEntry(rel)]) },
+      // cwd 를 소스와 다른 하위 디렉터리로 두어야 표시가 절대경로가 된다.
+      raw: { [rel]: 'x\n', 'sub/keep.md': 'x\n' },
+    });
+    const sub = join(base, 'sub');
+    const fixture = join(base, 'fixture.json');
+    const log = join(base, 'recall.jsonl');
+    writeFileSync(fixture, JSON.stringify({ results: [{ file: 'proj-wiki/decisions/card.md', title: 'Summary', score: 1 }] }));
+    const env = { QMD_QUERY_FIXTURE: fixture, QMD_RECALL_LOG: log };
+    assert.deepEqual(sourceLines(contextOf({ prompt: PROMPT, cwd: base }, env)), [rel],
+      'cwd=project 에서는 상대 표시가 상한 안이라 주입된다');
+    const ctx = contextOf({ prompt: PROMPT, cwd: sub }, env);
+    assert.deepEqual(sourceLines(ctx), [], '하위 cwd 에서는 절대 표시가 상한을 넘어 drop');
+    assert.equal(selection(log).source_drop_reasons.too_long, 1);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('sources: [ ... ] 한 줄 flow 시퀀스는 사유를 남긴다 (무흔적 실패 금지)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'qmd-src-'));
+  try {
+    project(dir);
+    // frontmatter 를 직접 조립한다(우리 writer 는 이 형태를 쓰지 않는다).
+    writeFileSync(join(dir, '.auto-context', 'wiki', 'decisions', 'card.md'), [
+      '---', 'title: "카드"', 'status: verified',
+      'sources: [{kind: "file", path: "docs/a.md"}]',
+      '---', '', '<!-- qmd:auto:start id="main" sourceHash="h" -->', '## Summary',
+      '본문.', '<!-- qmd:auto:end -->', '',
+    ].join('\n'));
+    writeFileSync(join(dir, 'docs', 'a.md'), 'a\n');
+    const fixture = join(dir, 'fixture.json');
+    const log = join(dir, 'recall.jsonl');
+    writeFileSync(fixture, JSON.stringify({ results: [{ file: 'proj-wiki/decisions/card.md', title: 'Summary', score: 1 }] }));
+    const ctx = contextOf({ prompt: PROMPT, cwd: dir }, { QMD_QUERY_FIXTURE: fixture, QMD_RECALL_LOG: log });
+    assert.deepEqual(sourceLines(ctx), []);
+    const sel = selection(log);
+    assert.equal(sel.source_entries, 1, '항목 수가 0 이면 "소스 없는 카드"와 구분되지 않는다');
+    assert.deepEqual(sel.source_drop_reasons, { inline_sequence: 1 });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('sources: [] 는 정상적인 "소스 없음" 표기라 사유를 만들지 않는다', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'qmd-src-'));
+  try {
+    project(dir);
+    writeFileSync(join(dir, '.auto-context', 'wiki', 'decisions', 'card.md'), [
+      '---', 'title: "카드"', 'status: verified', 'sources: []', '---', '',
+      '<!-- qmd:auto:start id="main" sourceHash="h" -->', '## Summary', '본문.',
+      '<!-- qmd:auto:end -->', '',
+    ].join('\n'));
+    const fixture = join(dir, 'fixture.json');
+    const log = join(dir, 'recall.jsonl');
+    writeFileSync(fixture, JSON.stringify({ results: [{ file: 'proj-wiki/decisions/card.md', title: 'Summary', score: 1 }] }));
+    contextOf({ prompt: PROMPT, cwd: dir }, { QMD_QUERY_FIXTURE: fixture, QMD_RECALL_LOG: log });
+    const sel = selection(log);
+    assert.equal(sel.source_entries, 0);
+    assert.deepEqual(sel.source_drop_reasons, {});
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('형태별 파싱: 표준 YAML 인용 키·주석은 읽고, 지원하지 않는 형태는 형태별 사유를 남긴다', () => {
+  // 카드의 sources 는 사람과 dedup/review resolver 가 손으로 이식한다(CLAUDE.md 계약).
+  // 표준 YAML 로 쓴 형태를 못 읽으면 그 카드의 원문 링크가 통째로 사라지므로, 인용 키와
+  // 주석은 읽는다. block mapping·여러 줄 flow 는 파서를 두 벌로 만들지 않고 사유만 남긴다.
+  const forms = {
+    emit: '{kind: "file", path: "docs/a.md"}',
+    quoted_keys: '{"kind": "file", "path": "docs/a.md"}',
+    single_quotes: "{kind: 'file', path: 'docs/a.md'}",
+    trailing_comment: '{kind: "file", path: "docs/a.md"}  # 주석',
+    trailing_garbage: '{kind: "file"} oops',
+    multiline: '{kind: "file",',
+    truncated_quote: '{kind: "file", path: "docs/a.md}',
+    block_mapping: 'kind: file',
+    inline_sequence: '[{kind: "file", path: "docs/a.md"}]',
+    empty_mapping: '{}',
+  };
+  const r = py([
+    'import recall, yaml_scalars as ys',
+    'out = {}',
+    'for name, entry in json.loads(sys.argv[1]).items():',
+    '    fields, issue = ys.load_flow_mapping(entry)',
+    '    out[name] = {"path": fields.get("path", ""),',
+    '                 "reason": recall.source_parse_reason(entry, issue) if issue else ""}',
+    'print(json.dumps(out, ensure_ascii=False))',
+  ], JSON.stringify(forms));
+  for (const name of ['emit', 'quoted_keys', 'single_quotes', 'trailing_comment']) {
+    assert.equal(r[name].path, 'docs/a.md', `${name} 은 읽어야 한다`);
+    assert.equal(r[name].reason, '');
+  }
+  assert.equal(r.block_mapping.reason, 'block_mapping');
+  assert.equal(r.inline_sequence.reason, 'inline_sequence');
+  assert.equal(r.multiline.reason, 'multiline_flow');
+  assert.equal(r.truncated_quote.reason, 'parse_failed', '잘린 값은 여러 줄 flow 와 구분한다');
+  assert.equal(r.trailing_garbage.reason, 'parse_failed');
+  assert.equal(r.empty_mapping.reason, 'parse_failed');
+});
+
+test('표준 YAML 인용 키 카드도 실제로 주입된다 (왕복 e2e)', () => {
+  withProject({
+    cards: { 'card.md': card('카드', '본문.', ['{"kind": "file", "path": "docs/a.md"}']) },
+    raw: { 'docs/a.md': 'a\n' },
+  }, ({ write, run }) => {
+    write([{ file: 'proj-wiki/decisions/card.md', title: 'Summary', score: 1 }]);
+    assert.deepEqual(sourceLines(run()), ['docs/a.md']);
+  });
+});
+
 test('sources 가 없는 카드({kind: unknown})는 안전하게 빈 결과를 낸다', () => {
   withProject({
     cards: { 'card.md': card('카드', '본문이다.') },
@@ -384,6 +589,63 @@ test('카드당 상한(기본 3)을 넘는 원문 경로는 잘리고 over_cap �
     assert.equal(sel.inject_source_paths_per_card, 3);
     assert.equal(sel.source_drop_reasons.over_cap, 2);
   });
+});
+
+test('상한 도달과 조사 예산 소진은 다른 사유로 남는다 (over_cap vs over_scan_budget)', () => {
+  // 상한 도달은 "설정을 올리면 늘어난다", 조사 예산 소진은 "앞쪽 항목이 대량으로 버려졌다"
+  // 는 뜻이다 — 뭉치면 로그로 둘을 구분할 수 없다.
+  withProject({
+    settings: { injectSourcePathsPerCard: 1 },
+    // 앞의 2건이 버려지므로 채택 1건 전에 조사 예산(1×2)이 먼저 소진된다.
+    cards: {
+      'scan.md': card('스캔', '본문.', [
+        fileEntry('docs/gone1.md'), fileEntry('docs/gone2.md'), fileEntry('docs/ok.md'),
+      ]),
+    },
+    raw: { 'docs/ok.md': 'ok\n' },
+  }, ({ log, write, run }) => {
+    write([{ file: 'proj-wiki/decisions/scan.md', title: 'Summary', score: 1 }]);
+    assert.deepEqual(sourceLines(run()), []);
+    const reasons = selection(log).source_drop_reasons;
+    assert.equal(reasons.missing, 2);
+    assert.equal(reasons.over_scan_budget, 1);
+    assert.equal(reasons.over_cap, undefined, '조사 예산 소진이 상한 도달로 뭉쳐지면 안 된다');
+  });
+  withProject({
+    settings: { injectSourcePathsPerCard: 1 },
+    cards: { 'cap.md': card('상한', '본문.', [fileEntry('docs/a.md'), fileEntry('docs/b.md')]) },
+    raw: { 'docs/a.md': 'a\n', 'docs/b.md': 'b\n' },
+  }, ({ log, write, run }) => {
+    write([{ file: 'proj-wiki/decisions/cap.md', title: 'Summary', score: 1 }]);
+    assert.deepEqual(sourceLines(run()), ['docs/a.md']);
+    const reasons = selection(log).source_drop_reasons;
+    assert.equal(reasons.over_cap, 1);
+    assert.equal(reasons.over_scan_budget, undefined);
+  });
+});
+
+test('injectSourcePathsPerCard: 0 이면 sources 유무와 무관하게 출력이 바이트 동일하다', () => {
+  // 2단계가 1단계 출력에 순증 0 임을 고정한다(끈 프로젝트의 회귀 가드).
+  const results = [{ file: 'proj-wiki/decisions/card.md', title: 'Summary', score: 1 }];
+  const render = (entries) => {
+    const dir = mkdtempSync(join(tmpdir(), 'qmd-src-off-'));
+    try {
+      project(dir, {
+        settings: { injectSourcePathsPerCard: 0 },
+        cards: { 'card.md': card('카드', '본문이다.', entries) },
+        raw: { 'docs/a.md': 'a\n' },
+      });
+      const fixture = join(dir, 'fixture.json');
+      writeFileSync(fixture, JSON.stringify({ results }));
+      return contextOf({ prompt: PROMPT, cwd: dir }, { QMD_QUERY_FIXTURE: fixture });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+  const withSources = render([fileEntry('docs/a.md')]);
+  const withoutSources = render([]);
+  assert.equal(withSources, withoutSources, '끈 상태의 출력은 1단계와 바이트 동일해야 한다');
+  assert.doesNotMatch(withSources, /↳/);
 });
 
 test('injectSourcePathsPerCard 로 상한을 조절하고 0 이면 원문 경로 주입을 끈다', () => {
