@@ -184,12 +184,22 @@ def bounded_failure(action: str, job: dict, reason: str) -> dict:
     }
 
 
-def read_text_bounded(path: Path, max_chars: int) -> str | None:
+def read_source_bounded(path: Path, max_chars: int) -> tuple[str, bool] | None:
+    """Bounded read plus whether the file was actually cut off.
+
+    The truncation flag is forwarded to the extractor prompt so it summarizes only
+    what it saw instead of asserting the document lacks what it never received.
+    """
     try:
         text = path.read_text(encoding="utf-8")
     except OSError:
         return None
-    return text[:max_chars]
+    return text[:max_chars], len(text) > max_chars
+
+
+def read_text_bounded(path: Path, max_chars: int) -> str | None:
+    result = read_source_bounded(path, max_chars)
+    return None if result is None else result[0]
 
 
 def is_hidden_source_path(rel_path: str) -> bool:
@@ -372,10 +382,11 @@ def process_job(root: Path, config: dict, compile_cfg: dict, job: dict) -> tuple
         append_jsonl(cpath, bounded_failure("extractor_failed", job, "invalid_source_scope"))
         return True, False
     max_chars = int(compile_cfg.get("maxSourceChars", 12000) or 12000)
-    content = read_text_bounded(src, max_chars)
-    if content is None:
+    bounded = read_source_bounded(src, max_chars)
+    if bounded is None:
         append_jsonl(cpath, bounded_failure("extractor_failed", job, "source_unreadable"))
         return True, False
+    content, source_truncated = bounded
 
     extractor = compile_cfg.get("extractor") if isinstance(compile_cfg.get("extractor"), dict) else {}
     timeout = int(extractor.get("timeout", 30) or 30)
@@ -407,8 +418,12 @@ def process_job(root: Path, config: dict, compile_cfg: dict, job: dict) -> tuple
             "path": rel,
             "collection": source.get("collection", ""),
             "content": content,
+            "truncated": source_truncated,
         },
         "wiki": wiki_ctx,
+        # Prompt states the same line budget the lint enforces, so a verbatim-heavy
+        # summary does not overshoot into too_many_lines.
+        "maxLines": int(compile_cfg.get("maxAutoPageLines", 120) or 120),
     }
     argv = primary if primary is not None else default
     extracted, reason, returncode = run_extractor(argv, payload, timeout, root)

@@ -21,7 +21,11 @@ CLI_ABSENT = 127
 
 ALLOWED_TYPES = ("concept", "entity", "decision", "comparison")
 
-_PROMPT_TEMPLATE = """You convert one source document into compact, durable wiki candidates.
+# Matches wiki_compile.py's compile.maxAutoPageLines default; the prompt states the
+# budget so the model does not write a summary the lint would reject outright.
+DEFAULT_MAX_LINES = 120
+
+_PROMPT_TEMPLATE = """You convert one source document into durable wiki candidates.
 
 Output RULES (strict):
 - Output ONLY a single JSON object: {{"candidates": [ ... ]}}. No prose, no code fence.
@@ -30,17 +34,33 @@ Output RULES (strict):
 - aliases should include Korean title variants and common alternate names when they exist.
 - If the source overlaps an existing wiki entry, reuse that entry's canonicalKey and targetPath instead of creating a new concept.
 - Do not split into multiple candidates unless the source contains clearly independent durable concepts. If uncertain, emit one candidate or none.
-- summary is a short durable conclusion (a decision, rule, concept, or entity fact). NOT a transcript, NOT step-by-step dialog.
-- Never include secrets, API keys, tokens, or credentials. Omit anything sensitive.
+- summary is a durable conclusion (a decision, rule, concept, or entity fact). NOT a transcript, NOT step-by-step dialog, NOT a scene-by-scene retelling.
 - If nothing durable is worth saving, output {{"candidates": []}}.
 - Do NOT use any tools. Do NOT read or write files. Answer directly.
+
+VERBATIM RULES (critical — these cards are keyword-searched, so identifiers ARE the search surface):
+- Copy identifiers EXACTLY as the source writes them. Never paraphrase, translate, abbreviate, normalize, or replace an identifier with a generic description of it.
+- Whenever the source contains any of the following, carry it into summary verbatim:
+  - backtick code spans (`like_this`) — keep the backticks
+  - file and directory paths (`core/recall.py`, `.auto-context/settings.json`) — keep the full path, do NOT shorten it to a basename
+  - function/method/class/type signatures (`classifyOrigin()`, `load_project_config(cwd)`)
+  - configuration keys, field names, env vars, CLI flags (`compile.maxSourceChars`, `QMD_RECALL_LOG`, `--safe-mode`)
+  - numeric thresholds, limits, versions, percentages — with their units (`12000자`, `34.7%`, `>=2.5.3`, `120 lines`)
+  - error strings, status/reason codes, log lines, exit codes (`exit 127`, `no_results_after_filter`)
+  - bracketed or prefixed tags and IDs (`[DEV20100]`, `EP13`, `AT-123`)
+  - names of people, places, entities and short quoted lines — reproduce the wording exactly
+- Prefer keeping an identifier over being brief. A longer summary that carries the identifiers is strictly better than a shorter abstract one; never drop an identifier to save space.
+- Do NOT invent identifiers. Copy only what literally appears in the source.
+- Length: use as many lines as the identifiers require, up to {max_lines} lines (longer summaries are rejected). There is no reward for brevity.
+- Never include secrets, API keys, tokens, or credentials — this OUTRANKS the verbatim rules. Name the key but write the value as <REDACTED>, or omit it entirely.
+- If SOURCE FILE below is marked truncated, summarize only what is shown and never assert that something is absent from the document.
 
 WIKI SCHEMA (for orientation):
 {schema}
 
 {existing_context_section}
 
-SOURCE FILE: {path}
+SOURCE FILE: {path}{truncated_note}
 SOURCE CONTENT:
 {content}
 """
@@ -105,6 +125,15 @@ def read_payload() -> dict:
         return {}
 
 
+def coerce_max_lines(value: object) -> int:
+    """summary line budget handed to the prompt — mirrors compile.maxAutoPageLines."""
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_LINES
+    return parsed if parsed > 0 else DEFAULT_MAX_LINES
+
+
 def build_prompt(payload: dict) -> str:
     source = payload.get("source") if isinstance(payload.get("source"), dict) else {}
     wiki = payload.get("wiki") if isinstance(payload.get("wiki"), dict) else {}
@@ -113,7 +142,9 @@ def build_prompt(payload: dict) -> str:
         schema=str(wiki.get("schema", ""))[:4000],
         existing_context_section=render_existing_context_section(wiki),
         path=str(source.get("path", "")),
+        truncated_note=" (truncated: true — only the beginning of the file is shown)" if source.get("truncated") else "",
         content=str(source.get("content", "")),
+        max_lines=coerce_max_lines(payload.get("maxLines")),
     )
 
 

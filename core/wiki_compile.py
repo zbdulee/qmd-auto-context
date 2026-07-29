@@ -46,10 +46,48 @@ TYPE_DIRS = {
     "style": "style",
 }
 TYPE_DIR_NAMES = set(TYPE_DIRS.values())
-SECRET_PATTERNS = [
+SECRET_LITERAL_PATTERNS = [
     re.compile(r"sk-[A-Za-z0-9_-]{16,}"),
-    re.compile(r"(?i)(api[_-]?key|secret|token)\s*[:=]\s*[^\s]+"),
 ]
+# The `key: value` pattern is the one a technical card can trip merely by *naming* a
+# config key, so its value is captured separately (group "value") and checked against
+# _NON_SECRET_VALUE_RE below.
+SECRET_KEYWORD_PATTERN = re.compile(r"(?i)(api[_-]?key|secret|token)\s*[:=]\s*(?P<value>[^\s]+)")
+# Kept as the full pattern list for compatibility; prefer secret_matches()/redact().
+SECRET_PATTERNS = SECRET_LITERAL_PATTERNS + [SECRET_KEYWORD_PATTERN]
+# Values that cannot be a credential under any reading: placeholders, references to a
+# value stored elsewhere, type names, booleans. A keyword match on one of these is
+# dropped instead of rejecting the whole card. This narrows false positives only — an
+# opaque value never matches here, so it is still redacted/rejected as before.
+_NON_SECRET_VALUE_RE = re.compile(
+    r"""(?ix) ^ (?:
+          <[^>]*>                             # <YOUR_TOKEN>, <값>, <REDACTED>
+        | \{\{[^}]*\}\} | \{[^}]*\}           # {{token}}, {token}
+        | \$\{?[A-Za-z_][A-Za-z0-9_]*\}?      # $GITHUB_TOKEN, ${GITHUB_TOKEN}
+        | \[?REDACTED\]?
+        | \.{2,} | \*{2,} | x{3,} | _{2,} | -{2,}
+        | true|false|null|none|nil|undefined
+        | str|string|int|integer|number|float|bool|boolean|optional|required|any|object
+    ) [.,;:)\]}'"`]* $""",
+)
+
+
+def is_non_secret_value(value: str) -> bool:
+    return bool(_NON_SECRET_VALUE_RE.match(value.strip().strip("`\"'")))
+
+
+def secret_matches(text: str) -> list[re.Match]:
+    """Secret-pattern hits in `text`, excluding keyword hits on non-secret values."""
+    matches = [m for pattern in SECRET_LITERAL_PATTERNS for m in pattern.finditer(text)]
+    matches.extend(
+        m for m in SECRET_KEYWORD_PATTERN.finditer(text)
+        if not is_non_secret_value(m.group("value"))
+    )
+    return matches
+
+
+def has_secret_like(text: str) -> bool:
+    return bool(secret_matches(text))
 TRANSCRIPT_RE = re.compile(r"(?im)^\s*(user|assistant|system|human|ai)\s*:")
 AUTO_START_RE = re.compile(r'<!-- qmd:auto:start id="main" sourceHash="([a-f0-9]+)" -->')
 AUTO_BLOCK_RE = re.compile(r'<!-- qmd:auto:start id="main" sourceHash="([a-f0-9]+)" -->\n.*?\n<!-- qmd:auto:end -->', re.S)
@@ -317,13 +355,22 @@ def resolve_target(root: Path, wiki_root: Path, candidate: dict, suggested_type:
 
 
 def redact(text: str) -> tuple[str, list[str]]:
-    redactions = []
+    redacted = False
     result = text
-    for pattern in SECRET_PATTERNS:
+    for pattern in SECRET_LITERAL_PATTERNS:
         if pattern.search(result):
-            redactions.append("secret_like")
+            redacted = True
             result = pattern.sub("[REDACTED]", result)
-    return result, sorted(set(redactions))
+
+    def replace_keyword(match: re.Match) -> str:
+        nonlocal redacted
+        if is_non_secret_value(match.group("value")):
+            return match.group(0)
+        redacted = True
+        return "[REDACTED]"
+
+    result = SECRET_KEYWORD_PATTERN.sub(replace_keyword, result)
+    return result, ["secret_like"] if redacted else []
 
 
 def source_hash(candidate: dict) -> str:
@@ -348,7 +395,7 @@ def lint_candidate(candidate: dict, target: Path | None, max_lines: int) -> dict
         findings.append("unsafe_target_path")
     if TRANSCRIPT_RE.search(summary):
         findings.append("transcript_like")
-    if any(pattern.search(summary) or pattern.search(title) for pattern in SECRET_PATTERNS):
+    if has_secret_like(summary) or has_secret_like(title):
         findings.append("secret_like")
     if len(summary.splitlines()) > max_lines:
         findings.append("too_many_lines")
