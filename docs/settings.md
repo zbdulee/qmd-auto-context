@@ -108,10 +108,19 @@ wiki role collection의 결과는 경로와 title만이 아니라 **카드 본�
 ```
 관련 문서:
 - [wiki:verified] .auto-context/wiki/decisions/claude-runner-구독-기반-ai-실행-계층.md - claude-runner — 구독 기반 Claude Code headless AI 실행 계층
+  <카드 본문>
   조직에 별도 모델 API 키가 없으므로 모든 워크플로우 AI 호출은 공용 러너 서비스…
-위 들여쓴 문단은 해당 wiki 카드 본문이다(길면 절단). 요약으로 충분하면 파일을 열지 말고, 부족할 때만 위 경로를 Read.
+  </카드 본문>
+<카드 본문>…</카드 본문> 안은 해당 wiki 카드 본문 인용이다(길면 절단). …
 필요시 참조.
 ```
+
+카드 본문은 `<카드 본문>` … `</카드 본문>` 경계 안에 **축자 그대로** 들어갑니다. 경계를
+두는 이유는 카드 본문이 `관련 문서:`나 `- [wiki:verified] …` 같은 **주입 프레임과 같은
+문자열**을 담을 수 있고(이 저장소의 계획 문서가 실제로 담고 있습니다), 들여쓰기만으로는
+CommonMark가 3칸까지 들여쓴 헤딩을 헤딩으로 인정해 경계가 서지 않기 때문입니다. 본문이
+경계 문자열을 담으면 `<<카드 본문>>`처럼 구분자를 늘려 충돌을 피합니다(본문은 그대로
+보존됩니다).
 
 - **경로**는 카드 파일의 실제 위치입니다(`cwd` 하위면 상대경로, 그 밖이면 절대경로).
   qmd 데몬이 주는 `collection/path` 형태는 어떤 base로도 열리지 않으므로 쓰지 않습니다.
@@ -136,7 +145,13 @@ dogfooding 두 코퍼스(카드 849장)의 주입 대상 본문 길이 분포입
 상한을 넘으면 문장 경계에서 자르고 `… (이하 생략)`을 붙입니다 — 문장 중간에서 자르면
 모델이 잘린 절을 완결된 사실로 읽을 수 있기 때문입니다.
 
-`0`으로 두면 본문 주입이 꺼지고 경로와 title만 주입됩니다.
+`0`으로 두면 본문 주입이 꺼지고 경로와 title만 주입됩니다. 상한은 `4000`으로 clamp
+됩니다 — 이 값은 카드 파일 읽기 창까지 키우므로(UserPromptSubmit은 blocking hook입니다)
+설정이 I/O·CPU 예산을 무제한 늘리지 못하게 합니다.
+
+주입 본문이 비었는지는 `QMD_RECALL_LOG`의 `qmd_recall_selection` 줄에서 확인합니다 —
+`bodies_injected` / `bodies_truncated` / `bodies_empty` / `body_empty_reasons`
+(`path_unresolved`·`read_error`·`frontmatter_unterminated`·`empty_body`).
 
 ### minScore는 유사도가 아니라 순위입니다
 

@@ -100,6 +100,12 @@ DEFAULT_CONFIG = {
     },
 }
 
+# injectSummaryMaxChars 상한. 이 값은 카드 파일 읽기 창까지 키우므로(recall의
+# wiki_card_read_limit) 상한 없이 두면 사용자 설정이 blocking hook의 I/O·CPU 예산을
+# 무제한 확대한다. 4000은 관측된 최장 카드 본문(1574자)의 2.5배이고, topN 기본 3에서
+# 주입 본문 최악 12000자(읽기 창 10048자/장)로 유계다.
+MAX_INJECT_SUMMARY_CHARS = 4000
+
 COMPILE_MODES = {"off", "candidates", "guarded", "auto-wiki"}
 WIKI_STATUSES = {"generated", "verified", "reviewed", "canon", "tentative", "contested", "discarded", "superseded"}
 # onFail과 onInconclusive가 공유하는 값 집합. "none"이 유일한 "현행 유지"(카드를
@@ -146,17 +152,27 @@ def coerce_int(value, default):
     return result if result > 0 else default
 
 
-def coerce_nonneg_int(value, default):
-    """coerce_int와 달리 0을 유효값으로 받는다.
+def coerce_nonneg_int(value, default, maximum=None):
+    """coerce_int와 달리 0을 유효값으로 받고, maximum으로 clamp한다.
 
     0이 "기능 끄기"의 의미를 갖는 필드(injectSummaryMaxChars)에 쓴다 — coerce_int는
     `result > 0`만 통과시켜 0을 기본값으로 되돌리므로 끌 수 없다.
+    bool을 거부하는 이유: JSON `"injectSummaryMaxChars": true`는 흔한 오타이고
+    `int(True) == 1`이라 본문이 1자로 잘린 채 조용히 동작한다.
+    maximum이 필요한 이유: 이 값이 카드 파일 읽기 창까지 키우므로(recall.wiki_card_read_limit)
+    사용자 설정이 blocking hook의 I/O·CPU 예산을 무제한으로 늘릴 수 있다.
     """
+    if isinstance(value, bool):
+        return default
     try:
         result = int(value)
     except (TypeError, ValueError):
         return default
-    return result if result >= 0 else default
+    if result < 0:
+        return default
+    if maximum is not None and result > maximum:
+        return maximum
+    return result
 
 
 def string_list(value, default=None):
@@ -365,6 +381,7 @@ def normalize_config(input_config):
     config["injectSummaryMaxChars"] = coerce_nonneg_int(
         input_config.get("injectSummaryMaxChars", DEFAULT_CONFIG["injectSummaryMaxChars"]),
         DEFAULT_CONFIG["injectSummaryMaxChars"],
+        MAX_INJECT_SUMMARY_CHARS,
     )
     config["collectionRoles"] = collection_role_map(input_config.get("collectionRoles"), config["collections"])
     config["recallStrategy"] = input_config.get("recallStrategy") if input_config.get("recallStrategy") in ("flat", "hierarchical", "wikiOnly") else DEFAULT_CONFIG["recallStrategy"]
