@@ -20,7 +20,16 @@ table only after every entry has been reached (or the run stopped early — see 
    a. Read the candidate (title/summary/suggestedType) already embedded in the entry.
    b. Read the actual content at `matchedPath`.
    c. Judge one action:
-      - Same fact/event, worth folding in → `merge`
+      - Same fact/event, worth folding in → `merge`. Before the CLI call, fold anything the
+        matched page has that the candidate summary lacks (the entry's `uniqueToMatched` list is the
+        starting point) into the matched page with your Edit tool, in its own `## …` section BELOW
+        that page's `<!-- qmd:auto:end -->` marker — never inside the
+        `qmd:auto:start`/`qmd:auto:end` block. `merge` substitutes that block wholesale with the
+        candidate's generated summary (`core/wiki_review.py`), and later source edits regenerate it
+        again; `status: verified` is no protection, since `is_auto_writable_page` deliberately
+        excludes `verified`. Only content outside the block survives — frontmatter included, so
+        transplanting `aliases`/`canonicalKey` is safe. Keep identifiers (numbers, percentages,
+        field names, queries) verbatim.
       - `decision`-type candidate that reverses/replaces the matched page's principle → `supersede`
       - Looks unrelated on inspection (semantic gate false positive) → `separate`
       - Not worth keeping at all → `discard`

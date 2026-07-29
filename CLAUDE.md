@@ -92,6 +92,7 @@ backend/   ← qmd MCP HTTP 데몬(:8483) launcher + keepalive/logrotate/index w
 - `wiki-compile` — compact durable summary/candidate JSON을 `core/wiki_extract.py` → `core/wiki_compile.py`로 수동 실행한다. raw transcript를 입력하지 않으며 query-time hook에서는 쓰지 않는다.
 - `wiki-review` — write-time semantic gate가 auto-write 대신 `merge-needed.jsonl`에 큐한 신규 후보를 사람 판단으로 per-entry resolve한다(`wiki-review.sh`). 큐 전체 자율 처리는 `agents/wiki-review-resolver.md` 에이전트로 위임. dedup과 대칭으로 SessionStart hint가 대기 건수를 `notice_once`로 사용자에게 표면화하고 모델용 spawn hint도 방출한다(두 파이프라인 동일 구조).
 - `wiki-dedup` — retroactive scan(`core/wiki_dedup_scan.py`)이 `dedup-needed.jsonl`에 큐한 **이미 존재하는** wiki 카드 쌍을 정리하는 user-facing 진입점. `agents/wiki-dedup-resolver.md` 에이전트를 스폰해 자율 판단한다(WORKFLOW는 에이전트가 SSOT — skill은 재복제하지 않음). 같은 큐를 SessionStart hint가 자동 스폰하며, hint는 대기 건수를 `notice_once`로 사용자에게 표면화한다. skill 경유(명시적 사용자 요청) 스폰은 요약을 반환하고 hint 경유 자동 스폰은 silent다(에이전트 step 5의 caller 조건부).
+- **wiki 카드에 사람/에이전트가 손으로 접어 넣는 내용은 항상 `<!-- qmd:auto:end -->` 밖에 둔다.** auto 블록은 소스 변경 시 `AUTO_BLOCK_RE.sub`로 통째 재생성되고 `verified`는 `is_auto_writable_page` 보호 집합에 없어(의도적) 갱신 대상이다 — 블록 안에 접어 넣은 고유 사실은 다음 소스 편집에 소실된다. 블록 밖은 frontmatter 포함 전부 보존되므로 dedup/review 병합 시 alias·canonicalKey·sources 이식은 안전하다. `maxAutoPageLines`는 candidate summary 줄 수만 보므로 수동 섹션은 lint에 영향이 없다. dedup/review resolver 에이전트가 각자 다른 결론(블록 안/밖)에 도달한 이력이 있어 두 에이전트 문서에 명시돼 있다.
 - `hint`에 해당하는 skill은 만들지 않는다. PostToolUse posttool은 편집 직후 자동 실행되는 hook-only 연속성 힌트다.
 - `gate`에 해당하는 skill은 만들지 않는다. gate는 pending 프로젝트 편집 차단용 내부 안전장치다.
 

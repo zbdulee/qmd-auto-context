@@ -43,7 +43,16 @@ summary; from the `wiki-dedup` skill on an explicit user request → report the 
    c. List every fact present in each page you will delete that is absent from the keeper, fold
       ALL of them into the keeper with your Edit tool first, and re-read the keeper to confirm
       every listed fact is now present. Only after the keeper holds everything do you start
-      deleting.
+      deleting. PLACEMENT IS LOAD-BEARING: folded facts go in their own `## …` section BELOW the
+      keeper's `<!-- qmd:auto:end -->` marker — never inside the `qmd:auto:start`/`qmd:auto:end`
+      block, and never by rewriting the sentences already inside it. `core/wiki_compile.py`
+      substitutes that block wholesale every time the source file changes, and `status: verified`
+      is no protection (`is_auto_writable_page` deliberately excludes `verified` so stale cards get
+      re-verified) — anything folded inside the block is silently lost on the next source edit.
+      Everything outside the block survives regeneration, frontmatter included, so transplanting
+      the deleted page's `aliases`/`canonicalKey`/`sources` entries is safe. Keep identifiers
+      (numbers, percentages, field names, queries) verbatim — they are the lexical search surface —
+      and close the section with an HTML comment naming the page you merged from.
    d. Then resolve the cluster's entries through step 4's normal per-entry loop: an entry pairing
       the keeper with a page you decided to delete → `--action merge --delete <that page>`; an
       entry pointing at a page you already deleted earlier in this run is now stale, and step
@@ -63,9 +72,10 @@ summary; from the `wiki-dedup` skill on an explicit user request → report the 
       the more complete one). List every fact present in the page you will delete that is absent
       from the keeper — this matters more here than for exact duplicates, since a category merge
       usually combines genuinely different specific facts, not just repeated ones. Fold each fact
-      into the keeper with your Edit tool first, and re-read the keeper to confirm every listed
-      fact is now present. Only then proceed. (For a pair whose cluster you already folded in step
-      3.c, do not re-fold — go straight to 4.d.)
+      into the keeper with your Edit tool first — below `<!-- qmd:auto:end -->`, per step 3.c's
+      placement rule, which applies to single-pair entries exactly as it does to clusters — and
+      re-read the keeper to confirm every listed fact is now present. Only then proceed. (For a
+      pair whose cluster you already folded in step 3.c, do not re-fold — go straight to 4.d.)
    d. Run: `python3 "$ROOT/core/wiki_dedup_resolve.py" --cwd <cwd> --index <n> --action merge
       --delete <wiki-root-relative path of the page being deleted>`
       (or `--action skip` with no `--delete` for non-duplicates).
@@ -85,6 +95,11 @@ summary; from the `wiki-dedup` skill on an explicit user request → report the 
 
 - Never edit `core/wiki_dedup_resolve.py`, `core/wiki_dedup_scan.py`, or the queue file directly —
   every mutation goes through step 4.d's CLI call.
+- The auto-block placement rule in step 3.c is not stylistic. Two resolver runs on the same day
+  reached opposite conclusions about it (one folded merged facts into the auto block, one added a
+  section after `auto:end`); the first run's facts were sitting on a card whose `auto:end` body was
+  0 lines, i.e. one source edit away from being erased. When in doubt, everything you author by
+  hand goes below `auto:end`.
 - This agent is spawned two ways, both going through step 0's run-lock: autonomously from the
   `core/update.sh` SessionStart hint (silent — no chat summary), or by the `wiki-dedup` skill on an
   explicit user request (report the step-5 summary). It has no direct user-facing trigger phrases of

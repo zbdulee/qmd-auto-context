@@ -159,6 +159,81 @@ test('wiki_compile: reuses existing page by canonicalKey when title changes and 
   }
 });
 
+test('wiki_compile: regenerating a verified page keeps hand-authored content below auto:end', () => {
+  // dedup/review resolvers fold a deleted card's unique facts into the keeper. That fold MUST land
+  // outside the auto block: `verified` is deliberately not in is_auto_writable_page's protected set,
+  // so a source change regenerates the block. This pins the contract both resolver agents rely on.
+  const work = repoTemp('wiki-compile-manual-section-survives');
+  try {
+    writeSettings(work);
+    const target = join(work, '.auto-context', 'wiki', 'concepts', 'signal-rules.md');
+    mkdirSync(join(work, '.auto-context', 'wiki', 'concepts'), { recursive: true });
+    const mergedSection = [
+      '## 병합된 고유 사실 (merged)',
+      '- 실측 충족률 6.1%(HGNN 172/2,817), resolutiondate 62.4%.',
+      '- `summary ~ "AT"`가 동일 조건에서 480건과 0건을 반환.',
+      '',
+      '<!-- merged from concepts/deleted-card.md by wiki-dedup 2026-07-29 -->',
+    ].join('\n');
+    writeFileSync(target, [
+      '---',
+      'title: "Signal Perception Rule"',
+      'canonicalKey: "signal-perception-rule"',
+      'aliases:',
+      '  - "Transplanted alias from the deleted card"',
+      'type: concept',
+      'status: verified',
+      'created: 2026-07-27',
+      'updated: 2026-07-29',
+      'createdBy: qmd-auto-context',
+      'confidence: high',
+      'reviewed: false',
+      'sources:',
+      '  - {kind: "file", path: "docs/a.md", collection: "proj-wiki"}',
+      'triggers:',
+      '  - post_tool_source',
+      'redactions:',
+      'verifiedBy: "claude"',
+      'verifiedAt: "2026-07-27T01:59:49.698425Z"',
+      '---',
+      '',
+      '<!-- qmd:auto:start id="main" sourceHash="aaaaaaaaaaaaaaaa" -->',
+      '## Summary',
+      'Original generated summary, regeneration target.',
+      '<!-- qmd:auto:end -->',
+      '',
+      mergedSection,
+      '',
+    ].join('\n'));
+
+    const out = runCompile(work, {
+      trigger: 'post_tool_source',
+      title: 'Signal Perception Rule',
+      canonicalKey: 'signal-perception-rule',
+      summary: 'Regenerated summary from the changed source file.',
+      suggestedType: 'concept',
+      confidence: 'high',
+    });
+    assert.match(out, /updated/);
+
+    const page = readFileSync(target, 'utf8');
+    // Auto block was regenerated (verified does not protect it) ...
+    assert.match(page, /Regenerated summary from the changed source file/);
+    assert.doesNotMatch(page, /Original generated summary/);
+    // ... status was reset for re-verification, and the machine-verify stamps cleared ...
+    assert.match(page, /^status: generated$/m);
+    assert.match(page, /^verifiedBy: ""$/m);
+    // ... while everything outside the block survived byte-for-byte.
+    assert.ok(page.includes(mergedSection), 'hand-authored section below auto:end must survive');
+    assert.match(page, /^ {2}- "Transplanted alias from the deleted card"$/m);
+    assert.match(page, /^ {2}- \{kind: "file", path: "docs\/a\.md", collection: "proj-wiki"\}$/m);
+    // Order matters: the manual section stays after the closing marker.
+    assert.ok(page.indexOf(mergedSection) > page.indexOf('<!-- qmd:auto:end -->'));
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
 test('wiki_compile: reuses existing page by alias or title before creating a title slug', () => {
   const work = repoTemp('wiki-compile-reuse-alias-title');
   try {
