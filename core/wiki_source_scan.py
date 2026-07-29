@@ -108,7 +108,7 @@ def rotate(rels: list[str], cursor: str, limit: int) -> list[str]:
 
 
 def run(cwd: str) -> dict:
-    result = {"cards": 0, "examined": 0, "detected": 0, "recorded": 0}
+    result = {"cards": 0, "examined": 0, "detected": 0, "recorded": 0, "resolved": 0}
     found = qmd_config.find_project_config(cwd)
     root = Path(found["projectRoot"]).resolve()
     config = found["config"]
@@ -121,11 +121,10 @@ def run(cwd: str) -> dict:
     if not scan_cfg.get("enabled", True):
         log("SKIP: compile.sourceScan.enabled is false")
         return result
-    wiki_rel = config.get("wikiPath", ".auto-context/wiki")
-    wiki_root = (root / wiki_rel).resolve()
-    try:
-        wiki_root.relative_to(root)
-    except ValueError:
+    # wiki root 격리 판정은 wiki_source_missing이 SSOT다 — repair CLI와 같은 함수를 써야
+    # 한다(갈려 있던 동안 repair만 심볼릭 링크·`wikiPath:"../x"`를 통과시켰다).
+    wiki_root = wsm.wiki_root_of(root, config)
+    if wiki_root is None:
         log("ABORT: unsafe wikiPath")
         return result
     if not wiki_root.is_dir():
@@ -167,11 +166,18 @@ def run(cwd: str) -> dict:
             continue
         result["examined"] += 1
         info = wsm.classify_card(text, root, allow_roots)
-        if not wsm.all_sources_missing(info):
-            continue
-        result["detected"] += 1
         # 카드 경로는 project root 상대로 남긴다(verify 큐·manifest와 같은 기준).
         target_rel = page.relative_to(root).as_posix()
+        if not wsm.all_sources_missing(info):
+            # 소스가 **다시 존재한다**. 미해결 상태로 남아 있었으면 종결 행을 남겨
+            # 대기에서 뺀다 — 이 전이가 없으면 복원된 카드가 영구히 대기로 남고(TTL마다
+            # 거짓 알림), 그것을 치우려 dismiss하면 다음 진짜 소실이 영구히 묻힌다.
+            if wsm.needs_resolution_record(states.get(target_rel)):
+                if wsm.record_resolution(root, compile_cfg, target_rel, status,
+                                         info["missing"], "scan", states):
+                    result["resolved"] += 1
+            continue
+        result["detected"] += 1
         if wsm.record_detection(root, compile_cfg, target_rel, status,
                                 info["missing"], "scan", states):
             result["recorded"] += 1
@@ -181,7 +187,8 @@ def run(cwd: str) -> dict:
     })
     log(
         f"cards={result['cards']} examined={result['examined']} "
-        f"detected={result['detected']} recorded={result['recorded']} cursor={last}"
+        f"detected={result['detected']} recorded={result['recorded']} "
+        f"resolved={result['resolved']} cursor={last}"
     )
     return result
 

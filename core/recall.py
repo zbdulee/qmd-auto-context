@@ -434,6 +434,9 @@ def frontmatter_source_entries(block: str) -> list[str]:
 # 검증에 쓰고 다른 한쪽은 그 경로를 모델에게 제시하므로, 서로 다른 집합을 보면 "검증되지
 # 않은 종류의 소스"가 주입된다.
 SOURCE_KIND_FILE = "file"
+# "파일 소스가 아니다"(= 소실 판정에서 무시) 사유. `wiki_source_missing`이 이 집합을
+# 그대로 쓴다 — 소실 판정이 두 벌이 되지 않게 한다.
+NON_FILE_SOURCE_REASONS = ("kind_not_file", "no_path")
 # 주입할 경로 문자열 상한. title(160)·본문(600)에는 상한이 있는데 경로만 무제한이면
 # 토큰 절감 목표에 구멍이 남는다(실측: 822자 경로가 축자 주입됐다. 최악 topN 3 × 상한
 # 3경로 × 1000자 ≈ 9KB). 근거: 실코퍼스 876항목의 경로 길이는 상대 median 53 / p95 69 /
@@ -549,26 +552,40 @@ def resolve_source_path(entry: str, project_root: Path, cwd: str,
 
 
 def collect_source_paths(block: str, project_root: Path, cwd: str, limit: int,
-                         allow_roots: list[Path]) -> tuple[list[str], int, dict[str, int]]:
-    """(표시 경로 목록, 본 항목 수, 사유별 drop 수). 카드당 상한 `limit`을 적용한다.
+                         allow_roots: list[Path],
+                         observe_only: bool = False) -> tuple[list[str], int, dict[str, int], int]:
+    """(표시 경로 목록, 본 항목 수, 사유별 drop 수, **살아 있는 파일 소스 수**).
+
+    마지막 값이 따로 필요한 이유: 주입 목록만으로는 "살아 있는 원문이 없다"와 "관측
+    전용 모드라 목록을 안 채웠다"·"카드 사이 중복 제거로 비었다"를 구분할 수 없다
+    (`cards_all_sources_missing`이 이것 때문에 과대 집계됐다).
+    카드당 상한 `limit`을 적용한다.
 
     카드 안 중복도 여기서 제거한다(같은 원문을 두 번 가리키는 항목). 카드 **사이**의
     중복은 최종 목록이 정해진 뒤 `dedup_source_paths`가 처리한다.
+
+    `observe_only`는 **주입하지 않고 사유만 센다**(`injectSourcePathsPerCard: 0` + 진단
+    로그 켜짐). `cards_all_sources_missing`이 그 설정 때문에 죽으면, "주입 배지를 두지
+    않는 대신 로그 카운터가 남긴다"는 3단계 근거가 성립하지 않는다 — 카드는 여전히
+    캐논으로 주입되기 때문이다. 반환 경로 목록은 항상 비어 있으므로 주입 문자열은
+    바이트 동일하다.
     """
     paths: list[str] = []
     reasons: dict[str, int] = {}
+    present = 0
     entries = frontmatter_source_entries(block)
     # 조사 항목 수도 상한을 둔다: `sources`는 모델이 준 목록이라 개수에 보장이 없고
     # 항목마다 stat()이 붙는다(읽기 창 8192자에는 수백 항목이 들어간다). 채택 상한의
     # 2배까지 조사하면 "정상 항목 하나당 이상 항목 하나"까지 견디면서 카드당 stat 수가
     # 주입 예산의 상수배로 유계다(실코퍼스 849장에는 애초에 max 4항목이다).
-    scan_limit = limit * 2
+    # observe_only에서도 stat 예산은 유계여야 한다 — 기본 상한과 같은 규모로 고정한다.
+    scan_limit = (limit if limit > 0 else DEFAULT_INJECT_SOURCE_PATHS_PER_CARD) * 2
     for index, entry in enumerate(entries):
         # 두 상한을 **다른 사유**로 남긴다: `over_cap`은 "쓸 만한 경로가 상한만큼 이미
         # 찼다"(설정을 올리면 늘어난다), `over_scan_budget`은 "조사 예산이 소진됐다"
         # (= 앞쪽 항목이 대량으로 버려졌다는 신호이므로 카드를 봐야 한다). 뭉치면 로그로
         # 둘을 구분할 수 없다.
-        if len(paths) >= limit:
+        if not observe_only and len(paths) >= limit:
             reasons["over_cap"] = reasons.get("over_cap", 0) + 1
             continue
         if index >= scan_limit:
@@ -578,28 +595,51 @@ def collect_source_paths(block: str, project_root: Path, cwd: str, limit: int,
         if not display:
             reasons[reason] = reasons.get(reason, 0) + 1
             continue
+        present += 1
         if display in paths:
             reasons["duplicate"] = reasons.get("duplicate", 0) + 1
             continue
+        if observe_only:
+            # 관측 전용: 사유 집계에만 참여하고 주입 목록에는 넣지 않는다.
+            continue
         paths.append(display)
-    return paths, len(entries), reasons
+    return paths, len(entries), reasons, present
 
 
-def source_inject_opts(config: dict) -> tuple[int, list[Path]]:
-    """(카드당 상한, allowRoots) — recall 호출당 1회 계산해 카드마다 재사용한다.
+def card_sources_all_missing(result: dict) -> bool:
+    """주입된 wiki 결과의 소스가 **전부 소실**인가(로그 카운터 판정).
+
+    규칙은 `wiki_source_missing.all_sources_missing`과 같다 — 소실 1건 이상 + 살아 있는
+    파일 소스 0 + 판정 불가 0. `_wiki_sources`(주입 목록)로 판정하면 안 된다: 관측 전용
+    모드에서는 항상 비어 있고, 카드 사이 중복 제거로도 비므로 과대 집계된다.
+    """
+    reasons = result.get("_wiki_source_reasons", {})
+    if not reasons.get("missing") or result.get("_wiki_source_present"):
+        return False
+    return not any(key not in NON_FILE_SOURCE_REASONS and key != "missing" for key in reasons)
+
+
+def source_inject_opts(config: dict, observe: bool = False) -> tuple[int, list[Path], bool]:
+    """(카드당 상한, allowRoots, 관측 전용 여부) — recall 호출당 1회 계산해 재사용한다.
 
     allowRoots를 카드마다 resolve하면 per-card 비용이 붙는다(이 저장소는 카드마다
     경로 재탐색으로 37ms/장을 태운 이력이 있다). coerce는 config.normalize_config가
     이미 하지만, 훅은 정규화를 거치지 않은 config로도 호출될 수 있어 여기서 한 번 더 막는다.
+
+    `observe`는 진단 로그(`QMD_RECALL_LOG`)가 켜져 있다는 뜻이다. 상한이 0이어도 그때는
+    분류를 돌려 `cards_all_sources_missing`·`source_drop_reasons`를 살린다(주입은 하지
+    않는다). 로그가 꺼져 있으면 카운터를 쓸 곳이 없으므로 추가 비용도 0으로 유지한다.
     """
     limit = config.get("injectSourcePathsPerCard", DEFAULT_INJECT_SOURCE_PATHS_PER_CARD)
     if not isinstance(limit, int) or isinstance(limit, bool) or limit < 0:
         limit = DEFAULT_INJECT_SOURCE_PATHS_PER_CARD
     limit = min(limit, MAX_INJECT_SOURCE_PATHS_PER_CARD)
     if limit == 0:
-        # 끈 경우엔 allowRoots resolve도 하지 않는다(추가 비용 0).
-        return 0, []
-    return limit, qmd_resolve_paths.allowed_roots(config)
+        if not observe:
+            # 끈 경우엔 allowRoots resolve도 하지 않는다(추가 비용 0).
+            return 0, [], False
+        return 0, qmd_resolve_paths.allowed_roots(config), True
+    return limit, qmd_resolve_paths.allowed_roots(config), False
 
 
 def read_wiki_meta(result: dict, config: dict, cwd: str, summary_max_chars: int = DEFAULT_INJECT_SUMMARY_MAX_CHARS,
@@ -621,7 +661,8 @@ def read_wiki_meta(result: dict, config: dict, cwd: str, summary_max_chars: int 
     meta = {"status": "generated", "reviewed": False, "title": "", "summary": "",
             "displayPath": "", "bodyReason": "", "decodeReplaced": False,
             "cardRead": False, "windowTruncated": False, "bodyIncomplete": False,
-            "metaIssues": [], "sources": [], "sourceEntries": 0, "sourceReasons": {}}
+            "metaIssues": [], "sources": [], "sourceEntries": 0, "sourceReasons": {},
+            "sourcePresent": 0}
     if roots is None:
         # 여기서 한 번만 계산한다(예전엔 resolve_wiki_result_path가 카드마다 재탐색했다).
         roots = wiki_roots(config, cwd)
@@ -670,11 +711,13 @@ def read_wiki_meta(result: dict, config: dict, cwd: str, summary_max_chars: int 
     issues: dict[str, str] = {}
     block = text[3:end]
     fields = parse_frontmatter_scalars(block, issues)
-    if source_opts[0] > 0:
+    observe_only = len(source_opts) > 2 and bool(source_opts[2])
+    if source_opts[0] > 0 or observe_only:
         # 원문 경로. 이미 메모리에 있는 frontmatter 블록만 쓰므로 추가 파일 읽기는 없다
         # (경로 존재 확인 stat만 카드당 최대 source_opts[0]회 붙는다).
-        meta["sources"], meta["sourceEntries"], meta["sourceReasons"] = collect_source_paths(
-            block, project_root, cwd, source_opts[0], source_opts[1])
+        (meta["sources"], meta["sourceEntries"], meta["sourceReasons"],
+         meta["sourcePresent"]) = collect_source_paths(
+            block, project_root, cwd, source_opts[0], source_opts[1], observe_only)
     if fields.get("status"):
         meta["status"] = fields["status"]
     elif "status" in issues:
@@ -727,6 +770,10 @@ def annotate_wiki_result(result: dict, config: dict, cwd: str, summary_max_chars
         result["_wiki_source_entries"] = meta["sourceEntries"]
     if meta.get("sourceReasons"):
         result["_wiki_source_reasons"] = dict(meta["sourceReasons"])
+    if meta.get("sourcePresent"):
+        # 주입 목록(`_wiki_sources`)과 별개다 — 관측 전용 모드·카드 사이 중복 제거 후에도
+        # "살아 있는 원문이 있었는가"가 남아야 한다.
+        result["_wiki_source_present"] = meta["sourcePresent"]
     if meta.get("displayPath"):
         result["_wiki_display_path"] = meta["displayPath"]
     if meta.get("title"):
@@ -1445,7 +1492,8 @@ def main():
         # (카드마다 find_project_config 재탐색이 52ms/장 → 8장 424ms였다).
     card_roots = wiki_roots(config, cwd)
     # 원문 경로 주입 예산(카드당 상한 + allowRoots). 호출당 1회 계산해 카드마다 재사용한다.
-    card_source_opts = source_inject_opts(config)
+    # 로그가 켜져 있으면 상한 0에서도 분류만 돌린다(cards_all_sources_missing 유지).
+    card_source_opts = source_inject_opts(config, observe=bool(log_path))
 
     def worth_annotating(result: dict) -> bool:
         """카드 파일을 읽기 **전에** 확실히 버릴 결과를 걸러낸다.
@@ -1716,10 +1764,7 @@ def main():
     # 시점에 유효했고 downgrade하지 않기로 했으므로 모델에게 줄 지시가 없다. 대신
     # 사람·유지보수 루프가 쓰는 신호(원장·SessionStart notice·repair skill)로 보내고
     # 여기서는 "실제로 캐논으로 주입됐다"는 사실만 카운터로 남긴다.
-    cards_all_sources_missing = sum(
-        1 for r in final_results
-        if not r.get("_wiki_sources") and r.get("_wiki_source_reasons", {}).get("missing")
-    )
+    cards_all_sources_missing = sum(1 for r in final_results if card_sources_all_missing(r))
     # 원문 경로 관측. 카드 **사이** 중복 제거는 최종 목록이 정해진 뒤에 해야 하므로
     # (순위 높은 카드 아래에만 남긴다) 여기서 돌린다 — 주입 직전이다.
     source_reasons: dict[str, int] = {"duplicate": dedup_source_paths(final_results)}

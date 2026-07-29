@@ -434,10 +434,22 @@ def append_jsonl(path: Path, payload: dict) -> None:
 
 
 def read_jsonl(path: Path) -> list[dict]:
+    """append-only 로그/큐 읽기. 못 읽는 줄은 **건너뛴다**(fail-open).
+
+    `errors="replace"`인 이유: 이 파일들은 여러 프로세스가 append하는 운영 파일이라 한
+    바이트만 깨져도 전체 읽기가 UnicodeDecodeError로 죽었다 — 실측 사고는 원장이 비UTF-8일
+    때 `wiki_source_repair --list`가 traceback으로 뜨지 못한 것이다(원장이 깨졌을 때 복구
+    도구가 못 뜨는 것이 최악의 조합). 대체 문자는 그 줄의 JSON 파싱만 실패시키고 아래
+    루프가 그 줄을 건너뛰므로, 손상은 손상된 줄에만 국한된다.
+    """
     if not path.exists():
         return []
     rows = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    for line in text.splitlines():
         try:
             parsed = json.loads(line)
         except json.JSONDecodeError:

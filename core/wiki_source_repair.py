@@ -26,12 +26,42 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.resolve()))
 import config as qmd_config
 import recall as qmd_recall
+import resolve_paths as qmd_resolve_paths
 import wiki_compile as wc
 import wiki_source_missing as wsm
 import yaml_scalars
 
 MAX_CANDIDATES = 3
 MIN_CANDIDATE_RATIO = 0.6
+# 재지정 시 버리는 키 — 값이 **옛 파일 내용**에 묶여 있어 새 경로와 함께 두면 거짓 기록이다.
+STALE_ON_REPOINT = ("sourceHash", "bodyHash")
+
+
+def write_card_atomic(path: Path, text: str) -> bool:
+    """카드 덮어쓰기는 **temp + os.replace**여야 한다.
+
+    `write_text`는 truncate 후 write라, 쓰기가 중간에 실패하면(ENOSPC·quota·EFBIG)
+    호출자는 "실패"를 받는데 **카드는 이미 잘려 있다**. 실측: 9.6MB `verified` 카드가
+    `ulimit -f 4` 아래에서 `card_unwritable`을 반환하며 2048B로 남았다. 이 모듈의 정책은
+    "카드가 그 지식의 유일한 기록일 수 있으므로 자동 삭제 금지"인데, 그 카드를 만지는
+    유일한 쓰기 경로가 데이터를 파괴하고 있었다 — 정책과 구현이 반대 방향이었다.
+    임시파일은 **같은 디렉터리**에 만든다(다른 파일시스템이면 rename이 원자적이지 않다).
+    패턴은 `wiki_compile.write_jsonl_atomic`·`config.py`·`sync.write_state_atomic`과 같다.
+    """
+    tmp = path.with_name(f".{path.name}.repair.tmp-{os.getpid()}")
+    try:
+        with open(tmp, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+        return True
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        return False
 
 
 def fail(message: str) -> int:
@@ -48,12 +78,18 @@ def load_project(cwd: str) -> tuple[Path, dict, dict]:
 
 
 def card_path(root: Path, config: dict, target_rel: str) -> Path | None:
-    """카드 경로는 wiki root 안이어야 한다(원장 행도 신뢰 입력이 아니다)."""
-    wiki_root = (root / config.get("wikiPath", ".auto-context/wiki")).resolve()
-    path = (root / target_rel).resolve()
-    try:
-        path.relative_to(wiki_root)
-    except ValueError:
+    """카드 경로는 **root 안의 wiki root** 안이어야 한다(원장 행도 신뢰 입력이 아니다).
+
+    두 단계 다 필요하다. 예전에는 카드가 wiki root 안인지만 봐서 `wikiPath` 자체가
+    프로젝트 밖을 가리킬 때(외부로 가는 디렉터리 심볼릭 링크, `wikiPath: "../escwiki"`)
+    root 밖 파일을 수정했다 — 스캐너는 같은 입력을 `unsafe wikiPath`로 거부했으므로
+    판정이 두 벌로 갈려 있었다. 이제 `wsm.wiki_root_of`가 그 판정의 SSOT다.
+    """
+    wiki_root = wsm.wiki_root_of(root, config)
+    if wiki_root is None:
+        return None
+    path = qmd_resolve_paths.contained_path(root, target_rel, [])
+    if path is None or not qmd_resolve_paths.is_within(path, wiki_root):
         return None
     return path
 
@@ -143,6 +179,11 @@ def repoint_entry(text: str, old: str, new: str) -> tuple[str | None, str]:
             continue
         updated = dict(fields)
         updated["path"] = new
+        # 옛 파일 내용을 가리키는 키는 새 경로 옆에 남기지 않는다. 지금 verify/compile은
+        # frontmatter의 이 값을 판정에 쓰지 않아 정지 위험은 없지만, 남기면 **기록이
+        # 거짓**이 된다("이 해시의 본문에서 나온 카드"인데 경로는 다른 파일이다).
+        for key in STALE_ON_REPOINT:
+            updated.pop(key, None)
         flow = yaml_scalars.dump_flow_mapping(updated)
         if not flow:
             return None, "unrepresentable_entry"
@@ -171,9 +212,8 @@ def do_repoint(root: Path, config: dict, compile_cfg: dict, target_rel: str,
     updated, why = repoint_entry(text, old, new_rel)
     if updated is None:
         return fail(why)
-    try:
-        path.write_text(updated, encoding="utf-8")
-    except OSError:
+    if not write_card_atomic(path, updated):
+        # 원본은 그대로다(임시파일만 버려진다) — 실패 반환과 디스크 상태가 일치한다.
         return fail("card_unwritable")
 
     ledger = wsm.ledger_path(root, compile_cfg)
@@ -235,5 +275,23 @@ def main() -> int:
     return 0
 
 
+def run_guarded() -> int:
+    """예상 밖 예외를 **기계가 읽을 수 있는 한 줄**로 바꾼다(traceback 금지).
+
+    이 CLI는 원장이 깨졌을 때 쓰는 복구 도구다 — 원장 손상으로 복구 도구가 못 뜨는 것이
+    가장 나쁜 조합이라, 어떤 예외도 `{"ok": false, ...}`로 흘려야 한다(scan/summary가
+    fail-open인 것과 같은 이유이고 `hook_main.run`과 같은 클래스의 경계다). 실패 행동
+    자체는 그대로 non-zero로 알린다 — 이건 hook이 아니라 사람이 쓰는 mutation CLI다.
+    """
+    try:
+        return main()
+    except SystemExit as exc:  # argparse의 usage 종료는 그대로 통과시킨다
+        return int(exc.code or 0)
+    except Exception as exc:
+        print(json.dumps({"ok": False, "error": "internal_error",
+                          "detail": f"{type(exc).__name__}"}, ensure_ascii=False))
+        return 1
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(run_guarded())

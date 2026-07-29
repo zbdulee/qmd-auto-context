@@ -790,7 +790,12 @@ test('injectSourcePathsPerCard 로 상한을 조절하고 0 이면 원문 경로
     assert.doesNotMatch(ctx, /↳/);
     const sel = selection(log);
     assert.equal(sel.inject_source_paths_per_card, 0);
-    assert.equal(sel.source_entries, 0, '끈 경우엔 항목을 읽지도 않는다(추가 비용 0)');
+    // QMD_RECALL_LOG가 켜져 있으면 상한 0에서도 **분류만** 돌린다 — 그래야 3단계의
+    // cards_all_sources_missing이 이 설정에 의해 죽지 않는다(카드는 여전히 캐논으로
+    // 주입된다). 주입은 여전히 0이고 출력은 바이트 동일하다(위 두 단정).
+    assert.equal(sel.source_entries, 2, '진단 로그가 켜진 동안은 항목을 분류한다(주입은 0)');
+    assert.equal(sel.sources_injected, 0);
+    assert.equal(sel.cards_all_sources_missing, 0, '두 원문이 다 살아 있으므로 0');
   });
 });
 
@@ -873,4 +878,31 @@ test('raw role 결과에는 원문 경로 줄이 붙지 않는다 (wiki 카드 �
     assert.deepEqual(sourceLines(ctx), []);
     assert.doesNotMatch(ctx, /↳/);
   });
+});
+
+test('cards_all_sources_missing: 살아 있는 원문이 있으면 세지 않는다 (주입 목록으로 판정하지 않는다)', () => {
+  const cards = {
+    // 살아 있는 원문 1 + 소실 1 → "전부 소실"이 아니다.
+    'partial.md': card('부분 소실', '본문 A.', [fileEntry('docs/live.md'), fileEntry('docs/gone.md')]),
+    // 소실만 → 전부 소실.
+    'dead.md': card('전멸', '본문 B.', [fileEntry('docs/vanished.md')]),
+    // 같은 원문을 가리켜 카드 사이 중복 제거로 주입 목록이 비는 카드.
+    'dup.md': card('중복', '본문 C.', [fileEntry('docs/live.md')]),
+  };
+  const raw = { 'docs/live.md': 'l\n' };
+  const results = [
+    { file: 'proj-wiki/decisions/partial.md', title: 'Summary', score: 1 },
+    { file: 'proj-wiki/decisions/dead.md', title: 'Summary', score: 0.5 },
+    { file: 'proj-wiki/decisions/dup.md', title: 'Summary', score: 0.33 },
+  ];
+  for (const settings of [{}, { injectSourcePathsPerCard: 0 }]) {
+    withProject({ settings, cards, raw }, ({ log, write, run }) => {
+      write(results);
+      run();
+      // 주입 목록(`_wiki_sources`)으로 판정하면 partial/dup 까지 세어 3이 된다 —
+      // 살아 있는 파일 소스 수를 따로 세야 한다(관측 전용 모드에서는 목록이 항상 빈다).
+      assert.equal(selection(log).cards_all_sources_missing, 1,
+        `설정 ${JSON.stringify(settings)} 에서 전멸 카드만 세어야 한다`);
+    });
+  }
 });

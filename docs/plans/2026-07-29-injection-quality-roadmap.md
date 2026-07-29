@@ -157,6 +157,12 @@ title: "claude-runner — 구독 기반 Claude Code headless AI 실행 계층"
 - **감지 경로**는 (1) `core/wiki_source_scan.py` — SessionStart **worker(백그라운드 fork)**,
   (2) 기계 검수의 큐 경유. 카드 mtime 스냅샷은 쓸 수 없다(소스가 개명돼도 카드는 안 바뀐다)
   → `maxCardsPerScan` + 순환 커서로 전량을 여러 회차에 덮는다
+- **리뷰 반영(2라운드)**: 카드 쓰기를 임시파일+`os.replace`로 원자화(실패 시 9.6MB 카드가
+  2048B로 잘렸다 — 자동 삭제를 금지한 정책과 정반대), `resolved` 전이 추가(복원된 카드가
+  영구 대기로 남고 dismiss가 다음 진짜 소실을 영구히 묻었다), `wikiPath` 격리 판정을
+  스캐너와 공유(repair만 심볼릭 링크·`../` 탈출을 허용했다), 원장 append `flock` 직렬화,
+  repair CLI fail-safe wrapper + `read_jsonl` 디코딩 fail-open, `injectSourcePathsPerCard:0`
+  에서도 카운터 유지(observe 모드), 재지정 시 옛 `sourceHash` 제거
 - **원장 `source-missing.jsonl`은 트림하지 않는다.** 이 신호가 트림 대상인
   `verify-log.jsonl`에만 남아 이미 유실되고 있었다. 누적 방어는 트림이 아니라 "상태가 바뀔
   때만 쓴다"이고, `action`의 카드별 최신 행이 상태라 한 파일이 감사 추적 + 대기 큐를 겸한다

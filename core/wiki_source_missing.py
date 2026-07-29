@@ -18,7 +18,7 @@ generated 18 / verified 7):
 사람의 명시적 지시로만 한다).
 
 원장(`source-missing.jsonl`)은 **한 파일이 감사 추적 + 대기 큐를 겸한다.** 행마다
-`action`(detected|repointed|dismissed)을 담고 카드별 **최신 행이 곧 상태**다
+`action`(detected|resolved|repointed|dismissed)을 담고 카드별 **최신 행이 곧 상태**다
 (`generated-manifest.jsonl`의 latest-wins·`dedup-skipped.jsonl`의 last-record-wins와 같은
 패턴). 대기 = 최신 행이 `detected`. 파일은 절대 `trim_jsonl`하지 않는다 — 이 신호가
 트림 대상인 `verify-log.jsonl`에만 남아 이미 유실되고 있었던 것이 3단계의 출발점이다
@@ -42,11 +42,20 @@ COMPILE_DIR = ".auto-context/compile"
 ACTION_DETECTED = "detected"
 ACTION_REPOINTED = "repointed"
 ACTION_DISMISSED = "dismissed"
+# 소스가 **다시 존재하게 됐다**는 전이. 개명 되돌리기·`git checkout`·문서 재생성이
+# 실측된 원인(개명)의 가장 흔한 회복 경로이므로, 이 전이가 없으면 (a) 복구된 카드가
+# 영구히 대기로 남아 SessionStart가 TTL마다 거짓 알림을 내고, (b) 그 오염을 치우는
+# 유일한 수단인 dismiss가 **다음 진짜 소실까지 영구 억제**한다(dismissed 행의 소실
+# 집합이 재소실 집합과 같으면 needs_record가 False다). notice_once의 "조건 해소 시
+# 재무장"과 같은 규칙을 원장에 도입한 것이다.
+ACTION_RESOLVED = "resolved"
+# 대기(pending)로 보는 유일한 action. 나머지는 전부 "사람/시스템이 처리했다"는 종결 상태다.
+PENDING_ACTIONS = (ACTION_DETECTED,)
 # 카드가 있는데 소스 항목을 하나도 파일로 읽을 수 없는 상태를 "소실"로 볼 수 없는 사유.
 # 파싱 실패·루트 밖·길이 초과는 "없다"가 아니라 "판정 불가"이므로 소실로 세지 않는다 —
 # 2단계가 미지원 표기(block mapping·여러 줄 flow)를 의도적으로 남겨 뒀고, 그것을 소실로
 # 오분류하면 원장이 "카드를 고치면 되는 표기 문제"와 "원문이 사라졌다"를 섞는다.
-IGNORED_ENTRY_REASONS = ("kind_not_file", "no_path")
+IGNORED_ENTRY_REASONS = qmd_recall.NON_FILE_SOURCE_REASONS
 
 
 def now_iso() -> str:
@@ -62,6 +71,63 @@ def ledger_path(root: Path, compile_cfg: dict) -> Path | None:
     if not isinstance(rel, str) or not rel:
         rel = LEDGER_DEFAULT
     return wc.safe_compile_file(root, compile_dir, rel)
+
+
+def ledger_lock_path(path: Path) -> Path:
+    """원장 sidecar 락. `wiki_compile_enqueue._queue_lock_path`와 같은 형태·같은 이유."""
+    return path.with_name(f"{path.name}.lock")
+
+
+def locked_ledger(path: Path):
+    """read-states + append 임계구역용 flock 컨텍스트.
+
+    `wc.append_jsonl`의 한 줄 쓰기는 찢어지지 않지만(POSIX O_APPEND) 이 원장의 race는
+    쓰기가 아니라 **check-then-act**다: "이미 대기 중인가"를 읽고 append하는 사이에
+    다른 프로세스가 같은 행을 넣으면 같은 카드 행이 여러 줄 생긴다. 실제로 경합할 수
+    있는 두 생산자는 서로 다른 lock 도메인에 있다(스캔=update worker, 검수=compile
+    worker lock). 그래서 원장 자신의 락으로 직렬화한다 — dirty queue·compile 큐가
+    쓰는 것과 같은 fcntl.flock 패턴이다.
+    """
+    import contextlib
+    import fcntl
+
+    @contextlib.contextmanager
+    def _guard():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            handle = open(ledger_lock_path(path), "a", encoding="utf-8")
+        except OSError:
+            # 락을 못 열어도 기록 자체는 진행한다(fail-open) — 최악이 중복 행 1줄이고,
+            # 기록을 포기하면 소실 신호가 사라진다(그쪽이 더 나쁘다).
+            yield
+            return
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            yield
+        finally:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            finally:
+                handle.close()
+
+    return _guard()
+
+
+def wiki_root_of(root: Path, config: dict) -> Path | None:
+    """`wikiPath` → 실경로. **root 격리 검사까지 포함한 SSOT.**
+
+    스캐너와 repair CLI가 같은 판정을 써야 한다 — 갈려 있던 동안 repair 쪽만 검사가
+    없어서 (a) `.auto-context/wiki`가 외부로 가는 **디렉터리 심볼릭 링크**일 때,
+    (b) `wikiPath: "../escwiki"`일 때 project root **밖의 파일을 수정**했다(스캐너는 같은
+    입력에서 `unsafe wikiPath`로 중단했다). 격리 판정은 재구현하지 않고 2단계에서 격리
+    SSOT로 확정된 `resolve_paths.contained_path`를 쓴다(resolve **후** 포함 검사라
+    심볼릭 링크가 걸린다). **allowRoots는 넘기지 않는다** — wiki는 관리 대상 디렉터리라
+    프로젝트 밖으로 나갈 수 있으면 안 된다(`safe_managed_dir`와 같은 강도).
+    """
+    rel = config.get("wikiPath", ".auto-context/wiki")
+    if not isinstance(rel, str) or not rel:
+        rel = ".auto-context/wiki"
+    return qmd_resolve_paths.contained_path(root, rel, [])
 
 
 def frontmatter_block(text: str) -> str | None:
@@ -166,7 +232,7 @@ def load_states(path: Path | None) -> dict[str, dict]:
 
 def pending_targets(states: dict[str, dict]) -> list[dict]:
     """대기 = 최신 행이 detected인 카드. 원장 순서를 보존한다."""
-    return [row for row in states.values() if row.get("action") == ACTION_DETECTED]
+    return [row for row in states.values() if row.get("action") in PENDING_ACTIONS]
 
 
 def needs_record(state: dict | None, missing: list[str]) -> bool:
@@ -179,9 +245,21 @@ def needs_record(state: dict | None, missing: list[str]) -> bool:
         return state.get("missingSources") != missing
     if action == ACTION_DISMISSED:
         # 사용자가 "이 소실은 그대로 둔다"고 판단했다 — 소실 집합이 바뀔 때까지 조용히.
+        # **소실 집합 한정 억제**다: 소스가 복원되면 스캔이 `resolved`를 남겨 이 행이
+        # 더 이상 최신이 아니게 되므로, 그 뒤 같은 경로가 다시 사라져도 재감지된다
+        # (dismiss가 다음 진짜 소실을 영구히 숨기던 결함의 해소 지점).
         return state.get("missingSources") != missing
-    # repointed 등: 고쳤는데 다시 소실이면 알려야 한다.
+    # repointed/resolved: 고쳤는데 다시 소실이면 알려야 한다.
     return True
+
+
+def needs_resolution_record(state: dict | None) -> bool:
+    """카드가 건강해졌을 때 `resolved` 행을 써야 하는가.
+
+    미해결 상태(detected/dismissed)에서만 쓴다 — 건강한 카드는 대부분이므로 이 조건이
+    없으면 스캔 회차마다 전 카드에 행이 쌓인다("상태가 바뀔 때만 쓴다" 규칙 유지).
+    """
+    return state is not None and state.get("action") in (ACTION_DETECTED, ACTION_DISMISSED)
 
 
 def record(path: Path | None, target_rel: str, action: str, missing: list[str],
@@ -203,23 +281,48 @@ def record(path: Path | None, target_rel: str, action: str, missing: list[str],
     return True
 
 
-def record_detection(root: Path, compile_cfg: dict, target_rel: str, status: str,
-                     missing: list[str], origin: str,
-                     states: dict[str, dict] | None = None) -> bool:
-    """감지 기록 진입점. 상태가 바뀌지 않았으면 쓰지 않고 False."""
+def _record_transition(root: Path, compile_cfg: dict, target_rel: str, action: str,
+                       status: str, missing: list[str], origin: str,
+                       states: dict[str, dict] | None,
+                       should_write) -> bool:
+    """상태 전이 기록의 공통 경로 — 판정과 append를 **같은 락 안에서** 한다.
+
+    호출자가 넘긴 `states`는 스캔 회차 안의 캐시일 뿐이고, 락을 잡은 뒤 원장을 다시
+    읽어 판정한다(그 사이 다른 프로세스가 같은 행을 넣었을 수 있다). 그래서 동시 실행에도
+    카드당 행이 하나만 늘어난다.
+    """
     path = ledger_path(root, compile_cfg)
     if path is None:
         return False
     key = missing_key(missing)
-    if states is None:
-        states = load_states(path)
-    if not needs_record(states.get(target_rel), key):
-        return False
-    written = record(path, target_rel, ACTION_DETECTED, key, status, origin)
-    if written:
-        states[target_rel] = {"targetPath": target_rel, "action": ACTION_DETECTED,
+    with locked_ledger(path):
+        fresh = load_states(path)
+        if not should_write(fresh.get(target_rel), key):
+            if states is not None and target_rel in fresh:
+                states[target_rel] = fresh[target_rel]
+            return False
+        written = record(path, target_rel, action, key, status, origin)
+    if written and states is not None:
+        states[target_rel] = {"targetPath": target_rel, "action": action,
                               "missingSources": key, "status": status}
     return written
+
+
+def record_detection(root: Path, compile_cfg: dict, target_rel: str, status: str,
+                     missing: list[str], origin: str,
+                     states: dict[str, dict] | None = None) -> bool:
+    """감지 기록 진입점. 상태가 바뀌지 않았으면 쓰지 않고 False."""
+    return _record_transition(root, compile_cfg, target_rel, ACTION_DETECTED, status,
+                              missing, origin, states, needs_record)
+
+
+def record_resolution(root: Path, compile_cfg: dict, target_rel: str, status: str,
+                      missing: list[str], origin: str,
+                      states: dict[str, dict] | None = None) -> bool:
+    """소스가 다시 존재하게 됐음을 기록해 대기에서 뺀다(미해결 상태였을 때만)."""
+    return _record_transition(root, compile_cfg, target_rel, ACTION_RESOLVED, status,
+                              missing, origin, states,
+                              lambda state, _key: needs_resolution_record(state))
 
 
 def allow_roots_of(config: dict) -> list[Path]:
