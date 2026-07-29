@@ -13,6 +13,11 @@
 
 - 출력 객체: `{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"<위 문자열>"}}`
 - 결과 0건이면 무출력(exit 0).
+- **wiki role 결과는 여기에 두 가지가 더 붙는다**(이 골든은 raw 단일 컬렉션이라 해당 없음):
+  `<displayPath>`가 카드 파일의 실제 경로, `<title>`이 frontmatter title이 되고,
+  항목 다음 줄부터 카드 본문이 2칸 들여쓰기로 이어진다. 본문이 하나라도 있으면
+  `필요시 참조.` 앞에 요약/원문 우선순위 안내 1줄이 추가된다.
+  raw 결과의 포맷은 위 계약 그대로 유지된다.
 
 ## 골든 파일
 

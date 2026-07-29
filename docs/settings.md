@@ -52,6 +52,7 @@
 | `skipPaths` | `[]` | recall 결과에서 제외할 경로 substring 목록입니다. `node_modules`, `.git`, `dist`, `build` 같은 값이 흔합니다. **이름과 달리 인덱싱 대상을 제한하지 않습니다** — `core/recall.py`의 결과 필터에서만 쓰이므로 파일은 그대로 색인됩니다. 아래 ["인덱싱 범위를 줄이는 방법"](#인덱싱-범위를-줄이는-방법) 참고. |
 | `allowRoots` | `[]` | 프로젝트 밖 absolute path collection을 허용해야 할 때 쓰는 root 목록입니다. 일반 프로젝트에서는 비워 둡니다. |
 | `prefixStyle` | `"full"` | recall 출력 prefix 스타일입니다. 허용값은 `full`, `tag`입니다. |
+| `injectSummaryMaxChars` | `600` | wiki 카드 1장당 주입할 본문 문자 상한입니다. `0`이면 본문 주입을 끄고 경로와 title만 넣습니다. 아래 ["카드 본문 주입"](#카드-본문-주입) 참고. |
 | `events` | `["sessionStart", "userPromptSubmit", "postToolUse"]` | 자동 동작을 켤 이벤트 목록입니다. |
 | `lexicalPatterns` | `[]` | 특수 lexical pattern 목록입니다. 현재 주 사용값은 `ep`입니다. |
 | `wikiPath` | `".auto-context/wiki"` | wiki collection의 기본 위치입니다. |
@@ -97,6 +98,45 @@
   "rawFallbackMinScore": 0.9
 }
 ```
+
+## 카드 본문 주입
+
+wiki role collection의 결과는 경로와 title만이 아니라 **카드 본문**까지 주입됩니다.
+이 플러그인의 목적이 "원문 대신 검수된 요약을 주입해 토큰과 context rot을 줄이는 것"이라
+본문이 빠지면 주입이 정보를 담지 못합니다.
+
+```
+관련 문서:
+- [wiki:verified] .auto-context/wiki/decisions/claude-runner-구독-기반-ai-실행-계층.md - claude-runner — 구독 기반 Claude Code headless AI 실행 계층
+  조직에 별도 모델 API 키가 없으므로 모든 워크플로우 AI 호출은 공용 러너 서비스…
+위 들여쓴 문단은 해당 wiki 카드 본문이다(길면 절단). 요약으로 충분하면 파일을 열지 말고, 부족할 때만 위 경로를 Read.
+필요시 참조.
+```
+
+- **경로**는 카드 파일의 실제 위치입니다(`cwd` 하위면 상대경로, 그 밖이면 절대경로).
+  qmd 데몬이 주는 `collection/path` 형태는 어떤 base로도 열리지 않으므로 쓰지 않습니다.
+- **title**은 카드 frontmatter의 `title`입니다. 데몬이 주는 `title`은 frontmatter가
+  아니라 첫 섹션 헤딩(`## Summary`)이라 카드 이름으로 쓸 수 없습니다.
+- **본문**은 `qmd:auto` 블록의 Summary + `qmd:auto:end` **밖**의 수동 섹션입니다.
+  수동 섹션을 포함하는 이유는 wiki dedup 병합이 삭제 카드의 고유 사실을 블록 밖에
+  접어 넣기 때문입니다(블록 안은 소스 변경 시 재생성으로 덮입니다).
+- raw role 결과에는 본문이 붙지 않습니다. 본문 주입은 wiki 카드 전용입니다.
+
+### injectSummaryMaxChars 기본값 600의 근거
+
+dogfooding 두 코퍼스(카드 849장)의 주입 대상 본문 길이 분포입니다.
+
+| 코퍼스 | 카드 | median | p90 | p95 | max |
+|---|---:|---:|---:|---:|---:|
+| service-engineering | 731 | 261 | 516 | 595 | 1574 |
+| novel | 118 | 206 | 383 | 483 | 608 |
+
+`600`이면 카드의 95% 이상이 **절단 없이** 들어가므로 절단은 예외 경로입니다. 동시에
+`topN` 기본값 3에서 주입 본문은 최악 1800자로 유계입니다(원문 소스는 흔히 수십 KB).
+상한을 넘으면 문장 경계에서 자르고 `… (이하 생략)`을 붙입니다 — 문장 중간에서 자르면
+모델이 잘린 절을 완결된 사실로 읽을 수 있기 때문입니다.
+
+`0`으로 두면 본문 주입이 꺼지고 경로와 title만 주입됩니다.
 
 ### minScore는 유사도가 아니라 순위입니다
 

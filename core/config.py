@@ -29,6 +29,9 @@ DEFAULT_CONFIG = {
     "collectionPaths": {},
     "allowRoots": [],
     "prefixStyle": "full",
+    # wiki 카드 본문(요약)을 recall 주입에 넣을 때의 카드 1장당 문자 상한. 0이면 본문
+    # 주입을 끄고 예전처럼 경로+title만 넣는다. 기본값 근거는 docs/settings.md 참고.
+    "injectSummaryMaxChars": 600,
     "events": ["sessionStart", "userPromptSubmit", "postToolUse"],
     "indexing": None,
     "collectionRoles": {},
@@ -141,6 +144,19 @@ def coerce_int(value, default):
     except (TypeError, ValueError):
         return default
     return result if result > 0 else default
+
+
+def coerce_nonneg_int(value, default):
+    """coerce_int와 달리 0을 유효값으로 받는다.
+
+    0이 "기능 끄기"의 의미를 갖는 필드(injectSummaryMaxChars)에 쓴다 — coerce_int는
+    `result > 0`만 통과시켜 0을 기본값으로 되돌리므로 끌 수 없다.
+    """
+    try:
+        result = int(value)
+    except (TypeError, ValueError):
+        return default
+    return result if result >= 0 else default
 
 
 def string_list(value, default=None):
@@ -346,6 +362,10 @@ def normalize_config(input_config):
     config["collectionPaths"] = string_map(input_config.get("collectionPaths"))
     config["allowRoots"] = string_list(input_config.get("allowRoots"), DEFAULT_CONFIG["allowRoots"])
     config["prefixStyle"] = input_config.get("prefixStyle") if input_config.get("prefixStyle") in ("full", "tag") else DEFAULT_CONFIG["prefixStyle"]
+    config["injectSummaryMaxChars"] = coerce_nonneg_int(
+        input_config.get("injectSummaryMaxChars", DEFAULT_CONFIG["injectSummaryMaxChars"]),
+        DEFAULT_CONFIG["injectSummaryMaxChars"],
+    )
     config["collectionRoles"] = collection_role_map(input_config.get("collectionRoles"), config["collections"])
     config["recallStrategy"] = input_config.get("recallStrategy") if input_config.get("recallStrategy") in ("flat", "hierarchical", "wikiOnly") else DEFAULT_CONFIG["recallStrategy"]
     config["wikiPath"] = input_config.get("wikiPath") if isinstance(input_config.get("wikiPath"), str) else DEFAULT_CONFIG["wikiPath"]
