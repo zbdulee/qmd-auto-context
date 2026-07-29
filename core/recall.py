@@ -372,6 +372,27 @@ def parse_frontmatter_scalars(block: str, issues: dict | None = None) -> dict:
     return fields
 
 
+def sources_inline_entry(raw: str) -> str:
+    """`sources:` 줄의 잔여 값에서 **항목으로 볼 것만** 돌려준다(없으면 빈 문자열).
+
+    잔여는 네 갈래다 — (a) 빈 값(다음 줄들에 항목이 있다) (b) 주석뿐 (c) `[]`(+주석) =
+    "소스 없음"의 정상 표기 (d) 진짜 한 줄 flow 시퀀스. (a)(b)(c)는 **항목이 아니므로 사유를
+    만들지 않는다**: 예전엔 `[]` 이외의 모든 잔여를 항목화해 `sources: # 원문 목록` 같은
+    정상 카드가 `parse_failed` 1건을 남겼고(허위 drop), `sources: [] # 없음`은
+    `inline_sequence`로 잡혔다. 주입 손실은 없지만 3단계가 `source_missing` 정책을 정할 때
+    읽는 신호에 **없는 실패**가 섞인다.
+    (d)와 그 밖의 잘못된 값(`sources: 뭔가`)은 그대로 흘려보내 형태별 사유를 남긴다.
+    """
+    value = raw.strip()
+    if not value or value.startswith("#"):
+        return ""
+    if value.startswith("[]"):
+        rest = value[2:].strip()
+        if not rest or rest.startswith("#"):
+            return ""
+    return value
+
+
 def frontmatter_source_entries(block: str) -> list[str]:
     """frontmatter의 top-level `sources:` 아래 `- {...}` 항목의 **표기 그대로**를 낸다.
 
@@ -396,8 +417,8 @@ def frontmatter_source_entries(block: str) -> list[str]:
         if not line[0].isspace():
             in_sources = line.startswith("sources:")
             if in_sources:
-                inline = line.split(":", 1)[1].strip()
-                if inline and inline != "[]":
+                inline = sources_inline_entry(line.split(":", 1)[1])
+                if inline:
                     entries.append(inline)
             continue
         if not in_sources:

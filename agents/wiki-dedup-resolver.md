@@ -50,7 +50,14 @@ summary; from the `wiki-dedup` skill on an explicit user request → report the 
       is no protection (`is_auto_writable_page` deliberately excludes `verified` so stale cards get
       re-verified) — anything folded inside the block is silently lost on the next source edit.
       Everything outside the block survives regeneration, frontmatter included, so transplanting
-      the deleted page's `aliases`/`canonicalKey`/`sources` entries is safe. Keep identifiers
+      the deleted page's `aliases`/`canonicalKey`/`sources` entries is safe. WRITE TRANSPLANTED
+      `sources` ENTRIES IN THE EMITTED FORM — one flow mapping per list item,
+      `  - {kind: "file", path: "docs/a.md"}`. `core/recall.py` injects `sources[].path` as the
+      link back to the original document and reads only that form (plus quoted keys, single
+      quotes, trailing comments). A block mapping (`- kind: file` with `path:` on the next line)
+      or an inline sequence (`sources: [{…}]`) parses to nothing, so that page loses every source
+      link — the loss is silent to the user and only shows up as `block_mapping`/`inline_sequence`
+      in `source_drop_reasons` (`docs/settings.md`). Keep identifiers
       (numbers, percentages, field names, queries) verbatim — they are the lexical search surface —
       and close the section with an HTML comment naming the page you merged from.
    d. Then resolve the cluster's entries through step 4's normal per-entry loop: an entry pairing

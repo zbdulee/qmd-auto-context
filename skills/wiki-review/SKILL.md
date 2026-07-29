@@ -71,8 +71,13 @@ host's own delegation mechanism (Codex's multi-agent tool, Hermes's `delegate_ta
         candidate's generated summary (`core/wiki_review.py`), and later source edits regenerate it
         again; `status: verified` is no protection, since `is_auto_writable_page` deliberately
         excludes `verified`. Only content outside the block survives — frontmatter included, so
-        transplanting `aliases`/`canonicalKey` is safe. Keep identifiers (numbers, percentages,
-        field names, queries) verbatim.
+        transplanting `aliases`/`canonicalKey` is safe. If you transplant `sources` entries, write
+        them in the emitted form — one flow mapping per item, `  - {kind: "file", path: "docs/a.md"}`.
+        `core/recall.py` injects `sources[].path` as the link back to the original document and
+        reads only that form (plus quoted keys, single quotes, trailing comments); a block mapping
+        or an inline sequence parses to nothing, silently costing that page every source link
+        (visible only as `block_mapping`/`inline_sequence` in `source_drop_reasons`).
+        Keep identifiers (numbers, percentages, field names, queries) verbatim.
       - `decision`-type candidate that reverses/replaces the matched page's principle → `supersede`
       - Looks unrelated on inspection (semantic gate false positive) → `separate`
       - Not worth keeping at all → `discard`

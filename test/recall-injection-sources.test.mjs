@@ -491,6 +491,133 @@ test('sources: [] 는 정상적인 "소스 없음" 표기라 사유를 만들지
   }
 });
 
+test('sources: 줄의 잔여 4분기 — 항목이 아닌 것은 사유를 만들지 않는다', () => {
+  // 예전엔 `[]` 이외의 모든 잔여를 항목화해 `sources: # 주석` 정상 카드가 허위
+  // `parse_failed` 를, `sources: [] # 없음` 이 `inline_sequence` 를 남겼다. 주입 손실은
+  // 없지만 3단계가 source_missing 정책을 정할 때 읽는 신호에 없는 실패가 섞인다.
+  const cases = [
+    ['sources:', ['  - {kind: "file", path: "docs/a.md"}'], 1, {}, 1],
+    ['sources: # 원문 목록', ['  - {kind: "file", path: "docs/a.md"}'], 1, {}, 1],
+    ['sources: []', [], 0, {}, 0],
+    ['sources: [] # 없음', [], 0, {}, 0],
+    ['sources: [{kind: "file", path: "docs/a.md"}]', [], 1, { inline_sequence: 1 }, 0],
+  ];
+  for (const [head, tail, entries, reasons, injected] of cases) {
+    const dir = mkdtempSync(join(tmpdir(), 'qmd-src-res-'));
+    try {
+      project(dir);
+      writeFileSync(join(dir, 'docs', 'a.md'), 'a\n');
+      writeFileSync(join(dir, '.auto-context', 'wiki', 'decisions', 'card.md'), [
+        '---', 'title: "카드"', 'status: verified', head, ...tail, '---', '',
+        '<!-- qmd:auto:start id="main" sourceHash="h" -->', '## Summary', '본문.',
+        '<!-- qmd:auto:end -->', '',
+      ].join('\n'));
+      const fixture = join(dir, 'fixture.json');
+      const log = join(dir, 'recall.jsonl');
+      writeFileSync(fixture, JSON.stringify({ results: [{ file: 'proj-wiki/decisions/card.md', title: 'Summary', score: 1 }] }));
+      const ctx = contextOf({ prompt: PROMPT, cwd: dir }, { QMD_QUERY_FIXTURE: fixture, QMD_RECALL_LOG: log });
+      assert.equal(sourceLines(ctx).length, injected, `주입 수 불일치: ${head}`);
+      const sel = selection(log);
+      assert.equal(sel.source_entries, entries, `항목 수 불일치: ${head}`);
+      assert.deepEqual(sel.source_drop_reasons, reasons, `사유 불일치: ${head}`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test('비인용 plain scalar 안의 인용부호는 값의 일부다 (인용은 스칼라 선두에서만 시작)', () => {
+  // 예전엔 어디서든 인용을 열어 `{path: a"b, kind: c}` 의 `,` 를 값 안으로 삼켜 kind 를
+  // 잃었다. 결과는 fail-closed 였지만 사유가 kind_not_file/missing 으로 오표기됐다.
+  const cases = {
+    quote_in_plain: '{path: a"b, kind: file}',
+    apostrophe_in_plain: "{path: a'b, kind: file}",
+    quoted_value_with_comma: '{path: ", kind: x", kind: file}',
+    single_quote_escape: "{path: 'it''s, ok', kind: file}",
+    colon_in_plain_key: '{path:x: docs/a.md, kind: file}',
+    colon_in_value: '{path: docs/a:b.md, kind: file}',
+  };
+  const r = py([
+    'import yaml_scalars as ys',
+    'out = {}',
+    'for name, entry in json.loads(sys.argv[1]).items():',
+    '    fields, issue = ys.load_flow_mapping(entry)',
+    '    out[name] = {"fields": fields, "issue": issue}',
+    'print(json.dumps(out, ensure_ascii=False))',
+  ], JSON.stringify(cases));
+  assert.deepEqual(r.quote_in_plain.fields, { path: 'a"b', kind: 'file' }, '값 중간 " 는 값의 일부');
+  assert.deepEqual(r.apostrophe_in_plain.fields, { path: "a'b", kind: 'file' });
+  assert.deepEqual(r.quoted_value_with_comma.fields, { path: ', kind: x', kind: 'file' },
+    '선두 인용부호는 여전히 인용을 열어 값 안의 , 를 보호한다');
+  assert.deepEqual(r.single_quote_escape.fields, { path: "it's, ok", kind: 'file' },
+    "single-quoted 안의 '' 는 이스케이프이므로 인용을 닫지 않는다");
+  assert.equal(r.colon_in_plain_key.fields.path, undefined,
+    '구분자가 아닌 : 로 키를 자르면 없는 경로를 만들어 사유가 오표기된다');
+  assert.deepEqual(r.colon_in_value.fields, { path: 'docs/a:b.md', kind: 'file' },
+    'plain scalar 는 : 를 담을 수 있다');
+});
+
+test('PyYAML 차분 퍼즈: 비교 가능한 입력에서 불일치 0 (런타임 의존 아님 — 테스트에서만)', () => {
+  // 리뷰 라운드에서 두 파서가 모두 수락한 11,243건 중 242건이 불일치했고 전부 "인용부호를
+  // 스칼라 중간에서 열었다"가 원인이었다. 이 테스트가 그 수렴을 고정한다.
+  // 비교 제외(원리적으로 다른 도메인, 각각 근거 있음):
+  //   - `{` 로 시작하지 않는 입력: block mapping 미지원이 **의도**다(사유로 남긴다)
+  //   - 개행이 든 입력: 항목은 항상 frontmatter 한 줄이라 발생 불가(PyYAML 은 개행을 접는다)
+  //   - str 아닌 값(리스트/숫자/None): 이 파서의 도메인이 아니다(문자열만 돌려준다)
+  //   - 중복 키: 우리는 first-wins(frontmatter 규약 — 뒤에 끼워 넣은 키가 앞을 못 덮는다),
+  //     PyYAML 은 last-wins. 의도된 divergence다
+  const r = py([
+    'import random',
+    'import yaml_scalars as ys',
+    'try:',
+    '    import yaml',
+    'except ImportError:',
+    '    print(json.dumps({"skipped": True})); raise SystemExit(0)',
+    'ALPHA = list(chr(123) + chr(125) + chr(91) + chr(93) + chr(34) + ",:# abkindpathfile.md0/-" + chr(39) + chr(92) + chr(9))',
+    'ALPHA += [chr(34) * 2, chr(39) * 2, chr(92) * 2, "kind", "path", ": ", ", "]',
+    'rnd = random.Random(20260730)',
+    'def gen(limit=14):',
+    '    return "".join(rnd.choice(ALPHA) for _ in range(rnd.randint(1, limit)))',
+    'def dup_keys(text):',
+    '    items, issue = ys._scan_flow_mapping(text)',
+    '    if issue:',
+    '        return False',
+    '    keys = []',
+    '    for item in items:',
+    '        key, sep, _ = ys._split_key_value(item)',
+    '        if sep:',
+    '            keys.append(ys.load_with_issue(key)[0])',
+    '    return len(keys) != len(set(keys))',
+    'compared = 0',
+    'mismatch = []',
+    'for i in range(int(sys.argv[1])):',
+    '    text = chr(123) + gen() + chr(125) if i % 2 == 0 else chr(123) + "kind: " + gen(8) + ", path: " + gen(8) + chr(125)',
+    '    if "\\n" in text:',
+    '        continue',
+    '    try:',
+    '        theirs = yaml.safe_load(text)',
+    '    except Exception:',
+    '        continue',
+    '    if not isinstance(theirs, dict):',
+    '        continue',
+    '    if not all(isinstance(k, str) and isinstance(v, str) for k, v in theirs.items()):',
+    '        continue',
+    '    if dup_keys(text):',
+    '        continue',
+    '    expect = {k: v for k, v in theirs.items() if ys.SAFE_KEY_RE.fullmatch(k)}',
+    '    ours, _issue = ys.load_flow_mapping(text)',
+    '    compared += 1',
+    '    if ours != expect and len(mismatch) < 5:',
+    '        mismatch.append({"text": text, "ours": ours, "yaml": expect})',
+    '    elif ours != expect:',
+    '        mismatch.append({"text": text})',
+    'print(json.dumps({"skipped": False, "compared": compared, "mismatch": mismatch}, ensure_ascii=False))',
+  ], '60000');
+  if (r.skipped) return;
+  assert.ok(r.compared > 3000, `비교 표본이 너무 적다: ${r.compared}`);
+  assert.deepEqual(r.mismatch, [], `PyYAML 과 불일치: ${JSON.stringify(r.mismatch.slice(0, 5))}`);
+});
+
 test('형태별 파싱: 표준 YAML 인용 키·주석은 읽고, 지원하지 않는 형태는 형태별 사유를 남긴다', () => {
   // 카드의 sources 는 사람과 dedup/review resolver 가 손으로 이식한다(CLAUDE.md 계약).
   // 표준 YAML 로 쓴 형태를 못 읽으면 그 카드의 원문 링크가 통째로 사라지므로, 인용 키와

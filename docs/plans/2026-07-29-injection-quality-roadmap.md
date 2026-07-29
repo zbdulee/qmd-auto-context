@@ -105,14 +105,46 @@ title: "claude-runner — 구독 기반 Claude Code headless AI 실행 계층"
 
 | # | 작업 | 핵심 제약 |
 |---|---|---|
-| 1 | **주입에 카드 본문 포함 + 경로를 Read 가능하게** | 토큰 상한 필수. `resolve_wiki_result_path` 가 실경로를 이미 계산하므로 재사용. frontmatter title 사용 |
-| 2 | `sources.path` 주입 | 경로 안전성·존재성 검증, 중복 제거, 개수 제한. "카드 먼저, 원문은 대조 필요시" 지시 동반 |
+| 1 | ✅ **완료** — 주입에 카드 본문 포함 + 경로를 Read 가능하게 | 토큰 상한 필수. `resolve_wiki_result_path` 가 실경로를 이미 계산하므로 재사용. frontmatter title 사용 |
+| 2 | ✅ **완료** — `sources.path` 주입 | 경로 안전성·존재성 검증, 중복 제거, 개수 제한. "카드 먼저, 원문은 대조 필요시" 지시 동반 |
 | 3 | `source_missing` 정책 | 현재 skip → downgrade/quarantine 결정. stale 링크가 유일 진실이 되는 것을 막음 |
 | 4 | verifier engine 을 extractor 와 분리 | 문헌의 명시적 완화법. CLI 부재 시 degrade 경로 유지 |
 | 5 | raw 있는 상태에서 shadow baseline 수집 | 측정을 **앞으로 당김**. 8번의 판정 근거 |
 | 6 | 커버리지 백필 | **비용 동의 필요**(969건 ≈ 16~20M 토큰). 소량 파일럿 → 중복률·verify 적체 확인 → 확대. 선행 4건은 `bulk-wiki-backfill-spec.md` |
 | 7 | role `source` 도입 | qmd 등록과 compile 입력 분리. 8번 없이는 불필요 |
 | 8 | **raw on/off A/B → 프로젝트별 가역적 제거** | 게이트: 링크 무결성 · query coverage · source-read 성공률 · 재생성 가능성 · raw-search escape hatch |
+
+### 완료 기록 (1·2단계)
+
+**1단계 — 주입에 정보를 담는다** (`677fe0d` 외 리뷰 라운드 3회, 최종 상태는
+`docs/settings.md` "카드 본문 주입"). 결론:
+
+- 경로·title·본문 세 값을 **카드 파일 단일 읽기**에서 얻는다(`read_wiki_meta`). 경로는
+  `resolve_wiki_result_path` 가 확인한 실파일(cwd 하위면 상대, 밖이면 절대), title 은
+  frontmatter `title`(데몬 title 은 첫 섹션 헤딩 `Summary` 라 849장 전부 같았다), 본문은
+  auto 블록 Summary + `qmd:auto:end` 밖 수동 섹션
+- 본문 상한 `injectSummaryMaxChars`(기본 600, clamp 4000, 0=끔) — 849장 실측 median
+  206~261자 / p95 483~595자
+- **프레임 방어는 블록 종류별 대응이 아니라 줄 단위 인용 접두(`  | `) 한 규칙**이다.
+  구분자 escalation·fence 홀짝·HTML 종료 토큰을 개별로 흉내내다 세 라운드 연속 구멍이 났다
+
+**2단계 — 원문으로 가는 링크** (`a9b1b2d` → 리뷰 반영 `f764022` → 진단 정확도 `HEAD`).
+결론:
+
+- `sources[].path` 를 카드 본문 아래에 `  ↳ ` 한 줄씩 주입한다. 표시 규칙은 카드 경로와 동일
+- **토큰 긴장 처리**: 안내문에 문장을 추가하지 않고 기존 문장의 마지막 절만 3단 우선순위
+  (카드 본문 → 카드 파일 → 대조 시 원문)로 교체했다(순증 29자, 원문 경로 없으면 0자)
+- 값은 신뢰 입력이 아니다: `kind == "file"`(verify worker 와 같은 집합) · `path` 는 비어
+  있지 않은 문자열 · 길이 200자 이하(초과는 **자르지 않고 버린다**) · project root 안 ·
+  실제 존재 · 한 줄 표시 가능. 카드당 3개 상한 + 카드 내·카드 사이 중복 제거
+- emit/parse 쌍은 `core/yaml_scalars.py` 가 SSOT(`dump_flow_mapping`/`load_flow_mapping`),
+  PyYAML 차분 퍼즈로 불일치 0 을 고정한다(런타임 의존 없음, 테스트에서만)
+- 실측: 849장 876항목 → 842 주입, drop 34 = `missing` 32(실제 stale 링크) +
+  `kind_not_file` 2(url/slack). 카드당 순증 median 61µs(추가 파일 읽기 0)
+- **남은 한계**(의도적): 미지원 `sources` 표기(block mapping·inline sequence·여러 줄 flow)로
+  쓰인 카드는 원문 링크가 전량 사라진다 — 파서를 두 벌로 만들지 않기 위한 선택이고,
+  형태별 사유가 `source_drop_reasons` 에 남는다. 3단계의 `source_missing` 신호는 이 사유와
+  분리돼 있다
 
 ### 단계별 주의
 

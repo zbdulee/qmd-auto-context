@@ -244,9 +244,26 @@ fail-closed drop된 경우(`path_unresolved`)를 진짜 미검수 카드와 구�
 | `- kind: file` / `  path: …` (block mapping) | 제외 + 사유 `block_mapping` |
 | 여러 줄 flow mapping | 제외 + 사유 `multiline_flow` |
 
+`sources:` 줄 자체의 값도 갈립니다 — 빈 값, 주석뿐(`sources: # 원문 목록`),
+`[]`(+주석)은 **항목이 아니므로 사유를 만들지 않습니다**. `[`로 시작하는 값만
+`inline_sequence`입니다.
+
 지원하지 않는 형태를 **파싱하지 않고 사유만 남기는** 이유는 파서를 두 벌로 만들지 않기
 위함입니다(이 저장소는 emit/parse가 갈려 두 번 깨졌습니다). 사유 값이 곧 "flow mapping으로
 다시 쓰라"는 지시이며, 어떤 형태도 **흔적 없이** 사라지지 않습니다.
+
+> **알려진 한계.** 미지원 표기(block mapping·inline sequence·여러 줄 flow)로 쓰인 카드는
+> 그 카드의 **원문 링크가 전량 사라집니다**(카드 본문·title·카드 경로는 정상 주입됩니다).
+> 사용자에게는 조용하고 `source_drop_reasons`의 형태별 사유로만 드러납니다. 손으로
+> `sources`를 쓰거나 다른 카드에서 이식할 때는 **writer가 쓰는 형태**를 쓰십시오 —
+> `  - {kind: "file", path: "docs/a.md"}`. 인용 키·single quote·후행 주석은 그대로 읽힙니다.
+> (dedup/review resolver 에이전트 문서에도 같은 제약이 적혀 있습니다.)
+
+값 표기 규칙은 `core/yaml_scalars.py`가 SSOT이며 표준 YAML을 따릅니다: 인용부호는 **스칼라
+선두에서만** 인용을 시작하고(값 중간의 `"`·`'`는 값의 일부입니다), single-quoted 안의 `''`는
+리터럴 `'`이고, plain scalar는 `:`를 담을 수 있습니다(구분자는 `: `처럼 공백·`,`·`}`가
+뒤따르는 `:`뿐입니다). 중복 키는 **first-wins**입니다(PyYAML은 last-wins) — frontmatter
+규약과 같으며, 뒤에 끼워 넣은 키가 앞의 값을 덮지 못하게 하는 의도된 차이입니다.
 
 base는 `cwd`가 아니라 **project root**입니다 — `sources[].path`는 project root 상대
 POSIX 경로로 기록되므로(`wiki_compile_enqueue`), 하위 디렉터리 세션에서 `cwd`를 base로

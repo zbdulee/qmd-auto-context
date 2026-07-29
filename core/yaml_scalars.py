@@ -197,83 +197,120 @@ def dump_flow_mapping(mapping) -> str:
     return "{" + ", ".join(parts) + "}" if parts else ""
 
 
-def _split_flow_items(inner: str) -> list[str] | None:
-    """flow mapping 내부를 인용부호 밖의 `,`로만 나눈다. 인용부호가 열린 채 끝나면 None.
+def _is_separator_colon(text: str, index: int) -> bool:
+    """`text[index]`의 `:`가 **key/value 구분자**인지(값의 일부가 아닌지).
 
-    값이 `,`를 담을 수 있으므로(`dump`가 인용하므로 표기상 안전하다) 단순 `split(",")`은
-    값을 반으로 자른다 — 그러면 경로가 조용히 다른 문자열이 된다.
+    YAML plain scalar는 `:`를 담을 수 있고(`docs/a:b.md`), 구분자는 `: `처럼 공백(또는
+    flow 종료·항목 구분)이 뒤따르는 `:`뿐이다. 이 구분을 하지 않으면 `{path:x: docs/a.md}`의
+    키를 `path`로 잘라 **없는 경로**를 만들어 사유가 `missing`으로 오표기된다(PyYAML은 키를
+    `path:x`로 읽어 아예 다른 매핑이다). 구분자 판정은 이 함수 한 곳이다 — 스캐너와
+    항목 분해가 같은 규칙을 써야 한다.
     """
-    items: list[str] = []
-    buf: list[str] = []
+    if text[index] != ":":
+        return False
+    if index + 1 >= len(text):
+        return True
+    return text[index + 1].isspace() or text[index + 1] in (",", "}")
+
+
+def _split_key_value(item: str) -> tuple[str, bool, str]:
+    """flow mapping 항목을 (키, 구분자 있음, 값)으로 나눈다. 규칙은 위 함수가 SSOT다."""
     quote = ""
-    index = 0
-    length = len(inner)
-    while index < length:
-        char = inner[index]
+    for index, char in enumerate(item):
         if quote:
-            buf.append(char)
-            if quote == '"' and char == "\\" and index + 1 < length:
-                buf.append(inner[index + 1])
-                index += 2
+            if quote == '"' and char == "\\":
                 continue
             if char == quote:
                 quote = ""
-            index += 1
             continue
-        if char in ('"', "'"):
+        if char in ('"', "'") and not item[:index].strip():
             quote = char
-            buf.append(char)
-            index += 1
             continue
-        if char == ",":
-            items.append("".join(buf))
-            buf = []
-            index += 1
-            continue
-        buf.append(char)
-        index += 1
-    if quote:
-        return None
-    items.append("".join(buf))
-    return items
+        if _is_separator_colon(item, index):
+            return item[:index], True, item[index + 1:]
+    return item, False, ""
 
 
-def _flow_mapping_body(text: str) -> tuple[str, str]:
-    """`{...}` 본문과 문제를 낸다. 닫는 `}`는 **인용부호 밖**에서 찾는다.
+def _scan_flow_mapping(text: str) -> tuple[list, str]:
+    """`{k: v, ...}` 표기를 **항목 목록**으로 나눈다: (items, 문제).
 
-    `text.endswith("}")`로 판정하면 두 경우를 놓친다 — (1) `{…} # 주석`처럼 뒤에 무언가
-    붙은 형태를 통째로 거부하고, (2) 값이 `}`로 끝나는 잘린 항목(`{path: "a}`)을 정상으로
-    본다. 둘 다 사람이 손으로 고친 카드에서 나올 수 있는 형태이므로 구분해서 신호한다.
+    스캐너를 하나로 둔 이유: 예전엔 "닫는 `}` 찾기"와 "항목 나누기"가 각자 인용부호 규칙을
+    들고 있었다 — 규칙이 두 벌이면 한쪽만 고쳐져 조용히 갈린다(이 저장소가 두 번 깨진
+    클래스다). 인용 판정은 여기 한 곳이다.
+
+    YAML 규칙 세 가지를 지킨다:
+    1. **인용부호는 스칼라 선두에서만 인용을 시작한다.** 값 중간의 `"`/`'`는 plain scalar의
+       일부다. 예전엔 어디서든 인용을 열어 `{path: a"b, kind: c}`의 `,`를 값 안으로 삼켜
+       `kind`를 잃었다 — 도달 결과는 전부 fail-closed였지만(경로 주입 0건) 사유가
+       `kind_not_file`/`missing`으로 **오표기**됐다. 3단계가 그 신호로 `source_missing`
+       정책을 정하므로 오표기는 그대로 정책 오판이 된다.
+    2. single-quoted 안의 `''`는 이스케이프된 `'`이고 인용을 닫지 않는다.
+    3. double-quoted 안의 `\\`는 다음 문자를 이스케이프한다.
+
+    문제 값: `not_flow_mapping`(`{`로 시작하지 않음) / `unbalanced_quote`(인용부호가 열린 채
+    끝남 = 값이 잘렸다) / `unterminated`(닫는 `}`가 없음 — 여러 줄 flow의 첫 줄) /
+    `trailing_garbage`(`}` 뒤에 주석 아닌 내용).
     """
     if not text.startswith("{"):
-        return "", "not_flow_mapping"
+        return [], "not_flow_mapping"
+    items: list = []
+    buf: list = []
     quote = ""
+    # 인용부호가 인용을 열 수 있는 위치인지. 항목 선두와 첫 `:` 뒤(값 선두)에서만 참이다.
+    at_scalar_start = True
+    seen_colon = False
     index = 1
     length = len(text)
     while index < length:
         char = text[index]
         if quote:
-            if quote == '"' and char == "\\":
+            buf.append(char)
+            if quote == '"' and char == "\\" and index + 1 < length:
+                buf.append(text[index + 1])
                 index += 2
                 continue
             if char == quote:
+                if quote == "'" and index + 1 < length and text[index + 1] == "'":
+                    # `''` = 리터럴 `'`. 인용은 계속 열려 있다(값 안의 `,`가 보호된다).
+                    buf.append("'")
+                    index += 2
+                    continue
                 quote = ""
             index += 1
             continue
-        if char in ('"', "'"):
+        if char in ('"', "'") and at_scalar_start:
             quote = char
+            buf.append(char)
+            at_scalar_start = False
+            index += 1
+            continue
+        if char == ",":
+            items.append("".join(buf))
+            buf = []
+            at_scalar_start = True
+            seen_colon = False
+            index += 1
+            continue
+        if not seen_colon and _is_separator_colon(text, index):
+            buf.append(char)
+            seen_colon = True
+            at_scalar_start = True
             index += 1
             continue
         if char == "}":
             tail = text[index + 1:].strip()
             # 표준 YAML에서 flow mapping 뒤에 올 수 있는 것은 주석뿐이다.
             if tail and not tail.startswith("#"):
-                return "", "trailing_garbage"
-            return text[1:index], ""
+                return [], "trailing_garbage"
+            items.append("".join(buf))
+            return items, ""
+        if not char.isspace():
+            at_scalar_start = False
+        buf.append(char)
         index += 1
-    # 닫는 `}`를 못 봤다. 인용부호가 열린 채 끝났으면 값이 잘린 것이고(그 안의 `}`를
-    # 닫는 괄호로 오인하지 않은 결과다), 아니면 여러 줄 flow mapping의 첫 줄이다.
-    return "", "unbalanced_quote" if quote else "unterminated"
+    # 닫는 `}`를 못 봤다. 인용부호가 열린 채면 값이 잘린 것이고(그 안의 `}`를 닫는 괄호로
+    # 오인하지 않은 결과다), 아니면 여러 줄 flow mapping의 첫 줄이다.
+    return [], "unbalanced_quote" if quote else "unterminated"
 
 
 def load_flow_mapping(raw: str) -> tuple[dict, str]:
@@ -292,19 +329,15 @@ def load_flow_mapping(raw: str) -> tuple[dict, str]:
     링크가 통째로 사라진다. 인용을 벗긴 뒤 SAFE_KEY_RE로 검증하므로 허용 범위는 넓어지지
     않고(개행·구두점이 든 키는 여전히 거부), 왕복 성질도 유지된다(emit 결과의 상위집합).
     """
-    text = raw.strip()
-    body, issue = _flow_mapping_body(text)
+    items, issue = _scan_flow_mapping(raw.strip())
     if issue:
         return {}, issue
-    items = _split_flow_items(body)
-    if items is None:
-        return {}, "unbalanced_quote"
     fields: dict[str, str] = {}
     issue = ""
     for item in items:
         if not item.strip():
             continue
-        key, sep, value = item.partition(":")
+        key, sep, value = _split_key_value(item)
         if not sep:
             continue
         key, key_issue = load_with_issue(key)
