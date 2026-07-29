@@ -70,6 +70,17 @@ function runRepair(dir, args) {
   });
 }
 
+// python 스크립트를 파일로 실행한다. `bash -c "python3 -c <JSON.stringify(...)>"` 는
+// 개행이 `\n` 리터럴로 들어가 python SyntaxError 가 되고, 그 실패가 try/catch 에 삼켜져
+// **테스트가 아무것도 검증하지 않는 거짓 통과**가 된다(실제로 한 번 겪었다).
+function runPy(dir, lines, { ulimit } = {}) {
+  const script = join(dir, `run-${Math.random().toString(36).slice(2)}.py`);
+  writeFileSync(script, ['import sys', 'sys.path.insert(0, "core")', ...lines].join('\n') + '\n');
+  const cmd = ulimit ? `ulimit -f ${ulimit}; exec python3 ${JSON.stringify(script)}`
+    : `exec python3 ${JSON.stringify(script)}`;
+  return execFileSync('bash', ['-c', cmd], { cwd: process.cwd(), encoding: 'utf8' });
+}
+
 function ledger(dir) {
   const path = join(dir, LEDGER_REL);
   if (!existsSync(path)) return [];
@@ -613,22 +624,16 @@ test('자동 경로(patch_frontmatter_fields)도 쓰기 실패에서 원본을 �
     const body = ['---', 'title: "C"', 'status: generated', '---', '', 'body line', ''].join('\n')
       + 'x'.repeat(40 * 1024) + '\n';
     writeFileSync(card, body);
-    let failed = false;
-    try {
-      execFileSync('bash', ['-c',
-        'ulimit -f 4; exec python3 -c ' + JSON.stringify([
-          'import sys; sys.path.insert(0, "core")',
-          'import wiki_compile as wc',
-          'from pathlib import Path',
-          `ok = wc.patch_frontmatter_fields(Path(${JSON.stringify(card)}), {"status": "verified"})`,
-          'print("ok" if ok else "failed")',
-        ].join('\n'))], { cwd: process.cwd(), encoding: 'utf8' });
-    } catch { failed = true; }
-    // 쓰기가 실패했든(상한) 성공했든, 카드는 절단되지 않는다.
+    const out = runPy(dir, [
+      'import wiki_compile as wc',
+      'from pathlib import Path',
+      `ok = wc.patch_frontmatter_fields(Path(${JSON.stringify(card)}), {"status": "verified"})`,
+      'print("ok" if ok else "failed")',
+    ], { ulimit: 4 });
+    assert.equal(out.trim(), 'failed', '쓰기 상한 아래에서는 실패를 반환해야 한다');
     const after = readFileSync(card, 'utf8');
-    assert.ok(after.length >= body.length - 32, `절단되면 안 된다 (${after.length} vs ${body.length})`);
-    assert.match(after, /body line/);
-    void failed;
+    assert.equal(after, body, '실패해도 원본이 바이트 그대로 남아야 한다');
+    assert.match(after, /^status: generated$/m, '패치가 반영되지 않은 상태여야 한다');
     assert.deepEqual(readdirSync(dir).filter((n) => n.includes('.tmp-')), []);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
@@ -641,19 +646,24 @@ test('verify pass 스탬프(자동, 사람 개입 없음)가 쓰기 실패로 �
     const body = ['---', 'title: "V"', 'status: generated', 'createdBy: qmd-auto-context',
       '---', '', 'claim body', ''].join('\n') + 'y'.repeat(40 * 1024) + '\n';
     writeFileSync(card, body);
-    try {
-      execFileSync('bash', ['-c',
-        'ulimit -f 4; exec python3 -c ' + JSON.stringify([
-          'import sys; sys.path.insert(0, "core")',
-          'import wiki_compile as wc',
-          'from pathlib import Path',
-          `wc.patch_frontmatter_fields(Path(${JSON.stringify(card)}), {"status": "verified", "verifiedBy": "claude", "verifiedAt": "2026-07-30T00:00:00Z"})`,
-        ].join('\n'))], { cwd: process.cwd(), encoding: 'utf8' });
-    } catch { /* 상한 초과는 실패해도 된다 — 검사 대상은 카드 상태다 */ }
-    const after = readFileSync(card, 'utf8');
-    // 패치가 성공했으면 verified, 실패했으면 원본 그대로 — 어느 쪽이든 절단은 없다.
-    assert.ok(after.startsWith('---\ntitle: "V"'), 'frontmatter가 온전해야 한다');
-    assert.match(after, /claim body/, '본문이 남아 있어야 한다');
+    const out = runPy(dir, [
+      'import wiki_compile as wc',
+      'from pathlib import Path',
+      `ok = wc.patch_frontmatter_fields(Path(${JSON.stringify(card)}), {"status": "verified", "verifiedBy": "claude", "verifiedAt": "2026-07-30T00:00:00Z"})`,
+      'print("ok" if ok else "failed")',
+    ], { ulimit: 4 });
+    assert.equal(out.trim(), 'failed');
+    // 이 경로는 verify worker가 사람 개입 없이 도는 곳이다 — 절단되면 다음 회차가
+    // 절단본을 읽어 changed_during_verify로 skip하고 영구 손상이 조용히 남는다.
+    assert.equal(readFileSync(card, 'utf8'), body, '카드가 바이트 그대로여야 한다');
+    // 상한을 풀면 정상 스탬프된다(원자적 경로가 기능을 깨지 않았다).
+    assert.equal(runPy(dir, [
+      'import wiki_compile as wc',
+      'from pathlib import Path',
+      `wc.patch_frontmatter_fields(Path(${JSON.stringify(card)}), {"status": "verified"})`,
+      'print("done")',
+    ]).trim(), 'done');
+    assert.match(readFileSync(card, 'utf8'), /^status: verified$/m);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -667,12 +677,11 @@ test('원자적 쓰기가 원본 권한을 보존한다 (0600 → 0600)', () => 
     runRepair(dir, ['--repoint', '.auto-context/wiki/entities/secret.md', '--from', 'docs/old.md', '--to', 'docs/new.md']);
     assert.equal(statSync(card).mode & 0o777, 0o600, 'os.replace가 권한을 넓히면 회귀다');
     // 자동 경로(frontmatter 패치)도 같다.
-    execFileSync('python3', ['-c', [
-      'import sys; sys.path.insert(0, "core")',
+    runPy(dir, [
       'import wiki_compile as wc',
       'from pathlib import Path',
       `wc.patch_frontmatter_fields(Path(${JSON.stringify(card)}), {"status": "contested"})`,
-    ].join('\n')], { cwd: process.cwd(), encoding: 'utf8' });
+    ]);
     assert.equal(statSync(card).mode & 0o777, 0o600);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
@@ -806,5 +815,48 @@ test('repair CLI 예외는 원인을 로그 파일에 남긴다 (stdout은 JSON 
     assert.equal(parsed.log, logFile);
     assert.match(readFileSync(logFile, 'utf8'), /REPAIR EXCEPTION[\s\S]*boom-detail/);
     assert.doesNotMatch(out, /Traceback/, 'stdout은 JSON 한 줄이어야 한다');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('index.md 쓰기 실패에서 누적 인덱스가 온전히 남는다 / 정상 append는 불변 / log는 append 그대로', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'qmd-index-'));
+  try {
+    const wiki = join(dir, 'wiki');
+    mkdirSync(join(wiki, 'concepts'), { recursive: true });
+    writeFileSync(join(wiki, 'concepts', 'new.md'), 'card\n');
+    // 누적 인덱스(라이브는 106KB / 850줄)
+    const existing = '# Auto-context Wiki Index\n\n'
+      + Array.from({ length: 900 }, (_, i) => `- concepts/old-${i}.md - 카드 ${i}`).join('\n') + '\n';
+    writeFileSync(join(wiki, 'index.md'), existing);
+    writeFileSync(join(wiki, 'log.md'), '# Auto-context Wiki Log\n\n- old log line\n');
+
+    const call = (limit) => runPy(dir, [
+      'import wiki_compile as wc',
+      'from pathlib import Path',
+      `wiki = Path(${JSON.stringify(wiki)})`,
+      'ok = wc.update_index(wiki, wiki / "concepts" / "new.md", "새 카드")',
+      'wc.append_log(wiki, "created", wiki / "concepts" / "new.md", "새 카드")',
+      'print("ok" if ok else "failed")',
+    ], limit ? { ulimit: limit } : {}).trim();
+
+    // (a) 쓰기 상한 아래: 실패를 반환하고 기존 인덱스는 그대로다.
+    assert.equal(call(4), 'failed');
+    assert.equal(readFileSync(join(wiki, 'index.md'), 'utf8'), existing, '누적 인덱스가 절단되면 안 된다');
+    assert.deepEqual(readdirSync(wiki).filter((n) => n.includes('.tmp-')), []);
+    // append 모드인 log는 상한 아래에서도 truncate되지 않는다.
+    assert.match(readFileSync(join(wiki, 'log.md'), 'utf8'), /^# Auto-context Wiki Log/);
+    assert.match(readFileSync(join(wiki, 'log.md'), 'utf8'), /- old log line/);
+
+    // (b) 정상 경로: 한 줄 append + 중복 호출은 늘리지 않는다(기존 동작 불변).
+    assert.equal(call(0), 'ok');
+    const after = readFileSync(join(wiki, 'index.md'), 'utf8');
+    assert.equal(after.split('\n').filter((l) => l.includes('concepts/new.md')).length, 1);
+    assert.ok(after.startsWith('# Auto-context Wiki Index'));
+    assert.equal(after.split('\n').filter((l) => l.startsWith('- concepts/old-')).length, 900);
+    assert.equal(call(0), 'ok');
+    assert.equal(readFileSync(join(wiki, 'index.md'), 'utf8'), after, '중복 줄을 추가하지 않는다');
+    // log는 호출마다 한 줄씩 늘어난다(append 계약).
+    assert.equal(readFileSync(join(wiki, 'log.md'), 'utf8')
+      .split('\n').filter((l) => l.includes('created')).length, 3);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

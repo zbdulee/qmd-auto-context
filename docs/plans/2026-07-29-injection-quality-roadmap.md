@@ -114,7 +114,7 @@ title: "claude-runner — 구독 기반 Claude Code headless AI 실행 계층"
 | 7 | role `source` 도입 | qmd 등록과 compile 입력 분리. 8번 없이는 불필요 |
 | 8 | **raw on/off A/B → 프로젝트별 가역적 제거** | 게이트: 링크 무결성 · query coverage · source-read 성공률 · 재생성 가능성 · raw-search escape hatch |
 
-### 완료 기록 (1·2단계)
+### 완료 기록 (1·2·3단계)
 
 **1단계 — 주입에 정보를 담는다** (`677fe0d` 외 리뷰 라운드 3회, 최종 상태는
 `docs/settings.md` "카드 본문 주입"). 결론:
@@ -146,8 +146,8 @@ title: "claude-runner — 구독 기반 Claude Code headless AI 실행 계층"
   형태별 사유가 `source_drop_reasons` 에 남는다. 3단계의 `source_missing` 신호는 이 사유와
   분리돼 있다
 
-**3단계 — `source_missing` 정책** (`docs/settings.md` "원문 소실(`source_missing`)"이 최종
-상태). 결론:
+**3단계 — `source_missing` 정책** (`46304d8` → 리뷰 반영 `340ee00` → `d90fc78` → 마무리
+`HEAD`. 최종 상태는 `docs/settings.md` "원문 소실(`source_missing`)"). 결론:
 
 - **삭제도 downgrade도 하지 않는다.** 라이브 855장 실측: 소스 전멸 25장(`generated` 18 /
   `verified` 7), 원인은 삭제가 아니라 **개명**(`…07-20.md` → `…07-21.md`)이고 둘은
@@ -157,27 +157,46 @@ title: "claude-runner — 구독 기반 Claude Code headless AI 실행 계층"
 - **감지 경로**는 (1) `core/wiki_source_scan.py` — SessionStart **worker(백그라운드 fork)**,
   (2) 기계 검수의 큐 경유. 카드 mtime 스냅샷은 쓸 수 없다(소스가 개명돼도 카드는 안 바뀐다)
   → `maxCardsPerScan` + 순환 커서로 전량을 여러 회차에 덮는다
-- **리뷰 반영(3라운드)**: 2라운드에서 고친 것은 **가장 드문 경로**(사람이 호출하는 repair)
-  뿐이었고 같은 truncate-then-write가 자동 경로(`patch_frontmatter_fields`·compile·review)에
-  남아 있었다 — 2라운드 커밋의 "그 카드를 만지는 유일한 쓰기 경로"라는 주장은 **틀렸다**.
-  원자적 쓰기를 `wiki_compile.write_text_atomic` 한 벌로 올리고(권한 이식 포함) 전 경로가
-  쓰게 했다. 그 외: "전부 소실" 판정을 `recall.sources_all_missing` 한 벌로 통일,
-  observe 모드 死코드(`duplicate` 미발화) 제거, `resolved` 행의 자기모순 필드 정리,
-  repair의 check-then-act를 락 안으로, `run_guarded`가 원인을 로그에 남기도록
-- **리뷰 반영(2라운드)**: 카드 쓰기를 임시파일+`os.replace`로 원자화(실패 시 9.6MB 카드가
-  2048B로 잘렸다 — 자동 삭제를 금지한 정책과 정반대), `resolved` 전이 추가(복원된 카드가
-  영구 대기로 남고 dismiss가 다음 진짜 소실을 영구히 묻었다), `wikiPath` 격리 판정을
-  스캐너와 공유(repair만 심볼릭 링크·`../` 탈출을 허용했다), 원장 append `flock` 직렬화,
-  repair CLI fail-safe wrapper + `read_jsonl` 디코딩 fail-open, `injectSourcePathsPerCard:0`
-  에서도 카운터 유지(observe 모드), 재지정 시 옛 `sourceHash` 제거
+- **`resolved` 전이가 정책의 나머지 절반이다.** 감지만 있고 "다시 존재함"이 없으면 복원된
+  카드가 영구히 대기로 남아 TTL마다 거짓 알림이 나고, 그것을 치우려 `dismiss`하면 같은
+  소실 집합의 `dismissed` 행이 계속 최신이라 **다음 진짜 소실이 영구히 묻힌다**. 개명
+  되돌리기·`git checkout`이 실측 원인(개명)의 가장 흔한 회복 경로라 정확히 그 경로에서
+  큐가 오염됐다. `dismiss` 억제는 소실 집합 한정이고 `resolved`가 재무장한다
+  (`notice_once`의 "조건 해소 시 재무장"과 같은 규칙)
+- **가장 큰 수확은 3단계 본론이 아니다: truncate-then-write 데이터 손상 클래스를 저장소
+  전반에서 제거했다.** `write_text`는 truncate 후 write라 쓰기 실패 시 호출자는 "실패"를
+  받는데 파일은 이미 잘려 있다. 세 라운드에 걸쳐 드러난 경로: repair(9.6MB 카드 → 2048B),
+  `patch_frontmatter_fields`(40054B → 2048B, **verify worker가 사람 개입 없이 `verified`를
+  스탬프하는 경로** — 절단본을 다음 회차가 읽어 `changed_during_verify`로 skip하므로
+  조용한 영구 손상), compile의 카드 write(신규 포함 — 절단 파일도 인덱싱되고 recall이
+  완결된 요약으로 주입한다), `wiki_review` 두 곳, 그리고 **재생성 경로가 없는 106KB
+  `index.md`**의 read-modify-write. 전부 `wiki_compile.write_text_atomic` 한 벌
+  (임시파일+fsync+`os.replace`+`copymode`)을 지나가고, `os.replace`가 0600 카드를 0644로
+  넓히던 권한 회귀도 여기서 막는다. **`append_log`는 의도적 예외다** — `open("a")` append
+  모드라 164KB인데도 truncate하지 않는다(그 비대칭 근거가 `update_index` docstring에 있다)
+- **리뷰 3라운드에서 배운 것**: 2라운드는 **가장 드물게 쓰이는 경로**(사람이 호출하는
+  repair)만 고치고 "그 카드를 만지는 유일한 쓰기 경로"라고 단정했다 — 틀렸고, 자동 경로가
+  그대로 남아 있었다. 한 안티패턴을 발견하면 **호출부를 전수 grep**해야 한다. 같은 라운드에
+  판정 이중화도 재발했다(`over_scan_budget`에서 recall과 스캐너의 "전부 소실" 답이 갈렸는데
+  주석은 "같은 규칙"이라 말했다 → `recall.sources_all_missing` 한 벌로 통일, 남은 차이는
+  입력 완전성 하나로 문서화)
 - **원장 `source-missing.jsonl`은 트림하지 않는다.** 이 신호가 트림 대상인
-  `verify-log.jsonl`에만 남아 이미 유실되고 있었다. 누적 방어는 트림이 아니라 "상태가 바뀔
-  때만 쓴다"이고, `action`의 카드별 최신 행이 상태라 한 파일이 감사 추적 + 대기 큐를 겸한다
+  `verify-log.jsonl`에만 남아 이미 유실되고 있었다(실측 3주치가 밀려나갔다). 누적 방어는
+  트림이 아니라 "상태가 바뀔 때만 쓴다"이고, `action`의 카드별 최신 행이 상태라 한 파일이
+  감사 추적 + 대기 큐를 겸한다. 원장 쓰기는 sidecar `flock`으로 직렬화한다(race는 append가
+  아니라 check-then-act이고 두 생산자가 서로 다른 lock 도메인에 있다)
 - **복구는 재지정**(`wiki-source-repair` skill). 후보 제안은 제안일 뿐 자동 적용하지 않고
-  자율 resolver도 두지 않는다 — 오매칭 카드는 다음 verify에서 삭제된다
+  자율 resolver도 두지 않는다(dedup/review와 다른 점) — 오매칭 카드는 무관한 원문을 가리킨
+  채 다음 verify에서 삭제된다. `status`는 이 경로에서 절대 바뀌지 않는다
 - **주입 표식은 두지 않는다.** 2단계의 "`missing`에 `↳` 줄을 두지 않는다"와 같은 근거이고,
   downgrade하지 않기로 한 카드에 신뢰 하향 배지를 붙이는 것은 자기모순이다. 대신
   `cards_all_sources_missing` 로그 카운터로 "실제 주입됨"만 토큰 0으로 관측한다
+  (`injectSourcePathsPerCard: 0`에서도 진단 로그가 켜져 있으면 산다 — 그 카운터가 배지
+  미도입 근거이므로 무관한 설정으로 죽으면 안 된다)
+- **1·2단계 회귀 0으로 종료.** 라이브 851장 876항목 per-entry 결과가 `46304d8`과 바이트
+  동일(주입 842 / drop 34 = `missing` 32 + `kind_not_file` 2), 감지 `verified` 7 /
+  `generated` 18, E2E recall stdout이 `{injectSourcePathsPerCard 0, 3} × {진단 로그 on, off}`
+  4조합 전부 sha 동일
 
 ### 단계별 주의
 

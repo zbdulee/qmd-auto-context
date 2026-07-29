@@ -63,6 +63,8 @@ def write_new_page(root: Path, wiki_root: Path, candidate: dict, extra_frontmatt
         raise OSError(f"card write failed: {target}")
     if extra_frontmatter:
         wc.patch_frontmatter_fields(target, extra_frontmatter)
+    # 인덱스는 항법이라 실패해도 카드 생성을 되돌리지 않는다(wiki_compile과 같은 결).
+    # 원자적 쓰기이므로 실패했더라도 기존 인덱스는 온전하다.
     wc.update_index(wiki_root, target, title)
     wc.append_log(wiki_root, "created", target, title)
     return target, title

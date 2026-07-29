@@ -466,12 +466,16 @@ LOG_MAX_BYTES = 256 * 1024
 def trim_jsonl(path: Path, max_bytes: int = LOG_MAX_BYTES) -> None:
     """append-only 로그의 무한 누적 방지: 상한 초과 시 최근 절반만 유지.
     순수 로그(candidates/dedup-deleted/verify-log)용 — 한 줄 유실은 무해.
-    correctness가 걸린 파일(manifest)엔 쓰지 말 것 — compact_manifest 사용."""
+    correctness가 걸린 파일(manifest)엔 쓰지 말 것 — compact_manifest 사용.
+
+    쓰기는 원자적이다. "절반을 의도적으로 버린다"와 "쓰기가 실패해 임의 지점에서
+    잘린다"는 다르다 — 후자의 최악은 첫 write에서 실패해 로그가 통째로 비는 것이고,
+    그건 이 함수가 허용한 유실이 아니다(update_index와 같은 read-modify-write 클래스)."""
     try:
         if path.stat().st_size <= max_bytes:
             return
         lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
-        path.write_text("".join(lines[len(lines) // 2:]), encoding="utf-8")
+        write_text_atomic(path, "".join(lines[len(lines) // 2:]))
     except OSError:
         pass
 
@@ -792,18 +796,34 @@ def patch_frontmatter_fields(path: Path, updates: dict[str, str]) -> bool:
     return write_text_atomic(path, patched)
 
 
-def update_index(wiki_root: Path, target: Path, title: str) -> None:
+def update_index(wiki_root: Path, target: Path, title: str) -> bool:
+    """index.md에 카드 1줄을 추가한다. **read-modify-write이므로 원자적으로 쓴다.**
+
+    `append_log`와의 비대칭이 여기 있다 — 둘 다 wiki 루트의 누적 파일인데 하나만
+    원자적 쓰기가 필요하다:
+      - index는 **전체를 읽어 전체를 다시 쓴다**(중복 줄 방지 검사 때문에). 즉 truncate
+        후 write이고, 실패하면 그때까지 누적된 인덱스 전부가 잘린다. 라이브 index.md는
+        106,717B(카드 1장당 1줄 ≈ 850줄)이고 **재생성 경로가 없다** — 잘리면 아무것도
+        복구하지 않는다. 카드가 생길 때마다(compile 경로) 호출되므로 노출도 높다.
+      - `append_log`는 `open("a")` **append 모드**라 기존 내용을 truncate하지 않는다.
+        164KB인데도 안전한 이유가 이것이다. 실패는 마지막 줄이 안 붙는 것으로 끝난다.
+        (두 함수의 최초 생성 `write_text`는 파일이 없을 때만이라 잃을 내용이 없다.)
+    반환값은 "인덱스가 카드와 어긋나지 않았는가"다 — 인덱스는 캐논이 아니라 항법이므로
+    실패가 카드 쓰기만큼 치명적이지는 않지만, 조용히 실패하면 카드와 어긋난 채 남는다.
+    """
     index = wiki_root / "index.md"
     if not index.exists():
         index.write_text("# Auto-context Wiki Index\n\n", encoding="utf-8")
     rel = target.relative_to(wiki_root).as_posix()
     line = f"- {rel} - {title}\n"
     text = index.read_text(encoding="utf-8")
-    if rel not in text:
-        index.write_text(text.rstrip() + "\n" + line, encoding="utf-8")
+    if rel in text:
+        return True
+    return write_text_atomic(index, text.rstrip() + "\n" + line)
 
 
 def append_log(wiki_root: Path, action: str, target: Path, title: str) -> None:
+    """log.md에 1줄 append. **원자적 쓰기가 필요 없다** — 사유는 `update_index` docstring."""
     log = wiki_root / "log.md"
     if not log.exists():
         log.write_text("# Auto-context Wiki Log\n\n", encoding="utf-8")
@@ -1257,7 +1277,10 @@ def main() -> int:
     # same-identity duplicates rather than size-trimming (which would drop a card's
     # entry and break tombstoning). Threshold-gated + atomic inside.
     compact_manifest(manifest_path)
-    update_index(wiki_root, target, title)
+    # 인덱스 쓰기 실패는 카드 쓰기 실패처럼 중단시키지 않는다 — 카드는 이미 캐논으로
+    # 디스크에 있고 인덱스는 항법(navigation)이다. 대신 조용히 넘기지 않고 출력·후보
+    # 레코드에 남긴다(인덱스가 카드와 어긋난 채 남았다는 사실을 알 수 있어야 한다).
+    index_ok = update_index(wiki_root, target, title)
     append_log(wiki_root, action, target, title)
 
     collection, collection_path = find_wiki_collection(config)
@@ -1281,7 +1304,11 @@ def main() -> int:
                 "trigger": record["trigger"],
             })
 
-    print(json.dumps({"action": action, "targetPath": record["targetPath"]}, ensure_ascii=False))
+    result = {"action": action, "targetPath": record["targetPath"]}
+    if not index_ok:
+        result["indexWriteFailed"] = True
+        append_jsonl(candidate_path, {**record, "indexWriteFailed": True})
+    print(json.dumps(result, ensure_ascii=False))
     return 0
 
 
