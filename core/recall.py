@@ -393,7 +393,7 @@ def log_shadow_diagnostics(
     daemon_url: str,
     strategy: str,
     fixture_path: str | None,
-    lexical_query: str,
+    lex_searches: list[dict],
     lexical_terms: list[str],
     vector_query: str,
     queried_collections: list[str],
@@ -433,11 +433,12 @@ def log_shadow_diagnostics(
                 raw = {"status": "skipped_fixture"}
         else:
             # lex/vec을 분리 질의해 "어느 쪽이 죽었는지"를 남긴다. qmd 2.5.3의 lex는
-            # positive term을 AND로 결합하므로 term 하나가 색인에 없으면 lex 전체가
-            # 0건이 된다 — lex_only.count==0이 그 신호다.
+            # 한 문자열 안의 positive term을 AND로 결합하므로 term 하나가 색인에 없으면
+            # 그 문자열은 0건이 된다 — lex_only.count==0이 그 신호다. EP 변형은 독립
+            # lex search로 분리돼 있으므로 **본 recall이 보낸 lex 엔트리 전부**를 그대로
+            # 넘겨야 진단이 실제 payload를 반영한다(단일 문자열 가정이면 오판한다).
             lex_only = run_shadow_query(
-                daemon_url, queried_collections,
-                [{"type": "lex", "query": lexical_query}], deadline,
+                daemon_url, queried_collections, list(lex_searches), deadline,
             )
             vec_only = run_shadow_query(
                 daemon_url, queried_collections,
@@ -446,10 +447,7 @@ def log_shadow_diagnostics(
             if raw is None:
                 raw = run_shadow_query(
                     daemon_url, raw_collections,
-                    [
-                        {"type": "lex", "query": lexical_query},
-                        {"type": "vec", "query": vector_query},
-                    ],
+                    list(lex_searches) + [{"type": "vec", "query": vector_query}],
                     deadline,
                 )
 
@@ -489,7 +487,10 @@ def log_shadow_diagnostics(
             score_model="1/rank (rerank=false)",
             min_score=active_min_score,
             top_n_limit=top_n,
-            lex_query=lexical_query,
+            # lex_query = 일반 lex 문자열(ep 비활성이면 예전과 동일한 값).
+            # lex_queries = 실제로 보낸 lex 엔트리 전부 — EP 변형 분리가 이 라인에서 보인다.
+            lex_query=lex_searches[0]["query"] if lex_searches else "",
+            lex_queries=[s["query"] for s in lex_searches],
             lex_terms=len(lexical_terms),
             vec_query_chars=len(vector_query),
             queried_collections=queried_collections,
@@ -587,7 +588,14 @@ def main():
     rank_index: dict[str, int] = {}
 
     # lex/vec 쿼리 문자열은 순수 계산이라 fixture 경로에서도 만들어 둔다(진단 로그용).
-    lexical_query = " ".join(deduped_lexical_terms)
+    # EP 변형은 일반 키워드와 합치지 않고 **독립 lex 엔트리**로 보낸다 — qmd는 한 lex
+    # 문자열 안의 term을 AND로 결합하므로 합치면 한 문서가 EP012·012·EP12를 모두 가져야
+    # 하고(불가능) EP 쿼리의 lex가 항상 0건이 된다. searches 배열의 lex는 각각 독립 FTS로
+    # 실행돼 RRF로 융합되므로 분리하면 AND가 아니라 OR 효과가 난다. 분리·예산 정책은
+    # keywords.build_lexical_terms가 SSOT다(lexQueries[0]=일반, [1:]=EP 변형).
+    lex_searches = [
+        {"type": "lex", "query": q} for q in built_terms["lexQueries"]
+    ]
     vector_query = re.sub(r"\s+", " ", prompt).strip()
 
     def query_daemon(query_collections: list[str]) -> list[dict] | None:
@@ -608,8 +616,7 @@ def main():
         else:
             def query_daemon(query_collections: list[str]) -> list[dict] | None:
                 query_payload = {
-                    "searches": [
-                        {"type": "lex", "query": lexical_query},
+                    "searches": list(lex_searches) + [
                         {"type": "vec", "query": vector_query},
                     ],
                     "collections": query_collections,
@@ -931,7 +938,7 @@ def main():
             daemon_url=daemon_url,
             strategy=config.get("recallStrategy", "flat"),
             fixture_path=fixture_path,
-            lexical_query=lexical_query,
+            lex_searches=lex_searches,
             lexical_terms=deduped_lexical_terms,
             vector_query=vector_query,
             queried_collections=queried_collections,

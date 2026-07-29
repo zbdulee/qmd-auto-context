@@ -14,6 +14,11 @@ KO_STOPWORDS = {
     "나는데", "있는데", "되는데", "하는데", "인데", "건데",
     "그런데", "그래서", "그러면", "그러니", "그러나",
     "때문에", "대해서", "관해서", "대한", "위해", "통해", "따라",
+    # 단독 토큰으로 떨어진 조사. `strip_ko_suffix`가 접미로는 이미 떼는 형태들인데
+    # 사용자가 띄어 쓰면("EP12 에서 …") 토큰 하나로 남아 term 예산(5개)을 먹고
+    # AND 조건만 좁힌다. 접미로 떼는 것과 단독일 때 버리는 것은 같은 정책이다.
+    # 활용형(먹은/보는 …)은 여기 넣지 않는다 — 어간 판정 없이 넣으면 의미어를 잃는다.
+    "에서", "으로", "에게", "처럼", "부터", "까지", "에는",
 }
 
 EN_STOPWORDS = {
@@ -266,14 +271,50 @@ def extract_keywords(text: str) -> list[str]:
             break
     return keywords
 
+# EP 변형을 **독립 lex search** 로 내보낼 개수 상한.
+#
+# qmd 는 하나의 lex 문자열 안의 positive term 을 AND 로 결합하므로 EP 변형 3종
+# (`EP012`/`012`/`EP12`)을 한 문자열에 합치면 한 문서가 세 표기를 모두 가져야 하고,
+# 현실적으로 불가능해 EP 쿼리의 lex 는 항상 0건이 된다. `searches` 배열에 lex 를
+# 여러 개 넣으면 각각 독립 FTS 로 실행되고 RRF 로 융합되므로 AND 대신 OR 효과가 난다
+# (`dist/store.js` structuredSearch step 1 — lex search 마다 rankedList 를 하나 push).
+#
+# 상한을 두는 이유: qmd MCP `searches` 스키마가 `.max(10)` 이고(HTTP 경로는 검증하지
+# 않지만 같은 structuredSearch 로 들어간다), 우리는 일반 lex 1 + vec 1 을 항상 쓴다.
+# 데몬은 single-thread 이므로 searchFTS 호출 수 자체를 상한하는 것이 지연 방어다.
+# 6 = EP 번호 2개 × 변형 3종 → payload 총 8개로 스키마 상한 안에 머문다.
+EP_SEARCH_BUDGET = 6
+
+
+_EP_MENTION_RE = re.compile(
+    r"\bEP\s*0*(\d{1,3})\b|\b0*(\d{1,3})\s*화", re.IGNORECASE
+)
+
+
 def extract_ep_terms(prompt: str) -> list[str]:
     terms: list[str] = []
-    for match in re.finditer(r"\bEP\s*0*(\d{1,3})\b|\b0*(\d{1,3})\s*화", prompt, re.IGNORECASE):
+    for match in _EP_MENTION_RE.finditer(prompt):
         ep_num = match.group(1) or match.group(2)
         if ep_num:
             normalized = int(ep_num)
             terms.extend([f"EP{normalized:03d}", f"{normalized:03d}", f"EP{normalized}"])
     return list(dict.fromkeys(terms))
+
+
+def _ep_mention_fragments(prompt: str) -> set[str]:
+    """EP 언급 **원문 span** 이 만들어낸 토큰 조각들 (소문자).
+
+    `EP 12` 처럼 띄어 쓰면 `extract_keywords` 가 `EP` 와 `12` 를 별개 토큰으로 낸다.
+    이 조각들은 EP 변형 독립 search 가 이미 덮으므로 일반 lex 문자열에 남겨 두면
+    AND 조건만 좁힌다 — 같은 span 에서 나온 것이 정규식으로 증명되는 조각만
+    제외하므로 무관한 숫자·단어에는 영향이 없다.
+    """
+    fragments: set[str] = set()
+    for match in _EP_MENTION_RE.finditer(prompt):
+        for piece in _EP_SPLIT_RE.split(match.group(0)):
+            if len(piece) >= 2:
+                fragments.add(piece.lower())
+    return fragments
 
 
 _EP_PLAIN_RE = re.compile(r"^EP\d+$", re.IGNORECASE)
@@ -306,13 +347,27 @@ def build_lexical_terms(prompt: str, patterns: list[str]) -> dict:
     순서: ``extract_ep_terms``(``"ep" in patterns`` 일 때만) → 식별자 → 일반 키워드.
     식별자를 앞에 두는 이유는 정확 토큰이 가장 강한 신호이기 때문이고, ep 게이팅이
     꺼져 있으면 식별자·키워드 양쪽에서 EP 용어를 제거한다(호스트별 불일치 방지).
+
+    ``lexQueries`` 가 실제로 데몬에 보낼 lex 문자열 목록이다:
+
+    - ``[0]`` = 일반 lex 문자열(식별자 + 키워드). AND 결합은 검색을 좁히는 의도된
+      동작이라 그대로 유지한다.
+    - ``[1:]`` = EP 변형 **각각 하나씩**. 같은 문자열에 합치면 AND 가 되어 항상
+      0건이므로 독립 search 로 분리한다(``EP_SEARCH_BUDGET`` 상한).
+
+    예산을 넘는 EP 변형은 일반 문자열로 되돌리지 않고 그냥 버린다 — 되돌리면 AND
+    조건이 다시 좁아져 고치려던 버그가 재발한다.
+
+    ``lexicalTerms`` 는 (EP 변형 포함) 전체 term 목록으로 기존 계약을 유지한다.
     """
     keywords = extract_keywords(prompt)
     identifiers = extract_identifiers(prompt)
 
+    ep_terms: list[str] = []
     lexical_terms: list[str] = []
     if "ep" in (patterns or []):
-        lexical_terms.extend(extract_ep_terms(prompt))
+        ep_terms = extract_ep_terms(prompt)
+        lexical_terms.extend(ep_terms)
         lexical_terms.extend(identifiers)
         lexical_terms.extend(keywords)
     else:
@@ -326,10 +381,23 @@ def build_lexical_terms(prompt: str, patterns: list[str]) -> dict:
             seen.add(term)
             deduped.append(term)
 
+    # 제외 집합 = EP 변형 전체 + EP 언급 원문 조각(`EP 12` → `EP`, `12`).
+    # 조각까지 빼는 이유: 독립 search 가 이미 덮는데 일반 문자열에 남으면 AND 만 좁힌다.
+    ep_set = {t.lower() for t in ep_terms}
+    if ep_terms:
+        ep_set |= _ep_mention_fragments(prompt)
+    ep_searches = ep_terms[:EP_SEARCH_BUDGET]
+    # 일반 문자열은 항상 lexQueries[0] 이다(빈 문자열이어도) — ep 가 꺼진 프로젝트의
+    # payload 모양이 바뀌지 않게 하고, structuredSearch 의 "첫 리스트 2x 가중" 대상도
+    # 기존과 같이 유지한다. 빈 lex 는 결과 0건이라 rankedList 로 push 되지도 않는다.
+    general_query = " ".join(t for t in deduped if t.lower() not in ep_set)
+
     return {
         "keywords": keywords,
         "identifiers": identifiers,
         "lexicalTerms": deduped,
+        "epTerms": ep_searches,
+        "lexQueries": [general_query] + ep_searches,
     }
 
 

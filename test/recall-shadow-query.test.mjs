@@ -190,6 +190,45 @@ test('shadow: EP promotion으로 절단 밖에서 올라온 결과의 원래 ran
   assert.equal(plain.original_rank, 2);
 });
 
+test('shadow: EP 변형이 독립 lex 엔트리로 분리된 payload 를 그대로 기록한다', () => {
+  // EP 변형을 한 lex 문자열에 합치면 AND 결합으로 항상 0건이 되므로 분리했다.
+  // 진단이 단일 문자열을 가정하면 실제 payload 와 어긋나 이후 phase 의 측정 도구를 잃는다.
+  const r = probe({
+    prompt: 'EP 12 에서 무슨 일이 있었는지 정리해줘',
+    log: true,
+    shadow: true,
+    settings: { lexicalPatterns: ['ep'] },
+  });
+  assert.equal(r.exit_code, 0);
+
+  // 본 recall payload: 일반 lex 1 + EP 변형 3 + vec 1. EP 는 다른 term 과 섞이지 않는다.
+  assert.equal(kinds(r.queries[0]), 'lex+lex+lex+lex+vec');
+  const primaryLex = r.queries[0].searches.filter((s) => s.type === 'lex').map((s) => s.query);
+  assert.deepEqual(primaryLex.slice(1), ['EP012', '012', 'EP12']);
+  assert.ok(!/EP/i.test(primaryLex[0]), `일반 lex 에 EP 가 남으면 AND 가 좁아진다: ${primaryLex[0]}`);
+
+  // lex-only 진단 질의는 본 recall 의 lex 엔트리 **전부**를 보낸다(단일 문자열 가정 금지).
+  assert.equal(kinds(r.queries[1]), 'lex+lex+lex+lex');
+  assert.deepEqual(r.queries[1].searches.map((s) => s.query), primaryLex);
+  // raw 대조 질의도 같은 lex 구성 + vec.
+  assert.equal(kinds(r.queries[3]), 'lex+lex+lex+lex+vec');
+  // 분리해도 shadow 질의 건수는 늘지 않는다(데몬은 single-thread).
+  assert.equal(r.queries.length, 4);
+
+  const s = shadowLine(r)[0];
+  assert.equal(s.lex_query, primaryLex[0], 'lex_query 는 일반 lex 문자열');
+  assert.deepEqual(s.lex_queries, primaryLex, 'lex_queries 가 실제 전송한 엔트리 전부');
+  // lex_terms 는 EP 변형까지 포함한 전체 term 수 계약을 그대로 유지한다.
+  assert.ok(s.lex_terms >= 3, `EP 변형이 term 집계에 남아야 함 (${s.lex_terms})`);
+});
+
+test('shadow: ep-off 면 lex 엔트리 1개 + lex_queries 도 1개 (회귀 방지)', () => {
+  const r = probe({ log: true, shadow: true });
+  assert.equal(kinds(r.queries[0]), 'lex+vec');
+  const s = shadowLine(r)[0];
+  assert.deepEqual(s.lex_queries, [s.lex_query], 'ep-off 로그는 예전과 동일한 단일 문자열');
+});
+
 test('shadow: lex 전멸(AND 결합)과 vec 생존을 구분해 기록', () => {
   const r = probe({ log: true, shadow: true, scenario: 'lex-dead' });
   const s = shadowLine(r)[0];
