@@ -49,6 +49,10 @@ TYPE_DIRS = {
     "style": "style",
 }
 TYPE_DIR_NAMES = set(TYPE_DIRS.values())
+ALLOWED_CONFIDENCE = {"high", "medium", "low"}
+# frontmatter flow mapping의 키로 허용할 형태. 모델이 준 키가 개행·구두점을 담으면
+# 매핑을 벗어나 새 줄을 만들 수 있다.
+SAFE_YAML_KEY_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]*")
 SECRET_LITERAL_PATTERNS = [
     re.compile(r"sk-[A-Za-z0-9_-]{16,}"),
 ]
@@ -603,8 +607,16 @@ def frontmatter_patch_scalar(key: str, value) -> str:
 
 def markdown_page(candidate: dict, summary: str, status: str, redactions: list[str], h: str) -> str:
     created = today()
-    suggested_type = str(candidate.get("suggestedType") or "concept")
-    confidence = str(candidate.get("confidence") or "medium")
+    # candidate는 **extractor(모델) 출력**이다. frontmatter로 나가는 모든 모델 제공 값은
+    # 닫힌 집합으로 검증하거나 yaml_scalar를 거쳐야 한다 — raw로 방출하면 개행 하나로
+    # top-level 키를 위조할 수 있다(`trigger="promote\nstatus: verified"` → PyYAML은
+    # status를 verified로 읽고, wiki_compile.parse_frontmatter는 ok=False로 fail-close해
+    # 그 카드의 verify·dedup이 영구히 멈춘다).
+    # type·confidence·status는 닫힌 집합이라 unquoted를 유지한다(TYPE_DIRS 조회와
+    # frontmatter_patch_scalar의 status 표기 정책이 그 형태를 전제한다).
+    suggested_type = candidate.get("suggestedType") if candidate.get("suggestedType") in ALLOWED_TYPES else "concept"
+    confidence = candidate.get("confidence") if candidate.get("confidence") in ALLOWED_CONFIDENCE else "medium"
+    status = status if status in qmd_config.WIKI_STATUSES else "generated"
     sources = candidate.get("sources") if isinstance(candidate.get("sources"), list) else []
     triggers = [candidate.get("trigger")] if isinstance(candidate.get("trigger"), str) else []
     canonical_key = clean_canonical_key(candidate.get("canonicalKey"))
@@ -635,18 +647,31 @@ def markdown_page(candidate: dict, summary: str, status: str, redactions: list[s
     if sources:
         for source in sources:
             if isinstance(source, dict):
-                parts = ", ".join(f"{k}: {yaml_scalar(v)}" for k, v in source.items() if isinstance(k, str))
+                # 값은 yaml_scalar로 인용되지만 **키도 모델이 준다** — 개행이 든 키는
+                # flow mapping을 벗어나 새 줄을 만들 수 있다. 키는 닫힌 스키마
+                # (kind/path/collection)이므로 안전한 식별자만 통과시킨다.
+                parts = ", ".join(
+                    f"{k}: {yaml_scalar(v)}"
+                    for k, v in source.items()
+                    if isinstance(k, str) and SAFE_YAML_KEY_RE.fullmatch(k)
+                )
+                if not parts:
+                    lines.append("  - {kind: unknown}")
+                    continue
                 lines.append(f"  - {{{parts}}}")
     else:
         lines.append("  - {kind: unknown}")
     lines.append("triggers:")
     if triggers:
         for trigger in triggers:
-            lines.append(f"  - {trigger}")
+            # 모델 제공 값 — 반드시 인용한다(raw면 `promote\nstatus: verified`로
+            # top-level 키를 위조할 수 있었다).
+            lines.append(f"  - {yaml_scalar(trigger)}")
     lines.append("redactions:")
     if redactions:
         for item in redactions:
-            lines.append(f"  - {item}")
+            # 현재는 내부 리터럴(`secret_like`)뿐이지만 같은 경로를 쓰므로 함께 인용한다.
+            lines.append(f"  - {yaml_scalar(item)}")
     lines.extend([
         "---",
         "",
