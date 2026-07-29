@@ -58,6 +58,24 @@ PENDING_ACTIONS = (ACTION_DETECTED,)
 IGNORED_ENTRY_REASONS = qmd_recall.NON_FILE_SOURCE_REASONS
 
 
+def log_path() -> Path:
+    """이 기능(감지·복구)의 진단 로그. 스캐너와 **같은 파일**을 쓴다 — 사용자가 볼 곳이
+    하나여야 한다(`QMD_SOURCE_SCAN_LOG`로 override)."""
+    import os
+    return Path(os.environ.get(
+        "QMD_SOURCE_SCAN_LOG", str(Path.home() / ".cache" / "qmd" / "source-scan.log")))
+
+
+def log(message: str) -> None:
+    try:
+        path = log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(f"[{now_iso()}] {message}\n")
+    except OSError:
+        pass
+
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -206,14 +224,18 @@ def classify_records(sources, project_root: Path, allow_roots: list[Path]) -> di
 
 
 def all_sources_missing(info: dict) -> bool:
-    """"소스 전부 소실" 판정.
+    """"소스 전부 소실" 판정 — 규칙은 `recall.sources_all_missing`(SSOT)에 있다.
 
     소실 항목이 하나 이상이고, 살아 있는 파일 소스가 하나도 없고, 판정 불가 항목도 없을
     때만 참이다. **일부만 소실은 대상이 아니다**(살아 있는 원문으로 대조가 가능하므로
     "stale 링크가 유일 진실"이 성립하지 않는다). 소스 항목이 0인 메타 카드
     (SCHEMA/index/log)도 대상이 아니다 — 소실이 0이라 자동으로 빠진다.
+    이 경로는 항목을 **전부** 조사하므로 recall의 stat 예산 절단이 없다(그 차이는
+    `recall.sources_all_missing` docstring 참고).
     """
-    return bool(info.get("missing")) and not info.get("present") and not info.get("unknown")
+    return qmd_recall.sources_all_missing(
+        len(info.get("missing") or ()), len(info.get("present") or ()),
+        sum((info.get("unknown") or {}).values()))
 
 
 def load_states(path: Path | None) -> dict[str, dict]:
@@ -284,7 +306,7 @@ def record(path: Path | None, target_rel: str, action: str, missing: list[str],
 def _record_transition(root: Path, compile_cfg: dict, target_rel: str, action: str,
                        status: str, missing: list[str], origin: str,
                        states: dict[str, dict] | None,
-                       should_write) -> bool:
+                       should_write, extra: dict | None = None) -> bool:
     """상태 전이 기록의 공통 경로 — 판정과 append를 **같은 락 안에서** 한다.
 
     호출자가 넘긴 `states`는 스캔 회차 안의 캐시일 뿐이고, 락을 잡은 뒤 원장을 다시
@@ -301,7 +323,7 @@ def _record_transition(root: Path, compile_cfg: dict, target_rel: str, action: s
             if states is not None and target_rel in fresh:
                 states[target_rel] = fresh[target_rel]
             return False
-        written = record(path, target_rel, action, key, status, origin)
+        written = record(path, target_rel, action, key, status, origin, extra)
     if written and states is not None:
         states[target_rel] = {"targetPath": target_rel, "action": action,
                               "missingSources": key, "status": status}
@@ -317,12 +339,39 @@ def record_detection(root: Path, compile_cfg: dict, target_rel: str, status: str
 
 
 def record_resolution(root: Path, compile_cfg: dict, target_rel: str, status: str,
-                      missing: list[str], origin: str,
+                      remaining: list[str], origin: str,
                       states: dict[str, dict] | None = None) -> bool:
-    """소스가 다시 존재하게 됐음을 기록해 대기에서 뺀다(미해결 상태였을 때만)."""
+    """소스가 다시 존재하게 됐음을 기록해 대기에서 뺀다(미해결 상태였을 때만).
+
+    `missingSources`는 **비운다** — 이 행의 뜻이 "이 카드는 더 이상 소실 상태가 아니다"라
+    소실 목록을 담으면 자기모순이다. 부분 소실로 끝난 경우(한 소스는 복원, 다른 하나는
+    여전히 없음) 남은 경로는 `remainingMissing`으로 따로 남긴다: 정보는 보존하되 상태
+    비교에 쓰이는 필드(`missingSources`)와 섞지 않는다.
+    """
+    extra = {"remainingMissing": missing_key(remaining)} if remaining else None
     return _record_transition(root, compile_cfg, target_rel, ACTION_RESOLVED, status,
-                              missing, origin, states,
-                              lambda state, _key: needs_resolution_record(state))
+                              [], origin, states,
+                              lambda state, _key: needs_resolution_record(state),
+                              extra)
+
+
+def record_dismissal(root: Path, compile_cfg: dict, target_rel: str) -> tuple[bool, dict]:
+    """대기 중인 카드를 거절 처리한다 — 판정과 append가 **한 락 안에** 있다.
+
+    (기록됨, 그 카드의 원장 상태) 반환. 대기 상태가 아니면 (False, {}). 소실 집합은
+    `detected` 행에서 그대로 옮겨 온다(사용자가 본 그 집합에 한정해 억제하기 위함).
+    """
+    path = ledger_path(root, compile_cfg)
+    if path is None:
+        return False, {}
+    with locked_ledger(path):
+        state = load_states(path).get(target_rel)
+        if state is None or state.get("action") != ACTION_DETECTED:
+            return False, {}
+        missing = [p for p in (state.get("missingSources") or []) if isinstance(p, str)]
+        record(path, target_rel, ACTION_DISMISSED, missing,
+               str(state.get("status") or ""), "repair")
+    return True, {"missingSources": missing_key(missing), "status": state.get("status", "")}
 
 
 def allow_roots_of(config: dict) -> list[Path]:

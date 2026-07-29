@@ -571,6 +571,10 @@ def collect_source_paths(block: str, project_root: Path, cwd: str, limit: int,
     바이트 동일하다.
     """
     paths: list[str] = []
+    # 채택 후보(중복 판정용). observe_only에서는 `paths`가 영구히 비므로 `paths`로 중복을
+    # 보면 `duplicate`가 **절대 발화하지 못한다**(死코드였다) — 두 모드가 같은 중복 판정을
+    # 쓰도록 목록을 분리한다. 주입 모드에서는 seen과 paths가 항상 같다.
+    seen: list[str] = []
     reasons: dict[str, int] = {}
     present = 0
     entries = frontmatter_source_entries(block)
@@ -585,6 +589,8 @@ def collect_source_paths(block: str, project_root: Path, cwd: str, limit: int,
         # 찼다"(설정을 올리면 늘어난다), `over_scan_budget`은 "조사 예산이 소진됐다"
         # (= 앞쪽 항목이 대량으로 버려졌다는 신호이므로 카드를 봐야 한다). 뭉치면 로그로
         # 둘을 구분할 수 없다.
+        # over_cap은 주입 상한 전용이다. observe_only에는 상한이 없으므로(주입하지 않는다)
+        # 이 사유가 발화할 수 없고, 발화하면 안 된다.
         if not observe_only and len(paths) >= limit:
             reasons["over_cap"] = reasons.get("over_cap", 0) + 1
             continue
@@ -596,27 +602,47 @@ def collect_source_paths(block: str, project_root: Path, cwd: str, limit: int,
             reasons[reason] = reasons.get(reason, 0) + 1
             continue
         present += 1
-        if display in paths:
+        if display in seen:
             reasons["duplicate"] = reasons.get("duplicate", 0) + 1
             continue
-        if observe_only:
-            # 관측 전용: 사유 집계에만 참여하고 주입 목록에는 넣지 않는다.
-            continue
-        paths.append(display)
+        seen.append(display)
+        # 관측 전용: 사유·present 집계에만 참여하고 주입 목록에는 넣지 않는다.
+        if not observe_only:
+            paths.append(display)
     return paths, len(entries), reasons, present
+
+
+def sources_all_missing(missing: int, present: int, undecidable: int) -> bool:
+    """"소스 전부 소실" 판정의 **단일 구현**.
+
+    소실 1건 이상 + 살아 있는 파일 소스 0 + 판정 불가 0. `wiki_source_missing`의
+    카드/레코드 분류와 이 모듈의 로그 카운터가 **이 함수 하나**를 호출한다 —
+    예전엔 같은 규칙을 두 곳이 각자 구현해 `over_scan_budget`이 있는 카드에서 답이
+    갈렸고(한쪽 True, 한쪽 False) 주석은 "같은 규칙"이라고 말했다.
+
+    입력 완전성은 호출부마다 다르고 그것이 유일한 차이다: 스캐너는 항목 전부를 조사하고,
+    recall은 카드당 stat 예산이 있어(`over_scan_budget`) 미조사 항목을 판정 불가로 센다 —
+    그래서 항목이 예산보다 많은 카드에서 recall이 세지 않는 쪽으로(과소) 갈린다. 이는
+    규칙의 차이가 아니라 조사 범위의 차이이고, 주입 경로의 상한을 지키기 위한 의도된
+    보수성이다(로그 카운터가 있다고 stat을 무제한 늘리지 않는다).
+    """
+    return missing > 0 and present == 0 and undecidable == 0
 
 
 def card_sources_all_missing(result: dict) -> bool:
     """주입된 wiki 결과의 소스가 **전부 소실**인가(로그 카운터 판정).
 
-    규칙은 `wiki_source_missing.all_sources_missing`과 같다 — 소실 1건 이상 + 살아 있는
-    파일 소스 0 + 판정 불가 0. `_wiki_sources`(주입 목록)로 판정하면 안 된다: 관측 전용
+    판정은 `sources_all_missing`(SSOT)에 넘기고, 여기서는 recall의 사유 집계를 그
+    세 숫자로 환산만 한다. `_wiki_sources`(주입 목록)로 판정하면 안 된다: 관측 전용
     모드에서는 항상 비어 있고, 카드 사이 중복 제거로도 비므로 과대 집계된다.
     """
     reasons = result.get("_wiki_source_reasons", {})
-    if not reasons.get("missing") or result.get("_wiki_source_present"):
-        return False
-    return not any(key not in NON_FILE_SOURCE_REASONS and key != "missing" for key in reasons)
+    undecidable = sum(
+        count for key, count in reasons.items()
+        if key not in NON_FILE_SOURCE_REASONS and key not in ("missing", "duplicate")
+    )
+    return sources_all_missing(
+        reasons.get("missing", 0), result.get("_wiki_source_present", 0), undecidable)
 
 
 def source_inject_opts(config: dict, observe: bool = False) -> tuple[int, list[Path], bool]:

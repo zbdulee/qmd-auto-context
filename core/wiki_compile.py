@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sys
 import urllib.error
 import urllib.request
@@ -475,6 +476,43 @@ def trim_jsonl(path: Path, max_bytes: int = LOG_MAX_BYTES) -> None:
         pass
 
 
+def write_text_atomic(path: Path, text: str) -> bool:
+    """기존 파일 덮어쓰기의 **단일 원자적 쓰기 경로**(카드·wiki 산출물 공용).
+
+    `write_text`는 truncate 후 write다. 쓰기가 중간에 실패하면(ENOSPC·quota·EFBIG)
+    호출자는 예외/실패를 받는데 **파일은 이미 잘려 있다**. 실측 두 건:
+      - `wiki_source_repair`(사람 호출): 9.6MB `verified` 카드 → 2048B
+      - `patch_frontmatter_fields`(**자동** 경로): 40054B 카드 → 2048B
+    자동 경로가 더 나쁘다 — verify worker가 `status: verified`를 스탬프하다 실패하면
+    예외가 `run()` 밖으로 나가 job은 requeue되지만, 다음 회차 `card_state`가 **절단본**을
+    읽어 `changed_during_verify`로 skip한다. 사람이 개입하지 않으므로 조용한 영구 손상이다.
+    카드가 그 지식의 유일한 기록일 수 있다는 이유로 자동 삭제를 금지한 정책과 정반대다.
+
+    임시파일은 **같은 디렉터리**에 만든다(다른 파일시스템이면 rename이 원자적이지 않다).
+    원본이 있으면 **권한을 이식한다** — `os.replace`는 임시파일 권한(umask 기준 0644)을
+    남기므로, 이식하지 않으면 0600 카드가 0644로 **넓어지는** 회귀가 된다.
+    """
+    tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    try:
+        with open(tmp, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            shutil.copymode(path, tmp)
+        except OSError:
+            # 원본이 없거나(신규 생성) 권한을 못 읽는 경우 — 기본 권한으로 진행한다.
+            pass
+        os.replace(tmp, path)
+        return True
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        return False
+
+
 def write_jsonl_atomic(path: Path, rows: list[dict]) -> None:
     """temp + os.replace 원자적 재작성 (부분 쓰기/유실 방지)."""
     tmp = path.with_suffix(path.suffix + ".compact.tmp")
@@ -750,8 +788,8 @@ def patch_frontmatter_fields(path: Path, updates: dict[str, str]) -> bool:
             new_lines.append(f"{key}: {frontmatter_patch_scalar(key, value)}")
     new_frontmatter = "\n".join(new_lines)
     patched = text[: match.start(1)] + new_frontmatter + text[match.end(1) :]
-    path.write_text(patched, encoding="utf-8")
-    return True
+    # 원자적 쓰기 — 실패해도 카드는 원본 그대로다(자동 경로라 절단되면 아무도 모른다).
+    return write_text_atomic(path, patched)
 
 
 def update_index(wiki_root: Path, target: Path, title: str) -> None:
@@ -1188,7 +1226,16 @@ def main() -> int:
         page_block = page_block_match.group(0)
         page = AUTO_BLOCK_RE.sub(page_block, old)
         action = "updated"
-    target.write_text(page, encoding="utf-8")
+    # 신규 생성도 같은 원자적 경로를 쓴다. `updated`는 기존 카드 파괴 방지가 이유이고,
+    # `created`는 **부분 카드가 완성된 카드처럼 보이는 것**이 이유다 — 절단된 파일도
+    # 인덱싱되고 recall이 그 본문을 완결된 요약으로 주입하며(읽기 창 안에서 끊겼는지
+    # 알 수 없다) verify는 반쪽 카드를 원문과 대조한다. 다음 회차 덮어쓰기에 의존하면
+    # 그 사이 세션이 잘린 카드를 캐논으로 본다. 실패는 아래 write_failure로 표면화한다.
+    if not write_text_atomic(target, page):
+        record["action"] = "write-failed"
+        append_jsonl(candidate_path, record)
+        print(json.dumps({"action": "write-failed", "targetPath": record["targetPath"]}, ensure_ascii=False))
+        return 1
 
     if action == "updated":
         # updated 경로는 AUTO_BLOCK만 치환하고 기존 frontmatter를 보존하므로, 이전

@@ -21,6 +21,7 @@ import difflib
 import json
 import os
 import sys
+import traceback
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.resolve()))
@@ -37,31 +38,10 @@ MIN_CANDIDATE_RATIO = 0.6
 STALE_ON_REPOINT = ("sourceHash", "bodyHash")
 
 
-def write_card_atomic(path: Path, text: str) -> bool:
-    """카드 덮어쓰기는 **temp + os.replace**여야 한다.
-
-    `write_text`는 truncate 후 write라, 쓰기가 중간에 실패하면(ENOSPC·quota·EFBIG)
-    호출자는 "실패"를 받는데 **카드는 이미 잘려 있다**. 실측: 9.6MB `verified` 카드가
-    `ulimit -f 4` 아래에서 `card_unwritable`을 반환하며 2048B로 남았다. 이 모듈의 정책은
-    "카드가 그 지식의 유일한 기록일 수 있으므로 자동 삭제 금지"인데, 그 카드를 만지는
-    유일한 쓰기 경로가 데이터를 파괴하고 있었다 — 정책과 구현이 반대 방향이었다.
-    임시파일은 **같은 디렉터리**에 만든다(다른 파일시스템이면 rename이 원자적이지 않다).
-    패턴은 `wiki_compile.write_jsonl_atomic`·`config.py`·`sync.write_state_atomic`과 같다.
-    """
-    tmp = path.with_name(f".{path.name}.repair.tmp-{os.getpid()}")
-    try:
-        with open(tmp, "w", encoding="utf-8") as handle:
-            handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, path)
-        return True
-    except OSError:
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
-        return False
+def _nullcontext():
+    """원장 경로가 없을 때(설정 이상) 락 없이 같은 코드를 지나가기 위한 no-op."""
+    import contextlib
+    return contextlib.nullcontext()
 
 
 def fail(message: str) -> int:
@@ -205,22 +185,28 @@ def do_repoint(root: Path, config: dict, compile_cfg: dict, target_rel: str,
         # 없는/루트 밖 경로로 재지정하면 카드가 무관한 곳을 가리킨 채 "정상"이 된다.
         return fail(f"new_source_{reason or 'invalid'}")
     new_rel = resolved.relative_to(root).as_posix() if resolved.is_relative_to(root) else new
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError:
-        return fail("card_unreadable")
-    updated, why = repoint_entry(text, old, new_rel)
-    if updated is None:
-        return fail(why)
-    if not write_card_atomic(path, updated):
-        # 원본은 그대로다(임시파일만 버려진다) — 실패 반환과 디스크 상태가 일치한다.
-        return fail("card_unwritable")
-
     ledger = wsm.ledger_path(root, compile_cfg)
-    info = wsm.classify_card(updated, root, allow_roots)
-    wsm.record(ledger, target_rel, wsm.ACTION_REPOINTED, info["missing"],
-               str((wc.parse_frontmatter(updated)[0] or {}).get("status") or "generated"),
-               "repair", {"from": old, "to": new_rel})
+    # 카드 read-modify-write와 원장 append를 **한 락 안에서** 한다. 동시 repoint에서는
+    # 각자 stale한 본문을 읽어 마지막 쓰기만 남는데, 원장에는 6건 모두 `repointed`가
+    # 남아 **거짓 기록**이 됐다(원장은 감사 추적이다). 락 안에서는 acquire하는 함수를
+    # 부르지 않는다(flock 재진입 = 자기 교착) — 아래 rare 분기는 락을 놓은 뒤 처리한다.
+    with wsm.locked_ledger(ledger) if ledger is not None else _nullcontext():
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            return fail("card_unreadable")
+        updated, why = repoint_entry(text, old, new_rel)
+        if updated is None:
+            return fail(why)
+        # 원자적 쓰기는 wiki_compile이 SSOT다(자동 경로와 같은 구현) — 구현을 두 벌로
+        # 만들면 한쪽만 고쳐진다. 이 저장소에서 반복된 클래스다.
+        if not wc.write_text_atomic(path, updated):
+            # 원본은 그대로다(임시파일만 버려진다) — 실패 반환과 디스크 상태가 일치한다.
+            return fail("card_unwritable")
+        info = wsm.classify_card(updated, root, allow_roots)
+        wsm.record(ledger, target_rel, wsm.ACTION_REPOINTED, info["missing"],
+                   str((wc.parse_frontmatter(updated)[0] or {}).get("status") or "generated"),
+                   "repair", {"from": old, "to": new_rel})
     if wsm.all_sources_missing(info):
         # 정상 경로에서는 도달하지 않는다(재지정 대상은 존재가 확인된 파일이므로 살아 있는
         # 소스가 최소 1개 생긴다). 재지정 직후 그 파일이 사라진 레이스에 대한 방어다 —
@@ -237,15 +223,13 @@ def do_repoint(root: Path, config: dict, compile_cfg: dict, target_rel: str,
 
 
 def do_dismiss(root: Path, config: dict, compile_cfg: dict, target_rel: str) -> int:
-    ledger = wsm.ledger_path(root, compile_cfg)
-    states = wsm.load_states(ledger)
-    state = states.get(target_rel)
-    if state is None or state.get("action") != wsm.ACTION_DETECTED:
+    # "대기 중인가" 확인과 append는 한 락 안에서 한다(check-then-act) — 밖에서 하면
+    # 동시 실행이 같은 카드에 dismissed를 여러 줄 남긴다.
+    written, state = wsm.record_dismissal(root, compile_cfg, target_rel)
+    if not written:
         return fail("not_pending")
-    missing = [p for p in state.get("missingSources", []) if isinstance(p, str)]
-    wsm.record(ledger, target_rel, wsm.ACTION_DISMISSED, missing,
-               str(state.get("status") or ""), "repair")
-    print(json.dumps({"ok": True, "action": "dismissed", "targetPath": target_rel},
+    print(json.dumps({"ok": True, "action": "dismissed", "targetPath": target_rel,
+                      "missingSources": state.get("missingSources", [])},
                      ensure_ascii=False))
     return 0
 
@@ -288,8 +272,14 @@ def run_guarded() -> int:
     except SystemExit as exc:  # argparse의 usage 종료는 그대로 통과시킨다
         return int(exc.code or 0)
     except Exception as exc:
+        # 원인을 잃지 않는다: stdout에는 기계가 읽는 한 줄(타입 + 메시지)을 주고,
+        # traceback은 이 기능의 진단 로그 파일에만 남긴다(`hook_main.run`이 훅
+        # traceback을 QMD_RECALL_LOG에 남기는 것과 같은 비대칭 해소). stdout에
+        # traceback을 흘리면 skill이 파싱하는 JSON이 깨진다.
+        wsm.log(f"REPAIR EXCEPTION: {traceback.format_exc()}")
         print(json.dumps({"ok": False, "error": "internal_error",
-                          "detail": f"{type(exc).__name__}"}, ensure_ascii=False))
+                          "detail": f"{type(exc).__name__}: {exc}"[:300],
+                          "log": str(wsm.log_path())}, ensure_ascii=False))
         return 1
 
 

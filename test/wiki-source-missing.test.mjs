@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -600,4 +600,211 @@ test('injectSourcePathsPerCard:0 에서도 진단 로그가 켜지면 카운터�
   assert.equal(observe[0], 0);
   assert.equal(observe[2], true, '로그가 켜지면 관측 전용 모드');
   assert.ok(observe[1].length > 0, '관측 모드에서는 allowRoots를 해석한다');
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 확인 라운드 반영 — 자동 경로 원자성 / 권한 / 판정 통일 / observe 死코드
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('자동 경로(patch_frontmatter_fields)도 쓰기 실패에서 원본을 지킨다', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'qmd-atomic-auto-'));
+  try {
+    const card = join(dir, 'card.md');
+    const body = ['---', 'title: "C"', 'status: generated', '---', '', 'body line', ''].join('\n')
+      + 'x'.repeat(40 * 1024) + '\n';
+    writeFileSync(card, body);
+    let failed = false;
+    try {
+      execFileSync('bash', ['-c',
+        'ulimit -f 4; exec python3 -c ' + JSON.stringify([
+          'import sys; sys.path.insert(0, "core")',
+          'import wiki_compile as wc',
+          'from pathlib import Path',
+          `ok = wc.patch_frontmatter_fields(Path(${JSON.stringify(card)}), {"status": "verified"})`,
+          'print("ok" if ok else "failed")',
+        ].join('\n'))], { cwd: process.cwd(), encoding: 'utf8' });
+    } catch { failed = true; }
+    // 쓰기가 실패했든(상한) 성공했든, 카드는 절단되지 않는다.
+    const after = readFileSync(card, 'utf8');
+    assert.ok(after.length >= body.length - 32, `절단되면 안 된다 (${after.length} vs ${body.length})`);
+    assert.match(after, /body line/);
+    void failed;
+    assert.deepEqual(readdirSync(dir).filter((n) => n.includes('.tmp-')), []);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('verify pass 스탬프(자동, 사람 개입 없음)가 쓰기 실패로 카드를 절단하지 않는다', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'qmd-atomic-verify-'));
+  try {
+    // wiki_verify_worker가 status: verified를 패치하는 그 경로를 직접 호출한다.
+    const card = join(dir, 'v.md');
+    const body = ['---', 'title: "V"', 'status: generated', 'createdBy: qmd-auto-context',
+      '---', '', 'claim body', ''].join('\n') + 'y'.repeat(40 * 1024) + '\n';
+    writeFileSync(card, body);
+    try {
+      execFileSync('bash', ['-c',
+        'ulimit -f 4; exec python3 -c ' + JSON.stringify([
+          'import sys; sys.path.insert(0, "core")',
+          'import wiki_compile as wc',
+          'from pathlib import Path',
+          `wc.patch_frontmatter_fields(Path(${JSON.stringify(card)}), {"status": "verified", "verifiedBy": "claude", "verifiedAt": "2026-07-30T00:00:00Z"})`,
+        ].join('\n'))], { cwd: process.cwd(), encoding: 'utf8' });
+    } catch { /* 상한 초과는 실패해도 된다 — 검사 대상은 카드 상태다 */ }
+    const after = readFileSync(card, 'utf8');
+    // 패치가 성공했으면 verified, 실패했으면 원본 그대로 — 어느 쪽이든 절단은 없다.
+    assert.ok(after.startsWith('---\ntitle: "V"'), 'frontmatter가 온전해야 한다');
+    assert.match(after, /claim body/, '본문이 남아 있어야 한다');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('원자적 쓰기가 원본 권한을 보존한다 (0600 → 0600)', () => {
+  const dir = setupProject();
+  try {
+    writeFileSync(join(dir, 'docs', 'new.md'), 'x\n');
+    const card = writeCard(dir, 'entities/secret.md', { status: 'verified', sources: [fileSource('docs/old.md')] });
+    chmodSync(card, 0o600);
+    runScan(dir);
+    runRepair(dir, ['--repoint', '.auto-context/wiki/entities/secret.md', '--from', 'docs/old.md', '--to', 'docs/new.md']);
+    assert.equal(statSync(card).mode & 0o777, 0o600, 'os.replace가 권한을 넓히면 회귀다');
+    // 자동 경로(frontmatter 패치)도 같다.
+    execFileSync('python3', ['-c', [
+      'import sys; sys.path.insert(0, "core")',
+      'import wiki_compile as wc',
+      'from pathlib import Path',
+      `wc.patch_frontmatter_fields(Path(${JSON.stringify(card)}), {"status": "contested"})`,
+    ].join('\n')], { cwd: process.cwd(), encoding: 'utf8' });
+    assert.equal(statSync(card).mode & 0o777, 0o600);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('전부 소실 판정이 두 경로에서 같은 구현을 쓴다 (예산 절단은 입력 차이로만 남는다)', () => {
+  const out = execFileSync('python3', ['-c', [
+    'import sys, json; sys.path.insert(0, "core")',
+    'import inspect, recall, wiki_source_missing as wsm',
+    // 구현은 한 벌이다.
+    'assert "sources_all_missing(" in inspect.getsource(wsm.all_sources_missing)',
+    'assert "sources_all_missing(" in inspect.getsource(recall.card_sources_all_missing)',
+    // 같은 (missing, present, undecidable) 입력이면 답이 같다.
+    'cases = [(1,0,0),(0,0,0),(2,1,0),(3,0,1),(1,0,2)]',
+    'rule = [recall.sources_all_missing(*c) for c in cases]',
+    'wsmr = [wsm.all_sources_missing({"missing": ["x"]*m, "present": ["y"]*p, "unknown": {"z": u} if u else {}}) for m,p,u in cases]',
+    'assert rule == wsmr, (rule, wsmr)',
+    // recall 쪽 환산: duplicate는 판정불가가 아니고(살아 있는 경로의 중복), over_scan_budget은 판정불가다.
+    'r = {"_wiki_source_reasons": {"missing": 7}, "_wiki_source_present": 0}',
+    'assert recall.card_sources_all_missing(r) is True',
+    'r2 = {"_wiki_source_reasons": {"missing": 6, "over_scan_budget": 1}, "_wiki_source_present": 0}',
+    'assert recall.card_sources_all_missing(r2) is False',
+    'print(json.dumps({"rule": rule}))',
+  ].join('\n')], { cwd: process.cwd(), encoding: 'utf8' });
+  assert.deepEqual(JSON.parse(out).rule, [true, false, false, false, false]);
+});
+
+test('observe 모드에서 duplicate 사유가 실제로 발화한다 (死코드 없음)', () => {
+  const out = execFileSync('python3', ['-c', [
+    'import sys, json, tempfile, os; sys.path.insert(0, "core")',
+    'import recall',
+    'from pathlib import Path',
+    'root = Path(tempfile.mkdtemp()).resolve()',
+    '(root / "docs").mkdir()',
+    '(root / "docs" / "a.md").write_text("x")',
+    'block = \'sources:\\n  - {kind: "file", path: "docs/a.md"}\\n  - {kind: "file", path: "docs/a.md"}\'',
+    'inject = recall.collect_source_paths(block, root, str(root), 3, [], False)',
+    'observe = recall.collect_source_paths(block, root, str(root), 0, [], True)',
+    'print(json.dumps({"inject": [inject[0], inject[2], inject[3]], "observe": [observe[0], observe[2], observe[3]]}))',
+  ].join('\n')], { cwd: process.cwd(), encoding: 'utf8' });
+  const { inject, observe } = JSON.parse(out);
+  assert.deepEqual(inject[1], { duplicate: 1 });
+  assert.deepEqual(observe[1], { duplicate: 1 }, 'observe 모드에서도 중복이 집계돼야 한다');
+  assert.deepEqual(observe[0], [], '관측 모드는 주입하지 않는다');
+  assert.equal(inject[2], 2);
+  assert.equal(observe[2], 2, 'present 집계는 두 모드가 같다');
+  // over_cap은 주입 상한 전용이므로 observe 모드에서 발화하지 않는다.
+  assert.ok(!('over_cap' in observe[1]));
+});
+
+test('resolved 행은 소실 목록을 담지 않는다 (남은 소실은 remainingMissing)', () => {
+  const dir = setupProject();
+  try {
+    const a = join(dir, 'docs', 'a.md');
+    writeCard(dir, 'entities/two.md', {
+      status: 'verified',
+      sources: [fileSource('docs/a.md'), fileSource('docs/b.md')],
+    });
+    runScan(dir);
+    assert.equal(JSON.parse(runRepair(dir, ['--list'])).pending, 1);
+    writeFileSync(a, 'restored\n');   // 하나만 복원 → 부분 소실 → 대기 대상 아님
+    runScan(dir);
+    const last = ledger(dir).at(-1);
+    assert.equal(last.action, 'resolved');
+    assert.deepEqual(last.missingSources, [], 'resolved 행에 소실 목록이 있으면 자기모순이다');
+    assert.deepEqual(last.remainingMissing, ['docs/b.md']);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('동시 repoint에서 원장이 거짓 기록을 남기지 않는다 (락 안 read-modify-write)', async () => {
+  const dir = setupProject();
+  try {
+    for (const n of ['1', '2', '3', '4', '5', '6']) writeFileSync(join(dir, 'docs', `new-${n}.md`), `${n}\n`);
+    const card = writeCard(dir, 'entities/race.md', {
+      status: 'verified',
+      sources: ['1', '2', '3', '4', '5', '6'].map((n) => fileSource(`docs/old-${n}.md`)),
+    });
+    runScan(dir);
+    await Promise.all(['1', '2', '3', '4', '5', '6'].map((n) => new Promise((resolve) => {
+      const child = spawn('python3', ['core/wiki_source_repair.py', '--cwd', dir,
+        '--repoint', '.auto-context/wiki/entities/race.md',
+        '--from', `docs/old-${n}.md`, '--to', `docs/new-${n}.md`],
+        { cwd: process.cwd(), stdio: 'ignore' });
+      child.on('close', resolve);
+    })));
+    const text = readFileSync(card, 'utf8');
+    const rows = ledger(dir).filter((r) => r.action === 'repointed');
+    // 원장이 주장하는 재지정은 전부 카드에 반영돼 있어야 한다(거짓 기록 금지).
+    for (const row of rows) {
+      assert.match(text, new RegExp(`path: "${row.to.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"`),
+        `원장은 ${row.to} 재지정을 기록했는데 카드에 없다`);
+    }
+    assert.ok(rows.length >= 1);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('동시 dismiss는 원장에 한 줄만 남긴다', async () => {
+  const dir = setupProject();
+  try {
+    writeCard(dir, 'entities/d.md', { status: 'verified', sources: [fileSource('docs/gone.md')] });
+    runScan(dir);
+    await Promise.all(Array.from({ length: 6 }, () => new Promise((resolve) => {
+      const child = spawn('python3', ['core/wiki_source_repair.py', '--cwd', dir,
+        '--dismiss', '.auto-context/wiki/entities/d.md'], { cwd: process.cwd(), stdio: 'ignore' });
+      child.on('close', resolve);
+    })));
+    assert.equal(ledger(dir).filter((r) => r.action === 'dismissed').length, 1);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('repair CLI 예외는 원인을 로그 파일에 남긴다 (stdout은 JSON 한 줄)', () => {
+  const dir = setupProject();
+  const logFile = join(dir, 'repair.log');
+  try {
+    let out = '';
+    try {
+      // classify_card가 예외를 던지도록 wikiPath를 파일로 만든다(디렉터리가 아님).
+      execFileSync('python3', ['-c', [
+        'import sys, json; sys.path.insert(0, "core")',
+        'import wiki_source_repair as r',
+        'r.main = lambda: (_ for _ in ()).throw(RuntimeError("boom-detail"))',
+        'sys.exit(r.run_guarded())',
+      ].join('\n')], {
+        cwd: process.cwd(), encoding: 'utf8',
+        env: { ...process.env, QMD_SOURCE_SCAN_LOG: logFile },
+      });
+      assert.fail('예외 경로는 non-zero여야 한다');
+    } catch (err) { out = err.stdout; }
+    const parsed = JSON.parse(out.trim());
+    assert.equal(parsed.ok, false);
+    assert.match(parsed.detail, /RuntimeError: boom-detail/, '원인을 잃지 않는다');
+    assert.equal(parsed.log, logFile);
+    assert.match(readFileSync(logFile, 'utf8'), /REPAIR EXCEPTION[\s\S]*boom-detail/);
+    assert.doesNotMatch(out, /Traceback/, 'stdout은 JSON 한 줄이어야 한다');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

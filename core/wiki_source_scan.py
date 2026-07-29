@@ -173,6 +173,9 @@ def run(cwd: str) -> dict:
             # 대기에서 뺀다 — 이 전이가 없으면 복원된 카드가 영구히 대기로 남고(TTL마다
             # 거짓 알림), 그것을 치우려 dismiss하면 다음 진짜 소실이 영구히 묻힌다.
             if wsm.needs_resolution_record(states.get(target_rel)):
+                # `missingSources`는 비운다 — "resolved인데 소실 목록이 있다"는 자기모순이다.
+                # 부분 소실로 끝난 경우 남은 깨진 링크는 `remainingMissing`에 둔다(정보는
+                # 보존하되 상태 필드와 섞지 않는다).
                 if wsm.record_resolution(root, compile_cfg, target_rel, status,
                                          info["missing"], "scan", states):
                     result["resolved"] += 1

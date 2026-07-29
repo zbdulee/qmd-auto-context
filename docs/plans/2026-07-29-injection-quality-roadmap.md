@@ -157,6 +157,13 @@ title: "claude-runner — 구독 기반 Claude Code headless AI 실행 계층"
 - **감지 경로**는 (1) `core/wiki_source_scan.py` — SessionStart **worker(백그라운드 fork)**,
   (2) 기계 검수의 큐 경유. 카드 mtime 스냅샷은 쓸 수 없다(소스가 개명돼도 카드는 안 바뀐다)
   → `maxCardsPerScan` + 순환 커서로 전량을 여러 회차에 덮는다
+- **리뷰 반영(3라운드)**: 2라운드에서 고친 것은 **가장 드문 경로**(사람이 호출하는 repair)
+  뿐이었고 같은 truncate-then-write가 자동 경로(`patch_frontmatter_fields`·compile·review)에
+  남아 있었다 — 2라운드 커밋의 "그 카드를 만지는 유일한 쓰기 경로"라는 주장은 **틀렸다**.
+  원자적 쓰기를 `wiki_compile.write_text_atomic` 한 벌로 올리고(권한 이식 포함) 전 경로가
+  쓰게 했다. 그 외: "전부 소실" 판정을 `recall.sources_all_missing` 한 벌로 통일,
+  observe 모드 死코드(`duplicate` 미발화) 제거, `resolved` 행의 자기모순 필드 정리,
+  repair의 check-then-act를 락 안으로, `run_guarded`가 원인을 로그에 남기도록
 - **리뷰 반영(2라운드)**: 카드 쓰기를 임시파일+`os.replace`로 원자화(실패 시 9.6MB 카드가
   2048B로 잘렸다 — 자동 삭제를 금지한 정책과 정반대), `resolved` 전이 추가(복원된 카드가
   영구 대기로 남고 dismiss가 다음 진짜 소실을 영구히 묻었다), `wikiPath` 격리 판정을

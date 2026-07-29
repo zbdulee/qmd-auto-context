@@ -58,7 +58,9 @@ def write_new_page(root: Path, wiki_root: Path, candidate: dict, extra_frontmatt
         target = (wiki_root / type_dir / f"{slug}-{h[:8]}.md").resolve()
     page = wc.markdown_page(candidate, summary, "generated", redactions, h)
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(page, encoding="utf-8")
+    # 원자적 쓰기(wiki_compile SSOT) — 절단된 카드가 완성된 카드처럼 인덱싱·주입되지 않게.
+    if not wc.write_text_atomic(target, page):
+        raise OSError(f"card write failed: {target}")
     if extra_frontmatter:
         wc.patch_frontmatter_fields(target, extra_frontmatter)
     wc.update_index(wiki_root, target, title)
@@ -109,7 +111,9 @@ def resolve_entry(root: Path, wiki_root: Path, config: dict, entry: dict, action
         if page_block_match is None:
             return {"action": "merge-needed", "reason": "generated_section_missing"}
         old = wc.AUTO_BLOCK_RE.sub(page_block_match.group(0), old)
-        matched_path.write_text(old, encoding="utf-8")
+        # 기존 카드 덮어쓰기 — 실패해도 원본이 잘리지 않아야 한다(wiki_compile SSOT).
+        if not wc.write_text_atomic(matched_path, old):
+            return {"action": "write-failed", "targetPath": matched_path.relative_to(root).as_posix()}
         wc.append_log(wiki_root, "updated", matched_path, title)
         return {"action": "updated", "targetPath": matched_path.relative_to(root).as_posix()}
 
