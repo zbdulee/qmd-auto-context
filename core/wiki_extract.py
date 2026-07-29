@@ -6,6 +6,7 @@ core/wiki_compile.py. It accepts already-bounded durable conclusions, converts
 them to deterministic candidate JSON, and delegates all write/lint/governance to
 wiki_compile.py. It intentionally does not accept or persist raw transcripts.
 """
+from __future__ import annotations
 import argparse
 import json
 import os

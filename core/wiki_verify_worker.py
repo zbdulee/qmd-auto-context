@@ -26,6 +26,7 @@ and doubles as a standalone CLI for tests/manual runs. Silent by default (hook
 path); queue/log records never store source bodies.
 """
 
+from __future__ import annotations
 import argparse
 import json
 import os

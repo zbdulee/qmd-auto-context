@@ -13,6 +13,7 @@ Fail-open end to end: always exits 0, never writes to stdout, and any
 exception is caught and logged rather than raised, so a scanner bug can
 never break the embed subshell that calls it.
 """
+from __future__ import annotations
 import argparse
 import hashlib
 import os

@@ -5,6 +5,7 @@ Worker is silent by default because it can run from host hooks. It never stores
 source markdown in queue/failure records.
 """
 
+from __future__ import annotations
 import argparse
 import fcntl
 import json

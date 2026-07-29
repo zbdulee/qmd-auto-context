@@ -5,6 +5,7 @@ Reads .auto-context/compile/merge-needed.jsonl, applies one action to the
 entry at --index, and rewrites the queue with that entry removed. Never
 touches entries other than the one resolved this run.
 """
+from __future__ import annotations
 import argparse
 import json
 import sys

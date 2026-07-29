@@ -22,6 +22,7 @@ exit 0이어야 한다). 대신 열린 인용부호처럼 **값이 잘렸다고 
 (`load_with_issue`) — 조용히 잘린 값을 반환하던 것이 위 1번과 같은 클래스다.
 """
 
+from __future__ import annotations
 import re
 
 BLOCK_SCALAR_HEADERS = {">", "|", ">-", "|-", ">+", "|+", ">>", "|2", ">2"}

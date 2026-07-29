@@ -4,6 +4,7 @@
 This command intentionally accepts already-compact candidate JSON. It does not
 persist raw transcripts and it does not run from query-time recall hooks.
 """
+from __future__ import annotations
 import argparse
 import hashlib
 import json

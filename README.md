@@ -38,7 +38,7 @@ continue below.
 
 ## 설치
 
-먼저 qmd CLI가 필요합니다. 지원 버전은 `>=2.5.3 <3.0.0`입니다.
+먼저 qmd CLI가 필요합니다. 지원 버전은 `>=2.5.3 <3.0.0`입니다. 훅은 `python3`을 그대로 실행하므로 PATH의 `python3`이 **3.9 이상**이어야 합니다(macOS 기본 탑재 버전이 하한입니다).
 
 ```bash
 bun add -g @tobilu/qmd@2.5.3

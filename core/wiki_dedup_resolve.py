@@ -10,6 +10,7 @@ place), this script's `merge` action DELETES a file -- the caller (the
 wiki-dedup-resolver subagent) has already folded any unique content into the
 page it is keeping via its own Edit tool before invoking this CLI.
 """
+from __future__ import annotations
 import argparse
 import json
 import sys
