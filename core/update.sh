@@ -1013,7 +1013,13 @@ if preset == "novel":
     compile_config.setdefault("manifestPath", ".auto-context/compile/generated-manifest.jsonl")
     compile_config.setdefault("excludeStatusesFromRecall", ["discarded", "contested"])
     compile_config.setdefault("lowPriorityStatuses", ["generated", "tentative"])
-    compile_config.setdefault("triggers", ["manual", "explicit_user_approval", "post_session_summary"])
+    # post_session_summary는 host가 compact session summary를 hook에 넘겨줄 때만
+    # 자동으로 발화할 수 있고 그런 host가 아직 없다(수동 skills/wiki-compile 경로의
+    # 라벨로만 소비된다). 자동 수집을 실제로 담당하는 트리거는 post_tool_source이므로
+    # 반드시 포함시킨다 — 없으면 세션 노트를 채워도 카드가 생기지 않는다.
+    compile_config.setdefault(
+        "triggers", ["post_tool_source", "manual", "explicit_user_approval", "post_session_summary"]
+    )
     compile_config.setdefault("maxAutoPageLines", 120)
     config["compile"] = compile_config
 if "indexing" not in config:

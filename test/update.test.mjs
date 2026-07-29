@@ -503,6 +503,9 @@ test('update core: --init-wiki --preset novel creates novel dirs and compile def
     assert.equal(cfg.compile.autoWrite, true);
     assert.equal(cfg.compile.defaultStatus, 'generated');
     assert.equal(cfg.compile.requireReviewForCanon, true);
+    // post_tool_source가 없으면 자동 수집 트리거가 하나도 없어 세션 노트를 채워도
+    // 카드가 생기지 않는다(post_session_summary는 수동 경로 라벨일 뿐이다).
+    assert.ok(cfg.compile.triggers.includes('post_tool_source'));
   } finally {
     rmSync(work, { recursive: true, force: true });
   }

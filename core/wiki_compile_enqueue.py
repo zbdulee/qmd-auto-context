@@ -20,6 +20,11 @@ from collection_match import select_collections
 
 DEFAULT_ENGINE = "unknown"
 
+# compile source가 절대 될 수 없는 segment. `.auto-context`는 이 플러그인의 관리 영역
+# (wiki 카드·큐·로그)이라 소스로 승격하면 카드가 자기 자신을 재컴파일해 증식한다.
+# 나머지는 collectionPaths에 등록될 일이 거의 없지만 방어적으로 막는다.
+DENIED_SOURCE_SEGMENTS = frozenset({".auto-context", ".git", ".hg", ".svn", "node_modules"})
+
 
 def _utc_now():
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -27,6 +32,10 @@ def _utc_now():
 
 def _is_hidden_source_path(rel_path: str) -> bool:
     return any(part.startswith(".") for part in Path(rel_path).parts)
+
+
+def _is_denied_source_path(rel_path: str) -> bool:
+    return any(part in DENIED_SOURCE_SEGMENTS for part in Path(rel_path).parts)
 
 
 def _engine(payload):
@@ -101,7 +110,19 @@ def _source_record(path_value, cwd, project_root, config, engine):
         rel_path = resolved.relative_to(Path(project_root).resolve()).as_posix()
     except ValueError:
         return None
-    if _is_hidden_source_path(rel_path):
+    if _is_denied_source_path(rel_path):
+        return None
+    # dot-prefix 정책은 유지하되 적용 범위를 "등록된 collection 루트 아래"로 좁힌다.
+    # 루트 자체의 dot segment(예: `.nova/06_Sessions`)는 사용자가 collectionPaths에
+    # 직접 적어 넣은 소스라 면제하고, 그 아래에서 새로 나타나는 dot segment
+    # (`.claude`, `docs/.draft`, `.hidden.md`)는 그대로 배제한다.
+    # 이 좁히기가 완화를 자동으로 봉쇄한다: collectionPaths가 `.`이면 면제되는
+    # 접두부가 비어 있어 rel_path 전체가 여전히 dot 검사를 받는다.
+    try:
+        inner_rel = resolved.relative_to(Path(selected[collection]).resolve()).as_posix()
+    except (OSError, ValueError):
+        inner_rel = rel_path
+    if _is_hidden_source_path(inner_rel):
         return None
     return {
         "ts": _utc_now(),
