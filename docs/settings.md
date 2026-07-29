@@ -125,14 +125,20 @@ wiki role collection의 결과는 경로와 title만이 아니라 **카드 본�
 
 ### 본문은 줄 단위 인용 접두로 프레임과 분리됩니다
 
-본문의 **모든 줄**에 `| ` 접두가 붙습니다. 카드 본문은 신뢰 입력이 아니고(자동 생성 +
+본문의 **모든 줄**에 `  | ` 접두(2칸 들여쓰기 + `| `, 4자)가 붙습니다. 빈 줄은 후행 공백을
+지워 `  |` 가 됩니다. 카드 본문은 신뢰 입력이 아니고(자동 생성 +
 사람 편집) `관련 문서:`·`- [wiki:verified] …` 같은 주입 프레임과 같은 문자열이나 열린 코드
 fence·HTML 블록을 담을 수 있는데, CommonMark의 모든 블록 개시(fenced code, HTML block,
 헤딩, setext, 구분선, 목록, 인용, 표 행)는 **줄 선두**에 와야 성립하므로 블록 의미가 없는
 접두를 모든 줄에 붙이면 어떤 블록도 열리지 않고 열린 상태가 다음 줄로 이어지지도 않습니다.
 블록 종류별 규칙(fence 문자·길이, HTML 종료 토큰)을 개별로 흉내내는 방식은 계속 구멍이
-납니다. 접두는 본문 문자를 하나도 바꾸지 않으므로 축자 보존이 유지되고, 모델은 접두 하나만
-벗기면 원문을 복원합니다.
+납니다. 접두는 본문을 재작성하지 않으므로(접두를 붙이고 후행 공백만 지웁니다) 축자 보존이
+유지되고, 모델은 접두 하나만 벗기면 원문을 복원합니다.
+
+**`injectSummaryMaxChars` 상한은 접두를 제외한 본문 문자 수입니다.** 접두 비용은 실측
+849장에서 순증 median 4자 / p95 4자 / max 29자이고(본문 줄 수 median 1 / p95 1 / max 10),
+`topN: 3` 기준 프레임 오버헤드는 typical 12자 + 안내문 129자 = 141자, 최악 87자 + 129자 =
+216자입니다.
 
 불릿 한 줄에 들어가는 title·경로는 공백류·제어문자·zero-width를 공백으로 접어 **한 줄로
 강제**합니다(개행 하나가 새 프레임 줄을 만들 수 있습니다).
@@ -162,8 +168,11 @@ dogfooding 두 코퍼스(카드 849장)의 주입 대상 본문 길이 분포입
 (절단 표식이 붙습니다).
 
 title 계열은 `titles_from_frontmatter`(주입 건수 중 frontmatter title을 얻은 수)와
-`card_meta_issues`(`frontmatter_missing`·`title_missing`·`title_block_scalar`·
-`title_shortened`·`status_block_scalar`)로 봅니다.
+`card_meta_issues`로 봅니다. `card_meta_issues` 값: `frontmatter_missing`,
+`title_missing`, `title_empty`, `title_block_scalar`(`title: >`),
+`title_unbalanced_quote`(인용부호가 열린 채 줄이 끝나 값이 잘림), `title_shortened`,
+같은 형태의 `status_*`, 그리고 `auto_block_truncated`/`after_auto_truncated`(읽기 창
+소진으로 본문 또는 그 뒤 수동 섹션이 잘림).
 
 카드 파일 읽기 자체가 실패했는지는 `card_read_failures` / `card_read_reasons`로 봅니다 —
 이쪽은 필터로 drop된 후보까지 포함하므로, `wikiPath` 오설정으로 검수 카드가 전부

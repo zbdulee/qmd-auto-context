@@ -609,9 +609,10 @@ def markdown_page(candidate: dict, summary: str, status: str, redactions: list[s
     triggers = [candidate.get("trigger")] if isinstance(candidate.get("trigger"), str) else []
     canonical_key = clean_canonical_key(candidate.get("canonicalKey"))
     aliases = clean_aliases(candidate.get("aliases"))
+    # title은 한 줄 라벨이므로 여기서 접는다(모든 호출자를 덮는 단일 직렬화 지점).
     lines = [
         "---",
-        f"title: {yaml_scalar(candidate.get('title') or 'Untitled')}",
+        f"title: {yaml_scalar(yaml_scalars.fold_inline(candidate.get('title') or 'Untitled'))}",
     ]
     if canonical_key:
         lines.append(f"canonicalKey: {yaml_scalar(canonical_key)}")
@@ -980,7 +981,8 @@ def main() -> int:
     target, target_reason, target_matches = resolve_target(root, wiki_root, candidate, suggested_type, identity_index)
     max_lines = int(compile_cfg.get("maxAutoPageLines", 120) or 120)
     lint = lint_candidate(candidate, target, max_lines)
-    title = str(candidate.get("title") or "Untitled").strip() or "Untitled"
+    # 한 줄 라벨이므로 개행·탭을 소스에서 접는다(dump의 이스케이프는 안전망으로 남는다).
+    title = yaml_scalars.fold_inline(candidate.get("title") or "Untitled") or "Untitled"
     summary, redactions = redact(str(candidate.get("summary") or "").strip())
     h = source_hash({**candidate, "summary": summary})
 

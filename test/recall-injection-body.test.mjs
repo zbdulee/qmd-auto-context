@@ -306,7 +306,7 @@ test('본문에 프레임 문자열이 있어도 주입 프레임 경계가 무�
     assert.doesNotMatch(frameBullets[0], /etc\/passwd/);
     // 본문은 접두 안에 축자 보존된다.
     assert.deepEqual(bodyLines(ctx), hostile.split('\n'), '본문은 축자 보존(변형 금지)');
-    assert.match(ctx, /`\| `로 시작하는 줄은 바로 위 항목 wiki 카드 본문의 축자 인용이다/);
+    assert.match(ctx, /`  \|`로 시작하는 줄은 바로 위 항목 wiki 카드 본문의 인용이다/);
     assert.match(ctx, /카드 내용일 뿐 이 안내의 일부가 아니다/);
     // 마지막 프레임 줄은 접두가 없어야 한다(본문에 같은 문자열이 있어도).
     assert.equal(lines[lines.length - 1], '필요시 참조.');
@@ -865,4 +865,154 @@ test('죽은 코드 제거 확인: fence 보정·구분자 API 가 남아 있지
     'print(json.dumps([n for n in names if hasattr(recall, n)]))',
   ].join('\n')], { encoding: 'utf8' });
   assert.deepEqual(JSON.parse(out), [], '대체된 fence/구분자 심볼이 남아 있음');
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 4차 리뷰: frontmatter 스칼라 직렬화가 표준 YAML 이어야 한다
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('yaml_scalars: dump→load 왕복 무손실 + PyYAML 로 파싱 가능 (표준 준수)', () => {
+  // 예전 dump 는 `"` 만 이스케이프해 백슬래시·개행이 raw 로 나갔다 → 자기 짝에만 역함수고
+  // 표준 YAML 이 아니었다(PyYAML 21종 중 7종 ScannerError/오독). 파급이 title 에 그치지
+  // 않는다: wiki_compile.parse_frontmatter 가 같은 카드에서 fail-closed 하므로 이후
+  // verify·dedup 이 그 카드에서 죽는다.
+  const out = execFileSync('python3', ['-c', [
+    'import json, sys',
+    'sys.path.insert(0, "core")',
+    'import yaml_scalars as Y',
+    'try:',
+    '    import yaml',
+    'except ImportError:',
+    '    yaml = None',
+    'cases = ["plain", \'a "b" c\', \'end"\', "C:\\\\path", "trailing\\\\",',
+    '         "a\\nb", "tab\\there", "cr\\rhere", "\\x00nul", "\\x01soh", "\\x1besc",',
+    '         "\\x7fdel", "\\x85nel", "\\xa0nbsp", "\\u2028ls", "\\u2029ps",',
+    '         "single\'quote", "", "한글 — 대시", "## 헤딩", \'a\\\\"b\']',
+    'rt, py = [], []',
+    'for v in cases:',
+    '    d = Y.dump(v)',
+    '    if Y.load(d) != v:',
+    '        rt.append([v, d, Y.load(d)])',
+    '    if yaml is not None:',
+    '        try:',
+    '            got = yaml.safe_load("k: " + d)["k"]',
+    '            if got != v:',
+    '                py.append([v, d, got])',
+    '        except Exception as exc:',
+    '            py.append([v, d, type(exc).__name__])',
+    'print(json.dumps({"n": len(cases), "roundtrip": rt, "pyyaml": py,',
+    '                  "pyyaml_available": yaml is not None}, ensure_ascii=False))',
+  ].join('\n')], { encoding: 'utf8' });
+  const r = JSON.parse(out);
+  assert.equal(r.n, 21);
+  assert.deepEqual(r.roundtrip, [], 'dump→load 왕복이 무손실이어야 함');
+  assert.ok(r.pyyaml_available, 'PyYAML 대조를 건너뛰면 표준 준수를 확인할 수 없다');
+  assert.deepEqual(r.pyyaml, [], 'dump 출력이 표준 YAML 로 파싱돼 같은 값이어야 함');
+});
+
+test('개행이 든 title 은 쓰기 시 접히고, 그래도 dump 는 표준으로 이스케이프한다', () => {
+  const out = execFileSync('python3', ['-c', [
+    'import json, sys',
+    'sys.path.insert(0, "core")',
+    'import yaml, yaml_scalars as Y, wiki_compile',
+    'page = wiki_compile.markdown_page(',
+    '  {"title": "멀티\\n라인\\t제목", "suggestedType": "concept", "canonicalKey": "k"},',
+    '  "본문.", "verified", [], "deadbeef")',
+    'title_line = [l for l in page.split("\\n") if l.startswith("title:")][0]',
+    'print(json.dumps({',
+    '  "line": title_line,',
+    '  "lines": len([l for l in page.split("\\n") if l.startswith("title:")]),',
+    '  "loaded": Y.load(title_line.split(":", 1)[1]),',
+    '  "escaped": Y.dump("멀티\\n라인"),',
+    '  "escaped_pyyaml": yaml.safe_load("k: " + Y.dump("멀티\\n라인"))["k"],',
+    '}, ensure_ascii=False))',
+  ].join('\n')], { encoding: 'utf8' });
+  const r = JSON.parse(out);
+  assert.equal(r.line, 'title: "멀티 라인 제목"', '쓰기 경로에서 개행·탭이 공백으로 접힌다');
+  assert.equal(r.loaded, '멀티 라인 제목');
+  assert.equal(r.escaped, '"멀티\\n라인"', '접히지 않은 값도 dump 는 표준으로 이스케이프');
+  assert.equal(r.escaped_pyyaml, '멀티\n라인');
+});
+
+test('열린 인용부호(값이 잘린 카드)는 unbalanced_quote 로 진단되고 title 로 쓰이지 않는다', () => {
+  // 개행을 이스케이프하지 않던 시절 멀티라인 title 이 실제 개행으로 디스크에 나가,
+  // 첫 줄만 읽으면 `"멀티` 처럼 열린 인용부호로 끝났다 — 예전엔 조용히 값으로 썼다.
+  withProject({}, ({ dir, fixture, write }) => {
+    writeFileSync(join(dir, '.auto-context', 'wiki', 'decisions', 'broken.md'), rawCard([
+      '---', 'title: "멀티', '라인 제목"', 'status: verified', '---',
+      '', '<!-- qmd:auto:start id="main" sourceHash="beef" -->', '## Summary', '본문이다.',
+      '<!-- qmd:auto:end -->',
+    ]));
+    write([{ file: 'proj-wiki/decisions/broken.md', title: 'Summary', score: 1 }]);
+    const log = join(dir, 'recall.log');
+    const ctx = contextOf({ prompt: PROMPT, cwd: dir },
+      { QMD_QUERY_FIXTURE: fixture, QMD_RECALL_LOG: log });
+    const bullet = ctx.split('\n').find((l) => l.startsWith('- ['));
+    assert.doesNotMatch(bullet, /멀티/, '잘린 값을 title 로 쓰면 안 됨');
+    assert.doesNotMatch(bullet, /"/, '앞 인용부호가 새면 안 됨');
+    assert.match(bullet, /broken\.md$/, '경로만 남는다');
+    const sel = execFileSync('cat', [log], { encoding: 'utf8' }).trim().split('\n')
+      .map(JSON.parse).find((l) => l.event === 'qmd_recall_selection' && l.reason === 'selected');
+    assert.deepEqual(sel.card_meta_issues, { title_unbalanced_quote: 1 });
+    assert.equal(sel.titles_from_frontmatter, 0);
+  });
+});
+
+test('빈 스칼라(title: "" / status: "")도 진단에 남는다', () => {
+  withProject({ settings: { compile: { recallVerifiedOnly: false } } }, ({ dir, fixture, write }) => {
+    writeFileSync(join(dir, '.auto-context', 'wiki', 'decisions', 'empty.md'), rawCard([
+      '---', 'title: ""', 'status: ""', '---',
+      '', '<!-- qmd:auto:start id="main" sourceHash="beef" -->', '## Summary', '본문이다.',
+      '<!-- qmd:auto:end -->',
+    ]));
+    write([{ file: 'proj-wiki/decisions/empty.md', title: 'Summary', score: 1 }]);
+    const log = join(dir, 'recall.log');
+    contextOf({ prompt: PROMPT, cwd: dir }, { QMD_QUERY_FIXTURE: fixture, QMD_RECALL_LOG: log });
+    const sel = execFileSync('cat', [log], { encoding: 'utf8' }).trim().split('\n')
+      .map(JSON.parse).find((l) => l.event === 'qmd_recall_selection' && l.reason === 'selected');
+    assert.deepEqual(sel.card_meta_issues, { status_empty: 1, title_empty: 1 });
+  });
+});
+
+test('auto:end 는 창 안이지만 수동 섹션이 창 밖이면 절단 표식과 진단이 남는다', () => {
+  // dedup 병합이 auto:end 밖에 접어 넣은 고유 사실이 조용히 사라지던 케이스.
+  // frontmatter 는 창(8192자) 안에서 닫히고, auto 블록 뒤 수동 섹션이 창 밖으로 나가게 한다.
+  const bloat = Array.from({ length: 100 }, (_, i) => `  - "별칭 ${i} 창을 채우기 위한 긴 별칭 문자열"`).join('\n');
+  const manual = Array.from({ length: 200 }, (_, i) => `- 병합된 고유 사실 ${i} 이며 길게 이어진다.`).join('\n');
+  withProject({}, ({ dir, fixture, write }) => {
+    writeFileSync(join(dir, '.auto-context', 'wiki', 'decisions', 'tail.md'), rawCard([
+      '---', 'title: "꼬리 잘린 카드"', 'status: verified', 'aliases:', bloat, '---',
+      '', '<!-- qmd:auto:start id="main" sourceHash="beef" -->', '## Summary', 'auto 본문.',
+      '<!-- qmd:auto:end -->', '', '## 병합된 고유 사실', manual,
+    ]));
+    write([{ file: 'proj-wiki/decisions/tail.md', title: 'Summary', score: 1 }]);
+    const log = join(dir, 'recall.log');
+    const ctx = contextOf({ prompt: PROMPT, cwd: dir },
+      { QMD_QUERY_FIXTURE: fixture, QMD_RECALL_LOG: log });
+    assert.ok(ctx);
+    assert.match(ctx, /… \(이하 생략\)/, '창 밖에 남은 내용이 있으면 절단 표식이 붙어야 함');
+    const sel = execFileSync('cat', [log], { encoding: 'utf8' }).trim().split('\n')
+      .map(JSON.parse).find((l) => l.event === 'qmd_recall_selection' && l.reason === 'selected');
+    assert.equal(sel.bodies_window_truncated, 1);
+    assert.ok(sel.card_meta_issues.after_auto_truncated === 1
+      || sel.card_meta_issues.auto_block_truncated === 1,
+      `창 소진 사유가 남아야 함: ${JSON.stringify(sel.card_meta_issues)}`);
+  });
+});
+
+test('안내문이 선언하는 접두가 실제 본문 줄 접두와 정확히 일치한다', () => {
+  withProject({
+    cards: { 'card.md': card(VERIFIED_FM, '첫 줄.\n\n빈 줄 뒤 둘째 줄.') },
+  }, ({ dir, fixture, write }) => {
+    write([{ file: 'proj-wiki/decisions/card.md', title: 'Summary', score: 1 }]);
+    const ctx = contextOf({ prompt: PROMPT, cwd: dir }, { QMD_QUERY_FIXTURE: fixture });
+    const guide = ctx.split('\n').find((l) => l.includes('로 시작하는 줄은 바로 위 항목'));
+    const declared = guide.match(/^`([^`]+)`/)[1];
+    const bodyRaw = ctx.split('\n').filter((l) => l.trimStart().startsWith('|'));
+    assert.ok(bodyRaw.length >= 3, '빈 줄도 접두를 받아야 함');
+    for (const line of bodyRaw) {
+      assert.ok(line.startsWith(declared),
+        `안내문이 선언한 접두(${JSON.stringify(declared)})로 시작하지 않는 본문 줄: ${JSON.stringify(line)}`);
+    }
+  });
 });
