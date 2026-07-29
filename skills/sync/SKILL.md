@@ -24,7 +24,12 @@ Run qmd auto-context filesystem sync for the current project.
 
 3. If qmd is missing or unsupported, report the wrapper's pinned install guidance.
 4. Report created/updated/deleted counts and queued collections.
-5. Do not run qmd delete commands. The worker handles `qmd update`.
+5. Also report `compileQueued` when it is non-zero: these are changed source Markdown files
+   queued for wiki compile because `git pull` / rebase / external edits never reach the
+   PostToolUse hook. If `compileDeferred` is non-zero, say so — a per-sync cap held those
+   files back and their snapshot entries were left untouched, so re-running sync picks them
+   up. This does **not** backfill documents that never changed; sync only sees snapshot diffs.
+6. Do not run qmd delete commands. The worker handles `qmd update`.
 
 ## Safety
 

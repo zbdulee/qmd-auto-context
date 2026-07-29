@@ -46,7 +46,7 @@ def compile_block(root, engines=ENGINES) -> dict:
         "sourceQueuePath": ".auto-context/compile/source-queue.jsonl",
         "manifestPath": ".auto-context/compile/generated-manifest.jsonl",
         "tombstonePath": ".auto-context/compile/tombstones.jsonl",
-        "triggers": ["post_tool_source", "manual"],
+        "triggers": ["post_tool_source", "post_sync_source", "manual"],
         "maxSourceChars": 12000,
         "excludeStatusesFromRecall": ["discarded", "contested"],
         "lowPriorityStatuses": ["generated", "tentative"],

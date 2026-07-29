@@ -88,6 +88,9 @@ COMPILE_TRIGGERS = {
     "explicit_user_approval",
     "post_session_summary",
     "post_tool_source",
+    # 수동 sync(core/sync.py)가 스냅샷 diff로 찾아낸 소스 변경. git pull·rebase·외부
+    # 편집은 PostToolUse 훅을 타지 않으므로 `post_tool_source`로는 잡히지 않는다.
+    "post_sync_source",
     "repeated_recall",
     "cross_file_conclusion",
     "manual",

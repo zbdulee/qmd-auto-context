@@ -20,6 +20,9 @@ from collection_match import select_collections
 
 DEFAULT_ENGINE = "unknown"
 
+# 편집 훅 경로의 trigger 라벨. 수동 sync 경로는 `post_sync_source`를 쓴다(core/sync.py).
+POST_TOOL_TRIGGER = "post_tool_source"
+
 # compile source가 절대 될 수 없는 segment. `.auto-context`는 이 플러그인의 관리 영역
 # (wiki 카드·큐·로그)이라 소스로 승격하면 카드가 자기 자신을 재컴파일해 증식한다.
 # 나머지는 collectionPaths에 등록될 일이 거의 없지만 방어적으로 막는다.
@@ -88,7 +91,28 @@ def _append_jsonl(path, records):
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
-def _source_record(path_value, cwd, project_root, config, engine):
+def compile_gate(config, accepted_triggers):
+    """compile enqueue 공통 게이팅. 통과하면 compile 설정 블록, 아니면 None.
+
+    편집 훅(`post_tool_source`)과 수동 sync(`post_sync_source`)가 같은 판정을 쓰도록
+    한 곳에 둔다 — 게이팅을 두 곳에 복제하면 다음 편집에서 어긋난다.
+    PostToolUse 전용 `events` 게이팅은 호출부(main)에 남긴다: sync는 hook 이벤트가 아니다.
+    """
+    if config.get("indexing") is not True:
+        return None
+    if not config.get("collections"):
+        return None
+    compile_cfg = config.get("compile") if isinstance(config.get("compile"), dict) else {}
+    if not compile_cfg.get("enabled") or compile_cfg.get("mode", "off") == "off":
+        return None
+    raw_triggers = compile_cfg.get("triggers")
+    triggers = raw_triggers if isinstance(raw_triggers, list) else []
+    if not any(trigger in triggers for trigger in accepted_triggers):
+        return None
+    return compile_cfg
+
+
+def _source_record(path_value, cwd, project_root, config, engine, trigger=POST_TOOL_TRIGGER):
     source_path = Path(path_value)
     abs_path = source_path if source_path.is_absolute() else Path(cwd) / source_path
     try:
@@ -126,7 +150,7 @@ def _source_record(path_value, cwd, project_root, config, engine):
         return None
     return {
         "ts": _utc_now(),
-        "trigger": "post_tool_source",
+        "trigger": trigger,
         "engine": engine,
         "cwd": str(Path(project_root).resolve()),
         "source": {
@@ -154,18 +178,10 @@ def main():
     found = qmd_config.find_project_config(cwd)
     config = found["config"]
     project_root = found["projectRoot"]
-    if config.get("indexing") is not True:
-        return 0
-    if not config.get("collections"):
-        return 0
     if not qmd_config.event_enabled(config, "postToolUse"):
         return 0
-    compile_cfg = config.get("compile") if isinstance(config.get("compile"), dict) else {}
-    if not compile_cfg.get("enabled") or compile_cfg.get("mode", "off") == "off":
-        return 0
-    raw_triggers = compile_cfg.get("triggers")
-    triggers = raw_triggers if isinstance(raw_triggers, list) else []
-    if "post_tool_source" not in triggers:
+    compile_cfg = compile_gate(config, (POST_TOOL_TRIGGER,))
+    if compile_cfg is None:
         return 0
 
     queue_path = _safe_queue_path(project_root, compile_cfg.get("sourceQueuePath"))

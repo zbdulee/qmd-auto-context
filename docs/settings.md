@@ -266,7 +266,7 @@ jq -c 'select(.event=="qmd_recall_shadow" and .verdict.selected_empty_raw_nonemp
     "mode": "auto-wiki",
     "autoWrite": true,
     "defaultStatus": "generated",
-    "triggers": ["post_tool_source", "manual"],
+    "triggers": ["post_tool_source", "post_sync_source", "manual"],
     "maxSourceChars": 12000,
     "maxAutoPageLines": 120,
     "excludeStatusesFromRecall": ["discarded", "contested"],
@@ -282,7 +282,7 @@ jq -c 'select(.event=="qmd_recall_shadow" and .verdict.selected_empty_raw_nonemp
 | `compile.autoWrite` | `false` | clean candidate를 wiki Markdown으로 직접 쓸지 여부입니다. |
 | `compile.defaultStatus` | `"generated"` | 새 wiki page의 기본 status입니다. |
 | `compile.requireReviewForCanon` | `true` | canon 승격에 검토 신호가 필요하다는 정책 플래그입니다. |
-| `compile.triggers` | `[]` | compile source를 만들 trigger 목록입니다. 보통 `post_tool_source`, `manual`을 씁니다. |
+| `compile.triggers` | `[]` | compile source를 만들 trigger 목록입니다. 보통 `post_tool_source`, `post_sync_source`, `manual`을 씁니다. `post_sync_source`는 수동 sync가 스냅샷 diff로 찾아낸 변경(git pull·rebase·외부 편집)을 compile 큐에 넣게 합니다 — 하위호환으로 `post_tool_source`만 있어도 sync 경유 enqueue는 허용됩니다. |
 | `compile.maxSourceChars` | `12000` | extractor에 넘길 source content 최대 길이입니다. |
 | `compile.maxAutoPageLines` | `120` | 자동 생성 wiki page의 최대 줄 수입니다. |
 | `compile.excludeStatusesFromRecall` | `["discarded", "contested"]` | recall에서 제외할 wiki status입니다. |

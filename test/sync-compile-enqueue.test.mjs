@@ -1,0 +1,442 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { join } from "node:path";
+
+const BUILTINS = ["claude", "codex", "hermes"];
+
+function makeEnv(extra = {}) {
+  const base = mkdtempSync(join(tmpdir(), "qmd-sync-compile-env-"));
+  return {
+    base,
+    queue: join(base, "queue"),
+    env: {
+      ...process.env,
+      QMD_SYNC_STATE_DIR: join(base, "state"),
+      QMD_DIRTY_QUEUE: join(base, "queue"),
+      QMD_SYNC_LOCKDIR: join(base, "lock.d"),
+      // engine resolution must be deterministic regardless of which host CLI is on PATH.
+      QMD_ENGINE: "codex",
+      ...extra,
+    },
+  };
+}
+
+function makeProject() {
+  // config discovery walks up to the HOME boundary, so projects must live under HOME.
+  const base = join(homedir(), ".tmp-qmd-sync-compile-test");
+  mkdirSync(base, { recursive: true });
+  return mkdtempSync(join(base, "proj-"));
+}
+
+function writeSettings(dir, overrides = {}) {
+  const settings = {
+    indexing: true,
+    collections: ["docs-src"],
+    collectionPaths: { "docs-src": "docs" },
+    collectionRoles: { "docs-src": "raw" },
+    ...overrides,
+    compile: {
+      enabled: true,
+      mode: "auto-wiki",
+      autoWrite: true,
+      triggers: ["post_tool_source", "post_sync_source", "manual"],
+      sourceQueuePath: ".auto-context/compile/source-queue.jsonl",
+      extractor: {
+        dispatch: "by-engine",
+        backends: {},
+        builtins: BUILTINS,
+        default: [],
+        timeout: 120,
+      },
+      ...(overrides.compile || {}),
+    },
+  };
+  mkdirSync(join(dir, ".auto-context"), { recursive: true });
+  writeFileSync(join(dir, ".auto-context", "settings.json"), JSON.stringify(settings));
+}
+
+function runSync(cwd, envInfo, args = []) {
+  const out = execFileSync("python3", ["core/sync.py", "--cwd", cwd, "--json", ...args], {
+    encoding: "utf8",
+    env: envInfo.env,
+  });
+  return out.trim() ? JSON.parse(out) : null;
+}
+
+function compileQueuePath(dir) {
+  return join(dir, ".auto-context", "compile", "source-queue.jsonl");
+}
+
+function compileRecords(dir) {
+  const path = compileQueuePath(dir);
+  if (!existsSync(path)) return [];
+  return readFileSync(path, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+}
+
+function queuedSourcePaths(dir) {
+  return compileRecords(dir).map((record) => record.source.path).sort();
+}
+
+function dirtyQueueLines(envInfo) {
+  if (!existsSync(envInfo.queue)) return [];
+  return readFileSync(envInfo.queue, "utf8").trim().split("\n").filter(Boolean);
+}
+
+function cleanup(envInfo, dir) {
+  rmSync(envInfo.base, { recursive: true, force: true });
+  rmSync(dir, { recursive: true, force: true });
+}
+
+test("changed markdown is enqueued to the compile source queue with the sync trigger", () => {
+  const envInfo = makeEnv();
+  const dir = makeProject();
+  mkdirSync(join(dir, "docs", "sub"), { recursive: true });
+  writeSettings(dir);
+  writeFileSync(join(dir, "docs", "a.md"), "a\n");
+  writeFileSync(join(dir, "docs", "sub", "b.md"), "b\n");
+  try {
+    const result = runSync(dir, envInfo);
+    assert.equal(result.reason, "synced");
+    assert.equal(result.compileQueued, 2);
+    assert.equal(result.compileDeferred, 0);
+    assert.equal(result.compileReason, "queued");
+
+    const records = compileRecords(dir);
+    assert.deepEqual(records.map((r) => r.source.path).sort(), ["docs/a.md", "docs/sub/b.md"]);
+    for (const record of records) {
+      assert.equal(record.trigger, "post_sync_source");
+      assert.equal(record.engine, "codex");
+      assert.equal(record.source.kind, "file");
+      assert.equal(record.source.collection, "docs-src");
+      assert.equal(record.cwd, dir);
+      assert.match(record.ts, /Z$/);
+    }
+
+    // A second sync sees no change and must not re-enqueue.
+    const second = runSync(dir, envInfo);
+    assert.equal(second.reason, "unchanged");
+    assert.equal(second.compileQueued, 0);
+    assert.equal(compileRecords(dir).length, 2);
+  } finally {
+    cleanup(envInfo, dir);
+  }
+});
+
+test("updates are enqueued but deletions are not", () => {
+  const envInfo = makeEnv();
+  const dir = makeProject();
+  mkdirSync(join(dir, "docs"), { recursive: true });
+  writeSettings(dir);
+  const keep = join(dir, "docs", "keep.md");
+  const gone = join(dir, "docs", "gone.md");
+  writeFileSync(keep, "keep\n");
+  writeFileSync(gone, "gone\n");
+  try {
+    runSync(dir, envInfo, ["--baseline-only"]);
+    assert.equal(existsSync(compileQueuePath(dir)), false);
+
+    writeFileSync(keep, "keep plus more\n");
+    rmSync(gone);
+    const result = runSync(dir, envInfo);
+    assert.equal(result.updated, 1);
+    assert.equal(result.deleted, 1);
+    assert.equal(result.compileQueued, 1);
+    assert.deepEqual(queuedSourcePaths(dir), ["docs/keep.md"]);
+  } finally {
+    cleanup(envInfo, dir);
+  }
+});
+
+test("wiki role collection changes are never enqueued for compile", () => {
+  const envInfo = makeEnv();
+  const dir = makeProject();
+  mkdirSync(join(dir, ".auto-context", "wiki"), { recursive: true });
+  writeSettings(dir, {
+    collections: ["proj-wiki"],
+    collectionPaths: { "proj-wiki": ".auto-context/wiki" },
+    collectionRoles: { "proj-wiki": "wiki" },
+  });
+  writeFileSync(join(dir, ".auto-context", "wiki", "card.md"), "# card\n");
+  try {
+    const result = runSync(dir, envInfo);
+    // dirty-queue (indexing) still gets the collection; compile must not.
+    assert.deepEqual(result.collectionsQueued, ["proj-wiki"]);
+    assert.equal(result.compileQueued, 0);
+    assert.equal(result.compileReason, "no_sources");
+    assert.equal(existsSync(compileQueuePath(dir)), false);
+  } finally {
+    cleanup(envInfo, dir);
+  }
+});
+
+test("non-markdown files are not enqueued for compile", () => {
+  const envInfo = makeEnv();
+  const dir = makeProject();
+  mkdirSync(join(dir, "docs"), { recursive: true });
+  writeSettings(dir);
+  writeFileSync(join(dir, "docs", "notes.txt"), "text\n");
+  writeFileSync(join(dir, "docs", "data.json"), "{}\n");
+  writeFileSync(join(dir, "docs", "README.MD"), "upper\n");
+  try {
+    const result = runSync(dir, envInfo);
+    assert.equal(result.created, 3);
+    // Only the (case-insensitive) .md file qualifies.
+    assert.equal(result.compileQueued, 1);
+    assert.deepEqual(queuedSourcePaths(dir), ["docs/README.MD"]);
+  } finally {
+    cleanup(envInfo, dir);
+  }
+});
+
+test("dot-prefix policy: registered dot root is exempt, dot segments below it are not", () => {
+  const envInfo = makeEnv();
+  const dir = makeProject();
+  mkdirSync(join(dir, ".nova", "sessions"), { recursive: true });
+  mkdirSync(join(dir, ".nova", ".draft"), { recursive: true });
+  writeSettings(dir, {
+    collections: ["nova"],
+    collectionPaths: { nova: ".nova" },
+    collectionRoles: { nova: "raw" },
+  });
+  writeFileSync(join(dir, ".nova", "sessions", "s1.md"), "s\n");
+  writeFileSync(join(dir, ".nova", ".draft", "d.md"), "d\n");
+  writeFileSync(join(dir, ".nova", ".hidden.md"), "h\n");
+  try {
+    const result = runSync(dir, envInfo);
+    assert.equal(result.created, 3);
+    // Root's own dot segment is exempt; new dot segments below it stay excluded.
+    assert.deepEqual(queuedSourcePaths(dir), [".nova/sessions/s1.md"]);
+    assert.equal(result.compileQueued, 1);
+  } finally {
+    cleanup(envInfo, dir);
+  }
+});
+
+test("DENIED_SOURCE_SEGMENTS are blocked even when registered as a raw collection root", () => {
+  const envInfo = makeEnv();
+  const dir = makeProject();
+  mkdirSync(join(dir, ".auto-context", "wiki"), { recursive: true });
+  writeSettings(dir, {
+    collections: ["meta"],
+    collectionPaths: { meta: ".auto-context" },
+    collectionRoles: { meta: "raw" },
+  });
+  writeFileSync(join(dir, ".auto-context", "wiki", "card.md"), "# card\n");
+  try {
+    const result = runSync(dir, envInfo);
+    assert.ok(result.created >= 1);
+    assert.equal(result.compileQueued, 0);
+    assert.equal(existsSync(compileQueuePath(dir)), false);
+  } finally {
+    cleanup(envInfo, dir);
+  }
+});
+
+test('collectionPaths "." keeps the dot check on the whole relative path', () => {
+  const envInfo = makeEnv();
+  const dir = makeProject();
+  mkdirSync(join(dir, "docs"), { recursive: true });
+  mkdirSync(join(dir, ".claude"), { recursive: true });
+  writeSettings(dir, {
+    collections: ["root"],
+    collectionPaths: { root: "." },
+    collectionRoles: { root: "raw" },
+  });
+  writeFileSync(join(dir, "docs", "ok.md"), "ok\n");
+  writeFileSync(join(dir, ".claude", "agent.md"), "no\n");
+  try {
+    const result = runSync(dir, envInfo);
+    assert.deepEqual(queuedSourcePaths(dir), ["docs/ok.md"]);
+    assert.equal(result.compileQueued, 1);
+  } finally {
+    cleanup(envInfo, dir);
+  }
+});
+
+test("compile.enabled false and absent trigger both skip compile enqueue", () => {
+  for (const [label, compile] of [
+    ["disabled", { enabled: false, mode: "off" }],
+    ["mode off", { enabled: true, mode: "off" }],
+    ["manual only", { triggers: ["manual"] }],
+    ["empty triggers", { triggers: [] }],
+  ]) {
+    const envInfo = makeEnv();
+    const dir = makeProject();
+    mkdirSync(join(dir, "docs"), { recursive: true });
+    writeSettings(dir, { compile });
+    writeFileSync(join(dir, "docs", "a.md"), "a\n");
+    try {
+      const result = runSync(dir, envInfo);
+      assert.equal(result.compileQueued, 0, label);
+      assert.equal(result.compileReason, "compile_disabled", label);
+      assert.equal(existsSync(compileQueuePath(dir)), false, label);
+      // Indexing is unaffected by compile gating.
+      assert.deepEqual(result.collectionsQueued, ["docs-src"], label);
+    } finally {
+      cleanup(envInfo, dir);
+    }
+  }
+});
+
+test("post_tool_source alone still grants sync-path compile enqueue (backward compat)", () => {
+  const envInfo = makeEnv();
+  const dir = makeProject();
+  mkdirSync(join(dir, "docs"), { recursive: true });
+  writeSettings(dir, { compile: { triggers: ["post_tool_source", "manual"] } });
+  writeFileSync(join(dir, "docs", "a.md"), "a\n");
+  try {
+    const result = runSync(dir, envInfo);
+    assert.equal(result.compileQueued, 1);
+    assert.equal(compileRecords(dir)[0].trigger, "post_sync_source");
+  } finally {
+    cleanup(envInfo, dir);
+  }
+});
+
+test("dry-run and baseline-only never write the compile queue", () => {
+  for (const flag of ["--dry-run", "--baseline-only"]) {
+    const envInfo = makeEnv();
+    const dir = makeProject();
+    mkdirSync(join(dir, "docs"), { recursive: true });
+    writeSettings(dir);
+    writeFileSync(join(dir, "docs", "a.md"), "a\n");
+    try {
+      const result = runSync(dir, envInfo, [flag]);
+      assert.equal(result.compileQueued, 0, flag);
+      assert.equal(result.compileReason, "not_attempted", flag);
+      assert.equal(existsSync(compileQueuePath(dir)), false, flag);
+    } finally {
+      cleanup(envInfo, dir);
+    }
+  }
+});
+
+test("per-sync cap defers overflow without advancing its snapshot entries", () => {
+  const envInfo = makeEnv({ QMD_SYNC_COMPILE_MAX: "2" });
+  const dir = makeProject();
+  mkdirSync(join(dir, "docs"), { recursive: true });
+  writeSettings(dir);
+  for (const name of ["a.md", "b.md", "c.md", "d.md", "e.md"]) {
+    writeFileSync(join(dir, "docs", name), `${name}\n`);
+  }
+  try {
+    const first = runSync(dir, envInfo);
+    assert.equal(first.compileQueued, 2);
+    assert.equal(first.compileDeferred, 3);
+    assert.equal(first.compileReason, "capped");
+    assert.deepEqual(queuedSourcePaths(dir), ["docs/a.md", "docs/b.md"]);
+
+    // Deferred files were left out of the snapshot, so the next sync picks them up.
+    const second = runSync(dir, envInfo);
+    assert.equal(second.compileQueued, 2);
+    assert.equal(second.compileDeferred, 1);
+    assert.deepEqual(queuedSourcePaths(dir), [
+      "docs/a.md", "docs/b.md", "docs/c.md", "docs/d.md",
+    ]);
+
+    const third = runSync(dir, envInfo);
+    assert.equal(third.compileQueued, 1);
+    assert.equal(third.compileDeferred, 0);
+    assert.equal(third.compileReason, "queued");
+
+    const fourth = runSync(dir, envInfo);
+    assert.equal(fourth.reason, "unchanged");
+    assert.equal(fourth.compileQueued, 0);
+    assert.equal(compileRecords(dir).length, 5);
+  } finally {
+    cleanup(envInfo, dir);
+  }
+});
+
+test("dirty-queue enqueue stays collection-level with compile enabled", () => {
+  const envInfo = makeEnv();
+  const dir = makeProject();
+  mkdirSync(join(dir, "docs"), { recursive: true });
+  mkdirSync(join(dir, "notes"), { recursive: true });
+  writeSettings(dir, {
+    collections: ["docs-src", "notes-src"],
+    collectionPaths: { "docs-src": "docs", "notes-src": "notes" },
+    collectionRoles: { "docs-src": "raw", "notes-src": "session" },
+  });
+  writeFileSync(join(dir, "docs", "a.md"), "a\n");
+  writeFileSync(join(dir, "docs", "b.md"), "b\n");
+  writeFileSync(join(dir, "notes", "c.md"), "c\n");
+  try {
+    const result = runSync(dir, envInfo);
+    assert.equal(result.created, 3);
+    assert.deepEqual(result.collectionsQueued, ["docs-src", "notes-src"]);
+    // One dirty-queue line per changed collection, not per file.
+    assert.deepEqual(dirtyQueueLines(envInfo), [
+      `docs-src\t${join(dir, "docs")}`,
+      `notes-src\t${join(dir, "notes")}`,
+    ]);
+    // Compile is per file, and the session role qualifies alongside raw.
+    assert.equal(result.compileQueued, 3);
+    assert.deepEqual(queuedSourcePaths(dir), ["docs/a.md", "docs/b.md", "notes/c.md"]);
+  } finally {
+    cleanup(envInfo, dir);
+  }
+});
+
+test("--json keeps every pre-existing field alongside the new compile fields", () => {
+  const envInfo = makeEnv();
+  const dir = makeProject();
+  mkdirSync(join(dir, "docs"), { recursive: true });
+  writeSettings(dir);
+  writeFileSync(join(dir, "docs", "a.md"), "a\n");
+  try {
+    const result = runSync(dir, envInfo);
+    for (const key of [
+      "ok", "reason", "projectRoot", "created", "updated", "deleted",
+      "collectionsQueued", "statePath", "warnings",
+    ]) {
+      assert.ok(key in result, `missing ${key}`);
+    }
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.warnings, []);
+    for (const key of ["compileQueued", "compileDeferred", "compileReason"]) {
+      assert.ok(key in result, `missing ${key}`);
+    }
+  } finally {
+    cleanup(envInfo, dir);
+  }
+});
+
+test("engine falls back to a configured builtin when QMD_ENGINE is unset", () => {
+  const envInfo = makeEnv();
+  delete envInfo.env.QMD_ENGINE;
+  const dir = makeProject();
+  mkdirSync(join(dir, "docs"), { recursive: true });
+  writeSettings(dir);
+  writeFileSync(join(dir, "docs", "a.md"), "a\n");
+  try {
+    const result = runSync(dir, envInfo);
+    assert.equal(result.compileQueued, 1);
+    // The worker maps engine -> adapter, so the label must be resolvable.
+    assert.ok(BUILTINS.includes(compileRecords(dir)[0].engine));
+  } finally {
+    cleanup(envInfo, dir);
+  }
+});
+
+test("sync never runs the compile worker or an extractor", () => {
+  const envInfo = makeEnv();
+  const dir = makeProject();
+  mkdirSync(join(dir, "docs"), { recursive: true });
+  writeSettings(dir);
+  writeFileSync(join(dir, "docs", "a.md"), "a\n");
+  try {
+    runSync(dir, envInfo);
+    // Only the source queue (+ its lock) is written; no candidates/manifest/wiki output.
+    const compileDir = join(dir, ".auto-context", "compile");
+    assert.equal(existsSync(join(compileDir, "candidates.jsonl")), false);
+    assert.equal(existsSync(join(compileDir, "generated-manifest.jsonl")), false);
+    assert.equal(existsSync(join(compileDir, "extractor.log")), false);
+    assert.equal(existsSync(join(dir, ".auto-context", "wiki")), false);
+  } finally {
+    cleanup(envInfo, dir);
+  }
+});
