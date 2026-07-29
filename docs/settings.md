@@ -108,33 +108,34 @@ wiki role collection의 결과는 경로와 title만이 아니라 **카드 본�
 ```
 관련 문서:
 - [wiki:verified] .auto-context/wiki/decisions/claude-runner-구독-기반-ai-실행-계층.md - claude-runner — 구독 기반 Claude Code headless AI 실행 계층
-  <카드 본문>
-  조직에 별도 모델 API 키가 없으므로 모든 워크플로우 AI 호출은 공용 러너 서비스…
-  </카드 본문>
-<카드 본문>…</카드 본문> 안은 해당 wiki 카드 본문 인용이다(길면 절단). …
+  | 조직에 별도 모델 API 키가 없으므로 모든 워크플로우 AI 호출은 공용 러너 서비스…
+`| `로 시작하는 줄은 바로 위 항목 wiki 카드 본문의 축자 인용이다(길면 절단). …
 필요시 참조.
 ```
-
-카드 본문은 `<카드 본문>` … `</카드 본문>` 경계 안에 **축자 그대로** 들어갑니다. 경계를
-두는 이유는 카드 본문이 `관련 문서:`나 `- [wiki:verified] …` 같은 **주입 프레임과 같은
-문자열**을 담을 수 있고(이 저장소의 계획 문서가 실제로 담고 있습니다), 들여쓰기만으로는
-CommonMark가 3칸까지 들여쓴 헤딩을 헤딩으로 인정해 경계가 서지 않기 때문입니다. 본문이
-경계 문자열을 담으면 `<<카드 본문>>`처럼 구분자를 늘려 충돌을 피합니다(본문은 그대로
-보존됩니다). 구분자는 **주입 전체에서 하나**를 쓰고 안내문이 그것을 그대로 인용합니다 —
-안내문과 실제 구분자가 어긋나면 모델이 본문 안 문자열을 경계로 오독합니다.
-
-코드 fence가 홀수로 열린 카드는 절단 여부와 무관하게 닫습니다. 닫을 자리가 상한 안에
-없으면 미완 블록을 제거합니다 — 절단 표식과 fence 닫기를 포함한 본문 길이는 항상
-`injectSummaryMaxChars` 이내입니다.
 
 - **경로**는 카드 파일의 실제 위치입니다(`cwd` 하위면 상대경로, 그 밖이면 절대경로).
   qmd 데몬이 주는 `collection/path` 형태는 어떤 base로도 열리지 않으므로 쓰지 않습니다.
 - **title**은 카드 frontmatter의 `title`입니다. 데몬이 주는 `title`은 frontmatter가
-  아니라 첫 섹션 헤딩(`## Summary`)이라 카드 이름으로 쓸 수 없습니다.
+  아니라 첫 섹션 헤딩(`## Summary`)이라 카드 이름이 아니므로, 카드 파일을 읽은 wiki
+  결과에서는 폴백하지 않습니다(title이 없으면 경로만 주입합니다).
 - **본문**은 `qmd:auto` 블록의 Summary + `qmd:auto:end` **밖**의 수동 섹션입니다.
   수동 섹션을 포함하는 이유는 wiki dedup 병합이 삭제 카드의 고유 사실을 블록 밖에
   접어 넣기 때문입니다(블록 안은 소스 변경 시 재생성으로 덮입니다).
 - raw role 결과에는 본문이 붙지 않습니다. 본문 주입은 wiki 카드 전용입니다.
+
+### 본문은 줄 단위 인용 접두로 프레임과 분리됩니다
+
+본문의 **모든 줄**에 `| ` 접두가 붙습니다. 카드 본문은 신뢰 입력이 아니고(자동 생성 +
+사람 편집) `관련 문서:`·`- [wiki:verified] …` 같은 주입 프레임과 같은 문자열이나 열린 코드
+fence·HTML 블록을 담을 수 있는데, CommonMark의 모든 블록 개시(fenced code, HTML block,
+헤딩, setext, 구분선, 목록, 인용, 표 행)는 **줄 선두**에 와야 성립하므로 블록 의미가 없는
+접두를 모든 줄에 붙이면 어떤 블록도 열리지 않고 열린 상태가 다음 줄로 이어지지도 않습니다.
+블록 종류별 규칙(fence 문자·길이, HTML 종료 토큰)을 개별로 흉내내는 방식은 계속 구멍이
+납니다. 접두는 본문 문자를 하나도 바꾸지 않으므로 축자 보존이 유지되고, 모델은 접두 하나만
+벗기면 원문을 복원합니다.
+
+불릿 한 줄에 들어가는 title·경로는 공백류·제어문자·zero-width를 공백으로 접어 **한 줄로
+강제**합니다(개행 하나가 새 프레임 줄을 만들 수 있습니다).
 
 ### injectSummaryMaxChars 기본값 600의 근거
 
@@ -155,8 +156,15 @@ dogfooding 두 코퍼스(카드 849장)의 주입 대상 본문 길이 분포입
 설정이 I/O·CPU 예산을 무제한 늘리지 못하게 합니다.
 
 주입 본문이 비었는지는 `QMD_RECALL_LOG`의 `qmd_recall_selection` 줄에서 확인합니다 —
-`bodies_injected` / `bodies_truncated` / `bodies_empty` / `body_empty_reasons`
-(`path_unresolved`·`read_error`·`frontmatter_unterminated`·`empty_body`·`delimiter_exhausted`).
+`bodies_injected` / `bodies_truncated` / `bodies_window_truncated` / `bodies_empty` /
+`body_empty_reasons`(`path_unresolved`·`read_error`·`frontmatter_unterminated`·`empty_body`).
+`bodies_window_truncated`는 카드 파일이 읽기 창보다 커서 본문이 중간에서 끊긴 건수입니다
+(절단 표식이 붙습니다).
+
+title 계열은 `titles_from_frontmatter`(주입 건수 중 frontmatter title을 얻은 수)와
+`card_meta_issues`(`frontmatter_missing`·`title_missing`·`title_block_scalar`·
+`title_shortened`·`status_block_scalar`)로 봅니다.
+
 카드 파일 읽기 자체가 실패했는지는 `card_read_failures` / `card_read_reasons`로 봅니다 —
 이쪽은 필터로 drop된 후보까지 포함하므로, `wikiPath` 오설정으로 검수 카드가 전부
 fail-closed drop된 경우(`path_unresolved`)를 진짜 미검수 카드와 구분할 수 있습니다.

@@ -323,7 +323,7 @@ test('plain-path(스킴 없는) 데몬 응답에도 wiki 메타·(미검수) 배
   const fixture = join(dir, 'plain-fixture.json');
   wikiBadgeProject(dir, { recallStrategy: 'hierarchical' });
   writeFileSync(join(dir, '.auto-context', 'wiki', 'concepts', 'auto.md'),
-    '---\nstatus: generated\ncreatedBy: qmd-auto-context\nreviewed: false\n---\n# Auto\n');
+    '---\ntitle: "Auto wiki"\nstatus: generated\ncreatedBy: qmd-auto-context\nreviewed: false\n---\n# Auto\n');
   writeFileSync(fixture, JSON.stringify({ results: [
     { file: 'proj-wiki/concepts/auto.md', title: 'Auto wiki', score: 0.9 },
   ] }));
@@ -341,9 +341,9 @@ test('미검수 wiki 카드에 (미검수) 배지 + 안내 문구, reviewed:true
   const fixture = join(dir, 'badge-fixture.json');
   wikiBadgeProject(dir, { recallStrategy: 'hierarchical' });
   writeFileSync(join(dir, '.auto-context', 'wiki', 'concepts', 'auto.md'),
-    '---\nstatus: generated\ncreatedBy: qmd-auto-context\nreviewed: false\n---\n# Auto\n');
+    '---\ntitle: "Auto wiki"\nstatus: generated\ncreatedBy: qmd-auto-context\nreviewed: false\n---\n# Auto\n');
   writeFileSync(join(dir, '.auto-context', 'wiki', 'concepts', 'checked.md'),
-    '---\nstatus: generated\ncreatedBy: qmd-auto-context\nreviewed: true\n---\n# Checked\n');
+    '---\ntitle: "Checked wiki"\nstatus: generated\ncreatedBy: qmd-auto-context\nreviewed: true\n---\n# Checked\n');
   writeFileSync(fixture, JSON.stringify({ results: [
     { file: 'qmd://proj-wiki/concepts/auto.md', title: 'Auto wiki', score: 0.9 },
     { file: 'qmd://proj-wiki/concepts/checked.md', title: 'Checked wiki', score: 0.8 },
@@ -381,7 +381,7 @@ test('lowPriorityStatuses 강등: 미검수 generated 카드는 topN 절단 전�
   const fixture = join(dir, 'demote-fixture.json');
   wikiBadgeProject(dir, { recallStrategy: 'hierarchical', topN: 1 });
   writeFileSync(join(dir, '.auto-context', 'wiki', 'concepts', 'auto.md'),
-    '---\nstatus: generated\ncreatedBy: qmd-auto-context\nreviewed: false\n---\n# Auto\n');
+    '---\ntitle: "Auto wiki"\nstatus: generated\ncreatedBy: qmd-auto-context\nreviewed: false\n---\n# Auto\n');
   writeFileSync(join(dir, '.auto-context', 'wiki', 'concepts', 'canon.md'),
     '---\nstatus: reviewed\ncreatedBy: qmd-auto-context\n---\n# Reviewed\n');
   writeFileSync(fixture, JSON.stringify({ results: [
@@ -402,7 +402,7 @@ test('flat 전략에서도 wiki role 컬렉션이면 미검수 배지 적용', (
   const fixture = join(dir, 'flat-fixture.json');
   wikiBadgeProject(dir, { recallStrategy: 'flat' }); // flat 명시(기본값은 hierarchical)
   writeFileSync(join(dir, '.auto-context', 'wiki', 'concepts', 'auto.md'),
-    '---\nstatus: generated\ncreatedBy: qmd-auto-context\nreviewed: false\n---\n# Auto\n');
+    '---\ntitle: "Auto wiki"\nstatus: generated\ncreatedBy: qmd-auto-context\nreviewed: false\n---\n# Auto\n');
   writeFileSync(fixture, JSON.stringify({ results: [
     { file: 'qmd://proj-wiki/concepts/auto.md', title: 'Auto wiki', score: 0.9 },
   ] }));
@@ -422,7 +422,7 @@ test('verified 카드는 검수급 대우: 배지 없음 + lowPriority 강등 �
   writeFileSync(join(dir, '.auto-context', 'wiki', 'concepts', 'machine.md'),
     '---\nstatus: verified\ncreatedBy: qmd-auto-context\nreviewed: false\nverifiedBy: claude\n---\n# Machine\n');
   writeFileSync(join(dir, '.auto-context', 'wiki', 'concepts', 'auto.md'),
-    '---\nstatus: generated\ncreatedBy: qmd-auto-context\nreviewed: false\n---\n# Auto\n');
+    '---\ntitle: "Auto wiki"\nstatus: generated\ncreatedBy: qmd-auto-context\nreviewed: false\n---\n# Auto\n');
   writeFileSync(fixture, JSON.stringify({ results: [
     { file: 'qmd://proj-wiki/concepts/auto.md', title: 'Auto wiki', score: 0.9 },
     { file: 'qmd://proj-wiki/concepts/machine.md', title: 'Machine wiki', score: 0.5 },
@@ -455,7 +455,7 @@ test('recallVerifiedOnly 기본(true): 미검수 generated wiki만 있으면 빈
     // recallVerifiedOnly 미설정 → 기본 true
   }));
   writeFileSync(join(dir, '.auto-context', 'wiki', 'concepts', 'auto.md'),
-    '---\nstatus: generated\ncreatedBy: qmd-auto-context\nreviewed: false\n---\n# Auto\n');
+    '---\ntitle: "Auto wiki"\nstatus: generated\ncreatedBy: qmd-auto-context\nreviewed: false\n---\n# Auto\n');
   writeFileSync(join(dir, '.auto-context', 'wiki', 'concepts', 'tent.md'),
     '---\nstatus: tentative\ncreatedBy: qmd-auto-context\nreviewed: false\n---\n# Tentative\n');
   writeFileSync(fixture, JSON.stringify({ results: [
@@ -484,7 +484,7 @@ test('recallVerifiedOnly 기본(true): verified/reviewed 카드는 정상 surfac
   writeFileSync(join(dir, '.auto-context', 'wiki', 'concepts', 'machine.md'),
     '---\nstatus: verified\ncreatedBy: qmd-auto-context\nreviewed: false\nverifiedBy: claude\n---\n# Machine\n');
   writeFileSync(join(dir, '.auto-context', 'wiki', 'concepts', 'auto.md'),
-    '---\nstatus: generated\ncreatedBy: qmd-auto-context\nreviewed: false\n---\n# Auto\n');
+    '---\ntitle: "Auto wiki"\nstatus: generated\ncreatedBy: qmd-auto-context\nreviewed: false\n---\n# Auto\n');
   // 라이브 형식(스킴 없는 plain path)으로 둔다 — 데몬 /query가 실제로 이 형태를
   // 반환하므로 스킴 fixture만 있으면 경로 해석 회귀가 라이브에서만 터진다.
   writeFileSync(fixture, JSON.stringify({ results: [

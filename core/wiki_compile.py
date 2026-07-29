@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).parent.resolve()))
 import config as qmd_config
 import wiki_dedup_judge
 import wiki_markers
+import yaml_scalars
 from dirty_queue import enqueue_collections
 
 ALLOWED_TYPES = {
@@ -184,10 +185,9 @@ def clean_canonical_key(value: object) -> str:
 
 
 def unquote_yaml(value: str) -> str:
-    text = value.strip()
-    if len(text) >= 2 and text[0] == text[-1] and text[0] in ("'", '"'):
-        text = text[1:-1]
-    return text.replace('\\"', '"')
+    # 인용/역인용 규칙은 core/yaml_scalars.py가 SSOT다 — recall의 읽기 파서가 같은
+    # 함수를 쓰게 해서 이스케이프 규칙이 갈리지 않게 한다(title 오염의 원인).
+    return yaml_scalars.load(value)
 
 
 def parse_yaml_scalar(value: str):
@@ -591,12 +591,7 @@ def compact_manifest(path: Path, max_bytes: int = LOG_MAX_BYTES) -> None:
 
 
 def yaml_scalar(value) -> str:
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, (int, float)):
-        return str(value)
-    text = str(value).replace('"', '\\"')
-    return f'"{text}"'
+    return yaml_scalars.dump(value)
 
 
 def frontmatter_patch_scalar(key: str, value) -> str:
