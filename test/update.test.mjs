@@ -1103,3 +1103,172 @@ test('update.sh main: 빈/비JSON stdin에도 SessionStart hook은 exit 0 (set -
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+// ---------------------------------------------------------------------------
+// run_update() 3단계 "Add collections" 회귀 (조용한 실패 = 성공 위장)
+//
+// 히스토리 버그: entries 추출 python 한 줄이 f-string 안 `\"` 이스케이프 때문에
+// SyntaxError 였고 `2>/dev/null` 이 그 stderr 를 버려서, while 루프가 조용히 0회
+// 돌았다. collections_ok 초기값 1 → `qmd update` 만 실행 → `END rc=0`.
+// 즉 SessionStart 는 `qmd collection add` 를 한 번도 하지 않았는데 로그는 성공으로
+// 보였다(index_worker.sh 가 대신 등록해 증상이 가려졌다).
+//
+// --worker 는 collection add / qmd update 를 동기로 수행하고 embed 만 nohup 백그라운드로
+// 넘기므로, 아래 테스트는 폴링 없이 종료 직후 로그를 읽어도 결정적이다.
+// ---------------------------------------------------------------------------
+
+function writeQmdStub(path, body) {
+  writeFileSync(path, ['#!/usr/bin/env sh', ...body].join('\n'), { mode: 0o755 });
+}
+
+function runWorker(work, extraEnv = {}) {
+  const bin = join(work, 'bin');
+  const fakeHome = join(work, 'fakehome');
+  return execFileSync('bash', [join(process.cwd(), 'core', 'update.sh'), '--worker', work], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      PATH: `${bin}:${process.env.PATH}`,
+      HOME: fakeHome,
+      QMD_CACHE_DIR: fakeHome,
+      QMD_LOCK_BASE: join(work, 'locks'),
+      QMD_HOOK_LOG: join(work, 'hook.log'),
+      ...extraEnv,
+    },
+  });
+}
+
+test('update core: resolved entries마다 ADD COLLECTION 로그 + qmd collection add 실제 호출 (조용한 0회 루프 회귀)', () => {
+  const work = repoTemp('qmd-update-addcol-logs');
+  const bin = join(work, 'bin');
+  const qmdLog = join(work, 'qmd.log');
+  const hookLog = join(work, 'hook.log');
+  try {
+    mkdirSync(join(work, '.auto-context'), { recursive: true });
+    mkdirSync(join(work, 'docs'), { recursive: true });
+    mkdirSync(join(work, 'notes'), { recursive: true });
+    mkdirSync(bin, { recursive: true });
+    mkdirSync(join(work, 'fakehome'), { recursive: true });
+    writeFileSync(join(work, '.auto-context', 'settings.json'), JSON.stringify({
+      indexing: true,
+      collections: ['docs', 'notes'],
+      collectionPaths: { docs: 'docs', notes: 'notes' },
+    }));
+    writeQmdStub(join(bin, 'qmd'), [`echo "$@" >> "${qmdLog}"`, 'exit 0']);
+
+    runWorker(work);
+
+    const hook = readFileSync(hookLog, 'utf8');
+    const qmd = readFileSync(qmdLog, 'utf8');
+
+    // (1) 핵심 회귀 방지: 로그 부재가 곧 버그의 증상이었다.
+    for (const name of ['docs', 'notes']) {
+      assert.ok(
+        hook.includes(`ADD COLLECTION: name=${name} path=${join(work, name)}`),
+        `ADD COLLECTION 로그가 ${name} 에 없다 — entries 추출이 조용히 0건이 된 회귀:\n${hook}`,
+      );
+      // (2) 로그만이 아니라 qmd 가 실제 호출됐는지 인자까지 캡처해 확인.
+      assert.ok(
+        qmd.includes(`collection add ${join(work, name)} --name ${name}`),
+        `qmd collection add 가 ${name} 에 대해 호출되지 않았다:\n${qmd}`,
+      );
+    }
+    // entries 가 있었으므로 빈-entries 경고는 없어야 한다.
+    assert.doesNotMatch(hook, /WARN: no collection entries resolved/);
+    assert.match(hook, /END rc=0/);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('update core: entries가 비면 WARN 로그로 표면화 (조용한 실패 금지)', () => {
+  const work = repoTemp('qmd-update-addcol-warn');
+  const bin = join(work, 'bin');
+  const qmdLog = join(work, 'qmd.log');
+  const hookLog = join(work, 'hook.log');
+  try {
+    mkdirSync(join(work, '.auto-context'), { recursive: true });
+    mkdirSync(bin, { recursive: true });
+    mkdirSync(join(work, 'fakehome'), { recursive: true });
+    // cwd 밖 경로는 resolve_paths 가 unsafe 로 skip 하고(entries=[]) prune 도 건드리지
+    // 않으므로(unsafe 는 missing 판정에서 continue), refused 아닌 채 entries 만 빈
+    // 상태를 만들 수 있다.
+    writeFileSync(join(work, '.auto-context', 'settings.json'), JSON.stringify({
+      indexing: true,
+      collections: ['escape'],
+      collectionPaths: { escape: '../outside-of-project' },
+    }));
+    writeQmdStub(join(bin, 'qmd'), [`echo "$@" >> "${qmdLog}"`, 'exit 0']);
+
+    runWorker(work);
+
+    const hook = readFileSync(hookLog, 'utf8');
+    assert.match(hook, /WARN: no collection entries resolved/, `빈 entries가 경고 없이 지나갔다:\n${hook}`);
+    assert.doesNotMatch(hook, /ADD COLLECTION/);
+    assert.doesNotMatch(readFileSync(qmdLog, 'utf8'), /collection add/);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('update core: collection add 실패는 qmd update를 건너뛰고 END rc=1로 남는다 (rc=0 위장 금지)', () => {
+  const work = repoTemp('qmd-update-addcol-fail');
+  const bin = join(work, 'bin');
+  const qmdLog = join(work, 'qmd.log');
+  const hookLog = join(work, 'hook.log');
+  try {
+    mkdirSync(join(work, '.auto-context'), { recursive: true });
+    mkdirSync(join(work, 'docs'), { recursive: true });
+    mkdirSync(bin, { recursive: true });
+    mkdirSync(join(work, 'fakehome'), { recursive: true });
+    writeFileSync(join(work, '.auto-context', 'settings.json'), JSON.stringify({
+      indexing: true,
+      collections: ['docs'],
+      collectionPaths: { docs: 'docs' },
+    }));
+    // "already exists" 를 포함하지 않는 진짜 실패여야 retry() 가 성공으로 삼지 않는다(BUG-2 대비).
+    writeQmdStub(join(bin, 'qmd'), [
+      `echo "$@" >> "${qmdLog}"`,
+      'case "$1 $2" in',
+      '  "collection add") echo "permission denied" >&2; exit 1 ;;',
+      '  *) exit 0 ;;',
+      'esac',
+    ]);
+
+    runWorker(work);
+
+    const hook = readFileSync(hookLog, 'utf8');
+    const qmd = readFileSync(qmdLog, 'utf8');
+    assert.match(hook, /ADD COLLECTION: name=docs/);
+    assert.doesNotMatch(qmd, /^update$/m, `collections_ok=0 인데 qmd update가 실행됐다:\n${qmd}`);
+    assert.match(hook, /END rc=1/, `collection add 실패가 rc=1로 기록되지 않았다:\n${hook}`);
+    assert.doesNotMatch(hook, /END rc=0/, 'collection add 실패가 END rc=0으로 위장됐다');
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('update core: entries 추출 python 한 줄이 SyntaxError 없이 TSV를 내고, stderr를 /dev/null로 버리지 않는다', () => {
+  // 원인 자체를 직접 단정한다: update.sh 안의 구현 문자열을 그대로 꺼내 실행하므로
+  // f-string(또는 다른 quoting 사고)이 다시 들어오면 여기서 즉시 깨진다.
+  const script = readFileSync(join(process.cwd(), 'core', 'update.sh'), 'utf8');
+  const line = script.split('\n').find(l => l.includes('get("entries", [])') && l.includes('python3 -c'));
+  assert.ok(line, 'entries 추출 python3 -c 한 줄을 update.sh에서 찾지 못했다');
+
+  // 버그의 은폐 절반: stderr 를 버리면 SyntaxError 가 다시 조용해진다.
+  assert.doesNotMatch(line, /2>\/dev\/null/, `entries 추출 stderr를 /dev/null로 버리면 안 된다: ${line}`);
+
+  const open = line.indexOf("python3 -c '") + "python3 -c '".length;
+  const code = line.slice(open, line.indexOf("'", open));
+  assert.ok(code.includes('json.load'), `추출한 python 코드가 이상하다: ${code}`);
+
+  // 실행: SyntaxError면 exit 1 → execFileSync throw.
+  const out = execFileSync('python3', ['-c', code], {
+    encoding: 'utf8',
+    input: JSON.stringify({ entries: [{ name: 'a', path: 'docs' }, { name: 'b', path: 'notes' }] }),
+  });
+  assert.equal(out, 'a\tdocs\nb\tnotes\n');
+
+  // entries 키가 없어도 조용히 빈 출력(기본값 경로).
+  assert.equal(execFileSync('python3', ['-c', code], { encoding: 'utf8', input: '{}' }), '');
+});

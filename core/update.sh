@@ -608,6 +608,19 @@ run_update() {
   preflight_remove_risky
 
   # 3. Add collections
+  #
+  # entries 추출에 f-string 을 쓰지 않는다. `-c` 인수는 single-quote 안에 들어가므로
+  # f-string 표현식에 `\"` 이스케이프가 섞이면 SyntaxError 가 되고(Python 3.13 에서도),
+  # 예전에는 그 stderr 를 /dev/null 로 버려 **while 루프가 조용히 0회 돌았다** —
+  # collections_ok 는 초기값 1 로 남아 `qmd update` 만 성공하고 END rc=0 이 찍혀서
+  # 실패가 성공처럼 보였다. 즉 SessionStart 는 collection add 를 한 번도 하지 않았고
+  # 컬렉션 등록·경로 변경이 반영되지 않았다(index_worker 경로가 대신 등록해 증상이 가려짐).
+  # stderr 는 버리지 말고 LOG 로 보내고, entries 가 비면 명시적으로 경고를 남긴다.
+  local entries_tsv
+  entries_tsv=$(echo "$resolved" | python3 -c 'import json,sys; [print(e["name"] + "\t" + e["path"]) for e in json.load(sys.stdin).get("entries", [])]' 2>>"$LOG")
+  if [ -z "$entries_tsv" ]; then
+    log "WARN: no collection entries resolved — collection add skipped"
+  fi
   collections_ok=1
   while read -r name path; do
     [ -z "$name" ] && continue
@@ -618,7 +631,7 @@ run_update() {
     fi
     log "ADD COLLECTION: name=$name path=$full_path"
     retry qmd collection add "$full_path" --name "$name" || collections_ok=0
-  done < <(echo "$resolved" | python3 -c 'import json,sys; [print(f"{e[\"name\"]}\t{e[\"path\"]}") for e in json.load(sys.stdin).get("entries", [])]' 2>/dev/null)
+  done <<< "$entries_tsv"
 
   # 4. update and embed
   if [ "$collections_ok" = 1 ] && retry qmd update; then
