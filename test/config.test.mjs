@@ -5,6 +5,16 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+// compile.semanticDedup.judge — LLM dedup judge defaults (core/config.py DEFAULTS)
+const JUDGE_DEFAULTS = {
+  enabled: true,
+  timeout: 120,
+  cooldownSeconds: 600,
+  maxPairsPerScan: 8,
+  maxPairsPerCompile: 1,
+  maxCharsPerPage: 6000,
+};
+
 function loadConfig(json, cwd = '/tmp/x') {
   const out = execFileSync('python3', ['core/config.py', '--cwd', cwd], { input: json });
   return JSON.parse(out);
@@ -119,7 +129,7 @@ test('wiki recall 신규 필드는 additive로 normalize 된다', () => {
     maxSourceChars: 12000,
     extractor: { argv: ['python3', 'scripts/extract.py'], timeout: 30, cooldownSeconds: 600 },
     batch: { idleSeconds: 90, maxItems: 5 },
-    semanticDedup: { enabled: true, threshold: 0.82, topK: 3, similarPageMaxChars: 12000, autoMergeThreshold: 0.9, maxPairsPerScan: 10 },
+    semanticDedup: { enabled: true, threshold: 0.82, topK: 3, similarPageMaxChars: 12000, autoMergeThreshold: 0.9, maxPairsPerScan: 10, candidateMinScore: 0.3, judge: JUDGE_DEFAULTS },
     verify: {
       enabled: true,
       timeout: 120,
@@ -537,15 +547,15 @@ test('compile.semanticDedup normalizes enabled/threshold/topK; defaults to true/
   const withSemantic = loadConfig(JSON.stringify({
     compile: { semanticDedup: { enabled: false, threshold: '0.5', topK: 7 } },
   }));
-  assert.deepEqual(withSemantic.compile.semanticDedup, { enabled: false, threshold: 0.5, topK: 7, similarPageMaxChars: 12000, autoMergeThreshold: 0.9, maxPairsPerScan: 10 });
+  assert.deepEqual(withSemantic.compile.semanticDedup, { enabled: false, threshold: 0.5, topK: 7, similarPageMaxChars: 12000, autoMergeThreshold: 0.9, maxPairsPerScan: 10, candidateMinScore: 0.3, judge: JUDGE_DEFAULTS });
 
   const withDefaults = loadConfig(JSON.stringify({ compile: {} }));
-  assert.deepEqual(withDefaults.compile.semanticDedup, { enabled: true, threshold: 0.82, topK: 3, similarPageMaxChars: 12000, autoMergeThreshold: 0.9, maxPairsPerScan: 10 });
+  assert.deepEqual(withDefaults.compile.semanticDedup, { enabled: true, threshold: 0.82, topK: 3, similarPageMaxChars: 12000, autoMergeThreshold: 0.9, maxPairsPerScan: 10, candidateMinScore: 0.3, judge: JUDGE_DEFAULTS });
 
   const withBadValues = loadConfig(JSON.stringify({
     compile: { semanticDedup: { enabled: 'nope', threshold: 'nan', topK: -1 } },
   }));
-  assert.deepEqual(withBadValues.compile.semanticDedup, { enabled: true, threshold: 0.82, topK: 3, similarPageMaxChars: 12000, autoMergeThreshold: 0.9, maxPairsPerScan: 10 });
+  assert.deepEqual(withBadValues.compile.semanticDedup, { enabled: true, threshold: 0.82, topK: 3, similarPageMaxChars: 12000, autoMergeThreshold: 0.9, maxPairsPerScan: 10, candidateMinScore: 0.3, judge: JUDGE_DEFAULTS });
 });
 
 test('compile.semanticDedup.similarPageMaxChars normalizes with a 12000 default', () => {

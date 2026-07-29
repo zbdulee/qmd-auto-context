@@ -17,6 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.resolve()))
 import config as qmd_config
+import wiki_dedup_judge
 from dirty_queue import enqueue_collections
 
 ALLOWED_TYPES = {
@@ -784,36 +785,122 @@ def query_wiki_similar(daemon_url: str, collection: str, text: str, top_k: int, 
         return None
 
 
-def find_wiki_semantic_match(
-    root: Path, wiki_root: Path, config: dict, candidate: dict, summary: str
-) -> tuple[Path | None, float | None]:
-    """Return (matched_path, score) for the top daemon hit above threshold, or
-    (None, top_score_or_None) if nothing qualifies or the daemon/fixture failed."""
+def _numeric_score(value) -> float:
+    return value if isinstance(value, (int, float)) else 0
+
+
+def query_wiki_candidates(
+    root: Path, wiki_root: Path, config: dict, candidate: dict, summary: str, min_score: float
+) -> list[tuple[Path, float]]:
+    """Resolved (path, score) daemon hits at or above `min_score`, best first.
+
+    Retrieval only. `min_score` narrows the candidate set; it must never stand in
+    for a duplicate judgment (the daemon score is rank-bounded — see
+    wiki_dedup_judge.py). Empty list covers "daemon down", "no hits", and
+    "semanticDedup disabled" alike, so every caller fails open.
+    """
     compile_cfg = config.get("compile") if isinstance(config.get("compile"), dict) else {}
     semantic_cfg = compile_cfg.get("semanticDedup") if isinstance(compile_cfg.get("semanticDedup"), dict) else {}
     if not semantic_cfg.get("enabled", True):
-        return None, None
+        return []
     collection, _ = find_wiki_collection(config)
     if not collection:
-        return None, None
+        return []
     text = f"{candidate.get('title') or ''} {summary}".strip()
     if not text:
-        return None, None
+        return []
     daemon_url = os.environ.get("QMD_DAEMON_URL", "http://localhost:8483")
     timeout = float(config.get("queryTimeout", 5.0) or 5.0)
     results = query_wiki_similar(daemon_url, collection, text, int(semantic_cfg.get("topK", 3)), timeout)
     if not results:
-        return None, None
-    def numeric_score(value) -> float:
-        return value if isinstance(value, (int, float)) else 0
+        return []
+    hits: list[tuple[Path, float]] = []
+    for result in sorted(
+        (r for r in results if isinstance(r, dict)),
+        key=lambda r: _numeric_score(r.get("score", 0)),
+        reverse=True,
+    ):
+        score = _numeric_score(result.get("score", 0))
+        if score < min_score:
+            continue
+        matched = resolve_daemon_result_path(root, wiki_root, result.get("file", ""), collection)
+        if matched is not None:
+            hits.append((matched, score))
+    return hits
 
-    top = max(results, key=lambda r: numeric_score(r.get("score", 0)) if isinstance(r, dict) else 0)
-    score = numeric_score(top.get("score", 0)) if isinstance(top, dict) else 0
+
+def find_wiki_semantic_match(
+    root: Path, wiki_root: Path, config: dict, candidate: dict, summary: str
+) -> tuple[Path | None, float | None]:
+    """Legacy score-threshold gate: (matched_path, score) for the top hit above
+    `semanticDedup.threshold`, else (None, None). Used only when no LLM judge is
+    available on this machine."""
+    compile_cfg = config.get("compile") if isinstance(config.get("compile"), dict) else {}
+    semantic_cfg = compile_cfg.get("semanticDedup") if isinstance(compile_cfg.get("semanticDedup"), dict) else {}
     threshold = float(semantic_cfg.get("threshold", 0.82))
-    if score < threshold:
-        return None, score
-    matched = resolve_daemon_result_path(root, wiki_root, top.get("file", "") if isinstance(top, dict) else "", collection)
-    return matched, score
+    hits = query_wiki_candidates(root, wiki_root, config, candidate, summary, threshold)
+    if not hits:
+        return None, None
+    return hits[0]
+
+
+def judge_new_page_duplicate(
+    root: Path, wiki_root: Path, config: dict, compile_cfg: dict, candidate: dict, summary: str, target: Path
+) -> tuple[Path | None, float | None, dict]:
+    """Write-time duplicate check for a page about to be CREATED.
+
+    Runs for every new page regardless of how its target path was resolved. Until
+    2026-07-29 this gate only ran for `slug`-resolved targets, so a candidate whose
+    extractor supplied an explicit `targetPath` bypassed dedup entirely — 130 of
+    133 creations (97.7%) in the measured project, which is where the surviving
+    near-duplicates came from.
+
+    Returns (matched_path, score, info). matched_path is set only on a "duplicate"
+    verdict; the caller then QUEUES the pair for review and never merges it itself.
+    info["outcome"] is "ok"/"unavailable"/"transient" (see wiki_dedup_judge).
+    """
+    semantic_cfg = compile_cfg.get("semanticDedup") if isinstance(compile_cfg.get("semanticDedup"), dict) else {}
+    engine = candidate.get("engine") if isinstance(candidate.get("engine"), str) else ""
+    budget = wiki_dedup_judge.max_pairs_per_compile(compile_cfg)
+    # Config-only availability check BEFORE the retrieval query: with no judge on
+    # this machine the caller falls back to the legacy gate, and querying the
+    # daemon here would only add latency.
+    if budget <= 0 or not wiki_dedup_judge.is_available(compile_cfg, engine):
+        return None, None, {"outcome": wiki_dedup_judge.OUTCOME_UNAVAILABLE, "reason": "judge_unavailable"}
+
+    min_score = float(semantic_cfg.get("candidateMinScore", 0.3))
+    hits = query_wiki_candidates(root, wiki_root, config, candidate, summary, min_score)
+    if not hits:
+        return None, None, {"outcome": wiki_dedup_judge.OUTCOME_OK, "reason": "no_candidates"}
+
+    target_resolved = target.resolve()
+    new_page = {
+        "path": target.relative_to(root).as_posix(),
+        "content": f"# {candidate.get('title') or ''}\n\n{summary}",
+    }
+    last_info: dict = {"outcome": wiki_dedup_judge.OUTCOME_OK, "reason": "no_duplicate"}
+    judged = 0
+    for matched, score in hits:
+        if judged >= budget:
+            break
+        if matched.resolve() == target_resolved:
+            continue
+        existing = wiki_dedup_judge.read_card(matched)
+        if existing is None:
+            continue
+        judged += 1
+        verdict, info = wiki_dedup_judge.judge_pair(
+            root, compile_cfg,
+            new_page,
+            {"path": matched.relative_to(root).as_posix(), "content": existing},
+            engine,
+        )
+        last_info = info
+        if info.get("outcome") != wiki_dedup_judge.OUTCOME_OK:
+            return None, None, info
+        if verdict == "duplicate":
+            return matched, score, info
+    return None, None, last_info
 
 
 def is_auto_writable_page(path: Path) -> tuple[bool, list[str]]:
@@ -954,23 +1041,41 @@ def main() -> int:
         print(json.dumps({"action": "candidate", "targetPath": record["targetPath"]}, ensure_ascii=False))
         return 0
 
-    if target_reason == "slug" and not target.exists():
-        matched_path, score = find_wiki_semantic_match(root, wiki_root, config, candidate, summary)
+    if not target.exists():
+        # LLM body judgment first: it covers EVERY new page, including
+        # explicit-targetPath candidates that the legacy slug-only gate skipped.
+        matched_path, score, judge_info = judge_new_page_duplicate(
+            root, wiki_root, config, compile_cfg, candidate, summary, target
+        )
+        judge_outcome = judge_info.get("outcome")
+        if matched_path is None and judge_outcome != wiki_dedup_judge.OUTCOME_OK and target_reason == "slug":
+            # No judge on this machine (or it is cooling down) — fall back to the
+            # legacy score-threshold gate so this path never gets weaker than before.
+            matched_path, score = find_wiki_semantic_match(root, wiki_root, config, candidate, summary)
+            judge_info = {**judge_info, "fallback": "score_threshold"}
         if matched_path is not None:
             suggested_action = "supersede-or-new" if suggested_type == "decision" else "merge"
-            append_jsonl(merge_needed_path, {
+            entry = {
                 "ts": now_iso(),
                 "candidate": record,
                 "matchedPath": matched_path.relative_to(root).as_posix(),
                 "matchedScore": score,
                 "suggestedAction": suggested_action,
-            })
+            }
+            if judge_info.get("verdict"):
+                entry["judgeVerdict"] = judge_info["verdict"]
+                entry["judgeReason"] = judge_info.get("reason", "")
+                entry["judgedBy"] = judge_info.get("engine", "")
+                entry["uniqueToCandidate"] = judge_info.get("uniqueToA", [])
+                entry["uniqueToMatched"] = judge_info.get("uniqueToB", [])
+            append_jsonl(merge_needed_path, entry)
             record["action"] = "queued_for_review"
             append_jsonl(candidate_path, record)
             print(json.dumps({
                 "action": "queued_for_review",
                 "matchedPath": matched_path.relative_to(root).as_posix(),
                 "score": score,
+                **({"judgeVerdict": judge_info["verdict"]} if judge_info.get("verdict") else {}),
             }, ensure_ascii=False))
             return 0
 

@@ -68,6 +68,18 @@ DEFAULT_CONFIG = {
             "similarPageMaxChars": 12000,
             "autoMergeThreshold": 0.9,
             "maxPairsPerScan": 10,
+            # Retrieval floor for LLM judging. The daemon score is rank-bounded, not a
+            # similarity (see wiki_dedup_judge.py), so it may only narrow the candidate
+            # set -- the verdict comes from the judge.
+            "candidateMinScore": 0.3,
+            "judge": {
+                "enabled": True,
+                "timeout": 120,
+                "cooldownSeconds": 600,
+                "maxPairsPerScan": 8,
+                "maxPairsPerCompile": 1,
+                "maxCharsPerPage": 6000,
+            },
         },
         "verify": {
             "enabled": True,
@@ -247,8 +259,12 @@ def compile_config(value):
     semantic = raw_semantic if isinstance(raw_semantic, dict) else {}
     default_semantic = defaults.get("semanticDedup", {
         "enabled": True, "threshold": 0.82, "topK": 3, "similarPageMaxChars": 12000,
-        "autoMergeThreshold": 0.9, "maxPairsPerScan": 10,
+        "autoMergeThreshold": 0.9, "maxPairsPerScan": 10, "candidateMinScore": 0.3,
+        "judge": {},
     })
+    raw_judge = semantic.get("judge")
+    judge = raw_judge if isinstance(raw_judge, dict) else {}
+    default_judge = default_semantic.get("judge") if isinstance(default_semantic.get("judge"), dict) else {}
     result["semanticDedup"] = {
         "enabled": semantic.get("enabled") if isinstance(semantic.get("enabled"), bool) else default_semantic["enabled"],
         "threshold": coerce_float(semantic.get("threshold", default_semantic["threshold"]), default_semantic["threshold"]),
@@ -256,6 +272,15 @@ def compile_config(value):
         "similarPageMaxChars": coerce_int(semantic.get("similarPageMaxChars", default_semantic["similarPageMaxChars"]), default_semantic["similarPageMaxChars"]),
         "autoMergeThreshold": coerce_float(semantic.get("autoMergeThreshold", default_semantic["autoMergeThreshold"]), default_semantic["autoMergeThreshold"]),
         "maxPairsPerScan": coerce_int(semantic.get("maxPairsPerScan", default_semantic["maxPairsPerScan"]), default_semantic["maxPairsPerScan"]),
+        "candidateMinScore": coerce_float(semantic.get("candidateMinScore", default_semantic["candidateMinScore"]), default_semantic["candidateMinScore"]),
+        "judge": {
+            "enabled": judge.get("enabled") if isinstance(judge.get("enabled"), bool) else default_judge.get("enabled", True),
+            "timeout": coerce_int(judge.get("timeout", default_judge.get("timeout", 120)), default_judge.get("timeout", 120)),
+            "cooldownSeconds": coerce_int(judge.get("cooldownSeconds", default_judge.get("cooldownSeconds", 600)), default_judge.get("cooldownSeconds", 600)),
+            "maxPairsPerScan": coerce_int(judge.get("maxPairsPerScan", default_judge.get("maxPairsPerScan", 8)), default_judge.get("maxPairsPerScan", 8)),
+            "maxPairsPerCompile": coerce_int(judge.get("maxPairsPerCompile", default_judge.get("maxPairsPerCompile", 1)), default_judge.get("maxPairsPerCompile", 1)),
+            "maxCharsPerPage": coerce_int(judge.get("maxCharsPerPage", default_judge.get("maxCharsPerPage", 6000)), default_judge.get("maxCharsPerPage", 6000)),
+        },
     }
     raw_verify = value.get("verify")
     verify = raw_verify if isinstance(raw_verify, dict) else {}

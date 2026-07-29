@@ -5,7 +5,9 @@ isolated temp cwd with tools/writes disabled, emit {"candidates": [...]} on stdo
 They never touch the project filesystem.
 
 The same adapters double as card verifiers: a payload with {"task": "verify"}
-switches to the adversarial verify prompt and emits {"verdict": ...} instead.
+switches to the adversarial verify prompt and emits {"verdict": ...} instead,
+and as duplicate judges: {"task": "dedup"} compares two card bodies and emits
+{"verdict": "duplicate"|"distinct"|"unclear", ...}.
 """
 from __future__ import annotations
 
@@ -92,6 +94,34 @@ CARD CONTENT:
 {sources_section}
 """
 
+DEDUP_VERDICT_VALUES = ("duplicate", "distinct", "unclear")
+
+# Body-vs-body judgment. Deliberately NOT a bare yes/no: the caller only queues a
+# pair for human/agent resolution, and the stated reason + unique-content lists are
+# what make a wrong judgment auditable (and what the resolver reads first).
+_DEDUP_PROMPT_TEMPLATE = """You compare two auto-generated wiki cards and decide whether they record the SAME fact.
+
+Output RULES (strict):
+- Output ONLY a single JSON object: {{"verdict": "duplicate"|"distinct"|"unclear", "reason": str, "sharedFacts": [str], "uniqueToA": [str], "uniqueToB": [str]}}. No prose, no code fence.
+- "duplicate": both cards assert the same underlying fact, rule, decision, or entity. Different titles, wording, level of detail, or card type do NOT make them distinct. One being a superset of the other is still "duplicate".
+- "distinct": they assert different facts, or describe different entities/events, even when they share vocabulary, a character, a location, or a topic.
+- "unclear": you cannot tell from the content shown.
+- reason: one sentence stating WHY, naming the specific overlapping or differing fact. Never restate the rules.
+- uniqueToA / uniqueToB: facts present in only that card. These are what a merge would have to preserve, so list them even when the verdict is "duplicate". Empty lists are fine.
+- Judge CONTENT only. Ignore frontmatter, status, titles-as-labels, formatting, and the auto-generated banner.
+- Being topically related is NOT being duplicate. When only the subject matter overlaps, answer "distinct".
+- Never include secrets, API keys, tokens, or credentials in output.
+- Do NOT use any tools. Do NOT read or write files. Answer directly.
+
+CARD A: {path_a}
+CARD A CONTENT:
+{content_a}
+
+CARD B: {path_b}
+CARD B CONTENT:
+{content_b}
+"""
+
 _SIMILAR_PAGES_TEMPLATE = """TOP MATCHING EXISTING WIKI PAGES (reuse canonicalKey/targetPath below if this source overlaps one):
 
 {pages}"""
@@ -165,6 +195,17 @@ def build_verify_prompt(payload: dict) -> str:
     )
 
 
+def build_dedup_prompt(payload: dict) -> str:
+    page_a = payload.get("pageA") if isinstance(payload.get("pageA"), dict) else {}
+    page_b = payload.get("pageB") if isinstance(payload.get("pageB"), dict) else {}
+    return _DEDUP_PROMPT_TEMPLATE.format(
+        path_a=str(page_a.get("path", "")),
+        content_a=str(page_a.get("content", "")),
+        path_b=str(page_b.get("path", "")),
+        content_b=str(page_b.get("content", "")),
+    )
+
+
 def extract_candidates(text: str) -> dict:
     if not isinstance(text, str) or "candidates" not in text:
         return {}
@@ -191,8 +232,8 @@ def extract_candidates(text: str) -> dict:
     return found or {}
 
 
-def extract_verdict(text: str) -> dict:
-    """Last JSON object in stdout carrying a valid "verdict" — extract_candidates와 동일 스캔."""
+def _extract_verdict_in(text: str, allowed: tuple[str, ...]) -> dict:
+    """Last JSON object in stdout carrying a verdict from `allowed` — extract_candidates와 동일 스캔."""
     if not isinstance(text, str) or "verdict" not in text:
         return {}
     decoder = json.JSONDecoder()
@@ -208,10 +249,18 @@ def extract_verdict(text: str) -> dict:
         except json.JSONDecodeError:
             idx = start + 1
             continue
-        if isinstance(obj, dict) and obj.get("verdict") in VERDICT_VALUES:
+        if isinstance(obj, dict) and obj.get("verdict") in allowed:
             found = obj
         idx = max(end, start + 1)
     return found or {}
+
+
+def extract_verdict(text: str) -> dict:
+    return _extract_verdict_in(text, VERDICT_VALUES)
+
+
+def extract_dedup_verdict(text: str) -> dict:
+    return _extract_verdict_in(text, DEDUP_VERDICT_VALUES)
 
 
 def resolve_bin(name: str, env_override: str) -> str | None:
@@ -280,11 +329,34 @@ def emit_verdict(verdict_obj: dict) -> int:
     return 0
 
 
+def emit_dedup_verdict(verdict_obj: dict) -> int:
+    if not isinstance(verdict_obj, dict) or verdict_obj.get("verdict") not in DEDUP_VERDICT_VALUES:
+        return 1
+
+    def strings(key: str) -> list[str]:
+        raw = verdict_obj.get(key)
+        return [str(item)[:300] for item in raw[:10]] if isinstance(raw, list) else []
+
+    print(json.dumps({
+        "verdict": verdict_obj["verdict"],
+        "reason": str(verdict_obj.get("reason") or "")[:500],
+        "sharedFacts": strings("sharedFacts"),
+        "uniqueToA": strings("uniqueToA"),
+        "uniqueToB": strings("uniqueToB"),
+    }, ensure_ascii=False))
+    return 0
+
+
 def run_adapter(cli_name: str, env_override: str, build_cmd) -> int:
     """Full adapter flow shared by all host adapters."""
     payload = read_payload()
-    is_verify = payload.get("task") == "verify"
-    prompt = build_verify_prompt(payload) if is_verify else build_prompt(payload)
+    task = payload.get("task")
+    if task == "verify":
+        prompt = build_verify_prompt(payload)
+    elif task == "dedup":
+        prompt = build_dedup_prompt(payload)
+    else:
+        prompt = build_prompt(payload)
     binary = resolve_bin(cli_name, env_override)
     if not binary:
         return CLI_ABSENT
@@ -294,6 +366,8 @@ def run_adapter(cli_name: str, env_override: str, build_cmd) -> int:
         return code
     if code != 0:
         return code
-    if is_verify:
+    if task == "verify":
         return emit_verdict(extract_verdict(out))
+    if task == "dedup":
+        return emit_dedup_verdict(extract_dedup_verdict(out))
     return emit(extract_candidates(out))
