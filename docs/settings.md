@@ -120,7 +120,12 @@ wiki role collection의 결과는 경로와 title만이 아니라 **카드 본�
 문자열**을 담을 수 있고(이 저장소의 계획 문서가 실제로 담고 있습니다), 들여쓰기만으로는
 CommonMark가 3칸까지 들여쓴 헤딩을 헤딩으로 인정해 경계가 서지 않기 때문입니다. 본문이
 경계 문자열을 담으면 `<<카드 본문>>`처럼 구분자를 늘려 충돌을 피합니다(본문은 그대로
-보존됩니다).
+보존됩니다). 구분자는 **주입 전체에서 하나**를 쓰고 안내문이 그것을 그대로 인용합니다 —
+안내문과 실제 구분자가 어긋나면 모델이 본문 안 문자열을 경계로 오독합니다.
+
+코드 fence가 홀수로 열린 카드는 절단 여부와 무관하게 닫습니다. 닫을 자리가 상한 안에
+없으면 미완 블록을 제거합니다 — 절단 표식과 fence 닫기를 포함한 본문 길이는 항상
+`injectSummaryMaxChars` 이내입니다.
 
 - **경로**는 카드 파일의 실제 위치입니다(`cwd` 하위면 상대경로, 그 밖이면 절대경로).
   qmd 데몬이 주는 `collection/path` 형태는 어떤 base로도 열리지 않으므로 쓰지 않습니다.
@@ -151,7 +156,10 @@ dogfooding 두 코퍼스(카드 849장)의 주입 대상 본문 길이 분포입
 
 주입 본문이 비었는지는 `QMD_RECALL_LOG`의 `qmd_recall_selection` 줄에서 확인합니다 —
 `bodies_injected` / `bodies_truncated` / `bodies_empty` / `body_empty_reasons`
-(`path_unresolved`·`read_error`·`frontmatter_unterminated`·`empty_body`).
+(`path_unresolved`·`read_error`·`frontmatter_unterminated`·`empty_body`·`delimiter_exhausted`).
+카드 파일 읽기 자체가 실패했는지는 `card_read_failures` / `card_read_reasons`로 봅니다 —
+이쪽은 필터로 drop된 후보까지 포함하므로, `wikiPath` 오설정으로 검수 카드가 전부
+fail-closed drop된 경우(`path_unresolved`)를 진짜 미검수 카드와 구분할 수 있습니다.
 
 ### minScore는 유사도가 아니라 순위입니다
 

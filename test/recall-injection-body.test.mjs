@@ -605,3 +605,182 @@ test('recall 스캐너는 wiki_compile 이 실제로 쓰는 마커를 읽는다 
   assert.ok(r.start_ok && r.end_ok, 'writer 가 공유 마커 리터럴을 쓴다');
   assert.equal(r.body, '왕복 본문이다.', 'reader 가 writer 산출물에서 본문만 정확히 뽑는다');
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 2차 리뷰 major 대응 (fence 불균형 카드 · 구분자/안내문 일치 · drop된 실패 이유)
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('절단이 없어도 디스크상 fence 불균형 카드에서 프레임이 붕괴하지 않는다', () => {
+  // extractor 가 fence 를 열고 길이 캡에 걸린 카드. 절단 경로를 타지 않으므로
+  // 예전 구현(truncate 안에서만 닫음)은 </카드 본문>·안내문을 코드블록에 빨려들게 했다.
+  const body = ['예시:', '```python', 'x = 1'].join('\n');
+  withProject({
+    cards: { 'card.md': card(VERIFIED_FM, body) },
+  }, ({ dir, fixture, write }) => {
+    write([{ file: 'proj-wiki/decisions/card.md', title: 'Summary', score: 1 }]);
+    const ctx = contextOf({ prompt: PROMPT, cwd: dir }, { QMD_QUERY_FIXTURE: fixture });
+    const fences = (ctx.match(/^ *```/gm) || []).length;
+    assert.equal(fences % 2, 0, `절단 없이도 fence 가 균형이어야 함 (실제 ${fences})`);
+    assert.match(ctx, /x = 1/, '본문 내용은 유지');
+    const lines = ctx.split('\n');
+    const close = lines.findIndex((l) => l.trim() === '</카드 본문>');
+    const fenceIdx = lines.map((l, i) => (/^ *```/.test(l) ? i : -1)).filter((i) => i >= 0);
+    assert.ok(fenceIdx[fenceIdx.length - 1] < close, '닫는 fence 가 경계보다 앞에 와야 함');
+  });
+});
+
+test('fence 를 닫을 예산이 없으면 미완 블록을 제거하고 상한을 넘지 않는다', () => {
+  const body = ['서술 문장이다.', '```python', 'x = 1'].join('\n');
+  withProject({
+    // 상한을 본문 길이에 딱 맞춰 닫는 fence(4자)가 들어갈 자리가 없게 한다.
+    settings: { injectSummaryMaxChars: body.length },
+    cards: { 'card.md': card(VERIFIED_FM, body) },
+  }, ({ dir, fixture, write }) => {
+    write([{ file: 'proj-wiki/decisions/card.md', title: 'Summary', score: 1 }]);
+    const ctx = contextOf({ prompt: PROMPT, cwd: dir }, { QMD_QUERY_FIXTURE: fixture });
+    const fences = (ctx.match(/^ *```/gm) || []).length;
+    assert.equal(fences, 0, '미완 블록 자체가 제거돼야 함');
+    assert.match(ctx, /서술 문장이다\./, '블록 앞 내용은 유지');
+    assert.match(ctx, /… \(이하 생략\)/, '내용 제거 사실을 표시');
+  });
+});
+
+test('절단 표식과 fence 닫기를 포함한 본문 길이가 항상 상한 이내다', () => {
+  // 1차 지적("표식이 상한 밖")이 fence 닫기로 재발한 케이스를 함수 단위로 고정한다.
+  const out = execFileSync('python3', ['-c', [
+    'import json, sys',
+    'sys.path.insert(0, "core")',
+    'import recall',
+    'plain = "가나다라마바사아자차카타파하" * 60',
+    'fenced = "앞 문장이다.\\n```python\\n" + "y = 1\\n" * 200',
+    'rows = []',
+    'for limit in (20, 100, 600, 4000):',
+    '    for name, text in (("plain", plain), ("fenced", fenced)):',
+    '        body, _ = recall.truncate_summary(text, limit)',
+    '        rows.append({"limit": limit, "kind": name, "len": len(body),',
+    '                     "fences": len([m for m in body.split(chr(10)) if m.lstrip().startswith("```")])})',
+    'print(json.dumps(rows))',
+  ].join('\n')], { encoding: 'utf8' });
+  for (const row of JSON.parse(out)) {
+    assert.ok(row.len <= row.limit, `${row.kind} limit=${row.limit} → ${row.len}자 (상한 초과)`);
+    assert.equal(row.fences % 2, 0, `${row.kind} limit=${row.limit} fence 불균형`);
+  }
+});
+
+test('구분자가 escalate 되면 안내문도 같은 구분자를 쓴다 (안내문/실제 불일치 금지)', () => {
+  withProject({
+    cards: { 'card.md': card(VERIFIED_FM, '주입 형식은 <카드 본문> ... </카드 본문> 이다.') },
+  }, ({ dir, fixture, write }) => {
+    write([{ file: 'proj-wiki/decisions/card.md', title: 'Summary', score: 1 }]);
+    const ctx = contextOf({ prompt: PROMPT, cwd: dir }, { QMD_QUERY_FIXTURE: fixture });
+    const lines = ctx.split('\n');
+    const open = lines.find((l) => /^\s*<+카드 본문>+$/.test(l)).trim();
+    const close = lines.find((l) => /^\s*<+\/카드 본문>+$/.test(l)).trim();
+    assert.equal(open, '<<카드 본문>>');
+    const guide = lines.find((l) => l.includes('안은 해당 wiki 카드 본문 인용이다'));
+    assert.ok(guide.startsWith(`${open}…${close} `),
+      `안내문이 실제 구분자를 인용해야 함: ${guide.slice(0, 40)}`);
+    assert.ok(!guide.startsWith('<카드 본문>'), '충돌하는 depth1 을 선언하면 안 됨');
+  });
+});
+
+test('여러 카드는 같은 depth 의 구분자를 공유한다 (섞이면 안내문이 성립하지 않는다)', () => {
+  withProject({
+    settings: { recallStrategy: 'hierarchical' },
+    cards: {
+      'plain.md': card(VERIFIED_FM, '평범한 본문.'),
+      'meta.md': card(['title: "형식 언급 카드"', 'status: verified'].join('\n'),
+        '경계 문자열 <카드 본문> 을 언급한다.'),
+    },
+  }, ({ dir, fixture, write }) => {
+    write([
+      { file: 'proj-wiki/decisions/plain.md', title: 'Summary', score: 1 },
+      { file: 'proj-wiki/decisions/meta.md', title: 'Summary', score: 0.5 },
+    ]);
+    const ctx = contextOf({ prompt: PROMPT, cwd: dir }, { QMD_QUERY_FIXTURE: fixture });
+    const opens = ctx.split('\n').filter((l) => /^\s*<+카드 본문>+$/.test(l)).map((l) => l.trim());
+    assert.equal(opens.length, 2);
+    assert.equal(new Set(opens).size, 1, `두 카드가 같은 구분자를 써야 함: ${opens}`);
+    assert.equal(opens[0], '<<카드 본문>>', '한 카드가 충돌하면 전체가 escalate');
+    const guide = ctx.split('\n').find((l) => l.includes('안은 해당 wiki 카드 본문 인용이다'));
+    assert.ok(guide.startsWith('<<카드 본문>>…<</카드 본문>> '));
+  });
+});
+
+test('구분자 escalation 소진은 silent 폴백 없이 본문을 빼고 로그에 남는다', () => {
+  const out = execFileSync('python3', ['-c', [
+    'import json, sys',
+    'sys.path.insert(0, "core")',
+    'import recall',
+    // 모든 depth 를 담은 본문 → escalation 소진.
+    'body = " ".join("<" * d + "카드 본문" + ">" * d for d in range(1, recall.MAX_BODY_DELIMITER_DEPTH + 1))',
+    'o, c, depth = recall.body_delimiters([body])',
+    'ok, okc, okdepth = recall.body_delimiters(["평범한 본문"])',
+    'print(json.dumps({"depth": depth, "ok_depth": okdepth, "collides": o in body}))',
+  ].join('\n')], { encoding: 'utf8' });
+  const r = JSON.parse(out);
+  assert.equal(r.depth, 0, '소진은 depth 0 으로 보고돼야 함(주입 포기 신호)');
+  assert.equal(r.ok_depth, 1, '정상 본문은 depth 1');
+});
+
+test('path_unresolved(오설정)가 로그에 남아 진짜 미검수와 구분된다', () => {
+  // wikiPath 오타 → 검수 카드도 경로 해석 실패 → fail-closed drop.
+  // final 만 집계하면 dropped_unverified:1 만 남아 오설정과 미검수가 구분되지 않는다.
+  withProject({
+    settings: { wikiPath: '.auto-context/wiki-typo' },
+    cards: { 'card.md': card(VERIFIED_FM, '검수 카드 본문.') },
+  }, ({ dir, fixture, write }) => {
+    write([{ file: 'proj-wiki/decisions/card.md', title: 'Summary', score: 1 }]);
+    const log = join(dir, 'recall.log');
+    const out = runRecall({ prompt: PROMPT, cwd: dir },
+      { QMD_QUERY_FIXTURE: fixture, QMD_RECALL_LOG: log }).trim();
+    assert.equal(out, '', '경로 해석 실패는 여전히 fail-closed');
+    const sel = execFileSync('cat', [log], { encoding: 'utf8' }).trim().split('\n')
+      .map(JSON.parse).find((l) => l.event === 'qmd_recall_selection' && l.reason);
+    assert.equal(sel.reason, 'no_results_after_filter');
+    assert.equal(sel.dropped_unverified, 1);
+    assert.equal(sel.card_read_failures, 1, 'drop 된 후보의 읽기 실패도 집계');
+    assert.deepEqual(sel.card_read_reasons, { path_unresolved: 1 });
+    assert.equal(sel.cards_read, 1);
+  });
+});
+
+test('읽기창 초과로 frontmatter 를 못 읽은 카드가 drop 돼도 이유가 로그에 남는다', () => {
+  const bloat = Array.from({ length: 400 }, (_, i) => `  - "별칭 ${i} 아주 긴 별칭 문자열로 창을 채운다"`).join('\n');
+  withProject({}, ({ dir, fixture, write }) => {
+    writeFileSync(join(dir, '.auto-context', 'wiki', 'decisions', 'big.md'), rawCard([
+      '---', 'title: "거대 frontmatter"', 'status: verified', 'aliases:', bloat, '---',
+      '', '<!-- qmd:auto:start id="main" sourceHash="beef" -->', '## Summary', '본문.', '<!-- qmd:auto:end -->',
+    ]));
+    write([{ file: 'proj-wiki/decisions/big.md', title: 'Summary', score: 1 }]);
+    const log = join(dir, 'recall.log');
+    // recallVerifiedOnly 기본(true) → status 를 못 읽어 미검수 판정 → drop.
+    const out = runRecall({ prompt: PROMPT, cwd: dir },
+      { QMD_QUERY_FIXTURE: fixture, QMD_RECALL_LOG: log }).trim();
+    assert.equal(out, '');
+    const sel = execFileSync('cat', [log], { encoding: 'utf8' }).trim().split('\n')
+      .map(JSON.parse).find((l) => l.event === 'qmd_recall_selection' && l.reason);
+    assert.deepEqual(sel.card_read_reasons, { frontmatter_unterminated: 1 });
+  });
+});
+
+test('비UTF8 카드는 fail-open 하되 디코딩 대체가 로그에 남는다', () => {
+  withProject({
+    settings: { compile: { recallVerifiedOnly: false } },
+  }, ({ dir, fixture, write }) => {
+    const head = Buffer.from('---\ntitle: "깨진 카드"\nstatus: verified\n---\n\n<!-- qmd:auto:start id="main" sourceHash="b" -->\n## Summary\n앞 ', 'utf8');
+    const broken = Buffer.from([0xff, 0xfe, 0xfd]);           // 유효하지 않은 UTF-8
+    const tail = Buffer.from(' 뒤 문장.\n<!-- qmd:auto:end -->\n', 'utf8');
+    writeFileSync(join(dir, '.auto-context', 'wiki', 'decisions', 'bad.md'),
+      Buffer.concat([head, broken, tail]));
+    write([{ file: 'proj-wiki/decisions/bad.md', title: 'Summary', score: 1 }]);
+    const log = join(dir, 'recall.log');
+    const ctx = contextOf({ prompt: PROMPT, cwd: dir },
+      { QMD_QUERY_FIXTURE: fixture, QMD_RECALL_LOG: log });
+    assert.ok(ctx, '비UTF8 카드도 훅을 죽이지 않고 주입된다(fail-open)');
+    assert.match(ctx, /뒤 문장\./, '디코딩 가능한 부분은 살아 있다');
+    const sel = execFileSync('cat', [log], { encoding: 'utf8' }).trim().split('\n')
+      .map(JSON.parse).find((l) => l.event === 'qmd_recall_selection' && l.reason === 'selected');
+    assert.equal(sel.cards_decode_replaced, 1, '조용히 깨진 글자를 주입한 사실이 남아야 함');
+  });
+});
