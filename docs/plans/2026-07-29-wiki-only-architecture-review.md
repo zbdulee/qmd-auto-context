@@ -235,14 +235,102 @@ recall이 비어도 에이전트가 Grep/Read로 찾을 수 있다는 주장은 
   남았습니다**
 - **P1과 맞물린 최악 시나리오**: lex가 AND 결합이라 0건이 되면 vec 1위만 남고, 그 점수가
   `1.0`이라 관련성이 낮아도 `minScore: 0.8`을 통과해 **유일한 컨텍스트로 주입**됩니다
-- 선택지 (정책 판단 필요):
-  1. recall도 `rerank: True`로 전환 — 점수가 실제 semantic score가 되지만 LLM 호출
-     비용·지연이 붙고, 데몬이 single-thread라 timeout 리스크가 커집니다
-  2. `minScore`가 rank 기반임을 인정하고 문서화 + 기본값을 `topN`과 일관되게 조정
-     (topN 3을 원하면 임계는 0.33 이하여야 합니다)
-  3. `minScore` 필터를 제거하고 순위 컷(`topN`)만 사용
+
+#### 라이브 증거 (P2 shadow query로 확보)
+
+P2 계측을 켜고 `service-engineering`에 실제 프롬프트("claude runner 구독 기반 실행 계층
+설계 결정")를 넣은 결과입니다. **문제는 "1건만 준다"가 아니라 "자주 0건을 준다"입니다.**
+
+```
+reason: no_results_after_filter
+candidates: 8
+  dropped_skip:        2
+  dropped_min_score:   5      ← minScore 0.8이 rank 2~8 전멸
+  dropped_unverified:  1      ← 남은 1위가 미검수 generated라 제거
+selected:              0      ← 최종 빈 출력
+```
+
+데몬이 돌려준 wiki 후보의 score는 정확히 `1/rank`였습니다(1.0 / 0.5 / 0.33).
+
+**핵심은 rank 2가 탈락한 것이 아니라 두 필터가 곱해져 0건이 된 것입니다.** `minScore`가
+1위만 남기므로, **그 1위 하나가 미검수이면 recall이 통째로 비어버립니다.** 검수된 카드가
+559장 있어도 rank 2 이하에 있으면 도달할 수 없습니다.
+
+> 같은 로그의 raw 대조 질의에는 `claude-remote-exec-추가개발계획.md` 등이 올라왔습니다.
+> 다만 이것이 "더 관련 있었다"는 근거는 아닙니다 — 관련성 우열은 이 로그로 판단할 수
+> 없습니다(`docs/settings.md`의 같은 취지 서술 참조). `verdict.raw_top_not_selected`는
+> wiki와 raw가 애초에 서로 다른 경로이므로 `wikiOnly`에서 거의 항상 true이며, 품질
+> 손실 지표가 아닙니다. 이 verdict 필드는 P2 리뷰 지적에 따라 폐기/한정 대상입니다.
+
+즉 1건만 통과하는 것 자체는 수용 가능하지만, **1건이 필터 곱셈으로 0건이 되는 경로**는
+막아야 합니다.
+
+이 현상은 "빈 출력은 정상 동작일 수 있다"는 기존 계약(CLAUDE.md 운영 함정)에 가려
+드러나지 않았습니다. 큐 백로그 0, 카드 생성·검수 정상이라는 2장의 실측과 모순되지
+않습니다 — **파이프라인은 건강한데 마지막 주입 단계에서 조용히 버려지고 있었습니다.**
+#### 무엇이 실제 문제인지 (범위 축소)
+
+**"관련 문서를 모두 추출할 필요는 없다"는 것이 이 프로젝트의 전제입니다.** recall은
+보조 컨텍스트 주입이고 1건이면 충분한 경우가 많습니다. 이 전제를 적용하면 세 현상의
+심각도가 갈립니다:
+
+| 현상 | 판정 |
+|---|---|
+| 1건만 통과한다 / `topN`이 무의미하다 | **실질 문제 아님.** 설정 의미 혼란이므로 문서 수정으로 족합니다 |
+| 관련 문서가 있는데 **0건**이 된다 | **실질 문제.** 아래 곱셈 효과가 원인입니다 |
+| 관련성 낮은 1위가 `1.0`으로 통과한다 | **실질 문제.** 잘못된 컨텍스트를 유일 근거로 주입합니다 |
+
+- 선택지 (정책 판단 필요, 위 축소를 반영한 순서):
+  1. **(권장, 최소 변경) 순위 폴백.** `minScore`를 순위 컷으로 유지하되, 통과한 결과가
+     후속 필터(`recallVerifiedOnly`·`skipPaths`)에서 전멸하면 다음 순위를 재검토합니다.
+     라이브 증거의 0건 케이스가 정확히 이 형태이므로 곱셈 효과만 끊으면 해소됩니다
+  2. `minScore`가 rank 기반임을 문서화하고 기본값을 `topN`과 일관되게 조정
+     (topN 3을 원하면 임계는 0.33 이하). 1번과 병행 가능합니다
+  3. recall도 `rerank: True`로 전환 — 점수가 실제 semantic score가 되어 세 번째 현상까지
+     해결하지만, LLM 호출 비용·지연이 붙고 데몬이 single-thread라 timeout 리스크가
+     커집니다. **1건으로 충분하다는 전제에서는 과잉일 수 있습니다**
+  4. `minScore` 필터를 제거하고 `topN`만 사용
 - `docs/settings.md`의 `minScore`·`rawFallbackMinScore` 설명도 함께 고쳐야 합니다
   (현재 유사도 임계처럼 읽힙니다)
+
+### 5.0-B P0-CRITICAL — EP 변형 확장이 AND 결합에서 lex를 죽인다
+
+**P2 계측을 novel 프로젝트에 켜서 발견했습니다.** P1과 같은 클래스(AND 결합을 전제하지
+않은 term 확장)이며, 두 번째 실사용 프로젝트의 lex를 구조적으로 무력화합니다.
+
+프롬프트 "EP12 에서 서미래가 먹은 약과 부작용"에 대한 shadow 로그:
+
+```
+lex_query:  "EP012 012 EP12 에서 서미래 먹은 약과"
+lex_only:   count=0     ← lex 완전 사망
+vec_only:   count=2
+primary:    count=2     (vec만 살아남음)
+raw:        count=8
+verdict:    lex_dead=true, selected_empty_raw_nonempty=true
+최종 selected: 0
+```
+
+`extract_ep_terms`가 EP 변형 3개(`EP012`, `012`, `EP12`)를 만듭니다. OR 검색에서는
+재현율을 높이는 전략이지만, qmd는 positive term을 **AND로 결합**하므로
+`"ep012"* AND "012"* AND "ep12"*`가 되어 **한 문서에 세 표기가 모두 있어야** 합니다.
+현실적으로 불가능하므로 EP 쿼리의 lex는 항상 0건입니다.
+
+novel은 legacy 컬렉션명(`*-manuscript`/`*-plot`) 때문에 `lexicalPatterns: ["ep"]`가
+**자동 활성화**됩니다(`core/config.py`). 즉 사용자가 설정하지 않았는데도 이 경로를 탑니다.
+
+부가 요인: `에서`·`먹은` 같은 한국어 활용형이 스톱워드에 없어 term에 들어가 AND 조건을
+더 좁힙니다.
+
+**novel의 recall 실패 체인** (네 단계 중 셋이 확인된 결함):
+1. EP 변형이 AND로 묶여 lex 사망
+2. vec만 2건 생존
+3. `minScore: 0.8`이 1위만 통과 (5.0)
+4. 그 1위가 미검수면 `recallVerifiedOnly`가 제거 → **0건**
+
+**해법 방향**: `core/recall.py`는 이미 `"searches": [{"type":"lex"}, {"type":"vec"}]`
+배열로 질의합니다. **lex를 여러 개 넣으면 각각 독립 검색이 되어 RRF로 융합**되므로
+AND 대신 OR 효과를 얻을 수 있습니다(qmd의 `searches` 처리 방식을 먼저 확인해야 합니다).
+차선책은 EP 변형 중 색인 형태에 맞는 하나만 남기는 것입니다.
 
 ### 5.1 P0 — raw collectionPath `.`(저장소 전체) 축소 + 설정 문서 강화
 
@@ -430,7 +518,8 @@ allowlist + 경로 화이트리스트, 사람이 지정한 소수 앵커 파일,
 
 | 순위 | 항목 | 비용 | 선행 |
 |---|---|---|---|
-| **P0-CRITICAL** | **`minScore`가 순위 컷으로 동작 (recall 1건 제한)** | 정책 선행 | — |
+| **P0-CRITICAL** | **`minScore` 순위 컷 + 필터 곱셈으로 0건 (순위 폴백)** | 낮음~중간 | — |
+| **P0-CRITICAL** | **EP 변형 확장이 AND에서 lex를 죽임 (5.0-B)** | 중간 | — |
 | P0 | collectionPath 축소 + 설정 문서 강화 | 낮음 | — |
 | P1 | keyword 추출 파이프라인 (lex 입력) | 낮음 | — |
 | P2 | shadow query 계측 (opt-in) | 중간 | — |
