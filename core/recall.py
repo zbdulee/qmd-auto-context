@@ -589,10 +589,10 @@ def main():
 
     # lex/vec 쿼리 문자열은 순수 계산이라 fixture 경로에서도 만들어 둔다(진단 로그용).
     # EP 변형은 일반 키워드와 합치지 않고 **독립 lex 엔트리**로 보낸다 — qmd는 한 lex
-    # 문자열 안의 term을 AND로 결합하므로 합치면 한 문서가 EP012·012·EP12를 모두 가져야
+    # 문자열 안의 term을 AND로 결합하므로 합치면 한 문서가 EP012·EP12를 모두 가져야
     # 하고(불가능) EP 쿼리의 lex가 항상 0건이 된다. searches 배열의 lex는 각각 독립 FTS로
-    # 실행돼 RRF로 융합되므로 분리하면 AND가 아니라 OR 효과가 난다. 분리·예산 정책은
-    # keywords.build_lexical_terms가 SSOT다(lexQueries[0]=일반, [1:]=EP 변형).
+    # 실행돼 RRF로 융합되므로 분리하면 AND가 아니라 OR 효과가 난다. 분리·예산·변형 목록
+    # 정책은 keywords.build_lexical_terms가 SSOT다(lexQueries[0]=일반, [1:]=EP 변형).
     lex_searches = [
         {"type": "lex", "query": q} for q in built_terms["lexQueries"]
     ]

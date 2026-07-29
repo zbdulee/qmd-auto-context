@@ -272,14 +272,14 @@ test('recall 경로: lexicalPatterns:["ep"] 게이팅은 그대로 동작한다'
 // --- EP 변형은 독립 lex search 여야 한다 (AND 결합으로 lex 가 죽는 버그) ---
 
 test('recall 경로: ep-on 이면 EP 변형이 각각 독립 lex 엔트리로 들어간다', () => {
-  // 한 문자열로 합치면 `"ep012"* AND "012"* AND "ep12"*` 가 되어 한 문서가 세 표기를
-  // 모두 가져야 하고, 현실적으로 불가능하므로 EP 쿼리의 lex 는 항상 0건이 된다.
+  // 한 문자열로 합치면 `"ep012"* AND "ep12"*` 가 되어 한 문서가 두 표기를 모두
+  // 가져야 하고, 현실적으로 불가능하므로 EP 쿼리의 lex 는 항상 0건이 된다.
   const searches = recallSearches('EP12 에서 서미래가 먹은 약과 부작용', {
     collections: ['sample'], lexicalPatterns: ['ep'],
   });
   const lex = searches.filter(s => s.type === 'lex').map(s => s.query);
 
-  assert.deepEqual(lex.slice(1), ['EP012', '012', 'EP12'], 'EP 변형 3종이 각각 별도 엔트리');
+  assert.deepEqual(lex.slice(1), ['EP012', 'EP12'], 'EP 변형이 각각 별도 엔트리');
   for (const q of lex.slice(1)) {
     assert.ok(!/\s/.test(q), `EP 엔트리에 다른 term 이 합쳐졌다 (AND 결합): ${q}`);
   }
@@ -323,12 +323,38 @@ test('EP 언급 원문 조각(`EP 12` → EP, 12)도 일반 lex 문자열에서 
   const lex = recallLexQueries('EP 12 에서 무슨 일이 있었는지 정리해줘', {
     collections: ['sample'], lexicalPatterns: ['ep'],
   });
-  assert.deepEqual(lex.slice(1), ['EP012', '012', 'EP12']);
+  assert.deepEqual(lex.slice(1), ['EP012', 'EP12']);
   assert.equal(lex[0], '무슨 일이 있었는지');
 
   // 같은 span 에서 나온 조각만 제외한다 — 무관한 숫자 토큰은 살아 있어야 한다.
   const r = kw('12개 항목 EP 12 확인', ['ep']);
   assert.equal(r.lexQueries[0], '12개 항목 확인');
+});
+
+test('순수 숫자 단독 변형(`012`)은 lex 엔트리로 나가지 않는다 (RRF 노이즈)', () => {
+  // AND 결합과는 별개 이유다: `012`* 는 EP 표기가 아니라 "012 로 시작하는 아무 토큰"에
+  // 걸려(특히 카드 frontmatter 의 sources 경로) 재현율 없이 노이즈만 늘린다.
+  // novel 실측: 012 제외 3건(전부 관련) vs 포함 8건(무관 5건 추가).
+  for (const [prompt, patterns] of [
+    ['EP12 에서 서미래가 먹은 약과 부작용', ['ep']],
+    ['EP 12 무슨 일이 있었는지', ['ep']],
+    ['12화 줄거리 정리', ['ep']],
+    ['EP1 EP2 EP3 정리', ['ep']],
+  ]) {
+    const r = kw(prompt, patterns);
+    for (const q of r.lexQueries.slice(1)) {
+      assert.ok(/^EP\d+$/i.test(q), `EP 접두 없는 변형이 실렸다: ${q}`);
+    }
+    // 합성 변형 목록 자체에도 남지 않아야 한다 — extract_ep_terms 단계에서 제거했으므로
+    // 로그의 term 수(lex_terms)와 실제 payload 가 어긋나지 않는다.
+    assert.ok(!r.epTerms.some(t => /^\d+$/.test(t)),
+      `순수 숫자 변형 누출: ${JSON.stringify(r.epTerms)}`);
+    // 원문에 직접 쓴 순수 숫자도 일반 AND 문자열에 남지 않는다(정책 일관성).
+    assert.ok(!/(^|\s)\d+(\s|$)/.test(r.lexQueries[0]),
+      `EP 언급의 순수 숫자가 일반 문자열에 남았다: ${r.lexQueries[0]}`);
+  }
+  // EP 접두 표기는 그대로 유지된다.
+  assert.deepEqual(kw('EP12 복선', ['ep']).lexQueries.slice(1), ['EP012', 'EP12']);
 });
 
 test('단독 조사 토큰은 stopword — 의미어가 term 예산(5)에서 밀려나지 않는다', () => {

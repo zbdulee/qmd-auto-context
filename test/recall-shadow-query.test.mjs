@@ -201,17 +201,17 @@ test('shadow: EP 변형이 독립 lex 엔트리로 분리된 payload 를 그대�
   });
   assert.equal(r.exit_code, 0);
 
-  // 본 recall payload: 일반 lex 1 + EP 변형 3 + vec 1. EP 는 다른 term 과 섞이지 않는다.
-  assert.equal(kinds(r.queries[0]), 'lex+lex+lex+lex+vec');
+  // 본 recall payload: 일반 lex 1 + EP 변형 2 + vec 1. EP 는 다른 term 과 섞이지 않는다.
+  assert.equal(kinds(r.queries[0]), 'lex+lex+lex+vec');
   const primaryLex = r.queries[0].searches.filter((s) => s.type === 'lex').map((s) => s.query);
-  assert.deepEqual(primaryLex.slice(1), ['EP012', '012', 'EP12']);
+  assert.deepEqual(primaryLex.slice(1), ['EP012', 'EP12']);
   assert.ok(!/EP/i.test(primaryLex[0]), `일반 lex 에 EP 가 남으면 AND 가 좁아진다: ${primaryLex[0]}`);
 
   // lex-only 진단 질의는 본 recall 의 lex 엔트리 **전부**를 보낸다(단일 문자열 가정 금지).
-  assert.equal(kinds(r.queries[1]), 'lex+lex+lex+lex');
+  assert.equal(kinds(r.queries[1]), 'lex+lex+lex');
   assert.deepEqual(r.queries[1].searches.map((s) => s.query), primaryLex);
   // raw 대조 질의도 같은 lex 구성 + vec.
-  assert.equal(kinds(r.queries[3]), 'lex+lex+lex+lex+vec');
+  assert.equal(kinds(r.queries[3]), 'lex+lex+lex+vec');
   // 분리해도 shadow 질의 건수는 늘지 않는다(데몬은 single-thread).
   assert.equal(r.queries.length, 4);
 

@@ -273,8 +273,8 @@ def extract_keywords(text: str) -> list[str]:
 
 # EP 변형을 **독립 lex search** 로 내보낼 개수 상한.
 #
-# qmd 는 하나의 lex 문자열 안의 positive term 을 AND 로 결합하므로 EP 변형 3종
-# (`EP012`/`012`/`EP12`)을 한 문자열에 합치면 한 문서가 세 표기를 모두 가져야 하고,
+# qmd 는 하나의 lex 문자열 안의 positive term 을 AND 로 결합하므로 EP 변형
+# (`EP012`/`EP12`)을 한 문자열에 합치면 한 문서가 두 표기를 모두 가져야 하고,
 # 현실적으로 불가능해 EP 쿼리의 lex 는 항상 0건이 된다. `searches` 배열에 lex 를
 # 여러 개 넣으면 각각 독립 FTS 로 실행되고 RRF 로 융합되므로 AND 대신 OR 효과가 난다
 # (`dist/store.js` structuredSearch step 1 — lex search 마다 rankedList 를 하나 push).
@@ -282,7 +282,7 @@ def extract_keywords(text: str) -> list[str]:
 # 상한을 두는 이유: qmd MCP `searches` 스키마가 `.max(10)` 이고(HTTP 경로는 검증하지
 # 않지만 같은 structuredSearch 로 들어간다), 우리는 일반 lex 1 + vec 1 을 항상 쓴다.
 # 데몬은 single-thread 이므로 searchFTS 호출 수 자체를 상한하는 것이 지연 방어다.
-# 6 = EP 번호 2개 × 변형 3종 → payload 총 8개로 스키마 상한 안에 머문다.
+# 6 = EP 번호 3개 × 변형 2종 → payload 총 8개로 스키마 상한 안에 머문다.
 EP_SEARCH_BUDGET = 6
 
 
@@ -292,12 +292,33 @@ _EP_MENTION_RE = re.compile(
 
 
 def extract_ep_terms(prompt: str) -> list[str]:
+    """EP 번호를 색인에 존재하는 표기로 정규화한다 (`EP12` → `EP012`, `EP12`).
+
+    **순수 숫자 단독 변형(`012`)은 만들지 않는다.** AND 결합과는 **별개 이유**다 —
+    독립 lex search 로 분리한 뒤에도 남는 문제이고, 원인은 RRF 노이즈다.
+    `012`* 는 EP 표기가 아니라 "012 로 시작하는 아무 토큰"에 걸리고, 특히 wiki 카드
+    frontmatter 의 `sources` 경로에 스치기만 해도 히트한다. novel 실측
+    (`yakbbal-wiki`, "EP12 에서 서미래가 먹은 약과 부작용", lex 단독):
+
+        012 제외 → 3건 (전부 관련: 서미래 / 밀어내는-것과… / 동시-활성-처방…)
+        012 포함 → 8건 (위 3건 + 무관 5건: 곽-소재-브로커, 좁은-공간… ×2,
+                        소재-매입자-곽, 신호는-자리에서…)
+
+    재현율은 그대로이고 노이즈만 5건 늘어 RRF 순위를 차지한다. 융합 결과에서도
+    상위 3위는 동일하고 4위만 무관 카드로 바뀌었다. `minScore` 를 낮추거나 `topN`
+    을 늘린 프로젝트, 그리고 순위 폴백이 2·3위로 내려가는 경로에서 직접 해를 준다.
+
+    사용자가 **직접 쓴** 숫자(`EP 012 확인` 의 `012`)도 ``_ep_mention_fragments`` 가
+    일반 AND 문자열에서 빼내므로 같은 정책이 일관되게 적용된다 — 합성이든 원문이든
+    "EP 언급에서 나온 순수 숫자"는 lex 에 실리지 않는다. EP 번호 신호는 `EP012`·`EP12`
+    독립 search 와 vec, 그리고 `promote_ep_exact_matches`(파일명 정확 매칭)가 담당한다.
+    """
     terms: list[str] = []
     for match in _EP_MENTION_RE.finditer(prompt):
         ep_num = match.group(1) or match.group(2)
         if ep_num:
             normalized = int(ep_num)
-            terms.extend([f"EP{normalized:03d}", f"{normalized:03d}", f"EP{normalized}"])
+            terms.extend([f"EP{normalized:03d}", f"EP{normalized}"])
     return list(dict.fromkeys(terms))
 
 
@@ -352,8 +373,9 @@ def build_lexical_terms(prompt: str, patterns: list[str]) -> dict:
 
     - ``[0]`` = 일반 lex 문자열(식별자 + 키워드). AND 결합은 검색을 좁히는 의도된
       동작이라 그대로 유지한다.
-    - ``[1:]`` = EP 변형 **각각 하나씩**. 같은 문자열에 합치면 AND 가 되어 항상
-      0건이므로 독립 search 로 분리한다(``EP_SEARCH_BUDGET`` 상한).
+    - ``[1:]`` = EP 변형(`EP012`/`EP12`) **각각 하나씩**. 같은 문자열에 합치면 AND 가
+      되어 항상 0건이므로 독립 search 로 분리한다(``EP_SEARCH_BUDGET`` 상한).
+      순수 숫자 변형은 애초에 만들지 않는다 — 근거는 ``extract_ep_terms`` 참고.
 
     예산을 넘는 EP 변형은 일반 문자열로 되돌리지 않고 그냥 버린다 — 되돌리면 AND
     조건이 다시 좁아져 고치려던 버그가 재발한다.
