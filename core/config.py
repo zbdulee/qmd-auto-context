@@ -85,8 +85,10 @@ DEFAULT_CONFIG = {
             "enabled": True,
             "timeout": 120,
             "onFail": "delete",
+            "onInconclusive": "delete",
             "queuePath": ".auto-context/compile/verify-queue.jsonl",
             "logPath": ".auto-context/compile/verify-log.jsonl",
+            "skippedPath": ".auto-context/compile/verify-skipped.jsonl",
             "cooldownSeconds": 600,
             "maxPerRun": 3,
         },
@@ -95,6 +97,8 @@ DEFAULT_CONFIG = {
 
 COMPILE_MODES = {"off", "candidates", "guarded", "auto-wiki"}
 WIKI_STATUSES = {"generated", "verified", "reviewed", "canon", "tentative", "contested", "discarded", "superseded"}
+# onFail과 onInconclusive가 공유하는 값 집합. "none"이 유일한 "현행 유지"(카드를
+# generated로 남김) 표현이므로, 기본값을 delete로 올려도 기존 동작을 명시 선택할 수 있다.
 VERIFY_ON_FAIL = {"delete", "contested", "none"}
 COMPILE_TRIGGERS = {
     "explicit_user_approval",
@@ -289,8 +293,10 @@ def compile_config(value):
         "enabled": verify.get("enabled") if isinstance(verify.get("enabled"), bool) else default_verify["enabled"],
         "timeout": coerce_int(verify.get("timeout", default_verify["timeout"]), default_verify["timeout"]),
         "onFail": verify.get("onFail") if verify.get("onFail") in VERIFY_ON_FAIL else default_verify["onFail"],
+        "onInconclusive": verify.get("onInconclusive") if verify.get("onInconclusive") in VERIFY_ON_FAIL else default_verify["onInconclusive"],
         "queuePath": verify.get("queuePath") if isinstance(verify.get("queuePath"), str) and verify.get("queuePath") else default_verify["queuePath"],
         "logPath": verify.get("logPath") if isinstance(verify.get("logPath"), str) and verify.get("logPath") else default_verify["logPath"],
+        "skippedPath": verify.get("skippedPath") if isinstance(verify.get("skippedPath"), str) and verify.get("skippedPath") else default_verify["skippedPath"],
         "cooldownSeconds": coerce_int(verify.get("cooldownSeconds", default_verify["cooldownSeconds"]), default_verify["cooldownSeconds"]),
         "maxPerRun": coerce_int(verify.get("maxPerRun", default_verify["maxPerRun"]), default_verify["maxPerRun"]),
     }

@@ -184,6 +184,27 @@ def bounded_failure(action: str, job: dict, reason: str) -> dict:
     }
 
 
+def verify_suppression_hash(root: Path, compile_cfg: dict, rel: str) -> str | None:
+    """Bounded-body hash recorded when this source last produced a card the
+    verifier could not adjudicate (deleted under verify.onInconclusive: delete).
+
+    A match means re-extracting would almost certainly repeat that verdict, so the
+    caller skips before spawning any host CLI — every retry bills the user's own
+    account. Lazy import mirrors _run_verify_pass (wiki_verify_worker imports this
+    module). Any failure returns None: a broken cost guard must fail OPEN and let
+    the compile run rather than silently starve the wiki.
+    """
+    vcfg = compile_cfg.get("verify") if isinstance(compile_cfg.get("verify"), dict) else {}
+    if not vcfg.get("enabled", True):
+        return None
+    try:
+        import wiki_verify_worker
+        path = wiki_verify_worker.verify_skipped_path(root, vcfg)
+        return wiki_verify_worker.load_verify_suppressions(path).get(rel)
+    except Exception:
+        return None
+
+
 def read_source_bounded(path: Path, max_chars: int) -> tuple[str, bool] | None:
     """Bounded read plus whether the file was actually cut off.
 
@@ -387,6 +408,13 @@ def process_job(root: Path, config: dict, compile_cfg: dict, job: dict) -> tuple
         append_jsonl(cpath, bounded_failure("extractor_failed", job, "source_unreadable"))
         return True, False
     content, source_truncated = bounded
+    # Cost guard, checked BEFORE any extractor spawn: this exact source content already
+    # produced a card the verifier could not adjudicate and that was deleted. Retrying
+    # would reproduce the verdict and re-bill the user. Edit the source and the hash
+    # changes, so the source is compiled again on its own.
+    if verify_suppression_hash(root, compile_cfg, rel) == wc.source_body_hash(content):
+        append_jsonl(cpath, bounded_failure("skipped", job, "verify_inconclusive_suppressed"))
+        return True, False
 
     extractor = compile_cfg.get("extractor") if isinstance(compile_cfg.get("extractor"), dict) else {}
     timeout = int(extractor.get("timeout", 30) or 30)

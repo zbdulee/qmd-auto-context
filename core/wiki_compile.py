@@ -384,6 +384,19 @@ def source_hash(candidate: dict) -> str:
     return hashlib.sha256(json.dumps(stable, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:16]
 
 
+def source_body_hash(text: str) -> str:
+    """Content hash of the *bounded* source text that was fed to the extractor.
+
+    verify-skipped.jsonl suppression keys on this, so both sides must hash the
+    same bytes: wiki_compile_worker hashes read_source_bounded() output and
+    wiki_verify_worker hashes the same maxSourceChars-bounded slice. Exact
+    content, no normalization — any real source edit must retry, and whitespace
+    is cheap to hash correctly here (unlike wiki_dedup_scan.body_hash, which
+    normalizes because it compares two independently authored pages).
+    """
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:32]
+
+
 def lint_candidate(candidate: dict, target: Path | None, max_lines: int) -> dict:
     findings = []
     title = str(candidate.get("title") or "").strip()
@@ -452,6 +465,14 @@ def write_jsonl_atomic(path: Path, rows: list[dict]) -> None:
             tmp.unlink()
         except OSError:
             pass
+
+
+# Manifest action written by wiki_verify_worker when IT deleted the card
+# (verify.onFail / verify.onInconclusive = delete). Delete-detection below reads a
+# missing file as "the user threw this card away" and tombstones it forever; a
+# machine deletion must not mean that, or "fix the source and it regenerates" —
+# the whole premise of deleting instead of keeping contested cards — never holds.
+MACHINE_DELETE_ACTION = "verify-deleted"
 
 
 def same_generated_identity(row: dict, record: dict) -> bool:
@@ -1021,7 +1042,12 @@ def main() -> int:
         row for row in read_jsonl(manifest_path)
         if same_generated_identity(row, record)
     ]
-    if previous and not target.exists() and not args.regenerate:
+    if (
+        previous
+        and not target.exists()
+        and not args.regenerate
+        and previous[-1].get("action") != MACHINE_DELETE_ACTION
+    ):
         tombstone = {**record, "action": "deleted", "status": "deleted", "previousStatus": previous[-1].get("status", "generated")}
         append_jsonl(tombstone_path, tombstone)
         record["action"] = "tombstoned"

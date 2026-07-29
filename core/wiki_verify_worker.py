@@ -6,7 +6,16 @@ This worker replays each card against its source documents through the same
 host-CLI adapter pool used for extraction (payload {"task": "verify"}), then:
   pass         -> patch frontmatter to status: verified (+ verifiedBy/verifiedAt)
   fail         -> compile.verify.onFail: delete card (default) | contested | none
-  inconclusive -> keep generated (stays badged unreviewed in recall)
+  inconclusive -> compile.verify.onInconclusive: delete (default) | contested | none
+
+Deleting on `inconclusive` needs loop protection that `fail` does not: "the verifier
+could not adjudicate" is far more likely to reproduce verbatim on the same source
+than "the source contradicts the card", so delete -> recompile -> inconclusive ->
+delete would re-bill the user's host-CLI account forever. Every inconclusive
+deletion therefore records (sourcePath, bounded source body hash) in
+verify-skipped.jsonl, and wiki_compile_worker.process_job skips those sources
+*before* spawning an extractor. Same body-hash suppression pattern as
+dedup-skipped.jsonl: unchanged content is never re-billed, changed content retries.
 
 Runs piggybacked from wiki_compile_worker.main() under the same per-cwd lock,
 and doubles as a standalone CLI for tests/manual runs. Silent by default (hook
@@ -29,6 +38,7 @@ from wiki_compile_enqueue import _safe_queue_path
 
 VERIFY_QUEUE_DEFAULT = ".auto-context/compile/verify-queue.jsonl"
 VERIFY_LOG_DEFAULT = ".auto-context/compile/verify-log.jsonl"
+VERIFY_SKIPPED_DEFAULT = ".auto-context/compile/verify-skipped.jsonl"
 VERDICT_VALUES = {"pass", "fail", "inconclusive"}
 MAX_SOURCES = 3
 
@@ -61,6 +71,91 @@ def set_verify_cooldown(root: Path, seconds: int) -> None:
 def log_verdict(log_path: Path, payload: dict) -> None:
     wcw.append_jsonl(log_path, payload)
     wc.trim_jsonl(log_path)
+
+
+def verify_skipped_path(root: Path, vcfg: dict) -> Path | None:
+    return wcw.safe_compile_file(root, vcfg.get("skippedPath", VERIFY_SKIPPED_DEFAULT))
+
+
+def load_verify_suppressions(path: Path | None) -> dict[str, str]:
+    """sourcePath -> bounded body hash that produced an unadjudicable card.
+
+    Append-only file read in order, so LAST record per source path wins (same
+    semantics as wiki_dedup_scan.load_skip_suppressions). Malformed rows are
+    ignored — fail-open means "compile it", i.e. spend tokens rather than lose
+    a card, which is the safe direction for a cost guard that can't read itself.
+    """
+    suppressions: dict[str, str] = {}
+    if path is None:
+        return suppressions
+    for row in wc.read_jsonl(path):
+        source_path = row.get("sourcePath")
+        body_hash = row.get("sourceBodyHash")
+        if not (isinstance(source_path, str) and source_path and isinstance(body_hash, str) and body_hash):
+            continue
+        suppressions[source_path] = body_hash
+    return suppressions
+
+
+def record_machine_delete(root: Path, compile_cfg: dict, record: dict, verdict: str) -> None:
+    """Mark the manifest so the next compile does not tombstone this target.
+
+    wiki_compile's delete-detection reads "manifest says it existed + file gone" as a
+    deliberate user deletion and tombstones the identity permanently. Without this
+    row, a verify delete would suppress the card forever — contradicting the reason
+    delete is preferable to contested (fix the source, get a fresh card). Fail-open:
+    an unwritable manifest degrades to today's tombstone behaviour, never to a crash.
+    """
+    path = wcw.safe_compile_file(root, compile_cfg.get("manifestPath", ".auto-context/compile/generated-manifest.jsonl"))
+    if path is None:
+        return
+    # targetPath만 담아 same_generated_identity가 이 카드에만 매칭되게 한다
+    # (sourceHash/canonicalKey를 넣으면 다른 카드까지 잘못 매칭될 수 있음).
+    wc.append_jsonl(path, {
+        "ts": wcw.now_iso(),
+        "action": wc.MACHINE_DELETE_ACTION,
+        "status": "deleted",
+        "targetPath": record.get("targetPath", ""),
+        "verdict": verdict,
+        "engine": record.get("engine", ""),
+    })
+    wc.compact_manifest(path)
+
+
+def record_verify_suppression(
+    root: Path, vcfg: dict, sources: list[dict], record: dict, verdict: str
+) -> int:
+    """Mark every source of a deleted card so it is not recompiled unchanged.
+
+    This doubles as the DURABLE audit trail for inconclusive deletions: unlike
+    verify-log.jsonl it is never trim_jsonl'd, because dropping a row here both
+    loses the deletion record AND reopens the billing loop it was written to
+    close. Rows carry verdict/reasons/targetPath so a deletion stays explainable
+    after the log has rotated.
+
+    Hashes are of the same maxSourceChars-bounded slice the extractor saw, so
+    wiki_compile_worker's pre-extraction check compares like with like.
+    """
+    path = verify_skipped_path(root, vcfg)
+    if path is None:
+        return 0
+    written = 0
+    for src in sources:
+        rel = src.get("path")
+        content = src.get("content")
+        if not (isinstance(rel, str) and rel and isinstance(content, str)):
+            continue
+        wc.append_jsonl(path, {
+            "sourcePath": rel,
+            "sourceBodyHash": wc.source_body_hash(content),
+            "targetPath": record.get("targetPath", ""),
+            "verdict": verdict,
+            "reasons": record.get("reasons", []),
+            "engine": record.get("engine", ""),
+            "deletedAt": wcw.now_iso(),
+        })
+        written += 1
+    return written
 
 
 def reindex_wiki(root: Path, config: dict) -> None:
@@ -214,26 +309,45 @@ def process_verify_job(
         reindex_wiki(root, config)
         log_verdict(log_path, {**record, "result": "verified"})
         return True, False
-    if verdict == "fail":
-        on_fail = vcfg.get("onFail", "delete")
-        if on_fail == "delete":
-            # tombstone은 세우지 않는다 — 소스가 고쳐지면 재컴파일→재검증이 다시 열려야 한다.
-            target.unlink(missing_ok=True)
-            reindex_wiki(root, config)
-            log_verdict(log_path, {**record, "result": "deleted"})
-        elif on_fail == "contested":
-            wc.patch_frontmatter_fields(target, {
-                "status": "contested",
-                "verifiedBy": engine or "unknown",
-                "verifiedAt": wcw.now_iso(),
-            })
-            reindex_wiki(root, config)
-            log_verdict(log_path, {**record, "result": "contested"})
-        else:
-            log_verdict(log_path, {**record, "result": "kept"})
-        return True, False
-    log_verdict(log_path, {**record, "result": "inconclusive"})
+    # fail/inconclusive는 같은 값 집합(delete|contested|none)을 각자 키로 고른다.
+    # 여기까지 왔다는 것은 verifier가 유효 JSON verdict를 반환했다는 뜻이다 — CLI 부재(127)와
+    # timeout/실행 실패는 위에서 이미 큐 보존으로 빠져나갔으므로 transient가 삭제로 흐를 수 없다.
+    action = vcfg.get("onFail", "delete") if verdict == "fail" else vcfg.get("onInconclusive", "delete")
+    apply_negative_verdict(
+        root, config, compile_cfg, vcfg, target, engine, action, verdict, sources, record, log_path
+    )
     return True, False
+
+
+def apply_negative_verdict(
+    root: Path, config: dict, compile_cfg: dict, vcfg: dict, target: Path, engine: str,
+    action: str, verdict: str, sources: list[dict], record: dict, log_path: Path,
+) -> None:
+    """Apply a fail/inconclusive verdict. Only inconclusive leaves a suppression marker."""
+    if action == "delete":
+        # tombstone은 세우지 않는다 — 소스가 고쳐지면 재컴파일→재검증이 다시 열려야 한다.
+        target.unlink(missing_ok=True)
+        record_machine_delete(root, compile_cfg, record, verdict)
+        suppressed = 0
+        if verdict == "inconclusive":
+            # fail은 판정이 결정적이라 마커가 없어도 되지만, inconclusive는 같은 소스에서
+            # 재현될 확률이 높아 마커 없이는 재컴파일→재삭제 과금 루프가 열린다.
+            suppressed = record_verify_suppression(root, vcfg, sources, record, verdict)
+        reindex_wiki(root, config)
+        log_verdict(log_path, {**record, "result": "deleted", "suppressedSources": suppressed})
+        return
+    if action == "contested":
+        wc.patch_frontmatter_fields(target, {
+            "status": "contested",
+            "verifiedBy": engine or "unknown",
+            "verifiedAt": wcw.now_iso(),
+        })
+        reindex_wiki(root, config)
+        log_verdict(log_path, {**record, "result": "contested"})
+        return
+    # none: 카드를 건드리지 않는다. inconclusive에서는 이것이 0.x 하위호환 경로 —
+    # generated로 남아 recallVerifiedOnly 기본값 아래 recall에서 제외된다.
+    log_verdict(log_path, {**record, "result": "inconclusive" if verdict == "inconclusive" else "kept"})
 
 
 def _dedup_by_target(rows: list) -> list:

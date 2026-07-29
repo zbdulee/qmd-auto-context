@@ -299,6 +299,7 @@ jq -c 'select(.event=="qmd_recall_shadow" and .verdict.selected_empty_raw_nonemp
       "enabled": true,
       "timeout": 120,
       "onFail": "delete",
+      "onInconclusive": "delete",
       "cooldownSeconds": 600,
       "maxPerRun": 3
     }
@@ -310,9 +311,52 @@ jq -c 'select(.event=="qmd_recall_shadow" and .verdict.selected_empty_raw_nonemp
 |---|---:|---|
 | `compile.verify.enabled` | `true` | 자동 검증 사용 여부입니다. |
 | `compile.verify.timeout` | `120` | 검증 실행 timeout(초)입니다. |
-| `compile.verify.onFail` | `"delete"` | 검증 실패 시 동작입니다. 허용값은 `delete`, `contested`, `none`입니다. |
+| `compile.verify.onFail` | `"delete"` | 검증 실패(카드가 원문과 모순) 시 동작입니다. 허용값은 `delete`, `contested`, `none`입니다. |
+| `compile.verify.onInconclusive` | `"delete"` | 검증 판정 불가(verifier가 대조하지 못함) 시 동작입니다. 값 집합은 `onFail`과 같습니다. `none`이 "현행 유지"(카드를 `generated`로 남김)입니다. |
 | `compile.verify.cooldownSeconds` | `600` | verifier 실패/timeout 뒤 재시도 cooldown입니다. |
 | `compile.verify.maxPerRun` | `3` | 한 번에 처리할 verify job 수입니다. |
+| `compile.verify.skippedPath` | `.auto-context/compile/verify-skipped.jsonl` | inconclusive 삭제 억제 마커 파일입니다. |
+
+#### `onInconclusive` 기본값이 `delete`인 이유
+
+이 플러그인은 **사람 검수를 전제하지 않습니다.** 사람의 개입은 승인이 아니라 삭제이고,
+불변식은 "살아있는 카드 = 기계 검수를 통과한 카드"입니다. `recallVerifiedOnly` 기본값이
+`true`이므로 `generated`로 남은 카드는 recall에서 영구 제외되고, 사람 검수가 없으면
+그 상태를 벗어날 경로는 소스 변경뿐입니다. 실측(service-engineering)에서 verify 판정의
+**21%가 inconclusive**였고 전부 이 사장 상태였습니다. 그래서 `onFail`과 같이 삭제합니다.
+
+**이 기본값은 기존 사용자에게 파괴적 변경입니다** — 0.x에서 `generated`로 남던 카드가
+업그레이드 후 삭제됩니다. 기존 동작을 유지하려면 `"onInconclusive": "none"`을 명시하십시오.
+
+#### 억제 마커 (`verify-skipped.jsonl`)
+
+`inconclusive`는 `fail`과 성질이 다릅니다. `fail`은 "카드가 원문과 모순"이라 판정이
+결정적이지만, `inconclusive`는 "verifier가 판정하지 못함"이라 같은 소스·같은 카드에서
+**재현될 확률이 높습니다.** 억제 장치가 없으면 소스 재큐잉(sync mtime 변화, checkout 등)
+마다 재컴파일 → 다시 inconclusive → 다시 삭제가 반복되고, 매 반복이 host CLI 호출이므로
+**토큰 비용이 사용자 계정으로 청구됩니다.**
+
+그래서 inconclusive 삭제 시 카드의 각 소스에 대해 `(sourcePath, sourceBodyHash)`를
+`verify-skipped.jsonl`에 기록합니다. `sourceBodyHash`는 extractor에 실제로 전달된
+`maxSourceChars` 절단 본문의 해시입니다. 다음 compile에서 같은 소스의 현재 본문 해시가
+기록과 일치하면 **extractor를 띄우기 전에 skip**하고(`candidates.jsonl`에
+`verify_inconclusive_suppressed` 사유로 남김), 소스 본문이 실제로 바뀌면 해시가 달라져
+자동으로 재시도됩니다. 마커 파일을 지우면 즉시 재시도됩니다.
+
+이 파일은 `dedup-skipped.jsonl`과 같은 이유로 **256KB 트림 대상이 아닙니다.** 한 줄
+유실은 (a) 삭제 감사 추적 유실과 (b) 과금 루프 재개를 동시에 뜻하기 때문입니다.
+`verify-log.jsonl`은 pass 레코드가 대부분을 차지하는 순수 로그라 트림을 유지하지만,
+삭제 레코드는 `verify-skipped.jsonl`에 `verdict`/`reasons`/`targetPath`/`deletedAt`과 함께
+중복 보존되므로 로그가 회전한 뒤에도 삭제 사유를 규명할 수 있습니다.
+
+기계 삭제는 `generated-manifest.jsonl`에 `action: "verify-deleted"` 행으로 남습니다.
+이것이 없으면 다음 compile의 삭제 감지가 파일 부재를 **사용자의 의도적 삭제**로 읽어
+tombstone(영구 억제)을 세우고, "소스를 고치면 재생성된다"는 전제가 깨집니다.
+사람이 직접 지운 카드는 이 마커가 없으므로 기존대로 tombstone 처리됩니다.
+
+`reviewed: true` 카드와 `is_auto_writable_page` 보호 집합은 삭제 대상이 아닙니다.
+CLI 부재(exit 127)·timeout 같은 **transient 실패는 inconclusive가 아니며** 큐 보존 +
+cooldown 경로를 그대로 타므로, verifier CLI가 없는 머신에서 카드가 삭제되지 않습니다.
 
 ### Semantic Dedup
 

@@ -135,14 +135,89 @@ test('verify fail + onFail=contested → status contested 패치(파일 보존)'
   } finally { rmSync(project, { recursive: true, force: true }); }
 });
 
-test('inconclusive → generated 유지 + log 기록', () => {
+test('inconclusive + onInconclusive=none → generated 유지 + log 기록 (하위호환)', () => {
   const verifier = mockVerifier({ verdict: 'inconclusive', claims: [], reasons: ['source truncated'] });
-  const project = setupProject({ extractorArgv: ['python3', verifier] });
+  const project = setupProject({ extractorArgv: ['python3', verifier], verify: { onInconclusive: 'none' } });
   try {
     runVerifyWorker(project);
     assert.match(readFileSync(join(project, CARD_REL), 'utf8'), /^status: generated$/m);
     const log = jsonl(join(project, '.auto-context', 'compile', 'verify-log.jsonl'));
     assert.equal(log[0].result, 'inconclusive');
+    assert.equal(jsonl(join(project, '.auto-context', 'compile', 'verify-skipped.jsonl')).length, 0,
+      '삭제하지 않았으면 억제 마커도 남기지 않는다');
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});
+
+test('inconclusive + onInconclusive 기본(delete) → 카드 삭제 + 억제 마커 + 삭제 사유 로그', () => {
+  const verifier = mockVerifier({ verdict: 'inconclusive', claims: [], reasons: ['verifier could not adjudicate'] });
+  const project = setupProject({ extractorArgv: ['python3', verifier] });
+  const dirtyQueue = join(mkdtempSync(join(tmpdir(), 'dirty-vi-')), 'queue');
+  try {
+    runVerifyWorker(project, { QMD_DIRTY_QUEUE: dirtyQueue });
+    assert.equal(existsSync(join(project, CARD_REL)), false, '판정 불가 카드도 삭제');
+    assert.equal(jsonl(join(project, '.auto-context', 'compile', 'tombstones.jsonl')).length, 0,
+      'tombstone 없음 — 소스 변경 시 재생성 가능');
+    assert.match(readFileSync(dirtyQueue, 'utf8'), /^proj-wiki\t/, '삭제 후 wiki 재인덱싱');
+
+    const log = jsonl(join(project, '.auto-context', 'compile', 'verify-log.jsonl'));
+    assert.equal(log[0].result, 'deleted');
+    assert.equal(log[0].verdict, 'inconclusive', '삭제 사유(verdict) 추적 가능');
+    assert.equal(log[0].reasons[0], 'verifier could not adjudicate');
+    assert.equal(log[0].suppressedSources, 1);
+
+    const skipped = jsonl(join(project, '.auto-context', 'compile', 'verify-skipped.jsonl'));
+    assert.equal(skipped.length, 1);
+    assert.equal(skipped[0].sourcePath, 'docs/source.md');
+    assert.equal(skipped[0].verdict, 'inconclusive');
+    assert.equal(skipped[0].targetPath, CARD_REL);
+    assert.match(skipped[0].sourceBodyHash, /^[a-f0-9]{32}$/);
+    assert.ok(skipped[0].deletedAt, '삭제 시각 기록 — verify-log 트림 후에도 남는 감사 추적');
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});
+
+test('inconclusive delete: reviewed 카드는 삭제되지 않는다 (사람 판단 보호)', () => {
+  const verifier = mockVerifier({ verdict: 'inconclusive', claims: [], reasons: ['unclear'] });
+  const project = setupProject({ extractorArgv: ['python3', verifier], cardStatus: 'reviewed' });
+  try {
+    runVerifyWorker(project);
+    assert.equal(existsSync(join(project, CARD_REL)), true, 'reviewed 카드는 기계 삭제 대상 아님');
+    assert.match(readFileSync(join(project, CARD_REL), 'utf8'), /^status: reviewed$/m);
+    const log = jsonl(join(project, '.auto-context', 'compile', 'verify-log.jsonl'));
+    assert.equal(log[0].reason, 'not_generated');
+    assert.equal(jsonl(join(project, '.auto-context', 'compile', 'verify-skipped.jsonl')).length, 0);
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});
+
+test('inconclusive + onInconclusive=contested → 파일 보존 + status contested', () => {
+  const verifier = mockVerifier({ verdict: 'inconclusive', claims: [], reasons: ['unclear'] });
+  const project = setupProject({ extractorArgv: ['python3', verifier], verify: { onInconclusive: 'contested' } });
+  try {
+    runVerifyWorker(project);
+    assert.match(readFileSync(join(project, CARD_REL), 'utf8'), /^status: contested$/m);
+    assert.equal(jsonl(join(project, '.auto-context', 'compile', 'verify-skipped.jsonl')).length, 0);
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});
+
+test('transient(CLI 부재 127)는 inconclusive로 오분류되지 않는다 — 카드 보존 + 큐 보존', () => {
+  const project = setupProject({ extractorArgv: ['/nonexistent/verify-cli-xyz'] });
+  try {
+    runVerifyWorker(project);
+    assert.equal(existsSync(join(project, CARD_REL)), true, 'CLI 없는 머신에서 카드가 전멸해선 안 됨');
+    assert.match(readFileSync(join(project, '.auto-context', 'compile', 'verify-queue.jsonl'), 'utf8'), /test-card\.md/);
+    assert.equal(jsonl(join(project, '.auto-context', 'compile', 'verify-skipped.jsonl')).length, 0,
+      'transient은 억제 마커를 남기지 않는다 — CLI 설치 후 재시도되어야 함');
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});
+
+test('transient(timeout)는 inconclusive로 오분류되지 않는다 — 카드 보존 + cooldown', () => {
+  const slow = join(mkdtempSync(join(tmpdir(), 'verifier-slow-i-')), 'verify.py');
+  writeFileSync(slow, '#!/usr/bin/env python3\nimport time\ntime.sleep(5)\n');
+  const project = setupProject({ extractorArgv: ['python3', slow], verify: { timeout: 1 } });
+  try {
+    runVerifyWorker(project);
+    assert.equal(existsSync(join(project, CARD_REL)), true);
+    assert.equal(existsSync(join(project, '.auto-context', 'compile', 'verify-cooldown')), true);
+    assert.equal(jsonl(join(project, '.auto-context', 'compile', 'verify-skipped.jsonl')).length, 0);
   } finally { rmSync(project, { recursive: true, force: true }); }
 });
 
@@ -231,6 +306,116 @@ w.trim_jsonl(Path(${JSON.stringify(log)}), max_bytes=1024)
     assert.equal(rows.length, 50, '절반 유지');
     assert.equal(rows[0].i, 50, '최근 절반(뒤쪽)이 남음');
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// 루프 방지: inconclusive 삭제는 매번 host CLI 호출(=사용자 과금)을 유발하므로,
+// 같은 소스 내용이 재후보가 되면 extractor를 띄우기 전에 skip해야 한다.
+function setupLoopProject(dual) {
+  const dir = mkdtempSync(join(tmpdir(), 'qwiki-loop-'));
+  mkdirSync(join(dir, '.auto-context', 'compile'), { recursive: true });
+  mkdirSync(join(dir, '.auto-context', 'wiki'), { recursive: true });
+  mkdirSync(join(dir, 'docs'), { recursive: true });
+  writeFileSync(join(dir, '.auto-context', 'settings.json'), JSON.stringify({
+    indexing: true,
+    collections: ['proj-docs', 'proj-wiki'],
+    collectionPaths: { 'proj-docs': 'docs', 'proj-wiki': '.auto-context/wiki' },
+    collectionRoles: { 'proj-docs': 'raw', 'proj-wiki': 'wiki' },
+    wikiPath: '.auto-context/wiki',
+    compile: {
+      enabled: true,
+      mode: 'auto-wiki',
+      autoWrite: true,
+      defaultStatus: 'generated',
+      triggers: ['post_tool_source', 'manual'],
+      semanticDedup: { enabled: false },
+      extractor: { argv: ['python3', dual], timeout: 30 },
+      verify: { enabled: true, timeout: 30 },
+    },
+  }));
+  return dir;
+}
+
+function inconclusiveDualMock(counter) {
+  const dual = join(mkdtempSync(join(tmpdir(), 'dual-inc-')), 'dual.py');
+  writeFileSync(dual, `#!/usr/bin/env python3
+import json, sys
+payload = json.loads(sys.stdin.read())
+with open(${JSON.stringify(counter)}, 'a') as fh:
+    fh.write((payload.get('task') or 'extract') + '\\n')
+if payload.get('task') == 'verify':
+    print(json.dumps({'verdict': 'inconclusive', 'claims': [], 'reasons': ['verifier could not adjudicate']}))
+else:
+    print(json.dumps({'candidates': [{
+      'title': 'Loop Decision',
+      'summary': 'Durable decision: loop guard suppresses unchanged sources.',
+      'suggestedType': 'decision',
+      'confidence': 'high',
+      'targetPath': '.auto-context/wiki/decisions/loop-decision.md'
+    }]}))
+`);
+  return dual;
+}
+
+test('루프 방지: 같은 소스·같은 body-hash 재후보는 extractor 호출 없이 skip, 소스 변경 시 재시도', () => {
+  const counterDir = mkdtempSync(join(tmpdir(), 'counter-'));
+  const counter = join(counterDir, 'calls.log');
+  const dual = inconclusiveDualMock(counter);
+  const dir = setupLoopProject(dual);
+  const dirtyQueue = join(mkdtempSync(join(tmpdir(), 'dirty-loop-')), 'queue');
+  const page = join(dir, '.auto-context', 'wiki', 'decisions', 'loop-decision.md');
+  const skippedPath = join(dir, '.auto-context', 'compile', 'verify-skipped.jsonl');
+  const candidates = join(dir, '.auto-context', 'compile', 'candidates.jsonl');
+  const enqueueSource = () => writeFileSync(
+    join(dir, '.auto-context', 'compile', 'source-queue.jsonl'),
+    JSON.stringify({
+      ts: '2026-07-04T00:00:00Z',
+      trigger: 'post_tool_source',
+      engine: 'claude',
+      cwd: dir,
+      source: { kind: 'file', path: 'docs/source.md', collection: 'proj-docs' },
+    }) + '\n',
+  );
+  const runWorker = () => execFileSync('python3', ['core/wiki_compile_worker.py', '--cwd', dir, '--flush-all'], {
+    cwd: process.cwd(), encoding: 'utf8',
+    env: { ...process.env, QMD_DIRTY_QUEUE: dirtyQueue },
+  });
+  const calls = () => readFileSync(counter, 'utf8').trim().split('\n').filter(Boolean);
+
+  try {
+    writeFileSync(join(dir, 'docs', 'source.md'), '# Source\n\nDurable decision: loop guard suppresses unchanged sources.\n');
+    enqueueSource();
+    runWorker();
+    assert.equal(existsSync(page), false, '1회차: inconclusive → 카드 삭제');
+    assert.equal(jsonl(skippedPath).length, 1, '1회차: 억제 마커 기록');
+    assert.deepEqual(calls(), ['extract', 'verify'], '1회차는 extract + verify 각 1회');
+
+    // 2회차: 소스 내용 동일 — sync/mtime 변화로 재enqueue될 수 있는 현실 경로.
+    enqueueSource();
+    runWorker();
+    assert.deepEqual(calls(), ['extract', 'verify'], '2회차는 host CLI를 아예 호출하지 않는다');
+    assert.equal(existsSync(page), false);
+    const skipRow = jsonl(candidates).filter((r) => r.reason === 'verify_inconclusive_suppressed');
+    assert.equal(skipRow.length, 1, 'skip 사유가 candidates 로그에 남는다');
+    assert.equal(skipRow[0].action, 'skipped');
+
+    // 3회차: 소스 본문이 실제로 바뀌면 억제가 풀리고 다시 시도된다.
+    writeFileSync(join(dir, 'docs', 'source.md'), '# Source\n\nDurable decision: loop guard retries when the source body changes.\n');
+    enqueueSource();
+    runWorker();
+    assert.deepEqual(calls(), ['extract', 'verify', 'extract', 'verify'], '소스 변경 후 재시도');
+    assert.equal(jsonl(skippedPath).length, 2, '새 body-hash로 마커 갱신');
+    const hashes = jsonl(skippedPath).map((r) => r.sourceBodyHash);
+    assert.notEqual(hashes[0], hashes[1], '기록된 hash가 소스 내용에 따라 달라진다');
+
+    // 기계 삭제는 사용자 삭제로 오독되면 안 된다: manifest의 verify-deleted 마커가
+    // 없으면 3회차가 tombstoned로 영구 억제돼 "소스 고치면 재생성"이 성립하지 않는다.
+    assert.equal(jsonl(join(dir, '.auto-context', 'compile', 'tombstones.jsonl')).length, 0);
+    const actions = jsonl(candidates).map((r) => r.action);
+    assert.deepEqual(actions, ['created', 'skipped', 'created'], 'tombstoned 없이 재생성');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(counterDir, { recursive: true, force: true });
+  }
 });
 
 test('end-to-end 피기백: compile worker 1회 실행으로 생성→검증→verified 승격까지', () => {

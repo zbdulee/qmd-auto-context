@@ -64,8 +64,12 @@ def compile_block(root, engines=ENGINES) -> dict:
             "enabled": True,
             "timeout": 120,
             "onFail": "delete",
+            # 사람 검수가 없다는 전제에서 inconclusive도 사장이므로 fail과 같이 삭제한다.
+            # config.py의 verify 기본값과 반드시 동일해야 한다.
+            "onInconclusive": "delete",
             "queuePath": ".auto-context/compile/verify-queue.jsonl",
             "logPath": ".auto-context/compile/verify-log.jsonl",
+            "skippedPath": ".auto-context/compile/verify-skipped.jsonl",
             "cooldownSeconds": 600,
             "maxPerRun": 3,
         },

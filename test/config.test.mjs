@@ -134,8 +134,10 @@ test('wiki recall 신규 필드는 additive로 normalize 된다', () => {
       enabled: true,
       timeout: 120,
       onFail: 'delete',
+      onInconclusive: 'delete',
       queuePath: '.auto-context/compile/verify-queue.jsonl',
       logPath: '.auto-context/compile/verify-log.jsonl',
+      skippedPath: '.auto-context/compile/verify-skipped.jsonl',
       cooldownSeconds: 600,
       maxPerRun: 3,
     },
@@ -156,23 +158,26 @@ test('compile verify config: 커스텀 값 정규화 + 불량 값은 기본값 �
     compile: {
       enabled: true,
       mode: 'auto-wiki',
-      verify: { enabled: false, timeout: 60, onFail: 'contested', maxPerRun: 5 },
+      verify: { enabled: false, timeout: 60, onFail: 'contested', onInconclusive: 'none', maxPerRun: 5 },
     },
   }));
   assert.equal(cfg.compile.verify.enabled, false);
   assert.equal(cfg.compile.verify.timeout, 60);
   assert.equal(cfg.compile.verify.onFail, 'contested');
+  // 'none' = 0.x 하위호환("generated 유지") — 파괴적 기본값을 끄는 유일한 경로
+  assert.equal(cfg.compile.verify.onInconclusive, 'none');
   assert.equal(cfg.compile.verify.maxPerRun, 5);
 
   const bad = loadConfig(JSON.stringify({
     compile: {
       enabled: true,
-      verify: { enabled: 'yes', timeout: -1, onFail: 'explode', queuePath: 123 },
+      verify: { enabled: 'yes', timeout: -1, onFail: 'explode', onInconclusive: 'maybe', queuePath: 123 },
     },
   }));
   assert.equal(bad.compile.verify.enabled, true);
   assert.equal(bad.compile.verify.timeout, 120);
   assert.equal(bad.compile.verify.onFail, 'delete');
+  assert.equal(bad.compile.verify.onInconclusive, 'delete', 'onFail과 같은 값 집합 — 불량 값은 기본값 폴백');
   assert.equal(bad.compile.verify.queuePath, '.auto-context/compile/verify-queue.jsonl');
 });
 
