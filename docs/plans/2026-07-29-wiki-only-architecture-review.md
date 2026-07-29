@@ -286,9 +286,16 @@ selected:              0      ← 최종 빈 출력
      라이브 증거의 0건 케이스가 정확히 이 형태이므로 곱셈 효과만 끊으면 해소됩니다
   2. `minScore`가 rank 기반임을 문서화하고 기본값을 `topN`과 일관되게 조정
      (topN 3을 원하면 임계는 0.33 이하). 1번과 병행 가능합니다
-  3. recall도 `rerank: True`로 전환 — 점수가 실제 semantic score가 되어 세 번째 현상까지
-     해결하지만, LLM 호출 비용·지연이 붙고 데몬이 single-thread라 timeout 리스크가
-     커집니다. **1건으로 충분하다는 전제에서는 과잉일 수 있습니다**
+  3. ~~recall도 `rerank: True`로 전환~~ — **이 선택지는 무효로 판정됐습니다.**
+     P7 dedup 조사에서 rerank 경로도 `blendedScore = w*(1/rrfRank) + (1-w)*rerankScore`
+     (w=0.75 rank≤3)로 RRF 순위를 섞어 **점수 상한이 순위로 고정**됨이 실측됐습니다
+     (구간 rank1 [0.75,1.0] / rank2 [0.375,0.625] / rank3 [0.25,0.5]; novel 125카드
+     실측 rank1 {0.88,0.93} / rank2 {0.55,0.56} / rank3 [0.40,0.44] — 순위 내 분산
+     0.01~0.04 vs 순위 간 격차 0.37). 단어 하나짜리 질의가 전체 본문 질의와 같은 점수를
+     내므로 **점수는 내용이 아니라 위치를 잽니다.** 즉 어느 경로에서도 daemon score는
+     유사도가 아니어서 rerank 전환으로는 세 번째 현상(관련성 낮은 1위가 통과)이
+     해결되지 않고 LLM 비용·지연만 추가됩니다. dedup은 이 사실을 받아들여 score를 후보
+     retrieval floor로 강등하고 판정을 LLM judge로 이관했습니다(커밋 `c2138ed`)
   4. `minScore` 필터를 제거하고 `topN`만 사용
 - `docs/settings.md`의 `minScore`·`rawFallbackMinScore` 설명도 함께 고쳐야 합니다
   (현재 유사도 임계처럼 읽힙니다)
@@ -501,9 +508,25 @@ dot 검사를 받으므로 아무것도 완화되지 않습니다.** `.auto-cont
   되었는데도 잔존 근중복 10쌍이 남아 있습니다. 예:
   `첫-유료-의뢰-요양병원-야간-복도` / `첫-음지-의뢰-요양병원-야간-복도-사건` /
   `결정-첫-유료-의뢰…` 3중복, `발소리는-미끼…` / `…냉기다` 변종, `곽` 관련 4장
-- 방향: `semanticDedup.autoMergeThreshold`(현재 0.5) 같은 threshold·cosine 레버는
-  임베딩 변별력이 없어 효과가 없다는 것이 이미 확인됐습니다. LLM body 판정 강화가
-  맞는 방향입니다
+- **해소 결과 (커밋 `c2138ed`)** — 실측 진단이 예상과 달랐습니다. 원인이 둘입니다:
+  - **원인 A (주 원인): write-time gate가 신규 카드의 97.7%를 우회했습니다.** gate 조건이
+    `target_reason == "slug" and not target.exists()`였는데, extractor 프롬프트가 기존
+    카드의 `targetPath` 재사용을 권장하므로 LLM이 거의 항상 그것을 채웁니다. 그러면 gate에
+    진입조차 못 하고 곧바로 디스크에 씌었습니다 — novel `candidates.jsonl` 실측 created
+    130건 **전부**가 `targetResolution: "explicit"`(130/133 = 97.7%)이었습니다.
+    즉 threshold 문제가 아니라 **gate 자체가 우회**되고 있었습니다
+  - **원인 B: `rerank=True`도 순위 함수입니다.** 상세는 위 5.0의 선택지 3 참조.
+    자기 본문 질의는 self-match가 항상 rank1이므로 진짜 중복은 rank≥2에만 올 수 있고,
+    거기서 `autoMergeThreshold` 기본 **0.9는 수학적으로 도달 불가**(retroactive scan이
+    기본값에서 no-op)입니다. 반대로 novel의 **0.5는 "rank2를 항상 큐잉"으로 퇴화**해
+    노이즈 쌍이 페이지당 하나뿐인 큐 슬롯(`break` after first)을 소진했습니다.
+    진짜 중복 쌍(`곽-소재-브로커`/`소재-매입자-곽`, rank2 0.56)은 큐·skip·삭제 어디에도
+    없었고, 3중복 그룹은 한 멤버가 rank3(상한 0.5)에 밀려 0.5로도 불가했습니다
+- 수정: score를 후보 retrieval floor(`semanticDedup.candidateMinScore`, 기본 0.3)로만 쓰고
+  판정은 `core/wiki_dedup_judge.py`의 LLM body-vs-body 비교로 이관했습니다. gate는
+  `target.exists()`가 false인 **모든** 신규 카드에 걸립니다. **judge는 절대 merge/delete
+  하지 않고 큐에만 넣습니다.** extractor 미설정 머신은 retrieval query조차 하지 않고
+  레거시 score gate로 degrade합니다
 - 비용: 높음
 - 순서 명시: **P6 파일럿 → 중복률 측정 → P7 gate 강화 → P6 확대**. 백필은 중복을
   증폭시키므로 이 루프를 명문화해야 합니다. `wikiOnly`에서는 같은 사실의 3중복이
