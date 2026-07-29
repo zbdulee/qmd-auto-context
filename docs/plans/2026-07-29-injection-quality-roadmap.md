@@ -107,7 +107,7 @@ title: "claude-runner — 구독 기반 Claude Code headless AI 실행 계층"
 |---|---|---|
 | 1 | ✅ **완료** — 주입에 카드 본문 포함 + 경로를 Read 가능하게 | 토큰 상한 필수. `resolve_wiki_result_path` 가 실경로를 이미 계산하므로 재사용. frontmatter title 사용 |
 | 2 | ✅ **완료** — `sources.path` 주입 | 경로 안전성·존재성 검증, 중복 제거, 개수 제한. "카드 먼저, 원문은 대조 필요시" 지시 동반 |
-| 3 | `source_missing` 정책 | 현재 skip → downgrade/quarantine 결정. stale 링크가 유일 진실이 되는 것을 막음 |
+| 3 | ✅ **완료** — `source_missing` 정책 | 삭제·downgrade 없이 감지·기록·표면화 + 사람 확인 복구(재지정). 원인이 개명이라 파괴적 조치 불가 |
 | 4 | verifier engine 을 extractor 와 분리 | 문헌의 명시적 완화법. CLI 부재 시 degrade 경로 유지 |
 | 5 | raw 있는 상태에서 shadow baseline 수집 | 측정을 **앞으로 당김**. 8번의 판정 근거 |
 | 6 | 커버리지 백필 | **비용 동의 필요**(969건 ≈ 16~20M 토큰). 소량 파일럿 → 중복률·verify 적체 확인 → 확대. 선행 4건은 `bulk-wiki-backfill-spec.md` |
@@ -145,6 +145,26 @@ title: "claude-runner — 구독 기반 Claude Code headless AI 실행 계층"
   쓰인 카드는 원문 링크가 전량 사라진다 — 파서를 두 벌로 만들지 않기 위한 선택이고,
   형태별 사유가 `source_drop_reasons` 에 남는다. 3단계의 `source_missing` 신호는 이 사유와
   분리돼 있다
+
+**3단계 — `source_missing` 정책** (`docs/settings.md` "원문 소실(`source_missing`)"이 최종
+상태). 결론:
+
+- **삭제도 downgrade도 하지 않는다.** 라이브 855장 실측: 소스 전멸 25장(`generated` 18 /
+  `verified` 7), 원인은 삭제가 아니라 **개명**(`…07-20.md` → `…07-21.md`)이고 둘은
+  파일시스템만으로 구분되지 않는다. verify-fail("원문이 있는데 모순")과 달리
+  소실("원문이 없다")은 그 카드가 **유일한 기록**일 수 있다. downgrade는
+  `recallVerifiedOnly` 기본값 아래에서 그 7장을 recall에서 지워 버린다
+- **감지 경로**는 (1) `core/wiki_source_scan.py` — SessionStart **worker(백그라운드 fork)**,
+  (2) 기계 검수의 큐 경유. 카드 mtime 스냅샷은 쓸 수 없다(소스가 개명돼도 카드는 안 바뀐다)
+  → `maxCardsPerScan` + 순환 커서로 전량을 여러 회차에 덮는다
+- **원장 `source-missing.jsonl`은 트림하지 않는다.** 이 신호가 트림 대상인
+  `verify-log.jsonl`에만 남아 이미 유실되고 있었다. 누적 방어는 트림이 아니라 "상태가 바뀔
+  때만 쓴다"이고, `action`의 카드별 최신 행이 상태라 한 파일이 감사 추적 + 대기 큐를 겸한다
+- **복구는 재지정**(`wiki-source-repair` skill). 후보 제안은 제안일 뿐 자동 적용하지 않고
+  자율 resolver도 두지 않는다 — 오매칭 카드는 다음 verify에서 삭제된다
+- **주입 표식은 두지 않는다.** 2단계의 "`missing`에 `↳` 줄을 두지 않는다"와 같은 근거이고,
+  downgrade하지 않기로 한 카드에 신뢰 하향 배지를 붙이는 것은 자기모순이다. 대신
+  `cards_all_sources_missing` 로그 카운터로 "실제 주입됨"만 토큰 0으로 관측한다
 
 ### 단계별 주의
 

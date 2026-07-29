@@ -340,6 +340,42 @@ test('소스 전부 소실 → source_missing skip, generated 유지(미검수 �
   } finally { rmSync(project, { recursive: true, force: true }); }
 });
 
+test('source_missing은 트림되지 않는 원장(source-missing.jsonl)에도 남는다', () => {
+  const verifier = mockVerifier({ verdict: 'pass', claims: [], reasons: [] });
+  const project = setupProject({ extractorArgv: ['python3', verifier], withSource: false });
+  try {
+    runVerifyWorker(project);
+    const rows = jsonl(join(project, '.auto-context', 'compile', 'source-missing.jsonl'));
+    assert.equal(rows.length, 1, 'verify-log.jsonl은 트림 대상이라 이 신호가 유실됐다 — 원장에 별도 보존');
+    assert.equal(rows[0].targetPath, CARD_REL);
+    assert.equal(rows[0].action, 'detected');
+    assert.equal(rows[0].origin, 'verify');
+    assert.equal(rows[0].status, 'generated');
+    assert.deepEqual(rows[0].missingSources, ['docs/source.md']);
+    // 카드는 그대로 남는다(삭제·downgrade 없음).
+    assert.equal(existsSync(join(project, CARD_REL)), true);
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});
+
+test('소스가 살아 있으면(읽기 실패 등) 원장에 소실로 기록하지 않는다', () => {
+  const verifier = mockVerifier({ verdict: 'pass', claims: [], reasons: [] });
+  const project = setupProject({ extractorArgv: ['python3', verifier] });
+  try {
+    // 소스가 존재하지만 job이 kind를 file이 아닌 것으로 들고 있는 경우: load_sources는
+    // 0건이지만 "원문 소실"은 아니다.
+    writeFileSync(join(project, '.auto-context', 'compile', 'verify-queue.jsonl'), JSON.stringify({
+      ts: '2026-07-04T00:00:00Z',
+      targetPath: CARD_REL,
+      sources: [{ kind: 'url', path: 'https://example.com/x' }],
+      sourceHash: HASH,
+      engine: 'claude',
+      trigger: 'post_tool_source',
+    }) + '\n');
+    runVerifyWorker(project);
+    assert.equal(existsSync(join(project, '.auto-context', 'compile', 'source-missing.jsonl')), false);
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});
+
 test('trim_jsonl: 상한 초과 시 최근 절반만 유지', () => {
   const dir = mkdtempSync(join(tmpdir(), 'trim-'));
   const log = join(dir, 'verify-log.jsonl');

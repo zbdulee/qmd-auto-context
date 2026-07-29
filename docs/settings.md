@@ -311,7 +311,9 @@ median 1 / p95 1 / max 4입니다. `3`이면 848/849(99.9%)가 절단 없이 들
 (의도된 동작입니다). 깨진 경로를 주면 모델이 열어 보고 실패한 뒤 복구해야 하고, "원문
 없음" 표식을 붙이면 stale 카드마다 토큰만 늘고 모델이 할 수 있는 일은 없습니다.
 `duplicate`는 같은 경로가 상위 카드 아래에 이미 있으므로 손실이 아닙니다. stale 링크는
-주입에서 감추는 것이 아니라 소스 쪽에서 고쳐야 하는 문제입니다(로드맵 3단계).
+주입에서 감추는 것이 아니라 소스 쪽에서 고쳐야 하는 문제입니다 —
+그 경로가 "원문 소실(`source_missing`)" 절입니다. 같은 줄의 `cards_all_sources_missing`은
+**살아 있는 원문이 하나도 없는 카드가 실제로 주입된 수**입니다(카드 사이 중복 제거 전 기준).
 
 ### minScore는 유사도가 아니라 순위입니다
 
@@ -572,6 +574,70 @@ tombstone(영구 억제)을 세우고, "소스를 고치면 재생성된다"는 
 `reviewed: true` 카드와 `is_auto_writable_page` 보호 집합은 삭제 대상이 아닙니다.
 CLI 부재(exit 127)·timeout 같은 **transient 실패는 inconclusive가 아니며** 큐 보존 +
 cooldown 경로를 그대로 타므로, verifier CLI가 없는 머신에서 카드가 삭제되지 않습니다.
+
+### 원문 소실 (`source_missing`)
+
+카드의 `sources[].path`가 가리키는 파일이 **전부** 사라진 상태입니다. 이 카드는 원문
+대조가 불가능하고, `verified`라면 캐논급으로 주입되면서도 검증할 수단이 없습니다
+(로드맵 3단계).
+
+```json
+{
+  "compile": {
+    "sourceMissingPath": ".auto-context/compile/source-missing.jsonl",
+    "sourceScan": { "enabled": true, "maxCardsPerScan": 300 }
+  }
+}
+```
+
+| Option | Default | Description |
+|---|---:|---|
+| `compile.sourceMissingPath` | `.auto-context/compile/source-missing.jsonl` | 감지·복구 원장 경로입니다(**트림하지 않습니다**). |
+| `compile.sourceScan.enabled` | `true` | 소스 소실 스캔 사용 여부입니다. |
+| `compile.sourceScan.maxCardsPerScan` | `300` | 한 회차에 검사할 카드 수 상한입니다. 초과분은 순환 커서로 다음 회차에 검사합니다(`QMD_SOURCE_SCAN_MAX`로 override). |
+
+**삭제도 downgrade도 하지 않습니다.** 라이브 855장 실측에서 소스 전멸 카드는 25장
+(`generated` 18 / `verified` 7)이었고, 사라진 원인은 삭제가 아니라 **개명**
+(`…07-20.md` → `…07-21.md`)이었습니다. 개명과 삭제는 파일시스템만으로 구분할 수 없으므로
+소실을 근거로 카드를 지우면 날짜 개명 한 번에 25장이 날아갑니다. `verify.onFail`의 삭제와
+성질이 다릅니다 — fail은 "원문이 있는데 카드와 모순"(카드가 틀렸고 소스를 고치면 재생성)이고
+소실은 "원문이 없다"(그 카드가 그 지식의 **유일한 기록**일 수 있음)입니다.
+자동 downgrade(`verified` → `generated`)도 하지 않습니다: 검증은 수행 시점에 유효했고,
+downgrade하면 `recallVerifiedOnly`(기본 `true`) 아래에서 그 카드가 recall에서 사라져
+유일한 기록을 숨기게 됩니다.
+
+**감지 경로 두 개.** (1) `core/wiki_source_scan.py` — SessionStart의 **백그라운드 worker**
+에서 실행됩니다(blocking hook 예산을 쓰지 않고, 데몬·embed·LLM에 의존하지 않는 stat 검사라
+embed 서브셸 안에 두지 않습니다). 카드 mtime 스냅샷을 쓰지 않는 이유는 **소스가 개명돼도
+카드 파일은 바뀌지 않기 때문**입니다 — 그래서 순환 커서로 전량을 여러 회차에 나눠 봅니다.
+(2) 기계 검수(`wiki_verify_worker`)가 큐 잡에서 소스 전멸을 만났을 때. 소스 존재 판정은
+주입 경로와 **같은 함수**(`recall.resolve_existing_source`)를 씁니다.
+
+**일부만 소실은 대상이 아닙니다.** 살아 있는 원문이 하나라도 있으면 대조가 가능하므로
+"stale 링크가 유일 진실"이 성립하지 않습니다. 소스 항목이 0인 메타 문서(SCHEMA/index/log)와
+지원하지 않는 `sources` 표기(block mapping·여러 줄 flow)도 대상이 아닙니다 — 후자는
+"원문이 없다"가 아니라 "판정 불가"입니다.
+
+**원장 = 감사 추적 + 대기 큐.** 행마다 `action`(`detected`/`repointed`/`dismissed`)을 담고
+카드별 **최신 행이 상태**입니다(대기 = 최신 행이 `detected`). 이 신호는 원래
+`verify-log.jsonl`에만 남았고 그 파일은 트림 대상이라 **이미 유실되고 있었습니다**
+(실측: 3주치가 밀려나갔음) — `verify-deleted.jsonl`과 같은 이유로 이 원장은 트림하지
+않습니다. 무한 누적을 막는 것은 트림이 아니라 **상태가 바뀔 때만 쓴다**는 규칙입니다:
+같은 소실 집합으로 이미 대기/거절 중이면 아무것도 쓰지 않으므로 스캔을 몇 번 돌려도
+행이 늘지 않습니다. 원문 본문은 담지 않습니다.
+
+**복구는 삭제가 아니라 재지정입니다.** SessionStart가 대기 건수를 1줄 알리고
+(`notice_once`, TTL 4h, 조건 해소 시 재무장), `wiki-source-repair` skill이 항목별로
+사람 확인을 받아 `sources[].path`만 고쳐 씁니다. 후보 제안(같은 디렉터리 안 파일명
+유사도)은 **제안일 뿐** 자동 적용하지 않습니다 — 잘못 매칭하면 카드가 무관한 원문을
+가리키고 그 상태로 verify가 돌면 카드가 삭제됩니다. 그래서 자율 resolver 에이전트도
+두지 않습니다(dedup/review와 다른 점). `status`는 이 경로에서 절대 바뀌지 않습니다.
+
+**주입 표식은 두지 않습니다.** 미검수 카드의 ` (미검수)` 배지와 달리 이 카드는 검수
+시점에 유효했고 downgrade하지 않기로 했으므로 모델에게 줄 지시가 없습니다. 그리고 2단계
+결정("`missing` 항목에는 `↳` 줄을 두지 않는다 — 깨진 경로 표식은 토큰만 늘리고 모델이 할
+수 있는 일이 없다")과 방향을 맞춥니다. 대신 진단 로그의 `cards_all_sources_missing`이
+"소스가 전멸한 카드가 실제로 주입됐다"는 사실을 토큰 비용 0으로 남깁니다.
 
 ### Semantic Dedup
 

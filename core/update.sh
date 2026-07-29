@@ -673,6 +673,15 @@ run_update() {
     write_failure_status "qmd update" "$LAST_OUT"
     log "END rc=1 - status written to $STATUS"
   fi
+
+  # 소스 소실 스캔(로드맵 3단계). 여기(worker 경로)인 이유:
+  #   (a) blocking hook 예산을 쓰지 않는다 — worker는 이미 백그라운드 fork다.
+  #   (b) 데몬·embed·LLM에 의존하지 않는 파일시스템 stat 검사이므로 dedup 스캔처럼
+  #       embed 서브셸 안에 둘 이유가 없다. 그 안에 두면 embed lock 경합이나
+  #       `qmd update` 실패로 소실 감지가 조용히 건너뛰어진다.
+  #   (c) 새 스케줄러를 만들지 않고 기존 배수 경로를 재사용한다.
+  # 비용 상한과 순환 커서는 스캐너 안에 있다(compile.sourceScan.maxCardsPerScan).
+  python3 "$(dirname "$0")/wiki_source_scan.py" --cwd "$workdir" >> "$LOG" 2>&1 || true
 }
 
 main() {
@@ -798,6 +807,31 @@ print(rel if isinstance(rel, str) and rel else ".auto-context/compile/merge-need
     fi
   else
     notice_clear wiki-review "$workdir"
+  fi
+
+  # 소스 소실 표면화(로드맵 3단계): 원장(source-missing.jsonl)의 대기 건수를 1줄 알린다.
+  # dedup/merge 힌트와 **같은 notice_once 구조**를 쓰되 모델용 spawn 힌트는 두지 않는다 —
+  # 복구(소스 재지정)는 사람이 "이 파일이 그 문서다"를 확인해야 하는 판단이고, 자율
+  # 에이전트가 잘못 매칭하면 카드가 무관한 원문을 가리킨 채 verify에서 삭제될 수 있다.
+  # 대기 판정("최신 행이 detected")은 Python이 SSOT다(bash에서 재구현하지 않는다).
+  # compile 디렉터리가 없으면 원장도 없으므로 python3 호출 자체를 생략한다.
+  if [ -d "$workdir/.auto-context/compile" ]; then
+    source_missing_json="$(python3 "$(dirname "$0")/wiki_source_missing.py" --cwd "$workdir" --pending-summary 2>/dev/null || true)"
+    source_missing_pending="$(printf '%s' "$source_missing_json" | python3 -c 'import json,sys
+try:
+    print(int(json.load(sys.stdin).get("pending") or 0))
+except Exception:
+    print(0)' 2>/dev/null || echo 0)"
+    source_missing_verified="$(printf '%s' "$source_missing_json" | python3 -c 'import json,sys
+try:
+    print(int(json.load(sys.stdin).get("verified") or 0))
+except Exception:
+    print(0)' 2>/dev/null || echo 0)"
+    if [ "${source_missing_pending:-0}" -gt 0 ] 2>/dev/null; then
+      notice_once source-missing "$workdir" "[qmd] wiki 카드 원문 소실 ${source_missing_pending}건 대기(검수 카드 ${source_missing_verified}건) — 고치려면 '/wiki-source-repair' 또는 '소스 소실 카드 고쳐줘'라고 요청하세요."
+    else
+      notice_clear source-missing "$workdir"
+    fi
   fi
 
   # 헬스체크: config·reason 검사 통과 후, fork 직전 1회 실행 (main() 호출에서만).

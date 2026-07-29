@@ -2,14 +2,14 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 
-test("manual skills expose enable-compile sync query update wiki-compile wiki-review wiki-dedup only; hint remains hook-only", () => {
+test("manual skills expose enable-compile sync query update wiki-compile wiki-review wiki-dedup wiki-source-repair only; hint remains hook-only", () => {
   const skillDirs = readdirSync("skills", { withFileTypes: true })
     .filter((entry) => entry.isDirectory())
     .map((entry) => entry.name)
     .filter((name) => name !== "qmd")
     .sort();
 
-  assert.deepEqual(skillDirs, ["enable-compile", "query", "sync", "update", "wiki-compile", "wiki-dedup", "wiki-review"]);
+  assert.deepEqual(skillDirs, ["enable-compile", "query", "sync", "update", "wiki-compile", "wiki-dedup", "wiki-review", "wiki-source-repair"]);
   assert.equal(existsSync("skills/hint"), false);
   assert.equal(existsSync("test/hint-skill.test.mjs"), false);
 });
@@ -25,7 +25,7 @@ test("plugin descriptions list manual skills without hint", () => {
 
   for (const file of files) {
     const text = readFileSync(file, "utf8");
-    assert.match(text, /sync\/query\/update\/wiki-compile\/wiki-review\/wiki-dedup\/enable-compile manual skills/);
+    assert.match(text, /sync\/query\/update\/wiki-compile\/wiki-review\/wiki-dedup\/wiki-source-repair\/enable-compile manual skills/);
     assert.doesNotMatch(text, /sync\/query\/update\/wiki-compile\/wiki-review\/hint manual skills/);
   }
 });

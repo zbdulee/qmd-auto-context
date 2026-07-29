@@ -464,11 +464,59 @@ def source_parse_reason(entry: str, issue: str) -> str:
     return SOURCE_PARSE_REASONS.get(issue, "parse_failed")
 
 
+def resolve_existing_source(raw_path: str, project_root: Path,
+                            allow_roots: list[Path]) -> tuple[Path | None, str]:
+    """경로 문자열 하나 → (존재가 확인된 실경로, 실패 사유). **소스 존재 판정 SSOT.**
+
+    세 호출부가 이 함수를 공유한다 — 주입(`resolve_source_path`), 기계 검수
+    (`wiki_verify_worker`가 `wiki_source_missing`을 경유), 소실 스캔
+    (`wiki_source_scan`). 판정이 갈리면 "주입은 링크를 지웠는데 스캔은 정상으로 본다"
+    같은 모순이 생기고, 이 저장소는 판정 이중화로 여러 번 깨졌다.
+    사유 값(`too_long`/`outside_root`/`missing`)과 검사 순서는 그대로 유지한다.
+    """
+    if len(raw_path) > MAX_SOURCE_PATH_CHARS:
+        # resolve/stat 전에 본다 — 비정상 길이 입력에 syscall을 쓰지 않는다.
+        return None, "too_long"
+    resolved = qmd_resolve_paths.contained_path(project_root, raw_path, allow_roots)
+    if resolved is None:
+        return None, "outside_root"
+    try:
+        if not resolved.is_file():
+            return None, "missing"
+    except OSError:
+        return None, "missing"
+    return resolved, ""
+
+
+def classify_source_entry(entry: str, project_root: Path,
+                          allow_roots: list[Path]) -> tuple[Path | None, str, str]:
+    """sources 항목 하나 → (존재하는 실경로, 실패 사유, 표기된 원본 path 문자열).
+
+    표시(한 줄 강제·표시 길이) **전까지의** 판정이다. 표시 규칙은 주입 전용이므로
+    소실 스캔·검수는 여기까지만 쓴다. 세 번째 값은 카드를 고칠 때(`wiki_source_repair`)
+    필요한 "카드에 적힌 그대로의 경로"다 — 여기서 내주지 않으면 호출부가 flow mapping을
+    한 번 더 파싱해야 하고 그것이 곧 판정 이중화다.
+    """
+    fields, issue = yaml_scalars.load_flow_mapping(entry)
+    raw_path = fields.get("path") if isinstance(fields.get("path"), str) else ""
+    if not raw_path or not raw_path.strip():
+        if issue:
+            return None, source_parse_reason(entry, issue), ""
+        # `{kind: unknown}`(소스 없음)이 여기 온다 — 정상 카드이므로 사유만 세고 넘어간다.
+        return None, "no_path", ""
+    if fields.get("kind") != SOURCE_KIND_FILE:
+        return None, "kind_not_file", raw_path
+    resolved, reason = resolve_existing_source(raw_path, project_root, allow_roots)
+    return resolved, reason, raw_path
+
+
 def resolve_source_path(entry: str, project_root: Path, cwd: str,
                         allow_roots: list[Path]) -> tuple[str, str]:
     """sources 항목 하나 → (모델이 Read할 수 있는 표시 경로, 실패 사유).
 
-    `sources[].path`는 **extractor(모델) 출력**이므로 신뢰 입력이 아니다. 다섯 가지를 본다:
+    `sources[].path`는 **extractor(모델) 출력**이므로 신뢰 입력이 아니다. 다섯 가지를 본다
+    (1~5의 판정은 `classify_source_entry`/`resolve_existing_source`가 SSOT이고 여기서는
+    표시 규칙만 더한다):
     1. kind — `file`만 원문 경로로 쓴다(`kind_not_file`). `{kind:"url", path:"docs/x.md"}`
        처럼 로컬 경로 모양의 값이면 원문으로 주입돼 버리고, 반대로 실제 url/slack 소스는
        `missing`으로 빠져 **사유가 틀린 채** 집계된다 — `source_missing` 정책(로드맵 3단계)이
@@ -487,26 +535,9 @@ def resolve_source_path(entry: str, project_root: Path, cwd: str,
     기준 base가 project_root인 이유: `wiki_compile_enqueue._source_record`가 경로를
     project_root 상대 POSIX로 기록한다(cwd 상대가 아니다).
     """
-    fields, issue = yaml_scalars.load_flow_mapping(entry)
-    raw_path = fields.get("path") if isinstance(fields.get("path"), str) else ""
-    if not raw_path or not raw_path.strip():
-        if issue:
-            return "", source_parse_reason(entry, issue)
-        # `{kind: unknown}`(소스 없음)이 여기 온다 — 정상 카드이므로 사유만 세고 넘어간다.
-        return "", "no_path"
-    if fields.get("kind") != SOURCE_KIND_FILE:
-        return "", "kind_not_file"
-    if len(raw_path) > MAX_SOURCE_PATH_CHARS:
-        # resolve/stat 전에 본다 — 비정상 길이 입력에 syscall을 쓰지 않는다.
-        return "", "too_long"
-    resolved = qmd_resolve_paths.contained_path(project_root, raw_path, allow_roots)
+    resolved, reason, _raw = classify_source_entry(entry, project_root, allow_roots)
     if resolved is None:
-        return "", "outside_root"
-    try:
-        if not resolved.is_file():
-            return "", "missing"
-    except OSError:
-        return "", "missing"
+        return "", reason
     display = display_card_path(resolved, cwd)
     # 표시가 절대경로면 project prefix가 붙어 상대 경로보다 길어진다 — 실제 주입되는
     # 문자열을 기준으로 다시 본다(토큰 예산은 주입 문자열의 함수다).
@@ -1679,6 +1710,16 @@ def main():
             body_reasons[reason] = body_reasons.get(reason, 0) + 1
     # 카드 읽기 실패는 drop된 후보까지 포함해 센다 — path_unresolved는 fail-closed drop
     # 때문에 final에 절대 도달하지 않으므로, final만 보면 오설정을 진단할 수 없다.
+    # 소스가 **전부 소실**된 채 주입된 카드 수(로드맵 3단계 관측). 카드 **사이** 중복
+    # 제거 전에 센다 — 제거 후에는 "옆 카드와 같은 원문"과 "살아 있는 원문이 없다"가
+    # 구분되지 않는다. 주입 문자열은 늘리지 않는다(표식 미도입 판단): 이 카드는 검수
+    # 시점에 유효했고 downgrade하지 않기로 했으므로 모델에게 줄 지시가 없다. 대신
+    # 사람·유지보수 루프가 쓰는 신호(원장·SessionStart notice·repair skill)로 보내고
+    # 여기서는 "실제로 캐논으로 주입됐다"는 사실만 카운터로 남긴다.
+    cards_all_sources_missing = sum(
+        1 for r in final_results
+        if not r.get("_wiki_sources") and r.get("_wiki_source_reasons", {}).get("missing")
+    )
     # 원문 경로 관측. 카드 **사이** 중복 제거는 최종 목록이 정해진 뒤에 해야 하므로
     # (순위 높은 카드 아래에만 남긴다) 여기서 돌린다 — 주입 직전이다.
     source_reasons: dict[str, int] = {"duplicate": dedup_source_paths(final_results)}
@@ -1723,6 +1764,7 @@ def main():
         sources_dropped=sum(source_reasons.values()),
         source_drop_reasons=source_reasons,
         source_line_prefix=SOURCE_LINE_PREFIX,
+        cards_all_sources_missing=cards_all_sources_missing,
         # title 오염·폴백 계열. titles_from_frontmatter가 selected보다 작으면 카드 이름
         # 없이 경로만 주입된 것이다(데몬 title `Summary` 폴백은 하지 않는다).
         titles_from_frontmatter=sum(1 for r in final_results if r.get("_wiki_title")),
