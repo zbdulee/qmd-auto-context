@@ -424,9 +424,28 @@ AND 대신 OR 효과를 얻을 수 있습니다(qmd의 `searches` 처리 방식�
 - 초판은 이를 "원인 조사 필요"로 남겼으나, **코드 blocker 2개가 확정**됐습니다
   1. `.nova/06_Sessions`가 dot-prefix라 `_is_hidden_source_path`에 걸려 compile
      source로 큐잉되지 않습니다 (5.1 대안절의 오발)
-  2. novel이 설정한 `post_session_summary` 트리거를 **소비하는 코드가 없습니다** —
-     `config.py:89`의 검증 목록에만 존재하고, enqueue는 `post_tool_source`만
-     봅니다(`wiki_compile_enqueue.py:147`). 디렉터리를 채워도 카드는 생기지 않습니다
+  2. ~~novel이 설정한 `post_session_summary` 트리거를 소비하는 코드가 없습니다~~
+     — **이 진단은 부정확했습니다.** 조사 결과 `post_session_summary`는 **자동 발화
+     경로가 원리적으로 없고**(Claude Code의 SessionEnd/PreCompact/Stop은
+     `transcript_path`(raw JSONL)만 주고, Codex·Hermes hook에는 session-end 채널이
+     없으며, raw transcript는 소스로 금지돼 있고 enqueue는 LLM을 호출하지 않으므로
+     hook-side 요약도 불가), 대신 **수동 경로(`skills/wiki-compile`)의 레코드 라벨로
+     실제 소비**됩니다. 죽은 설정이 아니므로 제거하면 안 됩니다.
+     세션 결론의 **자동** 수집은 `post_tool_source`가 담당합니다 — 세션 노트를
+     `raw`/`session` collection의 `.md`로 쓰면 편집 훅이 큐잉합니다
+
+**해소 결과 (커밋 `320d7c2`)**: novel의 설정을 확인한 결과 `triggers`에
+`post_tool_source`가 있고 `yakbbal-sessions`(`.nova/06_Sessions`, role `raw`)도
+정상 등록돼 있었습니다. **유일한 코드 blocker는 dot-prefix skip 하나였고 수정됐습니다.**
+디렉터리가 빈 것은 코드 문제가 아니라 세션 노트가 아직 작성되지 않은 것입니다.
+
+dot-prefix 예외의 범위는 "collection 루트 자체의 dot segment만 면제"로 좁혔습니다.
+collection 루트 기준 상대경로에만 dot 검사를 적용하므로, `.nova/06_Sessions/day1.md`는
+통과하고 `.nova/06_Sessions/.draft/x.md`는 여전히 배제됩니다. **`collectionPaths`가
+`.`인 프로젝트(service-engineering)에서는 면제 접두부가 비어 rel_path 전체가 그대로
+dot 검사를 받으므로 아무것도 완화되지 않습니다.** `.auto-context`·`.git`·`node_modules`
+등은 `DENIED_SOURCE_SEGMENTS`로 무조건 차단해 wiki 카드의 자기 재컴파일(무한 증식)을
+막습니다.
 - 근거: 카드 소스가 원고 80 / plot 20 / settings 22로 전부 원고 계열이며,
   "왜 그렇게 결정했는지"는 수집되지 않고 있습니다. **wiki의 최대 가치 영역이
   구조적으로 죽어 있습니다**
