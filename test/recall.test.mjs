@@ -485,9 +485,11 @@ test('recallVerifiedOnly 기본(true): verified/reviewed 카드는 정상 surfac
     '---\nstatus: verified\ncreatedBy: qmd-auto-context\nreviewed: false\nverifiedBy: claude\n---\n# Machine\n');
   writeFileSync(join(dir, '.auto-context', 'wiki', 'concepts', 'auto.md'),
     '---\nstatus: generated\ncreatedBy: qmd-auto-context\nreviewed: false\n---\n# Auto\n');
+  // 라이브 형식(스킴 없는 plain path)으로 둔다 — 데몬 /query가 실제로 이 형태를
+  // 반환하므로 스킴 fixture만 있으면 경로 해석 회귀가 라이브에서만 터진다.
   writeFileSync(fixture, JSON.stringify({ results: [
-    { file: 'qmd://proj-wiki/concepts/auto.md', title: 'Auto wiki', score: 0.9 },
-    { file: 'qmd://proj-wiki/concepts/machine.md', title: 'Machine wiki', score: 0.5 },
+    { file: 'proj-wiki/concepts/auto.md', title: 'Auto wiki', score: 0.9 },
+    { file: 'proj-wiki/concepts/machine.md', title: 'Machine wiki', score: 0.5 },
   ] }));
   try {
     const r = recall({ prompt: 'config layout decision 내용을 알려줘', cwd: dir }, { QMD_QUERY_FIXTURE: fixture });

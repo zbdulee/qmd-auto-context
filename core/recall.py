@@ -67,14 +67,23 @@ def resolve_wiki_result_path(result: dict, config: dict, cwd: str) -> Path | Non
     project_root = Path(qmd_config.find_project_config(cwd).get("projectRoot", cwd)).resolve()
     wiki_root = (project_root / wiki_path).resolve()
     candidates = []
-    if uri.startswith("qmd://") and "/" in uri[len("qmd://"):]:
-        rel = uri[len("qmd://"):].split("/", 1)[1]
+    # 데몬 /query는 file을 qmd:// 스킴 **없이** "collection/path"로도 반환한다. 그래서
+    # 분기 조건을 스킴 유무가 아니라 "첫 세그먼트가 실제 컬렉션명인지"로 잡는다 —
+    # 스킴을 전제하면 라이브(plain path)에서 collection prefix가 그대로 붙은 존재하지
+    # 않는 경로가 되고, wiki_root 밖이라 fail-closed로 None이 돼 **검수된 카드까지
+    # 전부 미검수 오판**된다(recallVerifiedOnly가 wiki recall을 통째로 죽인다).
+    # 무조건 벗기지 않는 이유: collection 상대 경로(`decisions/x.md`)의 첫 디렉터리를
+    # 컬렉션명으로 착각해 잘못 제거하게 된다.
+    body = uri[len("qmd://"):] if uri.startswith("qmd://") else uri
+    head, sep, rest = body.partition("/")
+    if head and sep and rest and head == collection:
         base = collection_paths.get(collection, "")
         if base:
-            candidates.append((project_root / base / rel).resolve())
-        candidates.append((project_root / rel).resolve())
-    elif uri:
-        path = Path(uri)
+            candidates.append((project_root / base / rest).resolve())
+        candidates.append((project_root / rest).resolve())
+    if body:
+        # prefix를 벗기지 않은 원본도 후보로 유지한다(절대경로 / collection 상대 경로).
+        path = Path(body)
         candidates.append(path.resolve() if path.is_absolute() else (project_root / path).resolve())
     for candidate in candidates:
         try:
