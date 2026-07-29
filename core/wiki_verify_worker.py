@@ -17,6 +17,10 @@ verify-skipped.jsonl, and wiki_compile_worker.process_job skips those sources
 *before* spawning an extractor. Same body-hash suppression pattern as
 dedup-skipped.jsonl: unchanged content is never re-billed, changed content retries.
 
+Every deletion (fail and inconclusive alike) also appends one row to
+verify-deleted.jsonl, the untrimmed audit ledger — verify-log.jsonl logs passes too and
+so rotates its history away within days on an active project.
+
 Runs piggybacked from wiki_compile_worker.main() under the same per-cwd lock,
 and doubles as a standalone CLI for tests/manual runs. Silent by default (hook
 path); queue/log records never store source bodies.
@@ -39,6 +43,7 @@ from wiki_compile_enqueue import _safe_queue_path
 VERIFY_QUEUE_DEFAULT = ".auto-context/compile/verify-queue.jsonl"
 VERIFY_LOG_DEFAULT = ".auto-context/compile/verify-log.jsonl"
 VERIFY_SKIPPED_DEFAULT = ".auto-context/compile/verify-skipped.jsonl"
+VERIFY_DELETED_DEFAULT = ".auto-context/compile/verify-deleted.jsonl"
 VERDICT_VALUES = {"pass", "fail", "inconclusive"}
 MAX_SOURCES = 3
 
@@ -75,6 +80,10 @@ def log_verdict(log_path: Path, payload: dict) -> None:
 
 def verify_skipped_path(root: Path, vcfg: dict) -> Path | None:
     return wcw.safe_compile_file(root, vcfg.get("skippedPath", VERIFY_SKIPPED_DEFAULT))
+
+
+def verify_deleted_path(root: Path, vcfg: dict) -> Path | None:
+    return wcw.safe_compile_file(root, vcfg.get("deletedPath", VERIFY_DELETED_DEFAULT))
 
 
 def load_verify_suppressions(path: Path | None) -> dict[str, str]:
@@ -122,16 +131,52 @@ def record_machine_delete(root: Path, compile_cfg: dict, record: dict, verdict: 
     wc.compact_manifest(path)
 
 
+def record_verify_deletion(
+    root: Path, vcfg: dict, sources: list[dict], record: dict, verdict: str
+) -> bool:
+    """Append the DURABLE audit row for a machine deletion (fail or inconclusive).
+
+    Machine verification is the only gate that removes cards (verify.onFail /
+    onInconclusive = delete, both default), so "why did this card go away" must stay
+    answerable. verify-log.jsonl cannot answer it: it records every verdict including
+    passes, so trim_jsonl drops the oldest half once it crosses LOG_MAX_BYTES — measured
+    on a live project, pass traffic had already pushed three weeks of history out. The
+    manifest's verify-deleted row survives compaction but carries no reasons and is
+    replaced the moment the card regenerates.
+
+    This file therefore holds deletions ONLY, which is what makes leaving it untrimmed
+    affordable: one small row per deleted card (paths and bounded reasons, never bodies),
+    not one per verdict. verify-skipped.jsonl overlaps for inconclusive but is keyed by
+    source + body hash for billing-loop suppression; this ledger is keyed by card and
+    covers fail too, which records no suppression by design.
+    """
+    path = verify_deleted_path(root, vcfg)
+    if path is None:
+        return False
+    wc.append_jsonl(path, {
+        "targetPath": record.get("targetPath", ""),
+        "verdict": verdict,
+        "engine": record.get("engine", ""),
+        "reasons": record.get("reasons", []),
+        "claims": record.get("claims", 0),
+        "sourcePaths": [
+            src.get("path") for src in sources
+            if isinstance(src, dict) and isinstance(src.get("path"), str) and src.get("path")
+        ],
+        "deletedAt": wcw.now_iso(),
+    })
+    return True
+
+
 def record_verify_suppression(
     root: Path, vcfg: dict, sources: list[dict], record: dict, verdict: str
 ) -> int:
     """Mark every source of a deleted card so it is not recompiled unchanged.
 
-    This doubles as the DURABLE audit trail for inconclusive deletions: unlike
-    verify-log.jsonl it is never trim_jsonl'd, because dropping a row here both
-    loses the deletion record AND reopens the billing loop it was written to
-    close. Rows carry verdict/reasons/targetPath so a deletion stays explainable
-    after the log has rotated.
+    Never trim_jsonl'd: dropping a row here reopens the billing loop it was written
+    to close. Rows also carry verdict/reasons/targetPath, so this doubles as a
+    source-keyed view of inconclusive deletions — but the card-keyed audit ledger for
+    every machine deletion is verify-deleted.jsonl (see record_verify_deletion).
 
     Hashes are of the same maxSourceChars-bounded slice the extractor saw, so
     wiki_compile_worker's pre-extraction check compares like with like.
@@ -325,6 +370,9 @@ def apply_negative_verdict(
 ) -> None:
     """Apply a fail/inconclusive verdict. Only inconclusive leaves a suppression marker."""
     if action == "delete":
+        # 감사 레코드를 먼저 쓴다 — 여기서 죽으면 "설명 없는 삭제"가 아니라
+        # "삭제되지 않은 카드에 대한 레코드 1줄"만 남는 쪽으로 실패해야 한다.
+        record_verify_deletion(root, vcfg, sources, record, verdict)
         # tombstone은 세우지 않는다 — 소스가 고쳐지면 재컴파일→재검증이 다시 열려야 한다.
         target.unlink(missing_ok=True)
         record_machine_delete(root, compile_cfg, record, verdict)

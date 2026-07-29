@@ -124,6 +124,50 @@ test('verify fail + onFail 기본(delete) → 카드 삭제, tombstone 없음, �
   } finally { rmSync(project, { recursive: true, force: true }); }
 });
 
+// 기계 판정이 카드를 지우는 유일한 게이트이므로 삭제 사유는 pass 트래픽과 분리된
+// 파일에 남아야 한다 — fail은 억제 마커(verify-skipped)를 남기지 않으므로 이 원장이
+// 유일한 지속 기록이다.
+test('verify fail delete → verify-deleted.jsonl 감사 레코드 (fail은 억제 마커 없음)', () => {
+  const verifier = mockVerifier({ verdict: 'fail', claims: [{ claim: 'c', supported: false, quote: '', sourcePath: 'docs/source.md' }], reasons: ['source contradicts claim'] });
+  const project = setupProject({ extractorArgv: ['python3', verifier] });
+  try {
+    runVerifyWorker(project);
+    const deleted = jsonl(join(project, '.auto-context', 'compile', 'verify-deleted.jsonl'));
+    assert.equal(deleted.length, 1);
+    assert.equal(deleted[0].targetPath, CARD_REL);
+    assert.equal(deleted[0].verdict, 'fail');
+    assert.equal(deleted[0].engine, 'claude');
+    assert.equal(deleted[0].reasons[0], 'source contradicts claim');
+    assert.deepEqual(deleted[0].sourcePaths, ['docs/source.md']);
+    assert.equal(deleted[0].claims, 1);
+    assert.ok(deleted[0].deletedAt);
+    assert.equal(JSON.stringify(deleted[0]).includes('Durable claim'), false, '원문 본문은 담지 않는다');
+    assert.equal(jsonl(join(project, '.auto-context', 'compile', 'verify-skipped.jsonl')).length, 0,
+      'fail은 재컴파일을 막지 않으므로 억제 마커 없음 — 감사 추적은 verify-deleted가 책임');
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});
+
+test('verify-deleted.jsonl은 상한을 넘어도 트림되지 않는다 (verify-log와 대비)', () => {
+  const verifier = mockVerifier({ verdict: 'fail', claims: [], reasons: ['contradiction'] });
+  const project = setupProject({ extractorArgv: ['python3', verifier] });
+  const deletedPath = join(project, '.auto-context', 'compile', 'verify-deleted.jsonl');
+  const logPath = join(project, '.auto-context', 'compile', 'verify-log.jsonl');
+  // 둘 다 LOG_MAX_BYTES(256KB) 초과 상태로 시작 — 트림 대상이면 절반이 날아간다.
+  const bulk = (tag) => Array.from({ length: 400 }, (_, i) => JSON.stringify({ i, tag, pad: 'x'.repeat(700) })).join('\n') + '\n';
+  writeFileSync(deletedPath, bulk('old-deletion'));
+  writeFileSync(logPath, bulk('old-verdict'));
+  try {
+    runVerifyWorker(project);
+    const deleted = jsonl(deletedPath);
+    assert.equal(deleted.length, 401, '기존 400줄 보존 + 새 삭제 1줄');
+    assert.equal(deleted[0].i, 0, '가장 오래된 삭제 이력이 남아 있다');
+    assert.equal(deleted[400].verdict, 'fail');
+    const log = jsonl(logPath);
+    assert.equal(log.length, 201, 'verify-log는 상한 초과 시 최근 절반만 유지');
+    assert.equal(log[0].i, 200);
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});
+
 test('verify fail + onFail=contested → status contested 패치(파일 보존)', () => {
   const verifier = mockVerifier({ verdict: 'fail', claims: [], reasons: ['contradiction'] });
   const project = setupProject({ extractorArgv: ['python3', verifier], verify: { onFail: 'contested' } });
@@ -132,6 +176,8 @@ test('verify fail + onFail=contested → status contested 패치(파일 보존)'
     runVerifyWorker(project, { QMD_DIRTY_QUEUE: dirtyQueue });
     const text = readFileSync(join(project, CARD_REL), 'utf8');
     assert.match(text, /^status: contested$/m);
+    assert.equal(existsSync(join(project, '.auto-context', 'compile', 'verify-deleted.jsonl')), false,
+      '삭제하지 않았으면 삭제 원장에 쓰지 않는다');
   } finally { rmSync(project, { recursive: true, force: true }); }
 });
 
@@ -172,6 +218,11 @@ test('inconclusive + onInconclusive 기본(delete) → 카드 삭제 + 억제 �
     assert.equal(skipped[0].targetPath, CARD_REL);
     assert.match(skipped[0].sourceBodyHash, /^[a-f0-9]{32}$/);
     assert.ok(skipped[0].deletedAt, '삭제 시각 기록 — verify-log 트림 후에도 남는 감사 추적');
+
+    const deleted = jsonl(join(project, '.auto-context', 'compile', 'verify-deleted.jsonl'));
+    assert.equal(deleted.length, 1, 'inconclusive 삭제도 삭제 원장에 기록');
+    assert.equal(deleted[0].verdict, 'inconclusive');
+    assert.equal(deleted[0].reasons[0], 'verifier could not adjudicate');
   } finally { rmSync(project, { recursive: true, force: true }); }
 });
 

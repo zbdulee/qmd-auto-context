@@ -580,9 +580,14 @@ P0~P5는 서로 독립이라 순서를 바꿔도 됩니다. P6 이후는 의존�
 - **novel의 extractor 설정이 레거시 형태입니다** — `compile.extractor`가
   claude/codex/hermes 절대경로를 직접 담고 있습니다. CLAUDE.md 규약은
   `compile.extractor.builtins`에 symbolic engine만 저장하는 것입니다
-- **service-engineering에 `verifiedBy`는 있고 `verifiedAt`이 없는 카드 29장**이 있습니다
-- **verify-log 트림으로 감사 추적이 끊깁니다** — service-engineering은 138줄인데
-  verified가 559장입니다. 256KB 트림 결과로 보이며 판정 이력 대부분이 없습니다
+- ~~**service-engineering에 `verifiedBy`는 있고 `verifiedAt`이 없는 카드 29장**~~ —
+  실측 28장, 전부 `verifiedBy: agent-full-source`(코드가 쓰지 않는 값 = 수동 백필 잔재)이고
+  `verifiedAt`은 아무 코드도 읽지 않습니다. 무해·재발 없음
+  (`2026-07-29-p8-policy-decisions.md` 잔여 항목 4)
+- ~~**verify-log 트림으로 감사 추적이 끊깁니다**~~ — 트림 자체는 실측 확인(카드
+  `verifiedAt`은 07-05부터인데 로그 최초 ts는 07-27). 단 "138줄"은 pass 판정 수이고
+  파일은 175줄입니다. 삭제 전용 원장 `verify-deleted.jsonl`(트림 없음) 추가로 해소
+  (`2026-07-29-p8-policy-decisions.md` 잔여 항목 5)
 - **`status: "verified"` 인용부호 변종 63장은 문제가 없습니다.** frontmatter 파서가
   `.strip('"\'')`로 따옴표를 벗겨냅니다(`recall.py:107`)
 - **novel wiki 버킷 편중** — `concepts` 72 / `decisions` 25 / `entities` 25이고

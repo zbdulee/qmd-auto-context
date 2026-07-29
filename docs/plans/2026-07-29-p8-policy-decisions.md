@@ -122,8 +122,9 @@
 
 **inconclusive 는 "카드가 틀렸다"가 아니라 "verifier 가 판정하지 못했다"** 이므로 (ii) 의
 삭제는 정보 손실입니다. 다만 사람 검수가 없는 전제에서는 (i) 도 사실상 사장이라
-결과가 비슷합니다. 판정 근거를 모으려면 verify-log 의 inconclusive 사유를 먼저
-분류해볼 가치가 있습니다(현재 트림으로 이력 대부분이 유실된 상태).
+결과가 비슷합니다. 판정 근거를 모으려면 inconclusive 사유를 분류해볼 가치가 있는데,
+`verify-log` 는 트림돼 최근 며칠치만 남으므로 **`verify-skipped.jsonl` /
+`verify-deleted.jsonl`**(둘 다 트림 없음, 아래 잔여 항목 5 참고)을 모집단으로 쓰십시오.
 
 ---
 
@@ -139,7 +140,28 @@
 3. **novel extractor 설정 마이그레이션** — `compile.extractor` 가 claude/codex/hermes
    절대 경로를 담은 레거시 형태입니다. 규약은 `compile.extractor.builtins` 에 symbolic
    engine 만 저장하는 것입니다
-4. **`verifiedBy` 만 있고 `verifiedAt` 이 없는 카드 29장**(service-engineering) —
-   데이터 일관성 확인
-5. **verify-log 트림으로 감사 추적 단절** — service-engineering 은 138줄인데 verified 가
-   559장입니다. 판정 이력 대부분이 남아 있지 않습니다
+4. ~~**`verifiedBy` 만 있고 `verifiedAt` 이 없는 카드 29장**(service-engineering)~~ —
+   **조사 완료(2026-07-29): 무해, 보정 불필요.** 실측 28장이고 전부
+   `verifiedBy: agent-full-source` 입니다. 이 문자열은 코드베이스에 존재하지 않으므로
+   플러그인이 쓴 값이 아니라 **일회성 에이전트 백필의 잔재**입니다. 워커가 쓴 카드
+   (`verifiedBy: claude` 559장)는 `verifiedAt` 이 전부 있습니다
+   (`core/wiki_verify_worker.py` 의 pass/contested 패치가 두 필드를 항상 함께 씁니다).
+   `verifiedAt` 은 **어디서도 읽지 않습니다** — `recall.read_wiki_meta` 의 검수 판정은
+   `status`/`reviewed`/`createdBy` 만 봅니다. 따라서 현재 코드에서 재발하지 않고 동작
+   영향도 없습니다. 참고로 소스 변경으로 카드가 갱신될 때
+   `wiki_compile.py:1141` 이 `verifiedBy`/`verifiedAt` 을 **빈 문자열로 리셋**하므로
+   `verifiedAt: ""` 은 결측이 아니라 의도된 상태입니다
+5. ~~**verify-log 트림으로 감사 추적 단절**~~ — **조사 완료(2026-07-29): 실재했고
+   수정했습니다.** "138줄"은 줄 수가 아니라 pass 판정 수였고, 실제 파일은 175줄입니다.
+   다만 트림은 실측으로 확인됐습니다: 카드의 `verifiedAt` 은 07-05 부터 분포하는데
+   `verify-log.jsonl` 의 최초 ts 는 **07-27** 이라 3주치(~350건)가 이미 밀려나갔습니다
+   (novel 은 369줄로 07-06 부터 전량 보존 — 아직 상한 미도달).
+   `trim_jsonl` 은 256KB 초과 시 뒤쪽 절반만 남기고 pass/fail 을 구분하지 않으므로,
+   pass 가 대량 생성되면 **삭제 이력이 함께 밀려납니다**. inconclusive 삭제는
+   `verify-skipped.jsonl`(트림 없음)에 남아 있었지만 **fail 삭제는 사유를 남기는 곳이
+   없었습니다**(manifest 의 `verify-deleted` 행은 reasons 가 없고 재생성 시 대체됨).
+   조치: 삭제 전용 원장 **`verify-deleted.jsonl`**(`compile.verify.deletedPath`,
+   트림 없음, fail·inconclusive 공통, 카드 1건당 1줄)을 추가했습니다. verify 삭제는
+   `tombstones.jsonl`/`dedup-deleted.jsonl` 과 달리 **원문 본문을 보존하지 않습니다** —
+   대신 소스가 디스크에 그대로 있고 tombstone 을 세우지 않으므로 소스 수정 시 재생성이
+   열려 있다는 것이 이 설계의 전제입니다

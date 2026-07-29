@@ -89,6 +89,8 @@ DEFAULT_CONFIG = {
             "queuePath": ".auto-context/compile/verify-queue.jsonl",
             "logPath": ".auto-context/compile/verify-log.jsonl",
             "skippedPath": ".auto-context/compile/verify-skipped.jsonl",
+            # 삭제 전용 감사 원장. logPath는 pass까지 담아 트림되므로 삭제 이력을 보존하지 못한다.
+            "deletedPath": ".auto-context/compile/verify-deleted.jsonl",
             "cooldownSeconds": 600,
             "maxPerRun": 3,
         },
@@ -297,6 +299,7 @@ def compile_config(value):
         "queuePath": verify.get("queuePath") if isinstance(verify.get("queuePath"), str) and verify.get("queuePath") else default_verify["queuePath"],
         "logPath": verify.get("logPath") if isinstance(verify.get("logPath"), str) and verify.get("logPath") else default_verify["logPath"],
         "skippedPath": verify.get("skippedPath") if isinstance(verify.get("skippedPath"), str) and verify.get("skippedPath") else default_verify["skippedPath"],
+        "deletedPath": verify.get("deletedPath") if isinstance(verify.get("deletedPath"), str) and verify.get("deletedPath") else default_verify["deletedPath"],
         "cooldownSeconds": coerce_int(verify.get("cooldownSeconds", default_verify["cooldownSeconds"]), default_verify["cooldownSeconds"]),
         "maxPerRun": coerce_int(verify.get("maxPerRun", default_verify["maxPerRun"]), default_verify["maxPerRun"]),
     }

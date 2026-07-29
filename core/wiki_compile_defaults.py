@@ -70,6 +70,7 @@ def compile_block(root, engines=ENGINES) -> dict:
             "queuePath": ".auto-context/compile/verify-queue.jsonl",
             "logPath": ".auto-context/compile/verify-log.jsonl",
             "skippedPath": ".auto-context/compile/verify-skipped.jsonl",
+            "deletedPath": ".auto-context/compile/verify-deleted.jsonl",
             "cooldownSeconds": 600,
             "maxPerRun": 3,
         },
