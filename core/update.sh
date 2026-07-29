@@ -859,6 +859,16 @@ PY
   # collectionPaths fnmatch 매칭과 "미지정 → ." 기본값의 SSOT이므로 여기서 재구현하면
   # 갈라진다(특히 collections에만 있고 collectionPaths에 없는 컬렉션도 "."이다).
   #
+  # recallStrategy가 wikiOnly면 안내하지 않는다: wikiOnly는 wiki role 컬렉션만
+  # 질의하므로 raw가 아무리 넓게 색인돼도 recall 결과에 들어오지 않는다 —
+  # "recall 노이즈가 늘어난다"가 사실이 아니고, 컬렉션을 쪼개는 것 말고는 좁힐
+  # 수단도 없어(qmd CLI에 pattern/ignore 인수 없음, collectionPaths는 단일 문자열)
+  # 실익 없는 조언이 TTL마다 반복된다. hierarchical(raw backfill)·flat(항상 raw)은
+  # 실제로 raw를 조회하므로 유지한다. 전략 판정은 이미 로드된 $config_json을
+  # normalize_config(SSOT)로 통과시켜 얻고, 스캔 "전"에 종료해 md walk 비용도
+  # 지불하지 않는다(동기 SessionStart 경로). 이때 메시지가 비므로 아래 else의
+  # notice_clear가 과거 marker를 정리해 전략을 바꾼 프로젝트도 즉시 조용해진다.
+  #
   # 작은 저장소에서 "."은 무해하므로 크기 가드를 함께 본다(recommend_config.py의
   # 200파일/5MB와 같은 수준, 대상만 .md로 좁힘). 임계 초과 즉시 스캔을 중단하므로
   # 알림이 뜨는 케이스는 빠르다. 임계에 못 미치는 거대 트리에서 walk가 길어지지
@@ -869,9 +879,27 @@ PY
     root_path_msg=""
     if [ -n "$resolved" ]; then
       # config/resolved는 argv로 전달(heredoc이 stdin을 차지 — stale-queue와 동일 패턴).
-      root_path_msg=$(python3 - "$workdir" "$resolved" <<'PY' 2>/dev/null || true
+      root_path_msg=$(python3 - "$workdir" "$resolved" "$config_json" "$(dirname "$0")" <<'PY' 2>/dev/null || true
 import json, os, sys
 from pathlib import Path
+
+
+def recall_strategy(raw, core_dir):
+    """이미 로드된 config_json의 recallStrategy를 config.py 기준으로 정규화한다."""
+    try:
+        parsed = json.loads(raw) if raw else {}
+    except Exception:
+        parsed = {}
+    if not isinstance(parsed, dict):
+        parsed = {}
+    try:
+        sys.path.insert(0, str(Path(core_dir).resolve()))
+        import config as qmd_config
+
+        return qmd_config.normalize_config(parsed).get("recallStrategy")
+    except Exception:
+        # config.py를 못 읽어도 explicit wikiOnly는 존중한다(잘못된 안내 방지).
+        return parsed.get("recallStrategy")
 
 
 def int_env(name, default):
@@ -887,6 +915,11 @@ MAX_FILES = int_env("QMD_ROOT_PATH_MAX_FILES", 200)
 MAX_BYTES = int_env("QMD_ROOT_PATH_MAX_BYTES", 5 * 1024 * 1024)
 ENTRY_BUDGET = int_env("QMD_ROOT_PATH_SCAN_BUDGET", 50000)
 MD_SUFFIXES = (".md", ".markdown")
+
+STRATEGY = recall_strategy(sys.argv[3] if len(sys.argv) > 3 else "", sys.argv[4] if len(sys.argv) > 4 else ".")
+if STRATEGY == "wikiOnly":
+    # raw 인덱스 폭이 recall과 무관 → 판정 결과를 쓸 곳이 없으니 스캔도 하지 않는다.
+    raise SystemExit(0)
 
 try:
     resolved = json.loads(sys.argv[2])
@@ -946,8 +979,10 @@ if not over:
 label = ", ".join(repr(n) for n in names)
 print(
     f"[qmd] 컬렉션 {label}의 collectionPath가 저장소 루트(.)라 md {files}개 이상이 "
-    "색인 대상입니다 — .auto-context/settings.json의 collectionPaths를 docs 같은 "
-    "좁은 경로로 지정하면 색인 비용과 recall 정확도가 개선됩니다."
+    f"색인 대상입니다 — recallStrategy가 {STRATEGY}라 raw를 조회하므로 recall 노이즈도 "
+    "함께 늘어납니다. .auto-context/settings.json의 collectionPaths를 docs 같은 좁은 "
+    "경로로 지정하세요(색인 범위를 줄이는 유일한 수단 — docs/settings.md "
+    "\"인덱싱 범위를 줄이는 방법\")."
 )
 PY
 )

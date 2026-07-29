@@ -483,6 +483,11 @@ ignore 파일 같은 축소 인수가 없고, `skipPaths`·`.auto-context-ignore
 큰 저장소에서 루트를 지정한 경우 SessionStart에서 안내가 1회 표시됩니다.
 `docs`, `docs/current`처럼 실제로 recall되기를 바라는 경로만 지정하세요.
 
+단 `recallStrategy: "wikiOnly"`에서는 이 안내가 표시되지 않습니다. wiki role
+collection만 질의하므로 raw가 넓게 색인돼도 recall 결과에 들어오지 않아 노이즈가
+늘지 않고, collection을 쪼개는 것 말고는 좁힐 수단도 없기 때문입니다. `hierarchical`
+(raw fallback)과 `flat`(항상 raw)에서는 그대로 표시됩니다.
+
 `collections`에 있는데 `collectionPaths`에 대응 항목이 없는 collection도 경로가
 `.`으로 해석됩니다. collection 이름마다 경로를 명시하세요.
 

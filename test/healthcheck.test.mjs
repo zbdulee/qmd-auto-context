@@ -304,6 +304,89 @@ test('update.sh main: QMD_SUPPRESS_NOTICE=1 → 루트 안내 무출력 + marker
   }
 });
 
+// recallStrategy별 유효성: wikiOnly는 wiki role 컬렉션만 질의하므로 raw 인덱스가
+// 넓어도 recall 결과에 들어오지 않는다 → 안내가 사실이 아니고 실익도 없어 침묵한다.
+// hierarchical(raw backfill)·flat(항상 raw)은 실제로 raw를 조회하므로 유지한다.
+const rootSettings = (extra = {}) => ({
+  indexing: true, collections: ['p-root'], collectionPaths: { 'p-root': '.' }, ...extra,
+});
+
+test('update.sh main: recallStrategy wikiOnly면 루트 안내 무출력 + marker 미생성', () => {
+  const base = mkdtempSync(join(NOTICE_BASE, 'qmd-rootpath-wikionly-'));
+  const { cache, env } = rootPathEnv(base, { QMD_NOTICE_TTL_SECS: '0' });
+  const d = rootPathProject(base, rootSettings({ recallStrategy: 'wikiOnly' }));
+  try {
+    assert.doesNotMatch(runMain(d, env), ROOT_PATH_RE, 'wikiOnly는 raw 인덱스 폭이 recall과 무관');
+    const markers = readdirSync(cache).filter((f) => f.startsWith('notice-root-collection-path-'));
+    assert.equal(markers.length, 0, 'marker도 남기지 않음');
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('update.sh: wikiOnly 판정은 md walk "전"에 종료된다 (동기 SessionStart 경로 비용 0)', () => {
+  // 스캔 실행 여부는 stdout으로 관측할 수 없으므로(무출력이 곧 기대값) 소스 순서로
+  // 회귀를 막는다: wikiOnly early-exit이 os.walk보다 앞에 있어야 한다.
+  const src = readFileSync('core/update.sh', 'utf8');
+  const skipAt = src.indexOf('if STRATEGY == "wikiOnly"');
+  const walkAt = src.indexOf('os.walk(root)');
+  assert.ok(skipAt > 0 && walkAt > 0, 'wikiOnly 가드와 루트 walk가 모두 존재');
+  assert.ok(skipAt < walkAt, 'wikiOnly면 os.walk에 도달하지 않아야 함');
+});
+
+for (const strategy of ['hierarchical', 'flat']) {
+  test(`update.sh main: recallStrategy ${strategy}는 루트 안내 유지 (raw를 실제로 조회)`, () => {
+    const base = mkdtempSync(join(NOTICE_BASE, `qmd-rootpath-${strategy}-`));
+    const { env } = rootPathEnv(base, { QMD_NOTICE_TTL_SECS: '0' });
+    const d = rootPathProject(base, rootSettings({ recallStrategy: strategy }));
+    try {
+      const hits = runMain(d, env).split('\n').filter((l) => ROOT_PATH_RE.test(l));
+      assert.equal(hits.length, 1, 'stdout 1줄 계약');
+      assert.match(hits[0], new RegExp(`recallStrategy가 ${strategy}라`), '유효한 전략을 문안에 명시');
+      assert.doesNotMatch(hits[0], /skipPaths/, '색인을 못 줄이는 skipPaths를 권하지 않음');
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+}
+
+test('update.sh main: wikiOnly로 바꾸면 남아 있던 루트 안내 marker가 정리된다', () => {
+  const base = mkdtempSync(join(NOTICE_BASE, 'qmd-rootpath-switch-'));
+  const { cache, env } = rootPathEnv(base);
+  const d = rootPathProject(base, rootSettings());
+  const markersOf = () => readdirSync(cache).filter((f) => f.startsWith('notice-root-collection-path-'));
+  try {
+    assert.match(runMain(d, env), ROOT_PATH_RE, '기본(hierarchical)에서는 안내 + marker 기록');
+    assert.equal(markersOf().length, 1);
+
+    writeFileSync(join(d, '.auto-context', 'settings.json'),
+      JSON.stringify(rootSettings({ recallStrategy: 'wikiOnly' })));
+    assert.doesNotMatch(runMain(d, { ...env, QMD_NOTICE_TTL_SECS: '0' }), ROOT_PATH_RE, '전략 변경 후 조용');
+    assert.equal(markersOf().length, 0, '조건 해소로 marker 정리(재무장)');
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('update.sh main: wikiOnly + QMD_SUPPRESS_NOTICE=1도 marker를 건드리지 않는다', () => {
+  const base = mkdtempSync(join(NOTICE_BASE, 'qmd-rootpath-wikionly-suppress-'));
+  const { cache, env } = rootPathEnv(base);
+  const d = rootPathProject(base, rootSettings());
+  try {
+    assert.match(runMain(d, env), ROOT_PATH_RE);
+    const marker = readdirSync(cache).find((f) => f.startsWith('notice-root-collection-path-'));
+    assert.ok(marker, '선행 세션 marker');
+
+    writeFileSync(join(d, '.auto-context', 'settings.json'),
+      JSON.stringify(rootSettings({ recallStrategy: 'wikiOnly' })));
+    const suppressed = runMain(d, { ...env, QMD_SUPPRESS_NOTICE: '1', QMD_NOTICE_TTL_SECS: '0' });
+    assert.doesNotMatch(suppressed, ROOT_PATH_RE);
+    assert.ok(readdirSync(cache).includes(marker), 'suppress 경로는 타 호스트 marker를 지우지 않음');
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
 test('update.sh: healthcheck timeout 기본값 2s + QMD_HEALTH_TIMEOUT override/fallback', () => {
   const dir = mkdtempSync(join(tmpdir(), 'qmd-health-timeout-'));
   const bin = join(dir, 'bin');
