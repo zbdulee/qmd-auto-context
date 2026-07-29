@@ -41,7 +41,7 @@
 | `indexing` | `null` | `true`면 이 프로젝트에서 recall/indexing을 사용합니다. `false`면 설정 파일이 있어도 effective collection이 비어 비활성처럼 동작합니다. |
 | `name` | `""` | 프로젝트 표시 이름입니다. 동작상 필수는 아니지만 추천 설정에서 보통 채워집니다. |
 | `collections` | `[]` | qmd에 등록할 logical collection 이름 목록입니다. 비어 있으면 recall은 아무 것도 하지 않습니다. |
-| `collectionPaths` | `{}` | collection 이름별 프로젝트 상대 경로입니다. 일반 문서는 `docs`, wiki는 `.auto-context/wiki`처럼 지정합니다. |
+| `collectionPaths` | `{}` | collection 이름별 프로젝트 상대 경로입니다. 일반 문서는 `docs`, wiki는 `.auto-context/wiki`처럼 지정합니다. **인덱싱 범위를 결정하는 유일한 설정입니다** — 아래 ["인덱싱 범위를 줄이는 방법"](#인덱싱-범위를-줄이는-방법) 참고. |
 | `collectionRoles` | `{}` | collection 역할입니다. 허용값은 `raw`, `wiki`, `session`입니다. |
 | `recallStrategy` | `"hierarchical"` | `flat`은 모든 collection을 같이 검색합니다. `hierarchical`은 wiki를 먼저 보고 부족할 때 raw를 fallback으로 봅니다. `wikiOnly`는 wiki만 검색하고 raw fallback을 하지 않습니다(wiki에 없으면 무출력). wiki role collection이 없으면 `hierarchical`은 `flat`과 동일하게 동작합니다. |
 | `minScore` | `0.0` | recall 결과를 주입하기 위한 score 하한입니다. **유사도 임계가 아니라 사실상 순위 컷입니다** — 아래 "minScore는 유사도가 아니라 순위입니다" 참고. |
@@ -49,7 +49,7 @@
 | `topN` | `3` | 최종 컨텍스트에 넣을 최대 문서 수입니다. `minScore`가 이보다 강하게 자를 수 있습니다(아래 참고). |
 | `queryTimeout` | `5` | qmd query 응답 대기 시간(초)입니다. |
 | `staleQueueThreshold` | `20` | update 시 적체된 dirty queue 안내를 표시할 기준입니다. |
-| `skipPaths` | `[]` | recall 결과에서 제외할 경로 문자열 목록입니다. `node_modules`, `.git`, `dist`, `build` 같은 값이 흔합니다. |
+| `skipPaths` | `[]` | recall 결과에서 제외할 경로 substring 목록입니다. `node_modules`, `.git`, `dist`, `build` 같은 값이 흔합니다. **이름과 달리 인덱싱 대상을 제한하지 않습니다** — `core/recall.py`의 결과 필터에서만 쓰이므로 파일은 그대로 색인됩니다. 아래 ["인덱싱 범위를 줄이는 방법"](#인덱싱-범위를-줄이는-방법) 참고. |
 | `allowRoots` | `[]` | 프로젝트 밖 absolute path collection을 허용해야 할 때 쓰는 root 목록입니다. 일반 프로젝트에서는 비워 둡니다. |
 | `prefixStyle` | `"full"` | recall 출력 prefix 스타일입니다. 허용값은 `full`, `tag`입니다. |
 | `events` | `["sessionStart", "userPromptSubmit", "postToolUse"]` | 자동 동작을 켤 이벤트 목록입니다. |
@@ -386,7 +386,7 @@ wiki는 상위 3위까지, raw fallback은 상위 2위까지만 봅니다(순위
 (`topN: 2` → `0.5`). 실제 값은 `QMD_RECALL_LOG`(필요하면 `QMD_SHADOW_QUERY`)로
 로그를 보면서 조정하는 것이 좋습니다.
 
-### 특정 경로 제외
+### recall 결과에서 특정 경로 제외
 
 ```json
 {
@@ -399,8 +399,48 @@ wiki는 상위 3위까지, raw fallback은 상위 2위까지만 봅니다(순위
 }
 ```
 
-`skipPaths`는 recall 결과 필터입니다. indexing cleanup이나 파일 삭제 반영을
-막는 용도가 아닙니다.
+`skipPaths`는 **recall 결과 필터일 뿐입니다.** 이름이 인덱싱 제외를 암시하지만,
+`core/recall.py`가 데몬 응답을 걸러낼 때만 쓰이고 인덱싱 대상은 전혀 줄이지
+않습니다. indexing cleanup이나 파일 삭제 반영에도 관여하지 않습니다.
+
+여기 걸린 문자열은 결과 경로에 **substring으로 포함되면** 제외됩니다. 즉
+`dist`는 `frontend/dist/a.md`뿐 아니라 `distribution-plan.md`도 걸러냅니다.
+
+추가로 문자열 `.auto-context-ignore`는 항상 skip 목록에 들어갑니다. **이것은
+ignore 파일이 아닙니다** — 플러그인은 `.auto-context-ignore`라는 파일을 읽지
+않으며, gitignore 류의 패턴 해석도 하지 않습니다. 경로에 그 문자열이 들어간
+결과를 recall에서 빼는 substring 필터가 전부입니다.
+
+`recallStrategy: "wikiOnly"`에서는 raw 문서를 대상으로 한 `skipPaths`가
+**아무 효과도 없습니다.** raw collection은 애초에 recall되지 않으므로 걸러낼
+결과 자체가 없습니다. `hierarchical`에서도 wiki 결과가 있는 동안에는 raw
+fallback이 실행되지 않아 같은 이유로 무의미합니다.
+
+### 인덱싱 범위를 줄이는 방법
+
+**인덱싱 대상을 줄이는 수단은 `collectionPaths`를 좁히는 것뿐입니다.**
+`core/update.sh`는 `qmd collection add "<경로>"`로 디렉터리만 넘기므로 glob이나
+ignore 파일 같은 축소 인수가 없고, `skipPaths`·`.auto-context-ignore`는 위에
+적은 대로 recall 결과 필터라 색인을 막지 못합니다.
+
+```json
+{
+  "collections": ["proj-docs", "proj-wiki"],
+  "collectionPaths": {
+    "proj-docs": "docs",
+    "proj-wiki": ".auto-context/wiki"
+  }
+}
+```
+
+특히 `collectionPaths`에 `.`(저장소 루트)을 지정하면 **저장소 전체 Markdown이
+색인 대상**이 됩니다. 워크트리 중복 체크아웃(`.worktrees`), vendored 문서,
+`node_modules`의 README까지 들어와 색인 비용과 recall 노이즈가 함께 늘어납니다.
+큰 저장소에서 루트를 지정한 경우 SessionStart에서 안내가 1회 표시됩니다.
+`docs`, `docs/current`처럼 실제로 recall되기를 바라는 경로만 지정하세요.
+
+`collections`에 있는데 `collectionPaths`에 대응 항목이 없는 collection도 경로가
+`.`으로 해석됩니다. collection 이름마다 경로를 명시하세요.
 
 ## Troubleshooting
 
