@@ -25,6 +25,213 @@ EN_STOPWORDS = {
     "has", "have", "been", "be", "will", "would", "not", "no",
 }
 
+# --- 식별자(정확 토큰) 추출 ------------------------------------------------
+#
+# qmd(>=2.5.3) lex 쿼리 문법 제약이 이 모듈의 설계를 지배한다.
+# `dist/store.js` buildFTS5Query / sanitizeFTS5Term / sanitizeFTS5Phrase 확인 결과:
+#
+#   1. plain term  → `[^\p{L}\p{N}'_]` 문자를 **삭제**한 뒤 `"sanitized"*` (prefix).
+#      즉 `docs/settings.md` 를 그대로 term 으로 보내면 `"docssettingsmd"*` 가 되어
+#      색인에 없는 토큰이 된다.
+#   2. positive term 들은 **AND** 로 결합된다. term 하나만 빗나가도 lex 전체가 0건이다.
+#      → term 을 늘리는 것 자체가 위험하므로 예산을 작게 유지한다.
+#   3. quoted phrase → 공백으로 쪼갠 각 조각의 **인접(exact adjacency)** 을 요구한다.
+#      FTS5 tokenizer 는 `porter unicode61` 이고 `_` 는 토큰 문자, `.` `/` `-` 는 구분자다.
+#
+# 3번 때문에 **우리는 quoted phrase 를 절대 만들지 않는다.** 실측(service-engineering-wiki):
+#   `"settings md"` → 0건 / `docs settings md 구조` → 2건 / 둘을 합치면 다시 0건.
+# wiki 카드 본문에는 원본 파일 경로가 보존되지 않고(운영 프로젝트는 `wikiOnly`) phrase 가
+# 매칭될 대상이 없는데, AND 결합이라 phrase 하나가 lex 전체를 0건으로 만든다.
+# 그래서 `_to_plain_term()` 은 경로/dotted 토큰에서 **가장 정보량 많은 조각 하나만**
+# plain prefix term 으로 승격한다 (`docs/settings.md` → `settings`).
+
+# AND 결합이므로 term 이 많아질수록 조건이 좁아져 0건 확률이 올라간다.
+# 일반 단어 5개 cap 과 별개 예산이고, 정확 토큰 신호에만 소량 배정한다.
+IDENTIFIER_BUDGET = 4
+
+# 아래 정규식은 전부 bounded 하고 선두에 무제한 반복이 없다. UserPromptSubmit 은
+# blocking hook 이고 queryTimeout 기본값이 3초이므로, 긴 로그 붙여넣기에서도
+# 제곱 시간 퇴화가 없어야 한다(try/except 도 hook_main 도 느린 정규식은 못 막는다).
+_CODE_SPAN_RE = re.compile(r"`([^`\n]{1,200})`")
+# 후보 토큰만 한 번에 긁는다. 뒤따르는 필수 구분자가 없으므로 재탐색이 발생하지 않는다.
+_CANDIDATE_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_./\-]{0,79}")
+_CALL_SUFFIX_RE = re.compile(r"\(\s{0,4}\)")
+# lowerUpper 전이 또는 두 글자 이상 대문자 런 뒤 소문자(HTTPServer, XMLParser).
+_CASE_MIX_RE = re.compile(r"[a-z][A-Z]|[A-Z]{2,}[a-z]")
+
+# bounded work: 아주 긴 붙여넣기에서도 후보 검사 횟수를 상한한다(앞쪽 우선).
+# 코드스팬 후보는 이 상한과 무관하게 먼저 수집된다(백틱 우선 계약).
+_MAX_CANDIDATES = 400
+_MAX_CODE_SPANS = 64
+
+# 우선순위(작을수록 강함). 백틱 코드스팬은 사용자가 명시적으로 표시한 가장 강한 신호.
+_RANK_CODE_SPAN = 0
+_RANK_CALL = 1
+_RANK_PATH = 2
+_RANK_DOTTED = 3
+_RANK_SNAKE = 4
+_RANK_CASE_MIX = 5
+_RANK_KEBAB = 6
+_RANK_ALNUM = 7
+
+
+def _to_plain_term(token: str) -> str:
+    """토큰을 plain prefix term 하나로 줄인다 (quoted phrase 는 만들지 않는다).
+
+    - 경로(`docs/settings.md`) → basename(`settings.md`)
+    - dotted(`settings.md`, `config.load_project_config`) → 가장 긴 조각
+      (`settings`, `load_project_config`). 파일명이면 확장자를 뗀 stem 과 같고,
+      속성 경로면 가장 구체적인 이름이 남는다.
+    - snake/camel/kebab 은 원형 유지 — `_` 는 FTS5 토큰 문자이고 하이픈은 qmd 의
+      ``isHyphenatedToken`` 이 알아서 처리하므로 우리가 손댈 이유가 없다.
+    """
+    if "/" in token:
+        token = token.rsplit("/", 1)[-1].strip("./-")
+    if "." in token:
+        parts = [p for p in token.split(".") if p]
+        if not parts:
+            return ""
+        token = max(parts, key=len)
+    return token
+
+
+def _is_identifier_like(token: str) -> bool:
+    """일반 단어와 구별되는 구조적 신호가 있는지."""
+    if "_" in token or "-" in token or "." in token or "/" in token:
+        return True
+    if _CASE_MIX_RE.search(token):
+        return True
+    has_digit = any(ch.isdigit() for ch in token)
+    has_alpha = any(ch.isalpha() for ch in token)
+    return has_digit and has_alpha
+
+
+def _rank_of(token: str) -> int:
+    if "/" in token:
+        return _RANK_PATH
+    if "." in token:
+        return _RANK_DOTTED
+    if "_" in token:
+        return _RANK_SNAKE
+    if _CASE_MIX_RE.search(token):
+        return _RANK_CASE_MIX
+    if "-" in token:
+        return _RANK_KEBAB
+    return _RANK_ALNUM
+
+
+def _prepare(token: str, in_code_span: bool, is_call: bool) -> tuple[int, str] | None:
+    """후보 토큰 → (우선순위, lex term). 부적격이면 None."""
+    token = token.rstrip("./-")
+    if len(token) < 2 or len(token) > 80:
+        return None
+    if token.lower() in EN_STOPWORDS or token in KO_STOPWORDS:
+        return None
+
+    # 숫자 승격 금지: 날짜(2026/07/29)·IP(192.168.0.1)·순수 숫자가 식별자로 들어가면
+    # 대상 문서에 그 숫자가 없을 때 AND 결합 때문에 lex 가 통째로 죽는다. 백틱으로
+    # 감싼 순수 숫자(`127`)만 명시적 의도로 보고 허용한다 — dotted 숫자(`0.8`)는
+    # sanitize 후 색인에 없는 토큰(`08`)이 되므로 코드스팬이어도 받지 않는다.
+    if not any(ch.isalpha() for ch in token):
+        if in_code_span and token.isdigit() and len(token) >= 2:
+            return (_RANK_CODE_SPAN, token)
+        return None
+
+    rank = _rank_of(token)
+    if rank == _RANK_PATH:
+        # 경로는 basename 만 본다. 디렉터리 조각은 extract_keywords 가 prefix term 으로
+        # 이미 커버하고, 경로 전체를 term 으로 보내면 sanitize 로 붙어버려
+        # (`docssettingsmd`) 색인에 없는 토큰이 된다.
+        base = token.rsplit("/", 1)[-1].strip("./-")
+        if len(base) < 2 or not _is_identifier_like(base):
+            return None
+    elif not in_code_span and not is_call and not _is_identifier_like(token):
+        return None
+
+    if in_code_span:
+        rank = _RANK_CODE_SPAN
+    elif is_call:
+        rank = _RANK_CALL
+
+    term = _to_plain_term(token)
+    if len(term) < 2 or term.lower() in EN_STOPWORDS:
+        return None
+    return (rank, term)
+
+
+def extract_identifiers(text: str) -> list[str]:
+    """프롬프트의 정확 토큰(식별자)을 **qmd lex 용어**로 변환해 우선순위 순으로 돌려준다.
+
+    대상: 백틱 코드스팬 내용, 호출형(`f()`), 경로 basename, dotted/snake/kebab/
+    CamelCase, 숫자 포함 토큰. 어간 절단은 하지 않는다(원형 보존).
+
+    반환값은 전부 **plain prefix term** 이다(quoted phrase 없음 — 모듈 상단 주석 참고).
+    최대 ``IDENTIFIER_BUDGET`` 개이며 어떤 입력에도 예외를 던지지 않는다.
+    """
+    if not isinstance(text, str) or not text:
+        return []
+
+    try:
+        candidates: list[tuple[int, int, str]] = []
+
+        # 1) 코드스팬 우선 패스. 백틱은 사용자가 명시한 가장 강한 신호이므로 일반 후보
+        #    상한(_MAX_CANDIDATES)에 밀려 버려지면 안 된다 — 그래서 별도 패스로 먼저 모은다.
+        code_spans: list[tuple[int, int]] = []
+        for span_index, span in enumerate(_CODE_SPAN_RE.finditer(text)):
+            if span_index >= _MAX_CODE_SPANS:
+                break
+            span_start = span.start(1)
+            code_spans.append((span_start, span.end(1)))
+            for match in _CANDIDATE_RE.finditer(span.group(1)):
+                prepared = _prepare(
+                    match.group(0),
+                    True,
+                    bool(_CALL_SUFFIX_RE.match(text, span_start + match.end())),
+                )
+                if prepared is not None:
+                    candidates.append((prepared[0], span_start + match.start(), prepared[1]))
+
+        def in_span(start: int, end: int) -> bool:
+            for s, e in code_spans:
+                if start >= s and end <= e:
+                    return True
+            return False
+
+        # 2) 일반 후보 패스. bounded work 상한은 코드스팬 밖 후보에만 적용한다.
+        examined = 0
+        for match in _CANDIDATE_RE.finditer(text):
+            start, end = match.start(), match.end()
+            if in_span(start, end):
+                continue
+            if examined >= _MAX_CANDIDATES:
+                break
+            examined += 1
+            is_call = bool(_CALL_SUFFIX_RE.match(text, end))
+            prepared = _prepare(match.group(0), False, is_call)
+            if prepared is not None:
+                candidates.append((prepared[0], start, prepared[1]))
+
+        # rank 우선, 같은 rank 내에서는 등장 순서(안정 정렬).
+        candidates.sort(key=lambda c: (c[0], c[1]))
+
+        terms: list[str] = []
+        seen: set[str] = set()
+        for _rank, _start, term in candidates:
+            if len(terms) >= IDENTIFIER_BUDGET:
+                break
+            # 중복 제거는 동일 term(equality)으로만 한정한다. 부분 문자열 기준으로
+            # 버리면 `notebook` 채택 후 `book()` 처럼 별개 이름이 탈락한다.
+            key = term.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            terms.append(term)
+        return terms
+    except Exception:
+        # 순수 함수지만 hook import 경로이므로 어떤 실패에도 무해하게 degrade한다.
+        return []
+
+
 def strip_ko_suffix(token: str) -> str:
     for suffix in (
         "해주세요", "해줘", "해봐",
@@ -68,6 +275,64 @@ def extract_ep_terms(prompt: str) -> list[str]:
             terms.extend([f"EP{normalized:03d}", f"{normalized:03d}", f"EP{normalized}"])
     return list(dict.fromkeys(terms))
 
+
+_EP_PLAIN_RE = re.compile(r"^EP\d+$", re.IGNORECASE)
+_EP_SPLIT_RE = re.compile(r"[^0-9A-Za-z]+")
+
+
+def _is_ep_term(term: str) -> bool:
+    """ep 패턴이 꺼져 있을 때 걸러낼 EP 용어인지.
+
+    plain term(`EP12`)뿐 아니라 식별자 경로가 만들 수 있는 변형까지 본다:
+    `ep_12`, `EP-12`, 그리고 확장자가 붙어 뒤에 조각이 더 따라오는 형태
+    (`EP12.md` → `EP12 md`). **선두 조각**만 보고 판정하므로 `^EP\\d+$` 만
+    검사할 때 새던 확장자 변형이 함께 막힌다.
+    """
+    components = [c for c in _EP_SPLIT_RE.split(term.strip('"')) if c]
+    if not components:
+        return False
+    if _EP_PLAIN_RE.match(components[0]):
+        return True
+    return (
+        len(components) >= 2
+        and components[0].lower() == "ep"
+        and components[1].isdigit()
+    )
+
+
+def build_lexical_terms(prompt: str, patterns: list[str]) -> dict:
+    """lex 쿼리에 쓸 용어를 조립한다 — CLI와 recall.py가 공유하는 단일 정책.
+
+    순서: ``extract_ep_terms``(``"ep" in patterns`` 일 때만) → 식별자 → 일반 키워드.
+    식별자를 앞에 두는 이유는 정확 토큰이 가장 강한 신호이기 때문이고, ep 게이팅이
+    꺼져 있으면 식별자·키워드 양쪽에서 EP 용어를 제거한다(호스트별 불일치 방지).
+    """
+    keywords = extract_keywords(prompt)
+    identifiers = extract_identifiers(prompt)
+
+    lexical_terms: list[str] = []
+    if "ep" in (patterns or []):
+        lexical_terms.extend(extract_ep_terms(prompt))
+        lexical_terms.extend(identifiers)
+        lexical_terms.extend(keywords)
+    else:
+        lexical_terms.extend(t for t in identifiers if not _is_ep_term(t))
+        lexical_terms.extend(t for t in keywords if not _is_ep_term(t))
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for term in lexical_terms:
+        if term not in seen:
+            seen.add(term)
+            deduped.append(term)
+
+    return {
+        "keywords": keywords,
+        "identifiers": identifiers,
+        "lexicalTerms": deduped,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description="Extract keywords and lexical terms.")
     parser.add_argument("--patterns", default="")
@@ -76,31 +341,9 @@ def main():
     patterns = [p.strip() for p in args.patterns.split(",") if p.strip()]
 
     prompt = sys.stdin.read().strip()
-    
-    keywords = extract_keywords(prompt)
-    
-    lexical_terms = []
-    if "ep" in patterns:
-        lexical_terms.extend(extract_ep_terms(prompt))
-        lexical_terms.extend(keywords)
-    else:
-        # If ep is not active, filter out any EP-like words (e.g., EP12, EP012) that might have been extracted as keywords
-        lexical_terms.extend([k for k in keywords if not re.match(r"^EP\d+$", k, re.IGNORECASE)])
-    
-    # Deduplicate while preserving order
-    seen = set()
-    deduped_lexical_terms = []
-    for term in lexical_terms:
-        if term not in seen:
-            seen.add(term)
-            deduped_lexical_terms.append(term)
 
-    result = {
-        "keywords": keywords,
-        "lexicalTerms": deduped_lexical_terms
-    }
-    
-    print(json.dumps(result, ensure_ascii=False))
+    # EP 게이팅·조립 순서·dedup 정책은 build_lexical_terms가 SSOT다 (recall.py와 공유).
+    print(json.dumps(build_lexical_terms(prompt, patterns), ensure_ascii=False))
 
 if __name__ == "__main__":
     main()

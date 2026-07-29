@@ -269,15 +269,17 @@ def main():
         log_recall_event(log_path, "event_disabled")
         return 0
     
-    # Extract keywords
-    kw_result_raw = qmd_keywords.extract_keywords(prompt)
-    
-    # Extract lexical terms
-    lexical_terms = []
-    if "ep" in config.get("lexicalPatterns", []):
-        lexical_terms.extend(qmd_keywords.extract_ep_terms(prompt))
-    lexical_terms.extend(kw_result_raw)
-    
+    # Extract keywords + identifiers(정확 토큰) + lexical terms.
+    # EP 게이팅과 조립 순서는 keywords.build_lexical_terms가 SSOT다 — CLI(main)와
+    # 이 훅 경로가 같은 정책을 쓰게 해서 ep-off일 때 식별자 경로로 EP 용어가
+    # 누출되던 불일치를 없앤다. 식별자는 별도 예산(IDENTIFIER_BUDGET)이라
+    # 일반 키워드 5개 cap을 건드리지 않는다.
+    built_terms = qmd_keywords.build_lexical_terms(
+        prompt, config.get("lexicalPatterns", [])
+    )
+    kw_result_raw = built_terms["keywords"]
+    lexical_terms = built_terms["lexicalTerms"]
+
     # Deduplicate lexical terms
     seen = set()
     deduped_lexical_terms = []
