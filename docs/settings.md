@@ -53,6 +53,7 @@
 | `allowRoots` | `[]` | 프로젝트 밖 absolute path collection을 허용해야 할 때 쓰는 root 목록입니다. 일반 프로젝트에서는 비워 둡니다. |
 | `prefixStyle` | `"full"` | recall 출력 prefix 스타일입니다. 허용값은 `full`, `tag`입니다. |
 | `injectSummaryMaxChars` | `600` | wiki 카드 1장당 주입할 본문 문자 상한입니다. `0`이면 본문 주입을 끄고 경로와 title만 넣습니다. 아래 ["카드 본문 주입"](#카드-본문-주입) 참고. |
+| `injectSourcePathsPerCard` | `3` | wiki 카드 1장당 주입할 **원문 경로**(`sources[].path`) 개수 상한입니다. `0`이면 원문 경로 주입을 끕니다. 아래 ["원문 경로 주입"](#원문-경로-주입) 참고. |
 | `events` | `["sessionStart", "userPromptSubmit", "postToolUse"]` | 자동 동작을 켤 이벤트 목록입니다. |
 | `lexicalPatterns` | `[]` | 특수 lexical pattern 목록입니다. 현재 주 사용값은 `ep`입니다. |
 | `wikiPath` | `".auto-context/wiki"` | wiki collection의 기본 위치입니다. |
@@ -178,6 +179,85 @@ title 계열은 `titles_from_frontmatter`(주입 건수 중 frontmatter title을
 카드 파일 읽기 자체가 실패했는지는 `card_read_failures` / `card_read_reasons`로 봅니다 —
 이쪽은 필터로 drop된 후보까지 포함하므로, `wikiPath` 오설정으로 검수 카드가 전부
 fail-closed drop된 경우(`path_unresolved`)를 진짜 미검수 카드와 구분할 수 있습니다.
+
+## 원문 경로 주입
+
+카드 본문 아래에 그 카드가 근거로 삼은 **원문 경로**(frontmatter `sources[].path`)가
+`  ↳ ` 접두를 달고 한 줄에 하나씩 붙습니다.
+
+```
+관련 문서:
+- [wiki:verified] .auto-context/wiki/decisions/claude-runner-….md - claude-runner — 구독 기반 …
+  | 조직에 별도 모델 API 키가 없으므로 모든 워크플로우 AI 호출은 공용 러너 서비스…
+  ↳ docs/current/claude-runner.md
+`  |`로 시작하는 줄은 … 요약으로 충분하면 파일을 열지 말고, 부족할 때만 위 경로를, 카드와 대조가 필요할 때만 `  ↳` 원문 경로를 Read.
+필요시 참조.
+```
+
+- 표시 규칙은 카드 경로와 **같습니다**: `cwd` 하위면 상대경로, 밖이면 절대경로 —
+  모델이 어디서든 그대로 Read할 수 있어야 합니다.
+- 경로 하나에 한 줄을 씁니다. 여러 경로를 구분자로 이어 붙이면 구분자를 담은 경로에서
+  모델이 경계를 오해해 존재하지 않는 파일을 열게 됩니다(POSIX 파일명은 `,`·공백을
+  허용합니다).
+- 줄 선두 `↳`는 CommonMark에서 어떤 블록도 열지 않으므로 본문 인용 접두와 같은 원리로
+  프레임 밖으로 새지 않습니다.
+- raw role 결과에는 붙지 않습니다(wiki 카드 전용).
+
+### 원문은 "지금 읽을 파일"이 아니라 "찾아갈 주소"입니다
+
+원문 경로를 주면 모델이 1KB 카드 대신 수십 KB 원문을 열 수 있고, 그것은 이 플러그인의
+토큰 절감 목표와 정면으로 충돌합니다. 그래서 안내문의 마지막 절이 **3단 우선순위**를
+명시합니다 — ① 카드 본문으로 충분하면 아무 파일도 열지 않는다 ② 부족하면 카드 파일을
+읽는다 ③ 카드와 원문 대조가 필요할 때만 원문을 읽는다. 안내문은 매 프롬프트에 붙으므로
+문장을 새로 추가하지 않고 기존 문장의 마지막 절만 바꿉니다(순증 약 40자, 원문 경로가
+없는 프롬프트에서는 1단계 문장 그대로라 순증 0자입니다).
+
+### `sources[].path`는 신뢰 입력이 아닙니다
+
+이 값은 extractor(모델) 출력입니다. 세 가지를 검증하고, 통과하지 못한 경로는 **주입하지
+않습니다**(조용히 고쳐 넣지 않습니다).
+
+| 검증 | 이유 |
+|---|---|
+| project root(또는 `allowRoots`) 안으로 해석되는가 | `../../../etc/passwd`를 "이 프로젝트 파일"로 제시하지 않기 위함입니다. `resolve()` **후** 판정하므로 밖을 가리키는 심볼릭 링크도 걸립니다. `collectionPaths` 검증과 같은 함수(`resolve_paths.contained_path`)를 씁니다. |
+| 실제 파일로 존재하는가 | 없는 경로를 주면 모델이 Read에 실패하고 헛돕니다(stale 링크). |
+| 한 줄로 표시 가능한가 | 개행·탭·zero-width가 들어가면 주입 프레임의 새 줄을 만들 수 있고, 접은 문자열은 실제 파일을 가리키지 않습니다. |
+
+base는 `cwd`가 아니라 **project root**입니다 — `sources[].path`는 project root 상대
+POSIX 경로로 기록되므로(`wiki_compile_enqueue`), 하위 디렉터리 세션에서 `cwd`를 base로
+쓰면 정상 소스가 미존재로 오판됩니다.
+
+### `injectSourcePathsPerCard` 기본값 3의 근거와 "켜 두는" 이유
+
+dogfooding 849장 전수의 `sources` path 개수 분포입니다.
+
+| path 개수 | 카드 수 |
+|---:|---:|
+| 1 | 830 (97.8%) |
+| 2 | 12 |
+| 3 | 6 |
+| 4 | 1 |
+
+median 1 / p95 1 / max 4입니다. `3`이면 848/849(99.9%)가 절단 없이 들어가고, `topN`
+기본값 3에서 최악 9줄(경로 길이 median 55자 / max 94자)로 유계입니다. 카드 사이 중복
+경로는 제거되므로(같은 원문에서 여러 카드가 나오는 것이 정상입니다) 실제 줄 수는 더
+줄어듭니다. 상한은 `10`으로 clamp됩니다 — 이 값이 카드당 `stat()` 호출 수이자 주입 줄
+수의 상한이고 UserPromptSubmit은 blocking hook입니다. 항목 조사 자체도 상한의 2배까지만
+합니다(`sources`는 개수 보장이 없는 모델 제공 목록입니다).
+
+**기본값을 켜 둡니다.** 카드에 원문 링크가 없으면 카드는 막다른 길이고, "wiki collection만
+유지하고 raw 인덱스를 제거한다"(`recallStrategy: "wikiOnly"`)가 성립하는 근거 자체가
+"카드에 원문 링크가 있으니 raw 검색이 불필요하다"이기 때문입니다. 비용은 카드당 보통
+한 줄(median 55자 ≈ 20토큰)이고, 원문을 여는 위험은 위 우선순위 지시로 억제합니다.
+토큰을 더 줄여야 하는 프로젝트는 `0`으로 끄면 됩니다.
+
+주입·drop 여부는 `QMD_RECALL_LOG`의 `qmd_recall_selection` 줄에서 확인합니다 —
+`inject_source_paths_per_card` / `source_entries`(본 항목 수) / `sources_injected` /
+`sources_dropped` / `source_drop_reasons`. 사유 값: `missing`(존재하지 않음),
+`outside_root`(루트 밖), `not_inline`(한 줄로 표시 불가), `duplicate`(중복 제거),
+`over_cap`(상한 초과), `parse_failed`(flow mapping 파싱 실패),
+`no_path`(`{kind: unknown}` 등 경로 없는 항목). `missing`은 소스가 이동·삭제된
+**stale 링크**를 뜻합니다(dogfooding 849장에서 876항목 중 34건).
 
 ### minScore는 유사도가 아니라 순위입니다
 

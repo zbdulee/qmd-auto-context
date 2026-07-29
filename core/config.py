@@ -32,6 +32,9 @@ DEFAULT_CONFIG = {
     # wiki 카드 본문(요약)을 recall 주입에 넣을 때의 카드 1장당 문자 상한. 0이면 본문
     # 주입을 끄고 예전처럼 경로+title만 넣는다. 기본값 근거는 docs/settings.md 참고.
     "injectSummaryMaxChars": 600,
+    # wiki 카드의 원문 경로(`sources[].path`)를 카드 1장당 몇 개까지 주입할지. 0이면 끈다.
+    # 기본값 근거는 docs/settings.md 참고(849장 전수: median 1 / p95 1 / max 4).
+    "injectSourcePathsPerCard": 3,
     "events": ["sessionStart", "userPromptSubmit", "postToolUse"],
     "indexing": None,
     "collectionRoles": {},
@@ -105,6 +108,10 @@ DEFAULT_CONFIG = {
 # 무제한 확대한다. 4000은 관측된 최장 카드 본문(1574자)의 2.5배이고, topN 기본 3에서
 # 주입 본문 최악 12000자(읽기 창 10048자/장)로 유계다.
 MAX_INJECT_SUMMARY_CHARS = 4000
+
+# injectSourcePathsPerCard 상한. 이 값이 카드당 stat() 호출 수이자 주입 줄 수의 상한이므로
+# (topN × 이 값) blocking hook 예산을 유계로 둔다. 관측 최대 소스 수는 4다.
+MAX_INJECT_SOURCE_PATHS_PER_CARD = 10
 
 COMPILE_MODES = {"off", "candidates", "guarded", "auto-wiki"}
 WIKI_STATUSES = {"generated", "verified", "reviewed", "canon", "tentative", "contested", "discarded", "superseded"}
@@ -382,6 +389,11 @@ def normalize_config(input_config):
         input_config.get("injectSummaryMaxChars", DEFAULT_CONFIG["injectSummaryMaxChars"]),
         DEFAULT_CONFIG["injectSummaryMaxChars"],
         MAX_INJECT_SUMMARY_CHARS,
+    )
+    config["injectSourcePathsPerCard"] = coerce_nonneg_int(
+        input_config.get("injectSourcePathsPerCard", DEFAULT_CONFIG["injectSourcePathsPerCard"]),
+        DEFAULT_CONFIG["injectSourcePathsPerCard"],
+        MAX_INJECT_SOURCE_PATHS_PER_CARD,
     )
     config["collectionRoles"] = collection_role_map(input_config.get("collectionRoles"), config["collections"])
     config["recallStrategy"] = input_config.get("recallStrategy") if input_config.get("recallStrategy") in ("flat", "hierarchical", "wikiOnly") else DEFAULT_CONFIG["recallStrategy"]

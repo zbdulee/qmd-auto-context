@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# `X | None` 표기를 쓰려면 필수다: 이 모듈은 update.sh가 `PATH=/usr/bin:/bin`으로도
+# 호출하므로 macOS 시스템 python 3.9에서 import돼야 하고, PEP 604는 3.10부터다.
+from __future__ import annotations
+
 import sys
 import json
 import fnmatch
@@ -54,15 +58,29 @@ def allowed_roots(config: dict) -> list[Path]:
     return resolved
 
 
-def safe_collection_path(cwd: Path, path_str: str, roots: list[Path]) -> bool:
+def contained_path(base: Path, path_str: str, roots: list[Path]) -> Path | None:
+    """path_str을 base 기준으로 해석해 **base 또는 allowRoots 안**이면 그 경로를 반환한다.
+
+    traversal 판정의 단일 지점이다. `resolve()` **뒤에** 포함 여부를 보는 것이 핵심이다 —
+    `../../etc/passwd`나 밖을 가리키는 심볼릭 링크가 여기서 걸린다.
+    base가 인자인 이유: collectionPath는 cwd 기준이지만 wiki 카드의 `sources[].path`는
+    project root 기준이다(다른 base, 같은 규칙). cwd가 프로젝트 하위 디렉터리인 세션에서
+    cwd를 base로 쓰면 정상 소스가 traversal로 오판된다.
+    """
     try:
         candidate = Path(path_str).expanduser()
         if not candidate.is_absolute():
-            candidate = cwd / candidate
+            candidate = base / candidate
         resolved = candidate.resolve()
-    except OSError:
-        return False
-    return is_within(resolved, cwd) or any(is_within(resolved, root) for root in roots)
+    except (OSError, ValueError):
+        return None
+    if is_within(resolved, base) or any(is_within(resolved, root) for root in roots):
+        return resolved
+    return None
+
+
+def safe_collection_path(cwd: Path, path_str: str, roots: list[Path]) -> bool:
+    return contained_path(cwd, path_str, roots) is not None
 
 
 def resolve_paths(cwd_str, config_json):

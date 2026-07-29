@@ -22,7 +22,14 @@ exit 0이어야 한다). 대신 열린 인용부호처럼 **값이 잘렸다고 
 (`load_with_issue`) — 조용히 잘린 값을 반환하던 것이 위 1번과 같은 클래스다.
 """
 
+import re
+
 BLOCK_SCALAR_HEADERS = {">", "|", ">-", "|-", ">+", "|+", ">>", "|2", ">2"}
+
+# flow mapping의 키로 허용할 형태. 키도 모델(extractor)이 주므로 개행·구두점이 든 키는
+# 매핑을 벗어나 새 줄을 만들 수 있다 — 안전한 식별자만 통과시킨다.
+# (wiki_compile.SAFE_YAML_KEY_RE가 이 상수를 그대로 재노출한다: 정의는 한 곳이다.)
+SAFE_KEY_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]*")
 
 # YAML 1.2 double-quoted 이스케이프(값 → 표기). 순서 중요: 백슬래시가 먼저다.
 _DUMP_ESCAPES = [
@@ -160,6 +167,97 @@ def load_with_issue(raw: str) -> tuple[str, str]:
 def load(raw: str) -> str:
     """frontmatter 표기를 원래 문자열로 되돌린다(`dump`의 역함수)."""
     return load_with_issue(raw)[0]
+
+
+def dump_flow_mapping(mapping) -> str:
+    """`{k: "v", ...}` flow mapping 표기를 낸다. 안전한 키가 하나도 없으면 빈 문자열.
+
+    `sources:` 항목이 이 표기다(`- {kind: "raw", path: "docs/a.md"}`). **읽는 쪽
+    (`load_flow_mapping`)과 쌍으로 여기 둔다** — 이 저장소는 emit/parse가 갈려 두 번
+    깨졌다(title 이스케이프 규칙 8/731장 오염, `qmd:auto` 마커 정규식). 값은 전부 `dump`를
+    거치므로 `,`·`}`·개행·인용부호가 들어도 표기를 벗어나지 못하고, 키는 SAFE_KEY_RE
+    화이트리스트다.
+    """
+    parts = []
+    for key, value in mapping.items():
+        if not isinstance(key, str) or not SAFE_KEY_RE.fullmatch(key):
+            continue
+        parts.append(f"{key}: {dump(value)}")
+    return "{" + ", ".join(parts) + "}" if parts else ""
+
+
+def _split_flow_items(inner: str) -> list[str] | None:
+    """flow mapping 내부를 인용부호 밖의 `,`로만 나눈다. 인용부호가 열린 채 끝나면 None.
+
+    값이 `,`를 담을 수 있으므로(`dump`가 인용하므로 표기상 안전하다) 단순 `split(",")`은
+    값을 반으로 자른다 — 그러면 경로가 조용히 다른 문자열이 된다.
+    """
+    items: list[str] = []
+    buf: list[str] = []
+    quote = ""
+    index = 0
+    length = len(inner)
+    while index < length:
+        char = inner[index]
+        if quote:
+            buf.append(char)
+            if quote == '"' and char == "\\" and index + 1 < length:
+                buf.append(inner[index + 1])
+                index += 2
+                continue
+            if char == quote:
+                quote = ""
+            index += 1
+            continue
+        if char in ('"', "'"):
+            quote = char
+            buf.append(char)
+            index += 1
+            continue
+        if char == ",":
+            items.append("".join(buf))
+            buf = []
+            index += 1
+            continue
+        buf.append(char)
+        index += 1
+    if quote:
+        return None
+    items.append("".join(buf))
+    return items
+
+
+def load_flow_mapping(raw: str) -> tuple[dict, str]:
+    """`{k: "v", ...}` → (dict, 문제). `dump_flow_mapping`의 역함수.
+
+    문제 값: `not_flow_mapping`(중괄호로 감싸이지 않음) / `unbalanced_quote`(값이 잘렸다)
+    / `empty`(키가 하나도 없음). fail-open이 원칙이라 파싱한 키는 문제와 함께 그대로
+    돌려준다 — 읽기 경로(recall)는 한 항목이 이상해도 나머지를 살려야 한다.
+    중복 키는 first-wins다(`parse_frontmatter_scalars`와 같은 규약).
+    """
+    text = raw.strip()
+    if not (text.startswith("{") and text.endswith("}")) or len(text) < 2:
+        return {}, "not_flow_mapping"
+    items = _split_flow_items(text[1:-1])
+    if items is None:
+        return {}, "unbalanced_quote"
+    fields: dict[str, str] = {}
+    issue = ""
+    for item in items:
+        if not item.strip():
+            continue
+        key, sep, value = item.partition(":")
+        key = key.strip()
+        if not sep or not SAFE_KEY_RE.fullmatch(key) or key in fields:
+            continue
+        parsed, value_issue = load_with_issue(value)
+        if value_issue:
+            issue = issue or value_issue
+            continue
+        fields[key] = parsed
+    if not fields and not issue:
+        issue = "empty"
+    return fields, issue
 
 
 def fold_inline(value) -> str:
