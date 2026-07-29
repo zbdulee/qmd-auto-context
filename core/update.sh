@@ -835,6 +835,117 @@ PY
     notice_clear stale-queue "$workdir"
   fi
 
+  # 루트 collectionPath 표면화: collectionPaths가 저장소 루트(".")로 해석되는 컬렉션이
+  # 있으면 저장소 전체 Markdown이 색인 대상이 된다. update는 `qmd collection add "$path"`로
+  # 디렉터리만 넘기므로(glob·ignore 인수 없음) 색인 범위를 줄이는 유일한 수단이
+  # collectionPaths를 좁히는 것이다 — skipPaths/.auto-context-ignore는 recall 결과
+  # 필터라 색인을 막지 못한다(docs/settings.md "인덱싱 범위를 줄이는 방법").
+  # recommend_config.py는 "."을 추천하지 않지만 수동 설정을 막지는 못한다.
+  #
+  # 판정은 이미 계산된 $resolved(entries)를 재사용한다 — resolve_paths.py가
+  # collectionPaths fnmatch 매칭과 "미지정 → ." 기본값의 SSOT이므로 여기서 재구현하면
+  # 갈라진다(특히 collections에만 있고 collectionPaths에 없는 컬렉션도 "."이다).
+  #
+  # 작은 저장소에서 "."은 무해하므로 크기 가드를 함께 본다(recommend_config.py의
+  # 200파일/5MB와 같은 수준, 대상만 .md로 좁힘). 임계 초과 즉시 스캔을 중단하므로
+  # 알림이 뜨는 케이스는 빠르다. 임계에 못 미치는 거대 트리에서 walk가 길어지지
+  # 않도록 entry budget 상한을 두고, 소진되면 조용히 포기한다(동기 SessionStart
+  # 경로 원칙 — 판정 못 하면 무출력). QMD_SUPPRESS_NOTICE면 스캔 자체를 건너뛴다
+  # (notice_clear까지 생략 — 타 호스트 marker를 지우지 않기 위함).
+  if [ -z "${QMD_SUPPRESS_NOTICE:-}" ]; then
+    root_path_msg=""
+    if [ -n "$resolved" ]; then
+      # config/resolved는 argv로 전달(heredoc이 stdin을 차지 — stale-queue와 동일 패턴).
+      root_path_msg=$(python3 - "$workdir" "$resolved" <<'PY' 2>/dev/null || true
+import json, os, sys
+from pathlib import Path
+
+
+def int_env(name, default):
+    try:
+        value = int(os.environ.get(name, ""))
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+# recommend_config.py의 크기 가드와 같은 수준. env override는 테스트/튜닝용.
+MAX_FILES = int_env("QMD_ROOT_PATH_MAX_FILES", 200)
+MAX_BYTES = int_env("QMD_ROOT_PATH_MAX_BYTES", 5 * 1024 * 1024)
+ENTRY_BUDGET = int_env("QMD_ROOT_PATH_SCAN_BUDGET", 50000)
+MD_SUFFIXES = (".md", ".markdown")
+
+try:
+    resolved = json.loads(sys.argv[2])
+except Exception:
+    resolved = {}
+if not isinstance(resolved, dict) or resolved.get("refused"):
+    raise SystemExit(0)
+entries = resolved.get("entries")
+if not isinstance(entries, list):
+    raise SystemExit(0)
+
+root = Path(sys.argv[1]).resolve()
+names = []
+for entry in entries:
+    if not isinstance(entry, dict):
+        continue
+    name = entry.get("name")
+    rel = entry.get("path")
+    if not isinstance(name, str) or not isinstance(rel, str):
+        continue
+    try:
+        candidate = Path(rel).expanduser()
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        if candidate.resolve() == root:
+            names.append(name)
+    except OSError:
+        continue
+if not names:
+    raise SystemExit(0)
+
+files = 0
+total = 0
+budget = ENTRY_BUDGET
+over = False
+# .git만 prune한다(Markdown이 없어 집계에 무의미). node_modules/.worktrees는
+# 실제로 색인되는 .md를 담으므로 세는 쪽이 실태에 가깝다.
+for dirpath, dirnames, filenames in os.walk(root):
+    dirnames[:] = [d for d in dirnames if d != ".git"]
+    budget -= len(dirnames) + len(filenames)
+    for filename in filenames:
+        if not filename.lower().endswith(MD_SUFFIXES):
+            continue
+        files += 1
+        try:
+            total += (Path(dirpath) / filename).stat().st_size
+        except OSError:
+            pass
+        if files > MAX_FILES or total > MAX_BYTES:
+            over = True
+            break
+    if over or budget <= 0:
+        break
+if not over:
+    raise SystemExit(0)
+
+label = ", ".join(repr(n) for n in names)
+print(
+    f"[qmd] 컬렉션 {label}의 collectionPath가 저장소 루트(.)라 md {files}개 이상이 "
+    "색인 대상입니다 — .auto-context/settings.json의 collectionPaths를 docs 같은 "
+    "좁은 경로로 지정하면 색인 비용과 recall 정확도가 개선됩니다."
+)
+PY
+)
+    fi
+    if [ -n "$root_path_msg" ]; then
+      notice_once root-collection-path "$workdir" "$root_path_msg"
+    else
+      notice_clear root-collection-path "$workdir"
+    fi
+  fi
+
   # main()이 이미 계산한 STATUS/STATUS_WORKDIR을 worker에 env로 넘겨 재계산을
   # 없앤다(resolve_workdir_meta의 QMD_UPDATE_STATUS+QMD_CANONICAL_WORKDIR 단락).
   QMD_UPDATE_STATUS="$STATUS" QMD_CANONICAL_WORKDIR="$STATUS_WORKDIR" \

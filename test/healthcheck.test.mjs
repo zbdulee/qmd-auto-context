@@ -176,6 +176,134 @@ test('update.sh main: 이전 update 실패 status는 프로젝트별로만 표�
   }
 });
 
+// 루트 collectionPath(".") 표면화: 저장소 전체가 색인 대상이 되는 설정을 크기 가드와
+// 함께 판정해 SessionStart에서 1줄 안내한다. skipPaths/.auto-context-ignore는 recall
+// 결과 필터라 색인을 못 줄이므로, 안내는 collectionPaths를 좁히라고 말해야 한다.
+const ROOT_PATH_RE = /collectionPath가 저장소 루트/;
+
+function rootPathProject(base, settings, mdCount = 5) {
+  const d = mkdtempSync(join(base, 'rootproj-'));
+  mkdirSync(join(d, '.auto-context'), { recursive: true });
+  mkdirSync(join(d, 'docs'), { recursive: true });
+  if (settings !== null) {
+    writeFileSync(join(d, '.auto-context', 'settings.json'), JSON.stringify(settings));
+  }
+  for (let i = 0; i < mdCount; i += 1) {
+    writeFileSync(join(d, 'docs', `f${i}.md`), '# doc\n');
+  }
+  return d;
+}
+
+function rootPathEnv(base, extra = {}) {
+  const cache = join(base, 'cache');
+  mkdirSync(cache, { recursive: true });
+  return {
+    cache,
+    env: {
+      QMD_HEALTHCHECK_PORT: '59999',
+      QMD_CACHE_DIR: cache,
+      QMD_DIRTY_QUEUE: join(base, 'no-queue'),
+      // 가드 임계를 낮춰 테스트에서 200개 파일을 만들지 않는다(프로덕션 기본 200/5MB).
+      QMD_ROOT_PATH_MAX_FILES: '2',
+      ...extra,
+    },
+  };
+}
+
+test('update.sh main: collectionPath "." + 크기 가드 초과 → 1줄 안내, 재세션은 marker로 조용', () => {
+  const base = mkdtempSync(join(NOTICE_BASE, 'qmd-rootpath-'));
+  const { env } = rootPathEnv(base);
+  const d = rootPathProject(base, {
+    indexing: true, collections: ['p-root'], collectionPaths: { 'p-root': '.' },
+  });
+  try {
+    const first = runMain(d, env);
+    const hits = first.split('\n').filter((l) => ROOT_PATH_RE.test(l));
+    assert.equal(hits.length, 1, 'stdout 1줄 계약');
+    assert.match(hits[0], /'p-root'/, '문제 컬렉션 이름 포함');
+    assert.match(hits[0], /collectionPaths를 docs 같은 좁은 경로로 지정/, '해결 안내 포함');
+    assert.doesNotMatch(hits[0], /skipPaths/, '색인을 못 줄이는 skipPaths를 권하지 않음');
+
+    const second = runMain(d, env);
+    assert.doesNotMatch(second, ROOT_PATH_RE, 'TTL 내 반복 알림 억제');
+    const third = runMain(d, { ...env, QMD_NOTICE_TTL_SECS: '0' });
+    assert.match(third, ROOT_PATH_RE, 'TTL 만료 후 재알림');
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('update.sh main: 크기 가드 미달이면 "."이어도 무출력 (작은 저장소는 무해)', () => {
+  const base = mkdtempSync(join(NOTICE_BASE, 'qmd-rootpath-small-'));
+  const { cache, env } = rootPathEnv(base, { QMD_ROOT_PATH_MAX_FILES: '500', QMD_NOTICE_TTL_SECS: '0' });
+  const d = rootPathProject(base, {
+    indexing: true, collections: ['p-root'], collectionPaths: { 'p-root': '.' },
+  });
+  try {
+    assert.doesNotMatch(runMain(d, env), ROOT_PATH_RE);
+    const markers = readdirSync(cache).filter((f) => f.startsWith('notice-root-collection-path-'));
+    assert.equal(markers.length, 0, '가드 미달은 marker도 남기지 않음(조건 해소 시 재무장)');
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('update.sh main: 좁은 collectionPath는 무출력', () => {
+  const base = mkdtempSync(join(NOTICE_BASE, 'qmd-rootpath-narrow-'));
+  const { env } = rootPathEnv(base, { QMD_NOTICE_TTL_SECS: '0' });
+  const d = rootPathProject(base, {
+    indexing: true, collections: ['p-docs'], collectionPaths: { 'p-docs': 'docs' },
+  });
+  try {
+    assert.doesNotMatch(runMain(d, env), ROOT_PATH_RE);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('update.sh main: collectionPaths 미지정 컬렉션도 "."으로 해석돼 안내 대상 (resolve_paths 기본값)', () => {
+  const base = mkdtempSync(join(NOTICE_BASE, 'qmd-rootpath-implicit-'));
+  const { env } = rootPathEnv(base, { QMD_NOTICE_TTL_SECS: '0' });
+  const d = rootPathProject(base, { indexing: true, collections: ['p-implicit'] });
+  try {
+    assert.match(runMain(d, env), /'p-implicit'/);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('update.sh main: optout/미설정 프로젝트는 루트 안내도 무출력', () => {
+  const base = mkdtempSync(join(NOTICE_BASE, 'qmd-rootpath-gate-'));
+  const { env } = rootPathEnv(base, { QMD_NOTICE_TTL_SECS: '0' });
+  const optout = rootPathProject(base, {
+    indexing: false, collections: ['p-root'], collectionPaths: { 'p-root': '.' },
+  });
+  const pending = rootPathProject(base, null);
+  try {
+    assert.doesNotMatch(runMain(optout, env), ROOT_PATH_RE, 'optout 프로젝트는 무동작');
+    assert.doesNotMatch(runMain(pending, env), ROOT_PATH_RE, '미설정 프로젝트는 무동작');
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('update.sh main: QMD_SUPPRESS_NOTICE=1 → 루트 안내 무출력 + marker 미생성', () => {
+  const base = mkdtempSync(join(NOTICE_BASE, 'qmd-rootpath-suppress-'));
+  const { cache, env } = rootPathEnv(base);
+  const d = rootPathProject(base, {
+    indexing: true, collections: ['p-root'], collectionPaths: { 'p-root': '.' },
+  });
+  try {
+    const suppressed = runMain(d, { ...env, QMD_SUPPRESS_NOTICE: '1' });
+    assert.doesNotMatch(suppressed, ROOT_PATH_RE);
+    const markers = readdirSync(cache).filter((f) => f.startsWith('notice-root-collection-path-'));
+    assert.equal(markers.length, 0, 'suppress 실행은 marker를 선점하지 않음');
+    assert.match(runMain(d, env), ROOT_PATH_RE, 'suppress 실행이 후속 세션 알림을 삼키지 않음');
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
 test('update.sh: healthcheck timeout 기본값 2s + QMD_HEALTH_TIMEOUT override/fallback', () => {
   const dir = mkdtempSync(join(tmpdir(), 'qmd-health-timeout-'));
   const bin = join(dir, 'bin');
