@@ -110,6 +110,35 @@ test('claude adapter: task=dedup uses the dedup prompt and emits a dedup verdict
   rmSync(d, { recursive: true, force: true });
 });
 
+test('resolve_engine: backends-only config resolves without a caller hint (retroactive scan has none)', () => {
+  // Regression: the scan calls is_available()/judge_pair() with no engine, so a
+  // config using extractor.backends WITHOUT builtins resolved to "" -> backends[""]
+  // missed -> judge permanently "unavailable" -> every scan silently degraded to the
+  // legacy score gate. Both dogfood projects use exactly that shape.
+  const py = `import json,os,sys; sys.path.insert(0,'core'); import wiki_dedup_judge as j
+backends = {'compile': None}
+cfg_backends = {'extractor': {'dispatch': 'by-engine', 'backends': {'codex': ['/x/codex'], 'claude': ['/x/claude']}, 'default': []}}
+cfg_builtins = {'extractor': {'dispatch': 'by-engine', 'builtins': ['codex'], 'backends': {'claude': ['/x/claude']}, 'default': []}}
+out = {}
+out['backends_no_hint'] = j.resolve_engine(cfg_backends)
+out['backends_hint_wins'] = j.resolve_engine(cfg_backends, 'hermes')
+out['builtins_preferred'] = j.resolve_engine(cfg_builtins)
+os.environ['QMD_ENGINE'] = 'codex'
+out['env_configured'] = j.resolve_engine(cfg_backends)
+os.environ['QMD_ENGINE'] = 'gemini'
+out['env_unconfigured'] = j.resolve_engine(cfg_backends)
+out['available_no_hint'] = j.is_available(cfg_backends)
+print(json.dumps(out))`;
+  const out = JSON.parse(runLib(py));
+  // Deterministic pick (sorted) so two hosts scanning the same project agree.
+  assert.equal(out.backends_no_hint, 'claude');
+  assert.equal(out.backends_hint_wins, 'hermes', '명시 hint가 최우선');
+  assert.equal(out.builtins_preferred, 'codex', 'builtins가 backends 키보다 우선');
+  assert.equal(out.env_configured, 'codex', '설정된 host engine이면 QMD_ENGINE 채택');
+  assert.equal(out.env_unconfigured, 'claude', '미설정 engine 라벨로는 죽지 않음');
+  assert.equal(out.available_no_hint, true, 'hint 없이도 judge 가용');
+});
+
 // ------------------------------------------------- write-time gate (wiki_compile)
 
 function writeCompileSettings(work, compile = {}) {

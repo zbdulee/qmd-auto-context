@@ -102,12 +102,34 @@ def set_cooldown(root: Path, seconds: int) -> None:
 
 
 def resolve_engine(compile_cfg: dict, hint: str = "") -> str:
-    """Engine label for adapter dispatch: caller hint, else the first configured builtin."""
+    """Engine label for adapter dispatch: caller hint, else the host engine this
+    process runs under, else the first configured builtin, else the first
+    explicitly configured backend.
+
+    The write-time gate always has a candidate `engine` to hand us, but the
+    retroactive scan has none. Without the env/backends fallbacks a project that
+    configures `extractor.backends` WITHOUT `builtins` (the shape both dogfood
+    projects use) resolves to "", `backends[""]` misses, and the judge reports
+    itself permanently unavailable -- silently degrading every retroactive scan
+    back to the legacy score gate the judge exists to replace.
+
+    QMD_ENGINE is only honored when that engine is actually configured; an
+    unconfigured host (e.g. gemini on a claude/codex-only project) falls through
+    to a configured backend rather than resolving to a dead label.
+    """
     if isinstance(hint, str) and hint:
         return hint
     extractor = compile_cfg.get("extractor") if isinstance(compile_cfg.get("extractor"), dict) else {}
     builtins = [e for e in (extractor.get("builtins") or []) if isinstance(e, str)]
-    return builtins[0] if builtins else ""
+    backends = extractor.get("backends") if isinstance(extractor.get("backends"), dict) else {}
+    env = os.environ.get("QMD_ENGINE", "")
+    if env and (env in builtins or env in backends):
+        return env
+    if builtins:
+        return builtins[0]
+    for name in sorted(name for name in backends if isinstance(name, str) and name):
+        return name
+    return ""
 
 
 def is_available(compile_cfg: dict, engine: str = "") -> bool:
