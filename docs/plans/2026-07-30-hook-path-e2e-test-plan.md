@@ -119,4 +119,32 @@ E2E 를 8단계 뒤로 미루므로, 훅 경유에서만 드러나는 결함이 
 - 1단계: 카드 본문 인용 접두 `  | `, frontmatter title, project-root 상대 경로
 - 2단계: `  ↳ ` 원문 경로, 3단 우선순위 안내문, `injectSourcePathsPerCard` 상한
 - 3단계: 소스 전멸 감지 → 원장 → notice → repair 재지정, 원자적 쓰기(실패 주입은 훅 경유로 불가)
-- 4단계: (구현 후 추가)
+- 4단계: 교차 검증 — `verifiedBy` ≠ extractor engine, `verifiedMode: cross-engine`.
+  다른 엔진 CLI 부재 시 `self` 로 degrade 하고 기록이 남는지. non-127 실패 후 **다음 run 이
+  다음 후보로** 내려가는지(`verify-engine-cooldown.json` 이 생기는지)
+- 5단계: `core/crowding_probe.py` 는 훅이 import 하지 않는다(blocking 비용 구조적 0).
+  E2E 에서는 훅 경유로 **불려서는 안 되는 것**을 확인한다 — recall 로그에 crowding 관련
+  항목이 없어야 한다
+- 6단계: 한 run 의 유료 호출이 상한 안인가. `verifyQueued` 가 그 run 의 카드를 **먼저**
+  검수하는지(backlog 가 있을 때). `cards_per_source_cap` 레코드가 나오는지(모델이 카드를
+  많이 낼 때만)
+- 7단계: role `source` 는 라이브 프로젝트에 설정하지 않았으므로 **기존 role 경로가 무변화**인지만
+  확인한다(`raw`/`wiki` 프로젝트에서 dirty 큐·recall payload 가 이전과 같은지)
+- 8단계: orphan 정리 후 인덱스에서 라이브 recall 이 정상 주입되는지(이미 직접 호출로 확인했고
+  **훅 경유로 재확인**). `minScore` 순위 컷 때문에 후보 다수가 탈락하는 것은 정상 동작이다
+
+### 훅 경유로 처음 실행되는 코드 (E2E 의 실질 대상)
+
+이 파일들은 1~8단계에서 새로 생겼고 **cache 0.22.2 에는 존재하지 않았다** — 즉 훅 경유
+실행 이력이 0 이다:
+
+`core/crowding_probe.py`(훅 미사용) · `core/wiki_markers.py` · `core/wiki_source_missing.py` ·
+`core/wiki_source_repair.py` · `core/wiki_source_scan.py` · `core/yaml_scalars.py`
+
+그리고 기존 파일 중 훅 경유 경로가 크게 바뀐 것: `core/recall.py`(962 → 1,917줄) ·
+`core/update.sh`(백그라운드 fork + role 판정 + notice 3종) · `core/wiki_compile.py` ·
+`core/wiki_verify_worker.py` · `core/config.py`(role SSOT).
+
+**`core/update.sh` 가 가장 위험하다** — SessionStart 마다 돌고, 백그라운드 fork 를 띄우고,
+stdout 이 모델 컨텍스트이며, 이 세션에서 조용한 실패(f-string SyntaxError 가 `2>/dev/null` 로
+버려지고 `END rc=0` 으로 성공 위장)가 실제로 발생했던 파일이다.
