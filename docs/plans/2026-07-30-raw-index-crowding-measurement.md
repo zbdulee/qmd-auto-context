@@ -469,5 +469,15 @@ deep 창 40 → 3~23). **즉 `--probe` 재생은 vec 비교에는 유효하지�
    raw 미등록의 recall 이득이 0 임을 보였을 뿐 `↳` 의 가치와 무관하다. 문서에서 두 주장을
    묶어 쓰지 말 것(`docs/settings.md` 의 "원문 경로 주입" 절이 그렇게 쓰여 있었고 고쳤다).
 4. **orphan 벡터 정리를 주기적으로 한다.** 63.8% 가 죽은 벡터였고 `collection remove` 가
-   그것을 남기는 것이 상류 동작이므로 계속 쌓인다. `qmd cleanup` 을 운영 절차에 넣을지는
-   별도 판단(이 플러그인이 대신 호출할 수도 있으나 사용자 인덱스를 만지는 일이다).
+   그것을 남기는 것이 상류 동작이므로 계속 쌓인다. → **구현됐다**(`core/orphan_reclaim.py`).
+   수동 명령을 사용자가 기억하는 방식이 아니라 자동 회수다: (1) `update.sh` 에서
+   `qmd collection remove` 가 **성공한** 직후(그 순간 orphan 이 생긴 것이 확실하므로 비율
+   임계를 보지 않는다), (2) 임계 초과 시 SessionStart 백그라운드에서 기회적 회수
+   (`maintenance.orphanVectors`, 기본 ratio 0.2 · count 200 · 시도 간격 24h). 컬렉션 제거
+   없이도 쌓인다는 것을 이 작업에서 재측정했다 — 위 정리 3시간 뒤 **1,112 / 16,590
+   (6.7%)** 이고 그 사이 제거는 없었다(편집 → 새 content hash → 옛 hash 벡터 orphan).
+   회수는 공식 `qmd cleanup` 만 부르고 vec0 에 손 SQL 을 쓰지 않으며, **데몬은 멈추지
+   않는다** — `qmd cleanup` 은 데몬이 DB 를 잡고 열린 read 트랜잭션이 있어도 rc=0 이고,
+   배타적 write 트랜잭션이 열려 있으면 SQLite busy timeout 으로 5.1s 기다린 뒤 성공했다
+   (격리 인덱스 + 실제 데몬으로 실측). 8단계에서 데몬을 멈춘 것은 필수가 아니었다.
+   설정·임계 근거·실패 종점은 `docs/settings.md` "orphan 벡터 자동 회수".

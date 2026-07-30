@@ -143,6 +143,24 @@ unregister_failed_state() {
   printf '%s' "$(_notice_marker unregister-failed-state "$1")"
 }
 
+# orphan 벡터 회수의 1차 트리거. `qmd collection remove`가 **실제로 성공**한 직후에만
+# 부른다 — 그 순간 orphan 벡터가 생긴 것이 확실하므로(qmd 2.5.3 `removeCollection`은
+# 벡터를 지우지 않는다) 비율 임계를 따지지 않고 회수 대상으로 표시한다.
+#
+# 마커 경로는 core/orphan_reclaim.py가 SSOT다(전역 1개 — qmd 인덱스가 전역 파일이므로
+# "orphan이 있다"는 사실도 프로젝트별이 아니다). 여기서 경로를 다시 적지 않고 스크립트를
+# 부른다: 두 벌로 갈리면 쓰는 쪽과 읽는 쪽이 다른 파일을 보게 되고, 그 실패는 조용하다.
+# 제거는 드문 이벤트라 python 스폰 1회는 문제가 되지 않는다(hot path 아님).
+mark_orphan_reclaim_pending() {
+  python3 "$_QMD_CORE_DIR/orphan_reclaim.py" --mark-pending >/dev/null 2>&1 || true
+}
+
+# main()이 회수 실패를 notice로 표면화할 때 읽는 전역 상태 파일. 경로는
+# orphan_reclaim.failed_path()와 **반드시 같아야** 한다(양쪽 주석에 명시).
+orphan_reclaim_failed_state() {
+  printf '%s' "$_QMD_CACHE_DIR/orphan-reclaim-failed"
+}
+
 wiki_compile_notice_info() {
   local cwd="$1"
   local core_dir="$2"
@@ -291,7 +309,9 @@ preflight_remove_risky() {
     [ -z "$path" ] && continue
     if path_refused_by_resolver "$path"; then
       log "PREFLIGHT: removing risky collection '$name' (path=$path)"
-      qmd collection remove "$name" >>"$LOG" 2>&1 || true
+      # 이 루프는 `| while`이라 서브셸이다 — 변수로 신호를 올릴 수 없으므로 마커 파일을 쓴다
+      # (mark_orphan_reclaim_pending이 파일 기반인 이유 중 하나).
+      qmd collection remove "$name" >>"$LOG" 2>&1 && mark_orphan_reclaim_pending || true
     fi
   done
   # while이 서브셸이라 캐시 무효화가 부모로 전파되지 않는다 — 여기서 명시적으로 버린다.
@@ -360,6 +380,7 @@ for entry in data.get("sourceEntries") or []:
         log "UNREGISTER SOURCE COLLECTION: $name (role=source)"
         if qmd collection remove "$name" >>"$LOG" 2>&1; then
           qmd_registry_invalidate
+          mark_orphan_reclaim_pending
         else
           # 등록돼 있는 것을 확인했는데 제거가 실패했다 = 사용자에게 알릴 사실.
           log "UNREGISTER SOURCE COLLECTION FAILED: $name"
@@ -375,7 +396,7 @@ for entry in data.get("sourceEntries") or []:
         # 매 세션 거짓 경보가 난다. notice는 "등록을 확인했는데 실패"일 때만 낸다.
         log "UNREGISTER SOURCE COLLECTION: $name (registry unreadable, attempting)"
         qmd collection remove "$name" >>"$LOG" 2>&1 \
-          && qmd_registry_invalidate \
+          && { qmd_registry_invalidate; mark_orphan_reclaim_pending; } \
           || log "UNREGISTER SOURCE COLLECTION: $name remove failed (registry unknown)"
         ;;
     esac
@@ -582,6 +603,7 @@ PY
 "
     elif qmd collection remove "$name" >>"$LOG" 2>&1; then
       qmd_registry_invalidate
+      mark_orphan_reclaim_pending
       successful="${successful}${name}
 "
     else
@@ -834,6 +856,13 @@ run_update() {
         # Retroactive wiki dedup scan: must run strictly after embed completes
         # (this line), never after run_update()/--worker itself returns.
         python3 "$CORE_DIR/wiki_dedup_scan.py" --cwd "$WORKDIR" >> "$LOG" 2>&1 || true
+        # orphan 벡터 회수. **embed 다음에 두는 것이 직렬화 수단이다** — `qmd cleanup`은
+        # vacuum을 하므로 우리 자신의 embed와 겹치면 서로를 기다린다(SQLite busy timeout).
+        # 데몬은 멈추지 않는다: 실측으로 `qmd cleanup`은 데몬이 DB를 잡고 열린 read
+        # 트랜잭션을 들고 있어도 성공하고(rc=0), 배타적 write 트랜잭션이 있으면 5.1s를
+        # 기다린 뒤 성공한다. 새 스케줄러를 만들지 않고 기존 배수 경로(3단계 dedup scan과
+        # 같은 자리)를 재사용한다.
+        python3 "$CORE_DIR/orphan_reclaim.py" --cwd "$WORKDIR" --qmd-bin "$QMD_BIN_RESOLVED" >> "$LOG" 2>&1 || true
       ' >/dev/null 2>&1 &
       log "EMBED: started in background (pid=$!)"
     fi
@@ -930,6 +959,20 @@ main() {
     notice_once unregister-failed "$workdir" "[qmd] role source 컬렉션을 qmd 인덱스에서 제거하지 못했습니다: ${unregister_failed}. 그때까지 이 컬렉션은 계속 색인·검색됩니다. 'qmd collection remove <이름>'을 직접 실행하거나 qmd 데몬 상태를 확인하세요."
   else
     notice_clear unregister-failed "$workdir"
+  fi
+
+  # orphan 벡터 회수 실패 표면화(같은 종점 패턴). 회수는 백그라운드 fork에서 돌아
+  # stdout이 사용자에게 닿지 않으므로 실패 사유를 전역 파일에 남기고 여기서 읽는다.
+  # 이 notice가 없으면 죽은 벡터가 계속 쌓이고 vec 후보 창을 갉아먹는 것이 조용히
+  # 진행된다(8단계에서 63.8%까지 쌓여 있었다). 재시도는 cooldown 주기로 계속되며
+  # (기본 24h) 성공 시 orphan_reclaim.py가 파일을 지워 자동 재무장한다.
+  orphan_reclaim_failed=""
+  orphan_reclaim_state="$(orphan_reclaim_failed_state)"
+  [ -s "$orphan_reclaim_state" ] && orphan_reclaim_failed="$(head -n 1 "$orphan_reclaim_state" 2>/dev/null || true)"
+  if [ -n "$orphan_reclaim_failed" ]; then
+    notice_once orphan-reclaim "$workdir" "[qmd] 죽은(orphan) 벡터 회수에 실패했습니다: ${orphan_reclaim_failed}. 쌓이면 검색 후보 창을 잠식합니다. 'qmd cleanup'을 직접 실행하거나 로그(~/.cache/qmd/orphan-reclaim.log)를 확인하세요."
+  else
+    notice_clear orphan-reclaim "$workdir"
   fi
 
   # 미지 role 값 표면화. `collectionRoles`에 **키가 있는데 값이 닫힌 집합

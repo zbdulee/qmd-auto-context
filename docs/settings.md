@@ -58,6 +58,7 @@
 | `lexicalPatterns` | `[]` | 특수 lexical pattern 목록입니다. 현재 주 사용값은 `ep`입니다. |
 | `wikiPath` | `".auto-context/wiki"` | wiki collection의 기본 위치입니다. |
 | `compile` | disabled | wiki compile과 verify 관련 설정입니다. |
+| `maintenance` | enabled | qmd 인덱스 유지보수(죽은 벡터 회수) 설정입니다. 아래 ["orphan 벡터 자동 회수"](#orphan-벡터-자동-회수) 참고. |
 
 ### blocking 훅의 시간 예산
 
@@ -1014,6 +1015,67 @@ embed 서브셸 안에 두지 않습니다). 카드 mtime 스냅샷을 쓰지 �
 | `compile.semanticDedup.similarPageMaxChars` | `12000` | extractor에 함께 넘길 유사 page content 최대 길이입니다. |
 | `compile.semanticDedup.autoMergeThreshold` | `0.9` | 자동 dedup scan에서 merge 후보로 볼 기준입니다. |
 | `compile.semanticDedup.maxPairsPerScan` | `10` | 한 번의 scan에서 queueing할 최대 pair 수입니다. |
+
+## orphan 벡터 자동 회수
+
+```json
+{
+  "maintenance": {
+    "orphanVectors": { "enabled": true, "minRatio": 0.2, "minCount": 200, "cooldownSeconds": 86400 }
+  }
+}
+```
+
+| Option | Default | Description |
+|---|---:|---|
+| `maintenance.orphanVectors.enabled` | `true` | 죽은(orphan) 벡터 자동 회수 사용 여부입니다. `false`면 두 트리거 모두 동작하지 않습니다. |
+| `maintenance.orphanVectors.minRatio` | `0.2` | 기회적 회수의 orphan 비율 하한입니다(`0`~`1`). |
+| `maintenance.orphanVectors.minCount` | `200` | 기회적 회수의 orphan 절대 개수 하한입니다. 두 조건을 **모두** 넘겨야 회수합니다. |
+| `maintenance.orphanVectors.cooldownSeconds` | `86400` | 회수 **시도** 간 최소 간격입니다. 양수만 유효합니다(`0`이나 음수는 기본값으로 되돌아갑니다 — 매 세션 vacuum을 설정 오타로 열지 않기 위함). |
+
+**왜 필요한가.** qmd 2.5.3의 `qmd collection remove`(`removeCollection`)는 `documents`와
+`content`만 삭제하고 **벡터는 남깁니다**(상류 동작). 남은 벡터는 디스크 문제가 아니라
+**검색 문제**입니다 — 데몬이 vec 후보를 뽑는 창(deep 40)을 죽은 행이 차지하기 때문입니다.
+실측(로드맵 8단계)에서 41,455행 중 26,438행(63.8%)이 orphan이었고, 그 상태에서는 컬렉션
+필터 질의가 전역 창 **밖**의 문서를 하나도 내지 못했습니다. 정리 후 두 라이브 프로젝트가
+`scoped_retrieval_proven`으로 뒤집혔습니다. 컬렉션 제거 없이도 쌓입니다 — 파일을 편집하면
+새 content hash가 생기고 옛 hash의 벡터가 orphan이 됩니다(정리 3시간 뒤 재측정: 1,112 /
+16,590 = 6.7%).
+
+**두 트리거.**
+
+1. **제거 직후** — `qmd collection remove`가 실제로 성공하면 그 순간 orphan이 생긴 것이
+   확실하므로 비율 임계를 보지 않고 회수합니다. 제거는 일회성 이벤트라 스스로 유계입니다.
+2. **기회적** — 외부에서 `qmd collection remove`를 직접 쓰거나 편집 churn으로 쌓인 경우를
+   위해, **임계를 넘을 때만** 회수합니다. 매 세션 돌리지 않는 이유는 `qmd cleanup`이
+   vacuum을 포함하기 때문입니다(26,438행 정리 + 1.0GB DB vacuum 실측 7초).
+
+**임계 근거.** orphan 비율은 vec 후보 창에서 낭비되는 칸의 기대 비율과 같습니다 — 20%면
+40칸 창에서 약 8칸입니다. 63.8%에서는 창이 포화돼 측정 자체가 불가능했고(위), 6.7%는
+실해가 관측되지 않는 수준입니다. `minCount` 200은 총 벡터가 적은 인덱스에서 비율이 잡음이
+되는 것을 막습니다(예: 20행 중 10행 orphan = 50%지만 실제 창 오염은 무의미). 활발한
+편집에서는 하루 정도면 20%에 도달하므로 회수는 대략 하루 1회 붙습니다.
+
+**어디서 도는가.** SessionStart의 백그라운드 `qmd embed` 서브셸 안, retroactive dedup scan
+**뒤**입니다(새 스케줄러를 만들지 않고 기존 배수 경로를 재사용합니다). blocking hook 예산을
+쓰지 않고 stdout에 아무 것도 내지 않습니다. 회수는 항상 공식 경로인 `qmd cleanup`을 부르며
+(`cleanupOrphanedVectors`는 sqlite-vec 미가용 시 우아하게 degrade합니다) 플러그인이 vec0
+가상 테이블에 직접 SQL을 쓰지 않습니다. orphan **판정**은 평범한 두 테이블
+(`content_vectors` × `documents`)의 read-only 조인이며 실측 10ms입니다.
+
+**데몬은 멈추지 않습니다.** `qmd cleanup`의 VACUUM이 데몬과 경합하는지 실측했습니다 —
+데몬이 DB를 잡고 있어도, 다른 연결이 열린 read 트랜잭션을 들고 있어도 rc=0으로 성공하고,
+배타적 write 트랜잭션이 열려 있으면 SQLite busy timeout으로 5.1초 기다린 뒤 성공했습니다.
+따라서 daemon stop/reload가 필요하지 않고, 세션 중 recall 중단도 없습니다.
+
+**실패하면.** 회수 실패는 전역 상태 파일에 남고 다음 SessionStart가 `notice_once`(TTL 4h)로
+1회 알립니다. 재시도는 cooldown 주기(기본 24h)로 계속되며 성공하면 상태가 지워져 다시
+무장합니다. cooldown은 **성공이 아니라 시도** 기준입니다 — sqlite-vec가 없으면 `cleanup`은
+0건 삭제로 성공하므로 성공 기준 cooldown이면 매 세션 vacuum이 돌게 됩니다.
+
+**끄는 방법.** `maintenance.orphanVectors.enabled: false`(프로젝트 단위) 또는
+`QMD_ORPHAN_RECLAIM=off`(프로세스 단위 kill switch). 미설정·optout 프로젝트에서는 애초에
+동작하지 않습니다 — 컬렉션이 없으면 전역 인덱스를 만질 근거도 없습니다.
 
 ## Common Recipes
 

@@ -95,6 +95,18 @@ DEFAULT_CONFIG = {
     "collectionRoles": {},
     "recallStrategy": "hierarchical",
     "wikiPath": ".auto-context/wiki",
+    # qmd 인덱스 자체의 유지보수(전역 인덱스 대상). 프로젝트 설정에 두는 이유는
+    # update.sh(SessionStart)가 프로젝트 단위로 돌기 때문이고, `qmd update`/`embed`가
+    # 이미 같은 성질(프로젝트 세션이 전역 인덱스를 만진다)이다. 기본 on 근거는
+    # docs/settings.md "orphan 벡터 자동 회수".
+    "maintenance": {
+        "orphanVectors": {
+            "enabled": True,
+            "minRatio": 0.2,
+            "minCount": 200,
+            "cooldownSeconds": 86400,
+        },
+    },
     "compile": {
         "enabled": False,
         "mode": "off",
@@ -583,6 +595,37 @@ def compile_config(value):
     return result
 
 
+def maintenance_config(value):
+    """qmd 인덱스 유지보수 설정. 사용자 인덱스를 만지는 동작이라 전부 끌 수 있어야 한다.
+
+    임계(minRatio/minCount)는 "이만큼 죽은 벡터가 쌓이면 회수한다"이므로 0도 유효값이다
+    (0 = 임계 없음 = 조금이라도 있으면 회수). `coerce_int`는 0을 기본값으로 되돌리므로
+    쓸 수 없다 — `coerce_nonneg_int`/직접 검사를 쓴다. cooldownSeconds는 반대로 0이면
+    매 세션 vacuum이 붙어 금지 사항이 되므로 양수만 받는다(`coerce_int`).
+    """
+    defaults = DEFAULT_CONFIG["maintenance"]["orphanVectors"]
+    raw = value if isinstance(value, dict) else {}
+    orphan = raw.get("orphanVectors") if isinstance(raw.get("orphanVectors"), dict) else {}
+    ratio = coerce_float(orphan.get("minRatio", defaults["minRatio"]), defaults["minRatio"])
+    if ratio < 0 or ratio > 1:
+        ratio = defaults["minRatio"]
+    return {
+        "orphanVectors": {
+            "enabled": (
+                orphan.get("enabled")
+                if isinstance(orphan.get("enabled"), bool)
+                else defaults["enabled"]
+            ),
+            "minRatio": ratio,
+            "minCount": coerce_nonneg_int(orphan.get("minCount", defaults["minCount"]), defaults["minCount"]),
+            "cooldownSeconds": coerce_int(
+                orphan.get("cooldownSeconds", defaults["cooldownSeconds"]),
+                defaults["cooldownSeconds"],
+            ),
+        },
+    }
+
+
 def has_legacy_novel_collection(collections):
     return any(
         collection.endswith("-manuscript") or collection.endswith("-plot")
@@ -637,6 +680,7 @@ def normalize_config(input_config):
     config["recallStrategy"] = input_config.get("recallStrategy") if input_config.get("recallStrategy") in ("flat", "hierarchical", "wikiOnly") else DEFAULT_CONFIG["recallStrategy"]
     config["wikiPath"] = input_config.get("wikiPath") if isinstance(input_config.get("wikiPath"), str) else DEFAULT_CONFIG["wikiPath"]
     config["compile"] = compile_config(input_config.get("compile"))
+    config["maintenance"] = maintenance_config(input_config.get("maintenance"))
     if "events" in input_config and isinstance(input_config.get("events"), list):
         config["events"] = [
             canonical_event_name(event)

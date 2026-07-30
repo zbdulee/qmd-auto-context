@@ -396,6 +396,52 @@ title: "claude-runner — 구독 기반 Claude Code headless AI 실행 계층"
   `hierarchical` 이고 `recallVerifiedOnly` 의 안전 설계가 raw backfill 에 기대므로,
   종점을 wiki-only 로 고정하면 자기 제품의 기본값과 모순됩니다
 
+## 후속 항목 (미구현)
+
+### F1. dedup 판정의 자기검증 노출 — write-time gate 한정으로 교차 엔진화
+
+**문제.** 4단계가 verify에 교차 엔진(`compile.verify.crossEngine`, 기본 `prefer`)을 도입해
+"카드를 만든 엔진이 그 카드를 검수한다"를 완화했지만, **dedup 판정에는 적용되지 않았다.**
+`core/wiki_dedup_judge.py`의 `resolve_engine()`은 (1) 호출자 hint → (2) `QMD_ENGINE` → (3)
+`builtins[0]` → (4) 첫 backend 순서로 엔진을 고르고, write-time gate의 hint는
+`wiki_compile.judge_new_page_duplicate`가 `judge_pair(..., engine)`으로 넘기는
+**candidate 자신의 엔진**(`candidate["engine"]`)이다. 즉 카드를 쓴 모델이 "이 카드가
+기존 카드와 같은 사실인가"를 스스로 판정한다.
+
+**왜 verify 처방을 그대로 재사용하면 안 되는가.** `wiki_verify_worker.plan_verify_attempts`는
+"이 카드의 생산자"라는 단일 값을 안다(카드 1장 : 엔진 1개). dedup은 **카드 두 장을 비교**하고
+그 둘의 생산자가 서로 다르거나 불명일 수 있다 — 무엇이 "자기검증"인지 확정되지 않는다.
+retroactive scan(`wiki_dedup_scan.py`)은 hint조차 없어 `builtins[0]`으로 떨어지므로, 두 카드의
+생산자와 판정자의 관계가 우연에 맡겨진다. 그래서 **생산자가 확실한 write-time dedup만**
+"다른 엔진 우선"으로 확장하는 것이 타당한 범위다(codex 판단, 동의).
+
+**범위 제안.**
+- write-time gate(`wiki_compile.judge_new_page_duplicate`)에서만 `crossEngine: prefer`와 같은
+  선호 규칙을 적용한다: candidate 엔진과 **다른** 엔진을 1순위로, 없으면 기존 동작으로 degrade.
+- retroactive scan은 **범위 밖**으로 명시한다. 여기서 "다른 엔진"을 정의하려면 카드마다
+  생산자 provenance가 필요하고(현재 카드 frontmatter에 생산 엔진 필드가 없다 — `verifiedBy`는
+  검수자다), 그 provenance 도입이 별건이다.
+- adapter argv 해석은 여전히 한 벌(`wiki_compile_worker.resolve_extractor_argv`)을 쓴다.
+
+**비용 영향: 호출 수는 늘지 않는다.** judge는 후보 쌍당 1회이고 예산도 그대로다
+(`semanticDedup.judge.maxPairsPerCompile` 기본 1 / `maxPairsPerScan` 기본 8). 바뀌는 것은
+**어느 CLI가 그 1회를 받는가**뿐이다. 단 CLI가 하나만 설치된 머신에서는 선호가 충족되지 않아
+기존 동작으로 degrade해야 하고(4단계 verify와 같은 규칙), 그 degrade가 없으면 판정 자체가
+사라져 레거시 score gate로 떨어진다 — score는 유사도가 아니므로 그것은 실질적 후퇴다.
+
+**현재 노출 규모(2026-07-30 라이브 실측, 읽기 전용).**
+
+| 프로젝트 | judge 판정 건수 | `judgedBy` | 기본 생산 엔진 | 자기검증 |
+|---|---:|---|---|---|
+| service-engineering | 12 (`distinct` 12) | `claude` 12 | `claude`(backends 첫 항목) | 12 / 12 |
+| 귀신은 약효가 돌 때 보인다 | 5 (`distinct` 4 · `duplicate` 1) | `claude` 5 | `claude`(`builtins[0]`) | 5 / 5 |
+
+집계원: 각 프로젝트 `.auto-context/compile/dedup-skipped.jsonl`·`dedup-needed.jsonl`의
+`judgedBy`/`judgeVerdict`. 두 프로젝트 모두 extractor 기본 엔진이 `claude`로 해석되므로
+**판정 17건 전부가 자기검증**이다. 참고로 같은 기간 verify는 이미 교차 엔진이 작동해
+service-engineering에서 `claude` 193 / `codex` 59로 갈려 있다(4단계 효과). `judgedBy`가 없는
+과거 행(se 7 / novel 36)은 judge 도입 전 score-threshold 기록이라 분모에서 제외했다.
+
 ## 로드맵에 넣지 않은 것 (선행 검토가 지적했으나 범위 밖)
 
 - **시간성(bitemporal)** — `superseded` status 는 있으나 유효 구간이 없어 "2월엔 A,
