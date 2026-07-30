@@ -296,8 +296,48 @@ def verify_skipped_path(root: Path, vcfg: dict) -> Path | None:
     return wcw.safe_compile_file(root, vcfg.get("skippedPath", VERIFY_SKIPPED_DEFAULT))
 
 
-def verify_deleted_path(root: Path, vcfg: dict) -> Path | None:
-    return wcw.safe_compile_file(root, vcfg.get("deletedPath", VERIFY_DELETED_DEFAULT))
+def verify_deleted_path(root: Path, vcfg: dict) -> Path:
+    """삭제 전용 감사 원장 경로. **형제 호출자들과 같이 기본 경로로 폴백한다.**
+
+    `candidate_path`·`log_path`는 폴백하는데 이것만 `None`을 돌려주던 것이 유료 무한 루프의
+    입구였다: compile 디렉터리 밖을 가리키는 `deletedPath`(`.auto-context/verify-deleted.jsonl`
+    같은 **자연스러운 오타**)가 config 검증을 통과하고 `safe_compile_file`이 None을 내면
+    `record_verify_deletion`이 실패해 fail-closed 분기로 가고, cooldown도 억제 마커도 없어
+    **매 run 유료 호출 1회 + 잡 영구 잔존 + 카드 영구 비가시**가 됐다(실측 3 run 연속).
+    오타가 과금 루프가 되어서는 안 되므로 기본 경로로 떨어진다 — 사용자가 적은 경로가
+    무시되는 것이 더 나은 실패다(그 사실은 원장이 기본 위치에 생기는 것으로 보인다).
+    """
+    return wcw.safe_compile_file(root, vcfg.get("deletedPath", VERIFY_DELETED_DEFAULT)) or (
+        root / ".auto-context" / "compile" / "verify-deleted.jsonl"
+    )
+
+
+def ledger_writable(path: Path) -> bool:
+    """삭제 원장에 append할 수 있는가 — **유료 호출 전에** 확인하는 preflight.
+
+    fail-closed(원장 없으면 삭제 안 함)는 옳지만 **종점이 없으면 과금 루프**가 된다: 판정을
+    받고(유료) 원장 쓰기에 실패해 잡을 보존하면 다음 run이 같은 카드를 다시 유료로 판정한다.
+    cooldown이나 억제 마커로 끊는 방법도 있지만, 그 파일들 역시 같은 디렉터리에 쓰므로
+    "아무것도 못 쓰는 상태"에서는 함께 실패한다. **가장 확실한 종점은 유료 호출을 아예 하지
+    않는 것**이고, 그래서 판정 전에 여기서 막는다(호출 0회 = 루프 없음).
+
+    **원장 파일을 만들지는 않는다.** 삭제가 없었으면 파일도 없어야 한다(원장의 존재 자체가
+    "이 프로젝트에서 카드가 지워졌다"로 읽히고, 기존 테스트도 그 계약을 고정한다). 그래서
+    부모 디렉터리에 임시 파일을 만들어 지우는 방식으로 쓰기 가능성만 확인하고(디렉터리 부재·
+    권한·ENOSPC를 모두 잡는다), 목표 경로가 이미 있으면 **일반 파일인지** 따로 본다
+    (디렉터리를 `deletedPath`로 적은 경우가 실측된 실패 모드다).
+    """
+    try:
+        if path.exists() and not path.is_file():
+            return False
+        path.parent.mkdir(parents=True, exist_ok=True)
+        probe = path.with_name(f".{path.name}.probe-{os.getpid()}")
+        with open(probe, "w", encoding="utf-8"):
+            pass
+        probe.unlink(missing_ok=True)
+        return True
+    except OSError:
+        return False
 
 
 def load_verify_suppressions(path: Path | None) -> dict[str, str]:
@@ -365,24 +405,29 @@ def record_verify_deletion(
     covers fail too, which records no suppression by design.
     """
     path = verify_deleted_path(root, vcfg)
-    if path is None:
+    # **예외도 False로 접는다.** `append_jsonl`이 OSError를 전파하면(경로가 디렉터리·ENOSPC)
+    # standalone worker가 rc=1 traceback으로 죽고 `verify-log.jsonl`에 **한 줄도 남지 않아**
+    # "흔적은 남는다"가 성립하지 않았다. 여기서 잡으면 호출자의 fail-closed 분기가
+    # `delete_blocked` 줄을 남기고 잡을 보존한다(= 관측 가능 + 카드 보존).
+    try:
+        wc.append_jsonl(path, {
+            "targetPath": record.get("targetPath", ""),
+            "verdict": verdict,
+            "engine": record.get("engine", ""),
+            # 자기검증(self)이 내린 삭제는 교차검증이 내린 삭제보다 약한 근거다 — 삭제된
+            # 카드를 사후에 판단하려면 누가 무엇을 검수했는지가 원장에 함께 있어야 한다.
+            "verifiedMode": record.get("verifiedMode", ""),
+            "producedBy": record.get("producedBy", ""),
+            "reasons": record.get("reasons", []),
+            "claims": record.get("claims", 0),
+            "sourcePaths": [
+                src.get("path") for src in sources
+                if isinstance(src, dict) and isinstance(src.get("path"), str) and src.get("path")
+            ],
+            "deletedAt": wcw.now_iso(),
+        })
+    except OSError:
         return False
-    wc.append_jsonl(path, {
-        "targetPath": record.get("targetPath", ""),
-        "verdict": verdict,
-        "engine": record.get("engine", ""),
-        # 자기검증(self)이 내린 삭제는 교차검증이 내린 삭제보다 약한 근거다 — 삭제된
-        # 카드를 사후에 판단하려면 누가 무엇을 검수했는지가 원장에 함께 있어야 한다.
-        "verifiedMode": record.get("verifiedMode", ""),
-        "producedBy": record.get("producedBy", ""),
-        "reasons": record.get("reasons", []),
-        "claims": record.get("claims", 0),
-        "sourcePaths": [
-            src.get("path") for src in sources
-            if isinstance(src, dict) and isinstance(src.get("path"), str) and src.get("path")
-        ],
-        "deletedAt": wcw.now_iso(),
-    })
     return True
 
 
@@ -795,6 +840,15 @@ def run(
     log_path = wcw.safe_compile_file(root, vcfg.get("logPath", VERIFY_LOG_DEFAULT))
     if log_path is None:
         log_path = root / ".auto-context" / "compile" / "verify-log.jsonl"
+
+    # **유료 호출 전 preflight: 삭제 원장에 쓸 수 없으면 검수하지 않는다.**
+    # fail-closed 삭제(원장 없이는 지우지 않는다)는 유지하지만 그 실패에 종점이 없으면
+    # 과금 루프가 된다 — 판정 1회(유료) → 원장 실패 → 잡 보존 → 다음 run 재판정(유료)…
+    # 큐를 claim하기 **전에** 막으므로 host CLI 호출이 0회이고 잡·카드는 그대로다.
+    # 사용자 표면화는 SessionStart(`core/update.sh`)가 같은 프로브를 돌려 notice_once로 한다.
+    if not ledger_writable(verify_deleted_path(root, vcfg)):
+        result["reason"] = "audit_ledger_unwritable"
+        return result
 
     # 0.x 전역 cooldown 파일의 고아 정리 — 이제 읽지도 쓰지도 않으므로 남아 있으면 "검수가
     # 식힘 중"이라는 잘못된 인상만 준다. 후보 단위 파일로 대체됐다(engine_cooldown_path).

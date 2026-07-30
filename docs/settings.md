@@ -520,6 +520,13 @@ jq -c 'select(.event=="qmd_recall_shadow" and .verdict.selected_empty_raw_nonemp
 수) + verify(아래 예산)**입니다. 세 항목이 각각 유계여야 총량이 유계이고, 그래서
 `maxCardsPerSource`가 필요합니다 — `batch.maxPerRun`만으로는 extractor 호출 수만 보장됩니다.
 
+> **⚠ 두 값의 곱이 그 run의 카드 수입니다.** 한 run이 쓰는 카드는 최대
+> `batch.maxPerRun × maxCardsPerSource`이고 dedup judge는 **카드당 1회**이므로, 기본값
+> (10 × 10)에서 한 run 최악 유료 호출은 **10 + 100 + 30 = 140회**입니다. 두 값을 각각
+> 클램프 상한까지 올리면(50 × 50 = 카드 2,500장) **2,581회**가 가능합니다. 어떤 클램프도
+> 이 **곱**을 막지 않습니다 — 두 값을 함께 올리는 것은 명시적 선택이므로 허용하되, 올릴
+> 때는 곱을 계산해 보십시오. 실측: `batch.maxPerRun 10` × `maxCardsPerSource 50` → 540회.
+
 `maxItems`와 `maxPerRun`을 혼동하지 마십시오. 예전에는 상한이 아예 없어 `maxItems`를 넘겨
 처리가 시작되면 **큐에 든 전량**을 한 워커 프로세스가 순차 실행했습니다. 큐가 수백 건이면
 (대량 `git pull` 뒤 sync는 한 번에 최대 50건을 넣습니다) 단일 one-shot 워커가 유료 host CLI 호출을 수십~수백 회 직렬로

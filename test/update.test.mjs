@@ -12,6 +12,27 @@ function resolvePaths(cwd, configJson) {
   return JSON.parse(out.toString());
 }
 
+// core/update.sh --worker forks a DETACHED background subshell (embed + dedup scan) that
+// keeps writing into the temp workdir after execFileSync returns, racing rmSync (ENOTEMPTY,
+// measured ~1 run in 4). Every test here uses a stub qmd, so that background work is
+// meaningless; the one test that verifies the fork itself opts out below.
+process.env.QMD_SKIP_BACKGROUND_EMBED = '1';
+
+// 정리 자체가 경합에 지지 않게 한다 — 위 가드를 끈 테스트(백그라운드 fork 검증)는 자식이
+// 아직 쓰고 있을 수 있으므로 짧게 재시도한다.
+function removeTemp(dir) {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+      return;
+    } catch (err) {
+      if (err.code !== 'ENOTEMPTY' && err.code !== 'EBUSY') throw err;
+      execFileSync('sleep', ['0.05']);
+    }
+  }
+  rmSync(dir, { recursive: true, force: true, maxRetries: 5 });
+}
+
 function repoTemp(prefix) {
   // HOME 하위(~/.cache)에 생성: repo 루트의 .auto-context.json(dogfooding)을 부모 상속하지
   // 않도록 repo 밖에 둔다. tmpdir(/private/tmp)는 risky_path라 resolve_paths가 risky를 반환하므로 쓰지 않는다.
@@ -1060,6 +1081,8 @@ test('update core: dedup scanner actually runs inside the embed subshell at runt
         QMD_DEDUP_LOG: dedupLog,
         QMD_DEDUP_COOLDOWN_DIR: join(work, 'dedup-cooldown'),
         QMD_SYNC_STATE_DIR: join(work, 'sync-state'),
+        // this test IS the fork's regression guard, so it must actually fork
+        QMD_SKIP_BACKGROUND_EMBED: '',
       },
     });
 
@@ -1073,7 +1096,7 @@ test('update core: dedup scanner actually runs inside the embed subshell at runt
     }
     assert.equal(seen, true, `wiki_dedup_scan.py did not log within 3s; embed subshell wiring likely broken`);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 

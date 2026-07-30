@@ -209,3 +209,153 @@ print(json.dumps({'verdict': 'pass', 'claims': [], 'reasons': []}))
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// The deletion audit ledger is fail-closed: no card is removed without its audit row. That
+// is right, but the failure had NO ENDPOINT — a verdict was paid for, the ledger write
+// failed, the job was preserved, and the next run paid again. Measured: 3 runs, 3 paid
+// verify calls, card still `generated` (invisible under recallVerifiedOnly), no cooldown and
+// no suppression marker, and the only trace was in a log that gets trimmed.
+function stampProject({ deletedPath, onFail = 'delete' } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'qwiki-ledger-'));
+  const cardRel = '.auto-context/wiki/concepts/ledger-card.md';
+  mkdirSync(join(dir, '.auto-context', 'compile'), { recursive: true });
+  mkdirSync(join(dir, '.auto-context', 'wiki', 'concepts'), { recursive: true });
+  mkdirSync(join(dir, 'docs'), { recursive: true });
+  const verifier = join(dir, 'verify.py');
+  const callLog = join(dir, 'verify-calls.log');
+  writeFileSync(verifier, `#!/usr/bin/env python3
+import json, sys, pathlib
+json.loads(sys.stdin.read())
+with pathlib.Path(${JSON.stringify(callLog)}).open('a') as h:
+    h.write('call\\n')
+print(json.dumps({'verdict': 'fail', 'claims': [], 'reasons': ['source contradicts card']}))
+`);
+  writeFileSync(join(dir, 'docs', 'source.md'), '# s\n\nDurable claim: the source says something else.\n');
+  writeFileSync(join(dir, '.auto-context', 'settings.json'), JSON.stringify({
+    indexing: true,
+    collections: ['proj-docs', 'proj-wiki'],
+    collectionPaths: { 'proj-docs': 'docs', 'proj-wiki': '.auto-context/wiki' },
+    collectionRoles: { 'proj-docs': 'raw', 'proj-wiki': 'wiki' },
+    wikiPath: '.auto-context/wiki',
+    compile: {
+      enabled: true, mode: 'auto-wiki', autoWrite: true, defaultStatus: 'generated',
+      triggers: ['post_tool_source'], maxSourceChars: 12000,
+      extractor: { argv: ['python3', verifier], timeout: 60 },
+      verify: { enabled: true, timeout: 60, maxPerRun: 3, onFail, ...(deletedPath ? { deletedPath } : {}) },
+    },
+  }));
+  writeFileSync(join(dir, cardRel), [
+    '---', 'title: "Ledger Card"', 'status: generated', 'createdBy: qmd-auto-context',
+    'reviewed: false', '---', '',
+    '<!-- qmd:auto:start id="main" sourceHash="h1" -->', '## Summary',
+    'Durable claim: the card says one thing.', '<!-- qmd:auto:end -->', '',
+  ].join('\n'));
+  writeFileSync(join(dir, '.auto-context', 'compile', 'verify-queue.jsonl'), JSON.stringify({
+    ts: '2026-07-30T00:00:00Z', targetPath: cardRel,
+    sources: [{ kind: 'file', path: 'docs/source.md', collection: 'proj-docs' }],
+    sourceHash: 'h1', engine: 'claude', trigger: 'post_tool_source',
+  }) + '\n');
+  return { dir, cardRel, callLog };
+}
+
+function runVerify(dir) {
+  return JSON.parse(execFileSync('python3', ['core/wiki_verify_worker.py', '--cwd', dir, '--json'], {
+    cwd: process.cwd(), encoding: 'utf8',
+    env: { ...process.env, QMD_DIRTY_QUEUE: join(dir, 'dirty-queue') },
+  }).trim());
+}
+
+function paidCalls(log) {
+  if (!existsSync(log)) return 0;
+  return readFileSync(log, 'utf8').trim().split('\n').filter(Boolean).length;
+}
+
+test('a deletedPath outside the compile dir falls back to the default, like its siblings', () => {
+  // candidate_path and log_path both fall back; only this one returned None, and that None
+  // was the entrance to the billing loop. `.auto-context/verify-deleted.jsonl` (one segment
+  // short) is a natural typo that passes config validation.
+  const { dir, cardRel, callLog } = stampProject({ deletedPath: '.auto-context/verify-deleted.jsonl' });
+  try {
+    const out = runVerify(dir);
+    assert.equal(out.processed, 1, 'the verdict is applied, not blocked');
+    assert.equal(existsSync(join(dir, cardRel)), false, 'fail verdict deletes the card');
+    const ledger = join(dir, '.auto-context', 'compile', 'verify-deleted.jsonl');
+    assert.equal(jsonl(ledger).length, 1, 'the row lands in the default location');
+    assert.equal(jsonl(ledger)[0].verdict, 'fail');
+    assert.equal(paidCalls(callLog), 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an unwritable audit ledger stops verification before spending anything', () => {
+  const { dir, cardRel, callLog } = stampProject();
+  const ledger = join(dir, '.auto-context', 'compile', 'verify-deleted.jsonl');
+  try {
+    // A directory at the ledger path is the measured failure mode: writable compile dir,
+    // unwritable ledger. Without a preflight this cost one paid call per run, forever.
+    mkdirSync(ledger, { recursive: true });
+    for (const attempt of [1, 2, 3]) {
+      const out = runVerify(dir);
+      assert.equal(out.reason, 'audit_ledger_unwritable', `run ${attempt}`);
+      assert.equal(out.processed, 0);
+      assert.equal(paidCalls(callLog), 0, `run ${attempt}: no host CLI call may happen`);
+      assert.equal(existsSync(join(dir, cardRel)), true, 'the card is preserved (fail-closed)');
+    }
+    // The job is still queued, so fixing the ledger resumes verification.
+    assert.equal(jsonl(join(dir, '.auto-context', 'compile', 'verify-queue.jsonl')).length, 1);
+    rmSync(ledger, { recursive: true, force: true });
+    const after = runVerify(dir);
+    assert.equal(after.processed, 1);
+    assert.equal(paidCalls(callLog), 1);
+    assert.equal(existsSync(join(dir, cardRel)), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the preflight does not create the ledger when nothing was deleted', () => {
+  // The ledger's existence reads as "cards have been deleted in this project", so probing
+  // must not fabricate it.
+  const { dir } = stampProject({ onFail: 'contested' });
+  try {
+    runVerify(dir);
+    assert.equal(existsSync(join(dir, '.auto-context', 'compile', 'verify-deleted.jsonl')), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a mid-run ledger failure leaves a trace instead of an rc=1 traceback', () => {
+  // record_verify_deletion used to let OSError propagate: the standalone worker died with a
+  // traceback and verify-log.jsonl got NO line, so "at least there is a trace" was false.
+  const { dir, cardRel } = stampProject();
+  try {
+    const py = `import json, sys, pathlib
+sys.argv = ['wiki_verify_worker.py', '--cwd', ${JSON.stringify(dir)}, '--json']
+sys.path.insert(0, ${JSON.stringify(process.cwd() + '/core')})
+import wiki_verify_worker as v
+real = v.wc.append_jsonl
+def boom(path, payload):
+    if 'verify-deleted' in str(path):
+        raise OSError('ENOSPC')
+    return real(path, payload)
+v.wc.append_jsonl = boom
+v.ledger_writable = lambda path: True   # pass the preflight, fail at write time
+v.main()
+`;
+    const out = execFileSync('python3', ['-c', py], {
+      cwd: process.cwd(), encoding: 'utf8',
+      env: { ...process.env, QMD_DIRTY_QUEUE: join(dir, 'dirty-queue') },
+    });
+    const parsed = JSON.parse(out.trim());
+    assert.equal(parsed.processed, 0);
+    assert.equal(parsed.remaining, 1, 'job preserved');
+    assert.equal(existsSync(join(dir, cardRel)), true, 'card not deleted without its audit row');
+    const log = jsonl(join(dir, '.auto-context', 'compile', 'verify-log.jsonl'));
+    assert.equal(log.at(-1).result, 'delete_blocked');
+    assert.equal(log.at(-1).reason, 'audit_ledger_unwritable');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

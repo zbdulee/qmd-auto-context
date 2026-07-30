@@ -647,7 +647,14 @@ run_update() {
       { [ -z "$epid" ] || ! kill -0 "$epid" 2>/dev/null; } && { rm -f "$EMBED_LOCK/pid" 2>/dev/null; rmdir "$EMBED_LOCK" 2>/dev/null || true; }
     fi
     
-    if ! mkdir "$EMBED_LOCK" 2>/dev/null; then
+    if [ -n "${QMD_SKIP_BACKGROUND_EMBED:-}" ]; then
+      # 백그라운드 fork(embed + retroactive dedup scan)를 건너뛴다. 이 fork는 detached라
+      # 호출자가 반환된 뒤에도 workdir에 쓰므로, 임시 디렉터리를 정리하는 호출자(테스트)와
+      # 경합해 ENOTEMPTY를 낸다 — 실측: 스위트 4회 중 1회 간헐 실패. 스위트를 커밋 게이트로
+      # 쓰는 한 "0 fail"의 신호 가치를 지켜야 하므로 명시적 스위치를 둔다. fork 자체를
+      # 검증하는 테스트는 이 값을 끄고 자식의 로그를 기다린다.
+      log "EMBED: skipped (QMD_SKIP_BACKGROUND_EMBED)"
+    elif ! mkdir "$EMBED_LOCK" 2>/dev/null; then
       log "EMBED: already running, skip"
     else
       LOG="$LOG" EMBED_LOCK="$EMBED_LOCK" QMD_BIN_RESOLVED="$qmd_bin" QMD_DAEMON_PORT="${QMD_DAEMON_PORT:-8483}" QMD_BACKEND_MANAGER="${QMD_BACKEND_MANAGER:-}" WORKDIR="$workdir" CORE_DIR="$(dirname "$0")" nohup bash -c '
@@ -831,6 +838,30 @@ except Exception:
       notice_once source-missing "$workdir" "[qmd] wiki 카드 원문 소실 ${source_missing_pending}건 대기(검수 카드 ${source_missing_verified}건) — 고치려면 '/wiki-source-repair' 또는 '소스 소실 카드 고쳐줘'라고 요청하세요."
     else
       notice_clear source-missing "$workdir"
+    fi
+
+    # 삭제 원장에 쓸 수 없으면 기계 검수가 **아무 카드도 검수하지 못한다**(fail-closed
+    # 삭제의 preflight가 유료 호출 전에 멈춘다). 그 상태로 두면 새 카드가 계속 `generated`로
+    # 쌓이고 `recallVerifiedOnly` 기본값에서 recall에 하나도 나오지 않는데, 흔적은 트림되는
+    # verify-log 뿐이라 사용자가 알 방법이 없었다. 판정은 Python이 SSOT다(bash 재구현 금지).
+    ledger_blocked="$(python3 -c 'import sys
+sys.path.insert(0, sys.argv[1])
+import config as c, wiki_verify_worker as v
+found = c.find_project_config(sys.argv[2])
+cfg = found["config"]
+compile_cfg = cfg.get("compile") if isinstance(cfg.get("compile"), dict) else {}
+vcfg = v.verify_cfg_of(compile_cfg)
+if not compile_cfg.get("enabled") or not vcfg.get("enabled", True):
+    print("")
+else:
+    import pathlib
+    root = pathlib.Path(found["projectRoot"]).resolve()
+    print("" if v.ledger_writable(v.verify_deleted_path(root, vcfg)) else "blocked")
+' "$(dirname "$0")" "$workdir" 2>/dev/null || true)"
+    if [ "$ledger_blocked" = "blocked" ]; then
+      notice_once verify-ledger "$workdir" "[qmd] 기계 검수 중단 — 삭제 감사 원장(.auto-context/compile/verify-deleted.jsonl)에 쓸 수 없습니다. 새 wiki 카드가 검수되지 않아 recall에 나오지 않습니다. compile 디렉터리 권한과 compile.verify.deletedPath 설정을 확인하세요."
+    else
+      notice_clear verify-ledger "$workdir"
     fi
   fi
 
