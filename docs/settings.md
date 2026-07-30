@@ -399,18 +399,25 @@ median 1 / p95 1 / max 4입니다. `3`이면 848/849(99.9%)가 절단 없이 들
 항목이 앞에 있어 상한 안에서 실제 원문이 밀려날 수 있었습니다(같은 목록이 기계 검수의
 근거이기도 하므로 그것은 검증 자체를 무력화했습니다. 아래 Verify 절 참고).
 
-**기본값을 켜 둡니다.** 카드에 원문 링크가 없으면 카드는 막다른 길이고,
-`recallStrategy: "wikiOnly"`(recall을 wiki에만 한다)가 성립하는 근거 자체가 "카드에 원문
-링크가 있으니 recall이 raw를 보지 않아도 된다"이기 때문입니다. 비용은 카드당 보통
-한 줄(median 55자 ≈ 20토큰)이고, 원문을 여는 위험은 위 우선순위 지시로 억제합니다.
-토큰을 더 줄여야 하는 프로젝트는 `0`으로 끄면 됩니다.
+**기본값을 켜 둡니다.** 카드에 원문 링크가 없으면 카드는 막다른 길입니다. 이 플러그인의
+아키텍처는 **"wiki는 중요하고 틀리지 않은 정보만 recall하고, 나머지는 에이전트가 raw를
+검색해 추출한다"** 이고, `recallStrategy: "wikiOnly"`는 그 전반부(자동 주입 범위)만 좁히는
+설정입니다. 원문 경로 주입은 그 **후반부로 넘어가는 통로**입니다 — 카드가 답이 아닐 때
+에이전트가 어디를 열어야 하는지 알려 줍니다. 비용은 카드당 보통 한 줄(median 55자 ≈
+20토큰)이고, 원문을 불필요하게 여는 위험은 위 우선순위 지시로 억제합니다. 토큰을 더 줄여야
+하는 프로젝트는 `0`으로 끄면 됩니다.
 
-> **`wikiOnly`는 "raw 인덱스를 제거한다"가 아닙니다.** 둘은 별개이고 후자는 하지 않는
+> **raw 검색은 불필요한 것이 아니라 설계된 폴백 경로입니다.** `wikiOnly`는 "raw를 검색하지
+> 않는다"가 아니라 "**자동 주입**은 wiki만 한다"는 뜻이고, raw는 에이전트의 명시적 검색으로
+> 계속 쓰입니다(`hierarchical`은 wiki가 비었을 때 자동 폴백까지 합니다).
+>
+> **그리고 `wikiOnly`는 "raw 인덱스를 제거한다"가 아닙니다.** 둘은 별개이고 후자는 하지 않는
 > 것으로 결론이 났습니다 — raw 인덱스 제거의 recall 이득은 lex·vec 양 경로에서 **0으로
 > 증명**됐습니다(qmd는 컬렉션별로 독립 검색하므로 비-wiki 인덱스가 wiki 후보를 밀어낼
-> 경로가 없습니다). raw 컬렉션은 등록된 채로 두고 recall 대상만 `wikiOnly`로 좁히는 것이
-> 현재 권고이며, raw는 수동 검색(escape hatch)과 카드 대조 경로로 계속 쓰입니다. 실측은
-> `docs/plans/2026-07-30-raw-index-crowding-measurement.md` 8단계에 있습니다.
+> 경로가 없습니다). raw 컬렉션은 등록된 채로 두고 자동 주입 범위만 `wikiOnly`로 좁히는 것이
+> 현재 권고입니다 — 인덱스를 지우면 위 아키텍처의 후반부(에이전트의 raw 검색)가 함께
+> 사라집니다. 실측은 `docs/plans/2026-07-30-raw-index-crowding-measurement.md` 8단계에
+> 있습니다.
 
 주입·drop 여부는 `QMD_RECALL_LOG`의 `qmd_recall_selection` 줄에서 확인합니다 —
 `inject_source_paths_per_card` / `source_entries`(본 항목 수) / `sources_injected` /
@@ -652,8 +659,15 @@ jq -c 'select(.event=="qmd_recall_shadow" and .verdict.selected_empty_raw_nonemp
 > **전부** 소진되면 backlog에 1건을 **추가로** 처리합니다(아래 `verify.maxPerRun` 참고).
 > 즉 verify 호출 수의 상한은 `예산`이 아니라 `예산 + 1`입니다. 기본값에서 verify 항은
 > `30 + 1 = 31`이고(`max(3, min(100, 30)) = 30`), 위 세 셈은 모두 이 `+1`을 포함합니다.
-> 라이브 실측 최악(프로젝트별 설정 기준): service-engineering **141**, 귀신은 약효가 돌 때
-> 보인다 **161**, 무림 **0**(compile 비활성).
+> 라이브 최악(프로젝트별 설정 기준, 셈을 그대로 적습니다):
+> service-engineering `10 + 100 + (max(15, 30) + 1) = ` **141**,
+> 귀신은 약효가 돌 때 보인다 `10 + 100 + (max(min(60, 50), 30) + 1) = ` **161**
+> (`verify.maxPerRun: 60`이 50으로 클램프됩니다), 무림 **0**(`compile.enabled: false`).
+>
+> 세 항의 정의는 extractor = `batch.maxPerRun`, dedup judge = 쓰인 카드 수 × `maxPairsPerCompile`
+> (기본 1 → 카드당 1회), verify = `max(verify.maxPerRun, min(카드 수, 30)) + 1`입니다.
+> 이 문서의 숫자는 `test/cost-budget-docs.test.mjs`가 **코드 상수에서 다시 계산해 대조**하므로,
+> 기본값이나 클램프가 바뀌면 문서가 아니라 테스트가 먼저 실패합니다.
 
 `maxItems`와 `maxPerRun`을 혼동하지 마십시오. 예전에는 상한이 아예 없어 `maxItems`를 넘겨
 처리가 시작되면 **큐에 든 전량**을 한 워커 프로세스가 순차 실행했습니다. 큐가 수백 건이면
@@ -1109,9 +1123,18 @@ collection만 질의하므로 raw가 넓게 색인돼도 recall 결과에 들어
 ## Troubleshooting
 
 컨텍스트가 기대와 다르게 들어오면 에이전트에게 recall 진단을 요청하세요. 진단
-시에는 `no_collections`, `no_indexed_collections`, `daemon_unreachable`, `query_failed`,
-`no_results_after_filter`, `selected` 같은 reason과 함께 score, drop 수,
+시에는 `empty_stdin`, `invalid_payload_json`, `prompt_too_short`, `event_disabled`,
+`no_keywords`, `no_collections`, `no_indexed_collections`, `daemon_unreachable`,
+`query_failed`, `no_results_after_filter`, `selected` 같은 reason과 함께 score, drop 수,
 선택된 collection을 확인할 수 있습니다.
+
+**recall이 건너뛴 경우에도 줄이 남습니다.** 앞의 세 reason이 그것입니다 —
+`empty_stdin`(stdin이 비었음), `invalid_payload_json`(payload가 JSON이 아님),
+`prompt_too_short`(프롬프트가 10자 미만이라 키워드가 나오지 않음, `prompt_chars` 동반).
+줄이 **하나도 없다**는 것은 "건너뜀"이 아니라 **훅이 실행되지 않았다**는 뜻입니다(디스패처
+오류·plugin root 미주입으로 인한 exit 127·sandbox). 이 구분이 E2E 진단의 출발점이므로
+`QMD_RECALL_LOG`를 켜고 줄의 유무를 먼저 확인하세요. sandbox(`QMD_SANDBOX`)는 "즉시 무출력
+종료"가 계약이라 파일에도 쓰지 않는 유일한 예외입니다.
 
 설정을 바꿨는데도 동작이 이상하면 다음을 먼저 봅니다.
 

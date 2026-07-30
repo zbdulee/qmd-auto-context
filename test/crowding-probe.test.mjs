@@ -503,3 +503,22 @@ test('레코드 스키마가 /3 이면 새 산식이다(구 레코드 구분용)
   const r = drive({ scenario: 'scoped-sparse', out: 'stdout' });
   assert.equal(r.records[0].schema, 'qmd_crowding_probe/3');
 });
+
+// 굶음 상한은 "wiki·raw 가 같은 topN 을 나눠 가진다" 를 전제한 값이고, 그 전제가 성립하는
+// 전략은 `flat` 하나뿐이다 — `hierarchical` 은 `prefer_wiki`(core/recall.py:1687)가 wiki
+// 히트가 있으면 raw 를 통째로 내리고 `wikiOnly` 는 wiki 컬렉션만 질의한다. 단독 숫자로
+// 오독되지 않게 레코드가 판정을 함께 낸다.
+test('레코드가 recallStrategy 별 지표 해당 여부를 낸다', () => {
+  const r = drive({ scenario: 'scoped-sparse', out: 'stdout' });
+  // 드라이버 프로젝트는 wikiOnly 다.
+  const applies = r.records[0].starvationMetricApplies;
+  assert.equal(applies.applies, false);
+  assert.equal(applies.strategy, 'wikiOnly');
+  assert.match(applies.basis, /wiki 컬렉션만 질의/);
+
+  const cases = unit('[cp.starvation_metric_applies(s) for s in ("flat", "hierarchical", "wikiOnly", "")]');
+  assert.deepEqual(cases.map((c) => c.applies), [true, false, false, false],
+    'flat 만 해당한다(빈 값은 기본 hierarchical)');
+  assert.equal(cases[3].strategy, 'hierarchical', '빈 값은 기본값으로 라벨링한다');
+  assert.match(cases[1].basis, /prefer_wiki/, '근거로 실제 함수를 인용한다');
+});

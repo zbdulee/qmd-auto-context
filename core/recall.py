@@ -29,6 +29,10 @@ QUERY_TIMEOUT = 5.0
 # 질의에 리터럴 8이 각각 박혀 있던 것을 상수 하나로 모았다(값은 동일 — 동작 무변화).
 DAEMON_QUERY_LIMIT = 8
 
+# recall을 시도할 최소 프롬프트 길이. 이보다 짧으면 키워드가 나오지 않아 질의가 무의미하다.
+# 리터럴로 두면 그 조기 return이 무엇을 판단한 것인지 로그(`prompt_too_short`)와 어긋난다.
+MIN_PROMPT_CHARS = 10
+
 # shadow query(진단 전용) 예산. 데몬은 single-thread이고 UserPromptSubmit은 blocking
 # hook이라, 진단 query는 본 recall 질의에 "직렬로" 추가된다. 따라서 본 recall의
 # queryTimeout(기본 5s)을 그대로 쓰지 않고 훨씬 짧은 per-query timeout + 전체
@@ -1059,9 +1063,15 @@ def log_recall_event(log_path: str | None, reason: str, **fields) -> None:
 
     Writes to the log file only (never stdout), and only when QMD_RECALL_LOG
     is set — so it never touches the model context and is a no-op in normal runs.
-    Lets an operator tell *why* recall produced empty output (event_disabled /
-    no_keywords / no_collections / daemon_unreachable / query_failed /
-    no_results_after_filter / selected).
+    Lets an operator tell *why* recall produced empty output (empty_stdin /
+    invalid_payload_json / prompt_too_short / event_disabled / no_keywords /
+    no_collections / daemon_unreachable / query_failed / no_results_after_filter /
+    selected).
+
+    **Every early return in main() must land here** — sandbox is the one exception
+    ("exit immediately with no output" is its contract, so it writes nothing at all).
+    A skip that writes no line is indistinguishable from "the hook never ran"
+    (dispatcher error, exit 127, sandbox), and E2E diagnosis has nothing else to read.
     """
     if not log_path:
         return
@@ -1330,23 +1340,32 @@ def main():
     if os.environ.get("QMD_SANDBOX") or "--sandbox" in sys.argv:
         return 0
 
+    # sandbox 다음에 바로 읽는다 — stdin 파싱 실패도 사유를 남겨야 하기 때문이다.
+    # (sandbox는 예외다: "즉시 무출력 종료"가 계약이므로 파일에도 쓰지 않는다.)
+    log_path = os.environ.get("QMD_RECALL_LOG")
+
     # Parse stdin
     raw = sys.stdin.read().strip()
     if not raw:
+        log_recall_event(log_path, "empty_stdin")
         return 0
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError:
+        # payload 본문은 남기지 않는다(프롬프트 전문이 로그로 새면 안 된다) — 길이만.
+        log_recall_event(log_path, "invalid_payload_json", stdin_chars=len(raw))
         return 0
 
     prompt = payload.get("prompt", "")
-    if len(prompt) < 10:
+    if len(prompt) < MIN_PROMPT_CHARS:
+        # **조용히 나가지 않는다.** 이 return은 정상 skip이지만, 로그에 줄이 하나도 남지
+        # 않으면 "짧은 프롬프트라 건너뜀"과 "훅이 아예 도달하지 못함"(디스패처 오류·exit
+        # 127·sandbox)을 구분할 수 없다 — E2E 진단이 이 로그 한 줄에 의존한다. 이 저장소의
+        # "조용한 실패 금지" 계약을 다른 조기 return과 같은 방식으로 지킨다.
+        log_recall_event(log_path, "prompt_too_short", prompt_chars=len(prompt))
         return 0
 
     cwd = payload.get("cwd") or os.getcwd()
-
-    # Read once up front so early-exit paths can record their reason too.
-    log_path = os.environ.get("QMD_RECALL_LOG")
 
     # Load configuration
     config = load_project_config(cwd)

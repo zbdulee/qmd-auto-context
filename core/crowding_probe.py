@@ -469,6 +469,36 @@ def window_composition(files: list[str], known: dict[str, str],
     }
 
 
+def starvation_metric_applies(strategy: str) -> dict:
+    """굶음 지표가 이 프로젝트의 **실제 recall 경로에 해당하는가**.
+
+    상한 산식은 "wiki와 raw가 같은 `topN`을 나눠 가진다"를 전제한다. 그런데 그 전제가
+    성립하는 전략은 `flat` **하나뿐**이다:
+      - `hierarchical` — `recall.prefer_wiki`(`core/recall.py:1687`)가 wiki 히트가 하나라도
+        있으면 raw를 **통째로 내린다**. 남은 wiki만으로 topN을 채우므로 raw가 wiki 칸을
+        가져갈 수 없다(wiki가 0건일 때만 raw backfill이 들어오고, 그때는 경쟁이 없다).
+      - `wikiOnly` — 데몬 질의 자체가 wiki 컬렉션만 대상이라 raw가 후보에 없다.
+    그래서 이 지표를 단독 숫자로 읽으면 hierarchical/wikiOnly 프로젝트에서 **해당하지 않는
+    값**을 피해로 오해한다. 레코드에 판정을 함께 남겨 그 오해를 구조적으로 막는다
+    (측정 자체는 어느 전략에서도 유효하다 — 재는 것은 데몬의 창 구성이다).
+    """
+    if strategy == "flat":
+        return {
+            "applies": True, "strategy": strategy,
+            "basis": "flat은 wiki·raw 후보가 같은 topN을 공유한다 — 굶음 지표가 해당한다",
+        }
+    if strategy == "wikiOnly":
+        return {
+            "applies": False, "strategy": strategy,
+            "basis": "wikiOnly는 wiki 컬렉션만 질의하므로 raw가 후보에 없다",
+        }
+    return {
+        "applies": False, "strategy": strategy or "hierarchical",
+        "basis": ("hierarchical은 wiki 히트가 있으면 raw를 통째로 내린다"
+                  "(recall.prefer_wiki) — wiki·raw가 topN을 공유하지 않는다"),
+    }
+
+
 def starved_bound_basis(entry: dict) -> str:
     """`starvedSlotsUpperBound`가 어느 전제 위에서 계산됐는가 — 규칙은 여기 한 곳이다.
 
@@ -723,6 +753,7 @@ def summarize_path(entries: list[dict], deep_limit: int) -> dict:
 
 LIMITATIONS = [
     "**starvedSlotsUpperBound는 상한이고 하한은 0이다(도구가 하한을 제공하지 않는다).** 그리고 이 산식은 post-filter 가정 위에서만 성립한다 — `scopedRetrievalProven`인 경로에서는 비-wiki 인덱스가 wiki 후보를 밀어낼 경로가 없으므로 상한이 **0**이고, 그 사실은 `starvedSlotsUpperBoundBasis`로 구분된다. 가정이 남아 있는 경로(`post_filter_assumption`)에서는 wikiInDeepWindow가 작은 것이 '매칭이 적어서'인지 '밀려나서'인지 이 관측으로 구분되지 않는다. 이 값을 피해로 읽으면 과대 판정이다.",
+    "**굶음 지표는 `recallStrategy: flat`에만 해당한다**(레코드의 `starvationMetricApplies`). 상한 산식은 wiki·raw가 같은 topN을 나눠 가진다는 전제인데, `hierarchical`은 `recall.prefer_wiki`(`core/recall.py:1687`)가 wiki 히트가 있으면 raw를 통째로 내리고 `wikiOnly`는 wiki 컬렉션만 질의하므로 두 전략에서는 애초에 경쟁이 없다. 측정 자체(데몬 창 구성)는 어느 전략에서도 유효하지만, 상한 숫자를 그 프로젝트의 recall 피해로 읽으면 틀린다.",
     "filterOrder가 unresolved인 경로는 recallStarvation을 판정하지 않는다(null). 관측이 post-filter와 독립 검색을 구분하지 못하기 때문이고, 틀린 판정을 남기는 것보다 낫다.",
     "scoped_retrieval_proven은 한 프로브의 관측을 **엔진의 성질**로 일반화한 것이다(질의별 성질이 아니라는 전제). qmd 구현이 바뀌면 다시 재야 한다.",
     "deep limit에서의 전역 결과 수는 창일 수도 엔진 cap일 수도 있다. 실측 qmd 2.5.3 lex는 컬렉션당 20 · 전역 병합 40 cap이며, detect_engine_cap이 '어휘가 다른 프로브 둘 이상이 같은 수를 반복'하는 신호로 이를 감지한다 — suspected이고 증명은 아니다.",
@@ -772,6 +803,8 @@ def build_record(project_dir: str, args: argparse.Namespace) -> dict:
             "rawCollections": raw_collections,
             "sourceCollections": source_collections,
         },
+        "starvationMetricApplies": starvation_metric_applies(
+            config.get("recallStrategy", "hierarchical")),
         "limits": {
             "recallLimit": args.recall_limit,
             "recallLimitIsRecallDefault": args.recall_limit == qmd_recall.DAEMON_QUERY_LIMIT,

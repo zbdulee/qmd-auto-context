@@ -156,3 +156,45 @@ test('QMD_RECALL_LOG 미설정이면 부작용 없이 정상 동작 (no-op)', ()
     assert.ok(parsed.hookSpecificOutput.additionalContext);
   });
 });
+
+// **조기 return 도 사유를 남긴다.** 줄이 하나도 없으면 "정상 skip" 과 "훅이 도달하지 못함"
+// (디스패처 오류·plugin root 미주입 exit 127)을 구분할 수 없고, E2E 진단이 이 로그에만
+// 의존한다. sandbox 는 "즉시 무출력 종료" 가 계약이라 유일한 예외다.
+test('짧은 프롬프트 조기 return도 reason="prompt_too_short"를 남긴다', () => {
+  withProject({ collections: ['sample'] }, (dir, logPath) => {
+    const out = run({ prompt: '짧다', cwd: dir }, { QMD_RECALL_LOG: logPath });
+    assert.equal(out, '', '주입은 없다(기존 동작)');
+    const events = selectionEvents(logPath);
+    assert.equal(events.length, 1, '조용히 나가지 않는다');
+    assert.equal(events[0].reason, 'prompt_too_short');
+    assert.equal(events[0].prompt_chars, 2, '판정 근거(길이)도 남는다');
+  });
+});
+
+test('빈 stdin / JSON 아닌 payload도 사유를 남긴다', () => {
+  withProject({ collections: ['sample'] }, (dir, logPath) => {
+    for (const input of ['', 'not-json{']) {
+      execFileSync('python3', ['core/recall.py'], {
+        input, encoding: 'utf8',
+        env: { ...process.env, QMD_RECALL_LOG: logPath },
+      });
+    }
+    const reasons = selectionEvents(logPath).map((e) => e.reason);
+    assert.deepEqual(reasons, ['empty_stdin', 'invalid_payload_json']);
+    const bad = selectionEvents(logPath)[1];
+    assert.equal(bad.stdin_chars, 'not-json{'.length, '길이만 남긴다(본문 유출 금지)');
+    assert.ok(!JSON.stringify(bad).includes('not-json'), 'payload 본문이 로그로 새지 않는다');
+  });
+});
+
+test('sandbox는 로그 파일조차 만들지 않는다 (즉시 무출력 종료 계약)', () => {
+  withProject({ collections: ['sample'] }, (dir, logPath) => {
+    const out = execFileSync('python3', ['core/recall.py'], {
+      input: JSON.stringify({ prompt: PROMPT, cwd: dir }),
+      encoding: 'utf8',
+      env: { ...process.env, QMD_RECALL_LOG: logPath, QMD_SANDBOX: '1' },
+    });
+    assert.equal(out.trim(), '');
+    assert.equal(existsSync(logPath), false, 'sandbox는 부작용이 0이어야 한다');
+  });
+});

@@ -55,6 +55,22 @@ test('문서의 기본값 최악 유료 호출 수가 코드 상수와 일치한
   assert.ok(DOC.includes('10 + 500 + 31 = 541회'), `문서에 실측 조합 ${measured}회가 없다`);
 });
 
+// 라이브 두 프로젝트의 최악값도 같은 식에서 나오는지 — 문서가 인용하는 숫자다.
+test('문서가 인용한 라이브 최악값이 같은 식에서 나온다', () => {
+  const k = pyJson('{"producedCap": c.VERIFY_PRODUCED_HARD_CAP, "maxVerify": c.MAX_VERIFY_PER_RUN}');
+  // service-engineering: batch 10 × cards 10, verify.maxPerRun 15
+  assert.equal(worstCase({
+    batchMaxPerRun: 10, cardsPerSource: 10, verifyMaxPerRun: 15, producedCap: k.producedCap,
+  }), 141);
+  // 귀신은 약효가 돌 때 보인다: verify.maxPerRun 60 → MAX_VERIFY_PER_RUN(50)으로 클램프
+  assert.equal(worstCase({
+    batchMaxPerRun: 10, cardsPerSource: 10,
+    verifyMaxPerRun: Math.min(60, k.maxVerify), producedCap: k.producedCap,
+  }), 161);
+  assert.ok(DOC.includes('= ` **141**'), '문서에 141 셈이 있다');
+  assert.ok(DOC.includes('= ` **161**'), '문서에 161 셈이 있다');
+});
+
 test('문서가 verify 항의 +1 예약을 셈에 명시한다', () => {
   assert.match(DOC, /`\+1`은 backlog 기아 방지 예약/,
     '예약이 셈에 포함된다는 사실이 문서에 없으면 다음 리뷰가 같은 1 차이를 다시 만든다');

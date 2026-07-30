@@ -101,6 +101,8 @@ limit=8 → 8건    limit=20 → 20건    limit=60 → 21건    limit=200 → 21
   프로젝트에서는 크기가 달라진다 → 5단계가 반복 측정을 만들 값이 여기 있다.
 - "raw 제거 후 실제로 wiki 후보가 21칸을 채우는가"는 **제거해야 확인된다**(8단계). 창 구성이
   인덱스 구성에 비례한다는 관측에서 추론한 것이다.
+  → **8단계에서 해소됐다**(아래 "8단계" 절): 컬렉션별 독립 검색이 증명되어 "채워질 칸" 자체가
+  없으므로 이 질문은 성립하지 않는다. raw 는 제거하지 않았다.
 - rerank=True 경로는 측정하지 않았다(recall 은 `rerank: False` 로 질의한다).
 
 ## 재현
@@ -183,6 +185,9 @@ lex '판정'      filter=[se-wiki] limit 200 → 20
   "매칭이 2건뿐"인지는 **여전히 구분되지 않는다**. cap 은 창에 비-wiki 가 **0칸**일 때만
   발동한다(그때는 되찾을 칸이 없다는 것만 보장).
 - 구분은 **raw 를 제거해 재측정할 때만** 결정된다. 8단계가 이 값을 피해로 읽으면 과대 판정이다.
+  → **8단계에서 해소됐다**(아래 "8단계" 절). 구분을 준 것은 raw 제거가 아니라 orphan 벡터
+  정리였고(창에 여유가 생겨 독립 검색이 드러났다), 증명 이후 이 상한 산식 자체가 무효다 —
+  `scopedRetrievalProven` 인 경로의 상한은 **0** 이다(리뷰 반영으로 코드도 고쳤다).
 
 ## 측정 형태 판단 — 별도 CLI (shadow 확장 아님)
 
@@ -282,6 +287,8 @@ python3 core/crowding_probe.py <프로젝트> --stdout
 
 - **`starvedSlotsUpperBound` 는 상한이고 하한은 0 이다(도구가 하한을 제공하지 않는다).**
   "매칭이 적어서"와 "밀려나서"는 raw 제거 후 재측정으로만 구분된다(8단계).
+  → **8단계에서 해소됐다**(아래 "8단계" 절). 이 한계는 `scopedRetrievalProven` 이 **없는**
+  경로(`starvedSlotsUpperBoundBasis: post_filter_assumption`)에만 남는다.
 - `unresolved` 경로는 `recallStarvation` 을 판정하지 않는다(null).
 - `scoped_retrieval_proven` 은 한 프로브의 관측을 **엔진의 성질**로 일반화한 것이다.
   qmd 구현이 바뀌면 다시 재야 한다.
@@ -352,6 +359,27 @@ DELETE) 과거 제거들이 남긴 잔해다. qmd 의 orphan 정의(활성 docum
 
 → **vec 은 post-filter 가 아니다. raw 의 인덱스 존재가 wiki vec 후보를 밀어낼 수 없다.**
 
+### 데이터 파일의 lex 수치를 오독하지 말 것
+
+`docs/plans/data/crowding-baseline.jsonl` 의 `step8-B` 레코드는 **lex 의
+`scopedRetrievalProven` 이 전 프로브 `False`** 이고 `lex.starvedSlotsUpperBound` 도
+`[6, 6, 5, 0, …]` 이다. **그것이 lex 굶음을 뜻하지 않는다.** lex 결론의 근거는 이 레코드가
+아니라 5단계의 별개 논거다 — **컬렉션당 20 · 전역 병합 40 cap** 관측이고, cap 값으로 계산한
+굶은 칸은 애초에 무의미하다(`detect_engine_cap` 이 이 신호를 잡는다). 게다가 이 레코드는
+`--probe` 축자 재생으로 수집했고 **`--probe` 는 lex 질의의 의미를 바꾼다**(자동 파생은 최빈
+토큰 1개, explicit 은 전체 문자열 AND — 위 "도구 결함" 절). 따라서 **이 레코드의 lex 수치는
+5단계 lex 수치와 비교 대상이 아니다.** 결론은 vec 경로 증명 + 5단계 lex cap 관측 둘로
+서 있고, 데이터 파일 한 필드로 뒤집히지 않는다.
+
+### 최초 리뷰가 옳았다
+
+`docs/plans/2026-07-29-wiki-only-architecture-review.md` 는 처음부터 raw 인덱스 제거를
+**철회 권고**로 판정했다("이득이 실측상 미미하고 리스크가 큽니다", `:17`·`:62`·`:77`),
+`:554` 는 role `source` 분리까지 철회를 권고했다. 5~8단계를 다 돌아 **같은 결론에
+도달했다** — 로드맵이 그 리뷰를 반증한 것이 아니라 **재검증**한 것이다. 다만 그 과정에서
+얻은 것이 있다: lex·vec 양 경로의 **증명**(추정이 아니라), 반복 가능한 측정 도구,
+orphan 벡터 26,438행 정리, 그리고 role `source` 는 유지 판정(위 권고 2번).
+
 ### 정정 (리뷰 반영) — 그 잔여 상한은 "매칭이 적음" 이 아니라 **무효한 지표**였다
 
 당시 기록: "남은 `starvedSlotsUpperBound: 2`(se 프로브 1개)는 deep 창이 26/40 으로 포화되지
@@ -371,6 +399,15 @@ DELETE) 과거 제거들이 남긴 잔해다. qmd 의 orphan 정의(활성 docum
 **수정**: `scopedRetrievalProven` 인 경로에서 상한은 0 이고, 근거는
 `starvedSlotsUpperBoundBasis`(`scoped_retrieval_proven` | `post_filter_assumption`)로 남는다
 — 0 을 냈을 때 "굶음이 없다" 와 "산식이 적용되지 않았다" 를 사후에 구분할 수 있어야 한다.
+
+**그리고 이 지표는 `recallStrategy: flat` 에만 해당한다.** 상한 산식은 wiki·raw 가 같은
+`topN` 을 나눠 가진다는 전제인데, `hierarchical` 은 `recall.prefer_wiki`
+(`core/recall.py:1687`)가 wiki 히트가 하나라도 있으면 raw 를 **통째로 내리고**(wiki 가 0건일
+때만 raw backfill 이 들어오며 그때는 경쟁이 없다), `wikiOnly` 는 데몬 질의 자체가 wiki
+컬렉션만 대상이다. 즉 **wiki 와 raw 가 topN 을 공유하는 경로는 `flat` 하나뿐**이고, 라이브 두
+프로젝트는 둘 다 `wikiOnly` 다. 레코드에 `starvationMetricApplies`(`applies`/`strategy`/
+`basis`)를 함께 남겨 상한 숫자를 그 프로젝트의 recall 피해로 오독하는 것을 구조적으로 막는다
+— 측정 자체(데몬 창 구성)는 어느 전략에서도 유효하다.
 
 > **⚠ 이전 레코드는 구 산식이다.** `docs/plans/data/crowding-baseline.jsonl` 은 append-only
 > 이므로 지우지 않는다. `schema` 가 `qmd_crowding_probe/1`·`/2` 인 레코드의
