@@ -1,1 +1,0 @@
-{"indexing":true,"collections":["proj-wiki","proj-docs"],"collectionRoles":{"proj-wiki":"wiki","proj-docs":"raw"},"recallStrategy":"hierarchical","minScore":0.5,"rawFallbackMinScore":0.7,"queryTimeout":1.25}
