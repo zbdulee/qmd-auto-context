@@ -42,6 +42,35 @@ dev repo  →  GitHub  →  marketplaces/<name>/ (git clone)  →  cache/<market
 cache 는 **버전 디렉터리 이름**으로 구분한다. `0.22.2` 가 이미 낡은 내용으로 존재하므로 같은
 번호로 덮으면 어느 것이 무엇인지 알 수 없게 된다 → **버전 bump 가 선행 조건이다.**
 
+## 활성 전환 메커니즘 (2026-07-30 확인)
+
+cache 에 버전 디렉터리를 만드는 것만으로는 **활성이 되지 않는다.** 레지스트리가 명시적으로
+설치 경로·버전·커밋을 기록한다:
+
+`~/.claude/plugins/installed_plugins.json`
+```json
+"qmd-auto-context@qmd-auto-context-marketplace": [{
+  "scope": "user",
+  "installPath": ".../cache/qmd-auto-context-marketplace/qmd-auto-context/<version>",
+  "version": "<version>",
+  "gitCommitSha": "<commit>",
+  "lastUpdated": "<iso8601>"
+}]
+```
+
+`marketplaces/qmd-auto-context-marketplace/` 는 저장소의 git clone 이고 정규 경로(`/plugin`)는
+그것을 갱신한 뒤 cache 로 추출한다. Remote Control 환경에서 `/plugin` 을 쓸 수 없을 때의
+수동 절차:
+
+1. **추적 파일만** 복사한다 — `git archive HEAD | tar -x -C <cache>/<version>/`.
+   `cp -r` 는 테스트 임시 디렉터리·`.worktrees` 를 함께 담는다(실제로 `git add -A` 로
+   `.tmp-qmd-http-hier-raw-threshold-*` 가 커밋에 섞인 사고가 있었다 → `.gitignore` 를
+   `.tmp-qmd-*/` 로 넓혔다)
+2. 내용 마커로 stale 을 판정한다(버전 문자열로는 불가 — 위 절 참조)
+3. `installed_plugins.json` 을 백업하고 `installPath`·`version`·`gitCommitSha`·`lastUpdated`
+   를 갱신한다
+4. **새 세션에서 확인한다** — 실행 중 세션은 레지스트리를 다시 읽지 않는다
+
 ## Phase A — 코드를 실제로 도는 플러그인에 넣기
 
 1. **버전 bump** (CLAUDE.md 체크리스트: 매니페스트 7곳 + `test/probe-manifest.test.mjs`).
