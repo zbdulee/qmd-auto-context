@@ -347,9 +347,36 @@ title: "claude-runner — 구독 기반 Claude Code headless AI 실행 계층"
   `{name, path}` 그대로다.** role을 항목에 얹으면 downstream이 role 문자열을 다시 비교하게
   되어 판정을 한 곳에 두려는 목적과 반대가 된다(그리고 role을 안 쓰는 프로젝트의 출력까지
   달라진다)
+- **리뷰 2라운드에서 잡힌 major 3건**(codex + 적대적 subagent):
+  (a) **prune이 unregister보다 먼저 돌아 복구 불가 고아 등록**을 만들었다 — prune이
+  `role=source`면 `qmd collection remove`를 건너뛰고 settings에서만 이름을 지웠는데,
+  "source는 등록된 적 없다"는 전제는 unregister가 이미 성공한 경우에만 참이다. 이름이
+  settings에서 빠지면 `sourceEntries`에도 prune에도 다시 나타나지 않아 수동 remove 외에
+  복구 경로가 없었다. 판정을 role이 아니라 **실제 등록 여부**로 바꿨다(원래 skip을 만든
+  "등록된 적 없는 컬렉션에 remove 실패 → settings 정리 영구 보류"도 같이 해결되고, raw인데
+  미등록인 경우에도 옳다). 레지스트리를 못 읽으면 **지우는 쪽을 시도한다** — 잘못 건너뛰면
+  복구 불가, 잘못 시도하면 다음 세션 재시도라 비대칭이 명확하다.
+  (b) **unregister 실패에 종점 신호가 없었다** — 재시도는 self-healing이라 옳지만 실패가
+  로그에만 남아, "색인하지 마라"고 말한 컬렉션이 rc=0·무출력으로 계속 인덱싱·검색됐다.
+  이 세션에서 세 번째 반복이다(4단계 영구 정지, 6단계 무한 과금 — 근거는 옳고 종점이 없었다).
+  worker는 백그라운드 fork라 stdout이 안 닿으므로 상태 파일 → 다음 SessionStart `notice_once`로
+  잇는다. **상태 파일 키는 notice 키와 달라야 한다** — `notice_once`가 marker의 존재·mtime을
+  TTL 억제에 쓰므로 경로가 같으면 상태를 쓰는 순간 notice가 자기 자신을 억제한다(첫 구현이
+  정확히 이랬고 테스트가 잡았다).
+  (c) **명시적 미지 role이 실제로 인덱싱됐다** — `{"p-archive": "sourse"}`에서 `collection add`가
+  그대로 실행됐다. "키 없음"(role 도입 전 → raw fail-open이 맞다)과 "키 있음 + 값 미지"
+  (사용자가 의도했는데 못 읽음 → fail-closed가 맞다)를 구분한다. 센티널은 정규화에서도
+  살려야 한다 — 버리면 normalize 소비자에서 "키 없음"으로 보여 fail-open이 되살아난다.
+  기존 인덱스를 지우지는 않는다(오타 하나로 파괴적 조치 금지).
+- **`qmd collection remove`는 벡터를 지우지 않는다(상류, 이번 범위 밖).** qmd 2.5.3
+  `removeCollection`(`dist/store.js`)은 `documents`·`content`만 DELETE하고, 라이브 실측
+  `content_vectors` 41,285행 중 orphan이 26,267행(63.6%)이며 벡터 후보는 orphan을 포함해
+  뽑힌다. 즉 `raw`→`source` 전환으로 확실히 제거되는 것은 **FTS 점유뿐이고 vec 점유는
+  남는다** → **8단계 A/B는 vec 경로에서 차이를 만들지 못한다.** 선택지는 벡터 직접 purge /
+  인덱스 재구축 / vec 측정 불가 확정이고 사용자 판단이 필요하다. 5단계가 "vec은 측정 불가"로
+  끝난 것과 같은 결론에 다른 경로로 도달한 셈이다
 - 1~6단계 회귀 0: 주입 stdout이 6 시나리오 전부 `161ac2e`와 **바이트 동일**, 라이브
-  불변식 유지(930항목 / 주입 896 / drop 34 = missing 32 + kind_not_file 2, 감지
-  verified 7 / generated 18)
+  불변식 유지(주입/drop/감지 분해가 `161ac2e` 워크트리 실행과 완전히 동일)
 
 ### 단계별 주의
 

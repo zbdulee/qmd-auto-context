@@ -208,8 +208,8 @@ def index_composition(qmd_bin: str | None, project_roles: dict[str, str],
     for name, files in counts.items():
         if name in project_roles:
             # 런타임이 실제로 적용하는 role로 라벨한다(`config.collection_role` —
-            # 미지 값은 raw로 fail-open). 원문 문자열을 그대로 쓰면 오타 role이 어떤
-            # 코드 경로도 인정하지 않는 제3의 버킷으로 baseline에 굳는다.
+            # 키 없음은 `raw`, 값 미지는 `invalid` fail-closed). 원문 문자열을 그대로
+            # 쓰면 오타가 어떤 코드 경로도 인정하지 않는 버킷으로 baseline에 굳는다.
             role = qmd_config.collection_role(project_roles, name)
         else:
             root = collection_root(qmd_bin, name)

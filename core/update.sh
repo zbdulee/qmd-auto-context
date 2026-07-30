@@ -129,6 +129,20 @@ notice_clear() {
   rm -f "$(_notice_marker "$1" "$2")" 2>/dev/null || true
 }
 
+# worker → main 신호 파일. worker(백그라운드 fork)의 stdout은 사용자에게 닿지 않으므로
+# "role source 컬렉션의 qmd 등록 해제에 실패했다"는 사실을 파일로 남기고, 다음
+# SessionStart의 동기 경로가 읽어 notice_once로 알린다(dedup/merge 힌트와 같은
+# "값싼 파일 검사 + 텍스트 추출" 패턴 — hot path에서 qmd/데몬을 부르지 않는다).
+# 위치는 notice marker와 같은 캐시 디렉터리이고 키도 같은 해시라 프로젝트별로 갈린다.
+#
+# **키(`-state` 접미사)를 notice 키와 반드시 다르게 유지할 것.** `notice_once`는 marker
+# 파일의 **존재와 mtime**을 TTL 억제에 쓰므로, 상태 파일이 같은 경로면 worker가 상태를
+# 쓰는 순간 그것이 곧 "방금 알렸다"는 marker가 되어 **notice가 자기 자신을 억제한다**
+# (한 글자 차이로 신호가 통째로 죽는다 — 처음 구현이 정확히 이랬다).
+unregister_failed_state() {
+  printf '%s' "$(_notice_marker unregister-failed-state "$1")"
+}
+
 wiki_compile_notice_info() {
   local cwd="$1"
   local core_dir="$2"
@@ -241,8 +255,37 @@ path_refused_by_resolver() {
   [ "$(echo "$resolved" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("reason"))' 2>/dev/null)" = "risky" ]
 }
 
+# --- qmd 레지스트리 조회 (SSOT) -------------------------------------------
+#
+# "이 컬렉션이 qmd에 실제로 등록돼 있는가"를 묻는 곳이 세 군데(preflight / prune /
+# unregister)라 파서를 한 벌로 모은다. 파서가 갈리면 한 곳만 조용히 빈 목록을 받는다.
+#
+# **파싱 실패와 "등록 0건"을 구분하지 않고 둘 다 `unknown`으로 본다.** 출력 형식이
+# 바뀌어(예: 들여쓰기) awk가 빈 결과를 내면 "등록 안 됨"으로 읽히는데, 그 오독의
+# 대가가 경로마다 다르다 — prune에서는 **되돌릴 수 없는 고아 등록**이 된다. 그래서
+# 판정을 boolean이 아니라 3값(yes/no/unknown)으로 내고 호출부가 각자 안전한 쪽을 고른다.
+_QMD_REGISTRY=""
+_QMD_REGISTRY_LOADED=0
+
+qmd_registry_invalidate() { _QMD_REGISTRY_LOADED=0; _QMD_REGISTRY=""; }
+
+qmd_registry_load() {
+  [ "$_QMD_REGISTRY_LOADED" = 1 ] && return 0
+  _QMD_REGISTRY=$(qmd collection list 2>/dev/null | awk '/^[^ ]/ {print $1}')
+  _QMD_REGISTRY_LOADED=1
+}
+
+# 0=등록됨 / 1=등록 안 됨 / 2=알 수 없음(레지스트리를 읽지 못했다)
+qmd_collection_registered() {
+  qmd_registry_load
+  [ -z "$_QMD_REGISTRY" ] && return 2
+  printf '%s\n' "$_QMD_REGISTRY" | grep -qxF -- "$1" && return 0
+  return 1
+}
+
 preflight_remove_risky() {
-  qmd collection list 2>/dev/null | awk '/^[^ ]/ {print $1}' | while read -r name; do
+  qmd_registry_load
+  printf '%s\n' "$_QMD_REGISTRY" | while read -r name; do
     [ -z "$name" ] && continue
     path=$(qmd collection show "$name" 2>/dev/null | awk -F': +' '/^ *Path|^ *Root/ {print $2; exit}')
     [ -z "$path" ] && continue
@@ -251,6 +294,8 @@ preflight_remove_risky() {
       qmd collection remove "$name" >>"$LOG" 2>&1 || true
     fi
   done
+  # while이 서브셸이라 캐시 무효화가 부모로 전파되지 않는다 — 여기서 명시적으로 버린다.
+  qmd_registry_invalidate
 }
 
 # role `source`로 전환된 컬렉션을 qmd 인덱스에서 **실제로** 제거한다.
@@ -268,8 +313,24 @@ preflight_remove_risky() {
 #
 # role 판정은 resolve_paths.py가 이미 끝냈다(`sourceEntries`). 여기서 role 문자열을 다시
 # 비교하지 않는다 — 판정이 두 벌로 갈리면 한쪽만 새 role을 알게 된다.
+#
+# **상류 한계(qmd 2.5.3, 우리 코드 결함 아님)**: `qmd collection remove`
+# (`dist/store.js:2265` `removeCollection`)는 `documents`·`content`만 DELETE하고
+# **벡터를 지우지 않는다.** 라이브 인덱스 실측으로 `content_vectors` 41,285행 중
+# orphan 26,267행(63.6%)이 확인됐고, qmd는 벡터 후보를 `vectors_vec` 상위 limit×3에서
+# **orphan 포함**으로 뽑는다. 따라서 이 함수가 성공해도 제거되는 것은 **FTS 점유뿐이고
+# 벡터 점유는 남는다** — 로드맵 8단계의 raw on/off A/B는 vec 경로에서 차이를 만들지
+# 못한다. 해결(벡터 직접 purge / 인덱스 재구축 / vec 측정 불가 확정)은 사용자 판단이
+# 필요한 별건이다. 이 주석을 지우면 코드가 "제거했다"고 전제하는 것처럼 읽힌다.
+#
+# 실패는 **조용히 넘기지 않는다**(종점 신호). 재시도 자체는 self-healing이라 옳지만,
+# 실패가 로그에만 남으면 "색인하지 마라"고 말한 컬렉션이 무한정 인덱싱·전역 검색된다.
+# 이 함수는 worker(백그라운드 fork)에서 돌아 stdout이 사용자에게 닿지 않으므로,
+# 상태를 파일로 남기고 다음 SessionStart의 동기 경로(main)가 notice_once로 알린다.
 unregister_source_collections() {
-  local resolved_json="$1"
+  local resolved_json="$1" workdir="$2"
+  local state
+  state="$(unregister_failed_state "$workdir")"
   [ -z "$resolved_json" ] && return 0
   local source_names
   source_names=$(printf '%s' "$resolved_json" | python3 -c 'import json,sys
@@ -282,22 +343,51 @@ if not isinstance(data, dict) or data.get("refused"):
 for entry in data.get("sourceEntries") or []:
     if isinstance(entry, dict) and isinstance(entry.get("name"), str):
         print(entry["name"])' 2>>"$LOG") || return 0
-  [ -z "$source_names" ] && return 0
+  if [ -z "$source_names" ]; then
+    # role source가 하나도 없으면 지난 실패 기록은 더 이상 유효하지 않다(조건 해소).
+    rm -f "$state" 2>/dev/null || true
+    return 0
+  fi
 
-  local registered
-  registered=$(qmd collection list 2>/dev/null | awk '/^[^ ]/ {print $1}')
-  [ -z "$registered" ] && return 0
-
+  local failed=""
   while IFS= read -r name; do
     [ -z "$name" ] && continue
-    if printf '%s\n' "$registered" | grep -qxF -- "$name"; then
-      log "UNREGISTER SOURCE COLLECTION: $name (role=source)"
-      qmd collection remove "$name" >>"$LOG" 2>&1 \
-        || log "UNREGISTER SOURCE COLLECTION FAILED: $name"
-    fi
+    # bare 호출은 set -e 아래에서 worker를 죽인다 — 반드시 `|| rc=$?`로 받는다.
+    local registered_rc=0
+    qmd_collection_registered "$name" || registered_rc=$?
+    case "$registered_rc" in
+      0)
+        log "UNREGISTER SOURCE COLLECTION: $name (role=source)"
+        if qmd collection remove "$name" >>"$LOG" 2>&1; then
+          qmd_registry_invalidate
+        else
+          # 등록돼 있는 것을 확인했는데 제거가 실패했다 = 사용자에게 알릴 사실.
+          log "UNREGISTER SOURCE COLLECTION FAILED: $name"
+          failed="${failed}${failed:+, }${name}"
+        fi
+        ;;
+      1)
+        : # 등록돼 있지 않다 — 지울 것이 없다(정상).
+        ;;
+      *)
+        # 레지스트리를 읽지 못했다. 시도는 하되 실패를 알리지는 않는다 — "등록 안 됨"과
+        # "제거 실패"를 구분할 수 없어서, 알리면 한 번도 색인된 적 없는 source 컬렉션마다
+        # 매 세션 거짓 경보가 난다. notice는 "등록을 확인했는데 실패"일 때만 낸다.
+        log "UNREGISTER SOURCE COLLECTION: $name (registry unreadable, attempting)"
+        qmd collection remove "$name" >>"$LOG" 2>&1 \
+          && qmd_registry_invalidate \
+          || log "UNREGISTER SOURCE COLLECTION: $name remove failed (registry unknown)"
+        ;;
+    esac
   done <<EOF
 $source_names
 EOF
+
+  if [ -n "$failed" ]; then
+    printf '%s\n' "$failed" >"$state" 2>/dev/null || true
+  else
+    rm -f "$state" 2>/dev/null || true
+  fi
 }
 
 acquire_lock() {
@@ -445,8 +535,6 @@ collection_paths = raw.get("collectionPaths") if isinstance(raw.get("collectionP
 collection_paths = {key: value for key, value in collection_paths.items() if isinstance(key, str) and isinstance(value, str)}
 roots = qmd_resolve_paths.allowed_roots(raw)
 
-roles = qmd_config.role_map(raw)
-
 missing = []
 for collection in collections:
     matched_path = "."
@@ -460,10 +548,13 @@ for collection in collections:
     if not candidate.is_absolute():
         candidate = project_root / candidate
     if not candidate.is_dir():
-        # role을 함께 넘긴다: role `source`는 qmd에 등록된 적이 없으므로
-        # `qmd collection remove`가 실패하고, 셸이 그것을 "제거 실패"로 읽어
-        # settings 정리를 영구히 건너뛴다(세션마다 WARN 반복).
-        missing.append(collection + "\t" + qmd_config.collection_role(roles, collection))
+        # role은 **넘기지 않는다**. "role source는 등록된 적 없으니 remove를 건너뛴다"는
+        # 판정은 unregister가 이미 성공한 경우에만 참인데 prune이 unregister보다 **먼저**
+        # 돌아서, 아직 등록돼 있는 source를 settings에서만 지워 **되돌릴 수 없는 고아
+        # 등록**을 만들었다(이름이 사라지면 sourceEntries에도 prune에도 다시 안 나타난다).
+        # 대신 셸이 실제 등록 여부를 확인한다 — role과 무관하게 옳고, "raw인데 한 번도
+        # 등록되지 않은" 경우(원래 skip을 만든 WARN 반복)도 같이 해결한다.
+        missing.append(collection)
 
 if not missing:
     sys.exit(0)
@@ -475,20 +566,26 @@ PY
 
   local successful
   successful=""
-  while IFS="$(printf '\t')" read -r name role; do
+  while IFS= read -r name; do
     [ -z "$name" ] && continue
-    log "PRUNE MISSING COLLECTION: $name (role=${role:-raw})"
-    if [ "$role" = "source" ]; then
-      # 인덱싱 대상이 아니므로 qmd에서 지울 것이 없다 — settings 정리만 진행한다.
-      # (root가 사라진 compile source는 raw와 같은 이유로 설정에서도 무의미하다)
-      log "PRUNE MISSING COLLECTION: $name is role=source, skipping qmd remove"
+    log "PRUNE MISSING COLLECTION: $name"
+    # 등록 여부로 판정한다(role 아님 — 위 heredoc 주석 참고). 레지스트리를 읽지
+    # 못했으면(`unknown`) **지우는 쪽을 시도한다**: 잘못 건너뛰면 고아 등록이 남아
+    # 복구 경로가 없고, 잘못 시도하면 실패 로그 한 줄에 settings 정리가 미뤄질 뿐
+    # (다음 세션이 재시도한다). 비대칭이 명확하므로 회복 가능한 쪽으로 튄다.
+    # `|| rc=$?`로 받는다 — bare 호출은 set -e 아래에서 worker를 죽인다.
+    local registered_rc=0
+    qmd_collection_registered "$name" || registered_rc=$?
+    if [ "$registered_rc" = 1 ]; then
+      log "PRUNE MISSING COLLECTION: $name is not registered in qmd, settings cleanup only"
       successful="${successful}${name}
 "
     elif qmd collection remove "$name" >>"$LOG" 2>&1; then
+      qmd_registry_invalidate
       successful="${successful}${name}
 "
     else
-      log "PRUNE MISSING COLLECTION FAILED: $name"
+      log "PRUNE MISSING COLLECTION FAILED: $name (registered=${registered_rc})"
     fi
   done <<EOF
 $missing
@@ -664,7 +761,7 @@ run_update() {
   fi
 
   preflight_remove_risky
-  unregister_source_collections "$resolved"
+  unregister_source_collections "$resolved" "$workdir"
 
   # 3. Add collections
   #
@@ -819,12 +916,32 @@ main() {
     echo "      끄려면 .auto-context/settings.json의 compile.extractor 를 제거하세요."
   fi
 
-  # 미지 role 값 표면화. `collectionRoles`의 role 값이 닫힌 집합(raw/wiki/session/source)
-  # 밖이면 config.collection_role_map이 그 항목을 버리고 `raw`로 fail-open한다 —
-  # 저장소 관례(설정 오류로 훅을 죽이지 않는다)이고 `raw`는 role 도입 전 기본 동작이라
-  # 안전한 방향이지만, `"source"` 오타 하나가 "인덱싱 제외"를 조용히 "인덱싱"으로
-  # 뒤집는다. 그래서 fail-open의 **종점**을 여기 둔다: 이미 로드된 raw settings로
-  # 판정하고(추가 파일 읽기 0) notice_once로 TTL 억제하며, 오타를 고치면 재무장한다.
+  # role source 등록 해제 실패 표면화. 판정은 worker가 끝냈고(등록을 확인했는데
+  # `qmd collection remove`가 실패) 여기서는 신호 파일만 읽는다 — hot path에서 qmd를
+  # 부르지 않는 dedup/merge 힌트와 같은 "값싼 파일 검사 + 텍스트 추출" 패턴이다.
+  # 재시도는 worker가 매 세션 계속하므로 self-healing이고, 이 notice는 그 재시도가
+  # 계속 실패한다는 **종점 신호**다(없으면 "색인하지 마라"고 말한 컬렉션이 조용히
+  # 무한정 인덱싱된다). 해제에 성공하거나 role이 source가 아니게 되면 worker가 파일을
+  # 지우므로 조건 해소 시 자동으로 재무장한다.
+  unregister_failed=""
+  unregister_state="$(unregister_failed_state "$workdir")"
+  [ -s "$unregister_state" ] && unregister_failed="$(cat "$unregister_state" 2>/dev/null || true)"
+  if [ -n "$unregister_failed" ]; then
+    notice_once unregister-failed "$workdir" "[qmd] role source 컬렉션을 qmd 인덱스에서 제거하지 못했습니다: ${unregister_failed}. 그때까지 이 컬렉션은 계속 색인·검색됩니다. 'qmd collection remove <이름>'을 직접 실행하거나 qmd 데몬 상태를 확인하세요."
+  else
+    notice_clear unregister-failed "$workdir"
+  fi
+
+  # 미지 role 값 표면화. `collectionRoles`에 **키가 있는데 값이 닫힌 집합
+  # (raw/wiki/session/source) 밖**이면 그 컬렉션을 인덱싱·recall·compile에서 전부
+  # 제외한다(fail-closed). 키 자체가 없는 것과 구분하는 것이 핵심이다 —
+  # 키 없음은 role 도입 전 프로젝트라 `raw`가 맞지만, 키가 있다는 것은 사용자가
+  # 무언가를 의도했는데 우리가 못 읽었다는 뜻이고, 그때 `raw`로 fail-open하면
+  # `"sourse"` 오타 하나가 "색인 제외"를 **실제 색인**으로 뒤집는다(사용자 데이터가
+  # 의도치 않게 인덱싱되는 방향). 대신 제외 상태가 조용히 지속되면 안 되므로
+  # 여기가 종점이다: 이미 로드된 settings로 판정하고(설정 파일 재독해 0 — 다만
+  # python 기동과 config import 비용은 있다) notice_once로 TTL 억제하며, 값을
+  # 고치면 재무장한다.
   # config는 argv로 전달한다 — heredoc이 stdin을 차지하므로 파이프는 무시된다
   # (stale-queue·root-path 안내와 동일 패턴).
   invalid_roles=$(python3 - "$(dirname "$0")" "$config_json" <<'PY' 2>/dev/null || true
@@ -848,7 +965,7 @@ if names:
 PY
 )
   if [ -n "$invalid_roles" ]; then
-    notice_once role-invalid "$workdir" "[qmd] collectionRoles의 role 값을 인식할 수 없어 raw로 처리했습니다: ${invalid_roles}. 허용값은 raw, wiki, session, source 입니다."
+    notice_once role-invalid "$workdir" "[qmd] collectionRoles의 role 값을 인식할 수 없어 색인·recall·compile에서 제외했습니다: ${invalid_roles}. 허용값은 raw, wiki, session, source 입니다."
   else
     notice_clear role-invalid "$workdir"
   fi

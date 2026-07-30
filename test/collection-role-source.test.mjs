@@ -6,7 +6,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -56,17 +56,45 @@ test('config: role 판정은 양성 집합이고 미지 role은 raw로 fail-open
     '}))',
   ].join('\n'));
   const r = JSON.parse(out);
-  // 오타(`sourse`)와 미설정(`nope`)은 둘 다 raw다 — 여집합이 아니라 기본값이다.
-  assert.deepEqual(r.roles, ['raw', 'wiki', 'session', 'source', 'raw', 'raw']);
-  // 인덱싱: source만 빠진다. 오타는 raw로 fail-open해 **인덱싱된다**(안전 방향).
-  assert.deepEqual(r.indexed, ['r', 'w', 's', 'typo', 'nope']);
+  // **키 없음(`nope`)과 값 미지(`typo`)는 다르다.** 전자는 role 도입 전 프로젝트라
+  // raw로 fail-open하고, 후자는 사용자가 의도한 것을 못 읽은 것이라 fail-closed다.
+  assert.deepEqual(r.roles, ['raw', 'wiki', 'session', 'source', 'invalid', 'raw']);
+  // 인덱싱: source와 미지 role이 빠진다. 오타가 "색인 제외"를 색인으로 뒤집지 않는다.
+  assert.deepEqual(r.indexed, ['r', 'w', 's', 'nope']);
   assert.deepEqual(r.wiki, ['w']);
-  // hierarchical raw backfill 대상 = 인덱싱되는 non-wiki. source는 없다.
-  assert.deepEqual(r.recallRaw, ['r', 's', 'typo', 'nope']);
-  // compile 입력에는 source가 있고 wiki는 없다.
-  assert.deepEqual(r.compileSrc, ['r', 's', 'src', 'typo', 'nope']);
-  // fail-open 자체는 조용하면 안 된다 — 오타는 목록으로 표면화된다.
+  // hierarchical raw backfill 대상 = 인덱싱되는 non-wiki.
+  assert.deepEqual(r.recallRaw, ['r', 's', 'nope']);
+  // compile 입력에는 source가 있고 wiki·미지 role은 없다(유료 호출이라 더더욱).
+  assert.deepEqual(r.compileSrc, ['r', 's', 'src', 'nope']);
+  // fail-closed 는 조용하면 안 된다 — 오타는 목록으로 표면화된다.
   assert.deepEqual(r.invalid, ['typo']);
+});
+
+test('config: 미지 role 판정이 raw settings와 normalize된 config에서 같다', () => {
+  // normalize가 미지 항목을 **버리면** 그 자리는 "키 없음"이 되어 raw로 되살아난다.
+  // 그러면 raw settings를 읽는 resolve_paths와 normalize를 쓰는 recall/index_enqueue의
+  // 판정이 갈리고, 하필 갈리는 방향이 fail-open이다.
+  const out = py([
+    'import json, sys',
+    'sys.path.insert(0, "core")',
+    'import config',
+    'raw = {"collections": ["a"], "collectionRoles": {"a": "sourse"}}',
+    'norm = config.normalize_config(raw)',
+    'print(json.dumps({',
+    '  "rawRole": config.collection_role(config.role_map(raw), "a"),',
+    '  "normRole": config.collection_role(config.role_map(norm), "a"),',
+    '  "rawIndexed": config.is_indexed_collection(config.role_map(raw), "a"),',
+    '  "normIndexed": config.is_indexed_collection(config.role_map(norm), "a"),',
+    '  "normInvalid": config.invalid_role_collections(norm.get("collectionRoles"), ["a"]),',
+    '}))',
+  ].join('\n'));
+  const r = JSON.parse(out);
+  assert.equal(r.rawRole, 'invalid');
+  assert.equal(r.normRole, 'invalid');
+  assert.equal(r.rawIndexed, false);
+  assert.equal(r.normIndexed, false);
+  // 센티널로 정규화해도 표면화 목록에는 그대로 잡힌다(notice가 죽지 않는다).
+  assert.deepEqual(r.normInvalid, ['a']);
 });
 
 test('config: collectionRoles 정규화가 source를 닫힌 집합으로 받아들인다', () => {
@@ -78,8 +106,8 @@ test('config: collectionRoles 정규화가 source를 닫힌 집합으로 받아�
     '                               "collectionRoles": {"a": "source", "b": "bogus"}})',
     'print(json.dumps(cfg["collectionRoles"]))',
   ].join('\n'));
-  // source는 유지, 미지 값은 버려져 collection_role이 raw로 답한다.
-  assert.deepEqual(JSON.parse(out), { a: 'source' });
+  // source는 유지, 미지 값은 버리지 않고 fail-closed 센티널로 정규화한다.
+  assert.deepEqual(JSON.parse(out), { a: 'source', b: 'invalid' });
 });
 
 // ---------------------------------------------------------------------------
@@ -126,13 +154,29 @@ test('resolve: role 미사용·미지 role 프로젝트는 indexEntries == entri
     assert.deepEqual(r.indexEntries, r.entries);
     assert.deepEqual(r.sourceEntries, []);
 
-    // (b) role 값이 오타 → raw로 fail-open해 여전히 인덱싱된다.
+    // (b) 빈 collectionRoles 도 role 도입 전과 같다.
+    writeSettings(dir, {
+      indexing: true, collections: ['a'], collectionPaths: { a: 'docs' }, collectionRoles: {},
+    });
+    r = resolveOnly(dir);
+    assert.deepEqual(r.indexEntries, r.entries);
+    assert.deepEqual(r.sourceEntries, []);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('resolve: 명시적 미지 role은 fail-closed — entries에만 남고 등록도 해제도 안 한다', () => {
+  const dir = homeProject('failclosed');
+  mkdirSync(join(dir, 'docs'), { recursive: true });
+  try {
     writeSettings(dir, {
       indexing: true, collections: ['a'], collectionPaths: { a: 'docs' },
       collectionRoles: { a: 'sourse' },
     });
-    r = resolveOnly(dir);
-    assert.deepEqual(r.indexEntries.map(e => e.name), ['a']);
+    const r = resolveOnly(dir);
+    assert.deepEqual(r.entries.map(e => e.name), ['a']);
+    // 새로 색인하지 않는다 = `qmd collection add` 대상이 아니다.
+    assert.deepEqual(r.indexEntries, []);
+    // 해제도 하지 않는다 — 오타 하나로 기존 인덱스를 지우는 것은 파괴적이다.
     assert.deepEqual(r.sourceEntries, []);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
@@ -205,6 +249,7 @@ test('update.sh: 미지 role 값은 SessionStart notice로 표면화된다 (조�
     const out = runSessionStart(f, project);
     assert.match(out, /collectionRoles/);
     assert.match(out, /raw, wiki, session, source/);
+    assert.match(out, /색인·recall·compile에서 제외/, 'fail-closed 라는 결과가 안내에 없다');
     assert.match(out, /\ba\b/, '어느 collection이 문제인지 이름이 나와야 한다');
 
     // TTL 억제: 같은 조건이면 두 번째 세션은 조용하다.
@@ -319,6 +364,188 @@ test('update.sh: role을 raw로 되돌리면 다음 세션이 재등록한다 (�
     assert.match(qmd, /collection add .*archive --name p-archive/);
     assert.doesNotMatch(qmd, /collection remove/);
   } finally { rmSync(work, { recursive: true, force: true }); }
+});
+
+test('update.sh: 미지 role 컬렉션은 qmd에 등록되지 않는다 (경고만 하고 색인하면 소용없다)', () => {
+  const work = workerProject('failclosed');
+  mkdirSync(join(work, 'docs'), { recursive: true });
+  mkdirSync(join(work, 'archive'), { recursive: true });
+  try {
+    writeSettings(work, {
+      indexing: true,
+      collections: ['p-docs', 'p-archive'],
+      collectionPaths: { 'p-docs': 'docs', 'p-archive': 'archive' },
+      collectionRoles: { 'p-docs': 'raw', 'p-archive': 'sourse' },
+    });
+    writeListingStub(work, ['p-docs']);
+    runWorker(work);
+    const qmd = readFileSync(join(work, 'qmd.log'), 'utf8');
+    assert.match(qmd, /collection add .*docs --name p-docs/);
+    assert.doesNotMatch(qmd, /--name p-archive/,
+      `미지 role 컬렉션이 실제로 인덱싱됐다:\n${qmd}`);
+    // 해제도 하지 않는다(파괴적 조치 금지).
+    assert.doesNotMatch(qmd, /collection remove p-archive/);
+  } finally { rmSync(work, { recursive: true, force: true }); }
+});
+
+test('update.sh: root 소실 + role source 여도 등록돼 있으면 지운다 (고아 등록 금지)', () => {
+  // prune 이 unregister 보다 **먼저** 돌기 때문에 "아직 등록된 source"가 존재할 수 있다.
+  // 예전에는 prune 이 role=source 면 remove 를 건너뛰고 settings 에서만 이름을 지워,
+  // 이후 sourceEntries·prune 어디에도 나타나지 않는 **복구 불가 고아 등록**을 만들었다.
+  const work = workerProject('orphan');
+  mkdirSync(join(work, 'docs'), { recursive: true });
+  mkdirSync(join(work, 'archive'), { recursive: true });
+  try {
+    writeSettings(work, {
+      indexing: true,
+      collections: ['p-docs', 'p-archive'],
+      collectionPaths: { 'p-docs': 'docs', 'p-archive': 'archive' },
+      collectionRoles: { 'p-docs': 'raw', 'p-archive': 'source' },
+    });
+    // 브랜치 전환·rename 으로 root 가 사라진 상태 + 아직 등록돼 있음.
+    rmSync(join(work, 'archive'), { recursive: true, force: true });
+    writeListingStub(work, ['p-docs', 'p-archive']);
+    runWorker(work);
+
+    const qmd = readFileSync(join(work, 'qmd.log'), 'utf8');
+    assert.match(qmd, /^collection remove p-archive$/m,
+      `등록된 채 settings 에서만 사라져 고아 등록이 됐다:\n${qmd}`);
+    // settings 정리는 그대로 진행된다.
+    const after = JSON.parse(readFileSync(join(work, '.auto-context', 'settings.json'), 'utf8'));
+    assert.deepEqual(after.collections, ['p-docs']);
+  } finally { rmSync(work, { recursive: true, force: true }); }
+});
+
+test('update.sh: 등록된 적 없는 컬렉션의 root 소실은 remove 실패 없이 settings만 정리한다', () => {
+  // 원래 role=source skip 을 만든 동기(매 세션 WARN 반복 + settings 정리 영구 보류)를
+  // role 이 아니라 **등록 여부**로 해결한다 — raw 인데 한 번도 등록되지 않은 경우에도 옳다.
+  const work = workerProject('neverreg');
+  mkdirSync(join(work, 'docs'), { recursive: true });
+  mkdirSync(join(work, 'gone'), { recursive: true });
+  try {
+    writeSettings(work, {
+      indexing: true,
+      collections: ['p-docs', 'p-gone'],
+      collectionPaths: { 'p-docs': 'docs', 'p-gone': 'gone' },
+      collectionRoles: { 'p-docs': 'raw', 'p-gone': 'raw' },
+    });
+    rmSync(join(work, 'gone'), { recursive: true, force: true });
+    writeListingStub(work, ['p-docs']);   // p-gone 은 등록된 적 없다
+    runWorker(work);
+
+    const qmd = readFileSync(join(work, 'qmd.log'), 'utf8');
+    const hook = readFileSync(join(work, 'hook.log'), 'utf8');
+    assert.doesNotMatch(qmd, /collection remove p-gone/);
+    assert.match(hook, /p-gone is not registered in qmd/);
+    assert.doesNotMatch(hook, /PRUNE MISSING COLLECTION FAILED: p-gone/);
+    const after = JSON.parse(readFileSync(join(work, '.auto-context', 'settings.json'), 'utf8'));
+    assert.deepEqual(after.collections, ['p-docs']);
+  } finally { rmSync(work, { recursive: true, force: true }); }
+});
+
+// 신호 파일은 notice marker와 같은 캐시 디렉터리에 있다. 경로 규칙을 테스트가
+// 재구현하지 않도록 glob으로 찾는다(규칙이 바뀌어도 이 테스트는 계약만 본다).
+// 접두는 `-state`까지 정확히 본다 — notice_once의 TTL marker(`notice-unregister-failed-`)와
+// **다른 파일**이어야 하고, 같아지면 상태 기록이 자기 notice를 억제한다.
+const STATE_PREFIX = 'notice-unregister-failed-state-';
+function unregisterStateFiles(f) {
+  if (!existsSync(f.cacheDir)) return [];
+  return readdirSync(f.cacheDir).filter(n => n.startsWith(STATE_PREFIX));
+}
+
+function unregisterFixture(removeExit) {
+  const f = noticeFixture();
+  const project = join(f.home, 'projects', 'unreg');
+  mkdirSync(join(project, 'archive'), { recursive: true });
+  writeSettings(project, {
+    indexing: true,
+    collections: ['p-archive'],
+    collectionPaths: { 'p-archive': 'archive' },
+    collectionRoles: { 'p-archive': 'source' },
+  });
+  writeFileSync(join(f.bin, 'qmd'), [
+    '#!/usr/bin/env sh',
+    `echo "$@" >> "${join(f.base, 'qmd.log')}"`,
+    'if [ "$1 $2" = "collection list" ]; then',
+    "  printf '%s\\n' 'p-archive  10 files'",
+    'fi',
+    `if [ "$1 $2" = "collection remove" ]; then exit ${removeExit}; fi`,
+    'exit 0',
+  ].join('\n'), { mode: 0o755 });
+  return { f, project };
+}
+
+// worker 는 main 이 nohup 으로 띄우는 백그라운드 fork라, 두 반쪽을 한 흐름으로
+// 엮으면 경합이 된다. 여기서는 worker 를 **동기로** 직접 돌려 상태를 확정한 뒤
+// 세션 하나로 표면화만 확인한다.
+function runWorkerIn(f, project) {
+  return execFileSync('bash', [join(process.cwd(), 'core', 'update.sh'), '--worker', project], {
+    cwd: process.cwd(),
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      HOME: f.home,
+      PATH: `${f.bin}:${process.env.PATH}`,
+      QMD_BACKEND_MANAGER: '/bin/true',
+      QMD_CACHE_DIR: f.cacheDir,
+      QMD_DIRTY_QUEUE: join(f.base, 'dirty-queue'),
+      QMD_LOCK_BASE: f.lockBase,
+      QMD_SKIP_BACKGROUND_EMBED: '1',
+    },
+  });
+}
+
+test('update.sh: unregister 실패가 SessionStart notice로 표면화된다 (종점 신호)', () => {
+  // 재시도 자체는 self-healing 이라 옳다. 빠져 있던 것은 **종점 신호**다 — 실패가
+  // 로그에만 남으면 "색인하지 마라"고 말한 컬렉션이 조용히 무한정 인덱싱·검색된다.
+  const { f, project } = unregisterFixture(3);
+  try {
+    runWorkerIn(f, project);
+    assert.equal(unregisterStateFiles(f).length, 1, 'worker 가 실패 상태를 남기지 않았다');
+    const out = runSessionStart(f, project);
+    assert.match(out, /role source 컬렉션을 qmd 인덱스에서 제거하지 못했습니다/);
+    assert.match(out, /p-archive/);
+    assert.match(out, /계속 색인·검색됩니다/, '결과(계속 색인됨)가 안내에 없다');
+
+    // 상태 파일과 notice_once TTL marker는 **다른 파일**이어야 한다. 같으면 상태를
+    // 쓰는 순간 그것이 "방금 알렸다"는 marker가 되어 notice가 자기 자신을 억제한다.
+    const files = readdirSync(f.cacheDir).filter(n => n.startsWith('notice-unregister-failed'));
+    assert.equal(files.filter(n => n.startsWith(STATE_PREFIX)).length, 1);
+    assert.equal(files.filter(n => !n.startsWith(STATE_PREFIX)).length, 1,
+      `notice marker가 상태 파일과 같은 경로다: ${files.join(', ')}`);
+  } finally { rmSync(f.base, { recursive: true, force: true }); }
+});
+
+test('update.sh: unregister 성공이면 상태가 지워져 notice가 나지 않는다 (조건 해소 재무장)', () => {
+  const { f, project } = unregisterFixture(0);
+  try {
+    runWorkerIn(f, project);
+    assert.deepEqual(unregisterStateFiles(f), [], '성공했는데 실패 상태가 남았다');
+    assert.doesNotMatch(runSessionStart(f, project), /제거하지 못했습니다/);
+    // 실제로 제거를 시도했는지도 확인한다(상태가 없는 이유가 "시도 안 함"이면 안 된다).
+    assert.match(readFileSync(join(f.base, 'qmd.log'), 'utf8'), /^collection remove p-archive$/m);
+  } finally { rmSync(f.base, { recursive: true, force: true }); }
+});
+
+test('update.sh: 등록돼 있지 않은 source는 실패로 치지 않는다 (거짓 경보 금지)', () => {
+  // 한 번도 색인된 적 없는 source 컬렉션에서 매 세션 경보가 나면 신호가 죽는다.
+  const { f, project } = unregisterFixture(3);
+  try {
+    // 레지스트리에서 빼면 지울 것이 없다 → 시도도 실패도 없다.
+    writeFileSync(join(f.bin, 'qmd'), [
+      '#!/usr/bin/env sh',
+      `echo "$@" >> "${join(f.base, 'qmd.log')}"`,
+      'if [ "$1 $2" = "collection list" ]; then',
+      "  printf '%s\\n' 'other-collection  3 files'",
+      'fi',
+      'if [ "$1 $2" = "collection remove" ]; then exit 3; fi',
+      'exit 0',
+    ].join('\n'), { mode: 0o755 });
+    runWorkerIn(f, project);
+    assert.deepEqual(unregisterStateFiles(f), []);
+    assert.doesNotMatch(readFileSync(join(f.base, 'qmd.log'), 'utf8'), /collection remove p-archive/);
+    assert.doesNotMatch(runSessionStart(f, project), /제거하지 못했습니다/);
+  } finally { rmSync(f.base, { recursive: true, force: true }); }
 });
 
 // ---------------------------------------------------------------------------
@@ -621,11 +848,27 @@ test('sync: source 변경은 dirty 큐를 건너뛰고 compile 큐에만 들어�
 test('여집합 금지: core/에 `role != "wiki"` 형태의 raw 판정이 남아 있지 않다', () => {
   // 세 번째 role(`source`)이 생긴 뒤로 "wiki가 아니면 raw"는 항상 오분류다.
   // 새 판정 지점이 들어와도 여기서 걸린다.
+  // 인용 표기는 **양쪽 다** 잡는다 — 큰따옴표만 보면 `roles.get(c) != 'wiki'`가
+  // 그대로 통과해 가드가 목적을 달성하지 못한다.
   // 산문(주석·docstring)은 제외한다 — config.py가 이 안티패턴을 **금지하는 이유**로
   // 패턴 자체를 인용하고 있다. 인용은 백틱 안이고 Python 코드 줄에는 백틱이 없다.
-  const out = execFileSync('bash', ['-c',
-    `grep -rn --include='*.py' 'role[s]\\?\\(\\.get([^)]*)\\|\\[[^]]*\\]\\) *!= *"wiki"' core/ `
-    + `| grep -v ':[0-9]*: *#' | grep -v '\`' || true`,
-  ], { encoding: 'utf8' }).trim();
+  // 셸 문자열은 큰따옴표로 감싸므로 패턴 안의 `"`는 `\"`로 이스케이프해야 한다
+  // (안 하면 셸 인용이 거기서 끊겨 패턴이 조용히 반쪽이 된다 — 아래 자체 검증이 잡는다).
+  const quoted = `(\\"wiki\\"|'wiki')`;
+  const cmd = `grep -rnE --include='*.py' `
+    + `"role[s]?(\\.get\\([^)]*\\)|\\[[^]]*\\]) *!= *${quoted}" core/ `
+    + `| grep -v ':[0-9]*: *#' | grep -v '\`' || true`;
+  const out = execFileSync('bash', ['-c', cmd], { encoding: 'utf8' }).trim();
   assert.equal(out, '', `여집합 role 판정이 남아 있다:\n${out}`);
+
+  // 가드가 실제로 두 표기를 다 잡는지 자체 검증한다(가드가 조용히 무력해지는 것 방지).
+  const probe = mkdtempSync(join(tmpdir(), 'qmd-role-guard-'));
+  try {
+    mkdirSync(join(probe, 'core'), { recursive: true });
+    writeFileSync(join(probe, 'core', 'a.py'), 'x = roles.get(c) != "wiki"\n');
+    writeFileSync(join(probe, 'core', 'b.py'), "y = roles.get(c) != 'wiki'\n");
+    const hits = execFileSync('bash', ['-c', cmd], { encoding: 'utf8', cwd: probe }).trim();
+    assert.match(hits, /a\.py/, `가드가 큰따옴표 표기를 놓쳤다:\n${hits}`);
+    assert.match(hits, /b\.py/, `가드가 작은따옴표 표기를 놓쳤다:\n${hits}`);
+  } finally { rmSync(probe, { recursive: true, force: true }); }
 });

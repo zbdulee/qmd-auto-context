@@ -152,8 +152,11 @@ def resolve_paths(cwd_str, config_json):
     #   entries       — 설정에 적힌 전부. compile source 경로(`core/sync.py`)가 쓴다
     #   indexEntries  — qmd `collection add`/`update`/`embed` 대상(INDEXED_ROLES)
     #   sourceEntries — role `source`. 인덱스에서 **빼야 할** 것(update.sh unregister)
-    # 미지 role은 `config.collection_role`이 `raw`로 fail-open하므로 indexEntries에 들어간다
-    # (role 도입 전 동작 = 안전한 방향).
+    # role 키가 **없으면** `raw`로 fail-open해 indexEntries에 들어간다(role 도입 전 동작).
+    # 키가 있는데 값이 미지면 fail-closed라 **세 목록 중 entries에만** 남는다 — 등록도
+    # 해제도 하지 않는다. 오타 하나로 기존 인덱스를 지우는 것은 파괴적이고 재색인 비용이
+    # 들기 때문이다(새로 색인하지 않고 recall도 안 하는 것으로 충분하다). 사용자에게는
+    # `update.sh`의 role-invalid notice가 알린다.
     return {
         "refused": False,
         "entries": entries,
