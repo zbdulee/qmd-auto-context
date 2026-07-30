@@ -542,9 +542,10 @@ def trim_jsonl(path: Path, max_bytes: int = LOG_MAX_BYTES) -> None:
         if path.stat().st_size <= max_bytes:
             return
         lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
-        # 유일하게 반환값을 보지 않아도 되는 자리다: 원자적 쓰기라 실패해도 원본 로그가
-        # 온전하고(잘리지 않는다) 할 일은 "다음 호출에서 다시 시도"뿐이다. 실패를 표면화할
-        # 채널도 없다(이 함수는 로그 쓰기 경로 안에서 불린다).
+        # **의도적으로 반환값을 보지 않는다**(분류: 실패 방향이 안전). 원자적 쓰기라 실패해도
+        # 원본 로그가 온전하고(잘리지 않는다) 할 일은 "다음 호출에서 다시 시도"뿐이다.
+        # 실패를 표면화할 채널도 없다(이 함수는 로그 쓰기 경로 안에서 불린다).
+        # 분류 기준은 CLAUDE.md "쓰기 반환값" 항목 3번.
         write_text_atomic(path, "".join(lines[len(lines) // 2:]))
     except OSError:
         pass
@@ -712,6 +713,10 @@ def compact_manifest(path: Path, max_bytes: int = LOG_MAX_BYTES) -> None:
                 seen_keys_nonexplicit.add(canonical_key)
     kept = [rows[i] for i in range(n) if keep[i]]
     if len(kept) != n:
+        # **의도적으로 결과를 보지 않는다**(분류: 실패 방향이 안전). write_jsonl_atomic은
+        # 반환값이 없고 OSError를 내부에서 삼키는데, 실패하면 압축이 일어나지 않을 뿐
+        # 원본 manifest는 온전하다(temp + os.replace). 아래 compact-stamp가 "압축해도 줄지
+        # 않는" 상태의 재시도 폭주를 막으므로 다음 회차 재시도로 자연히 수렴한다.
         write_jsonl_atomic(path, kept)
     try:
         new_size = path.stat().st_size

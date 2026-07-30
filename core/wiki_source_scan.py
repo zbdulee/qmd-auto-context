@@ -185,6 +185,13 @@ def run(cwd: str) -> dict:
                                 info["missing"], "scan", states):
             result["recorded"] += 1
 
+    # **삼킨 반환값이 아니다**(분류: 실패 방향이 안전 + 실패가 예외로 표면화).
+    # write_state_atomic은 반환값이 없고 실패 시 예외를 던지며, main()이 그것을 잡아
+    # 로그에 EXCEPTION으로 남긴다. 커서가 전진하지 않으면 다음 run이 같은 창을 다시
+    # 훑는다 — 원장에 중복 행이 생기지는 않는다(`needs_record`가 "소실 집합이 그대로면
+    # 쓰지 않는다"로 상태를 보고 막는다. 커서가 아니라 그 규칙이 증식 방어다).
+    # 유일한 실질 손해는 **지속적으로** 못 쓸 때 순환이 첫 창에 멈추는 것이고, 그것은
+    # 로그의 cursor 값이 고정되는 것으로 보인다.
     qmd_sync.write_state_atomic(cursor_path(project_key), {
         "version": 1, "projectRoot": str(root), "cursor": last,
     })

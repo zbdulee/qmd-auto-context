@@ -412,6 +412,10 @@ def run(cwd: str) -> None:
             current_files[rel] = {"mtimeNs": stat.st_mtime_ns, "size": stat.st_size}
 
     snapshot = {"version": 1, "projectRoot": str(root), "files": current_files}
+    # **삼킨 반환값이 아니다**(분류: 실패 방향이 안전 + 실패가 예외로 표면화). 반환값이
+    # 없고 실패는 예외이며 main()이 로그에 EXCEPTION으로 남긴다. 스냅샷이 전진하지 않으면
+    # 다음 scan이 같은 카드를 다시 본다 — 유료 judge 재호출은 `dedup-skipped.jsonl`의
+    # body-hash 억제가 막고, 큐 중복은 `already_queued`가 막는다.
     qmd_sync.write_state_atomic(snap_path, snapshot)
     log(
         f"pages={len(pages)} scanned_ok={scanned_ok} scanned_failed={scanned_failed} "

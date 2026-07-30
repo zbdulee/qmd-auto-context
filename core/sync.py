@@ -64,6 +64,15 @@ def read_state(path):
 
 
 def write_state_atomic(path, snapshot):
+    """스냅샷/커서 상태를 원자적으로 쓴다. **반환값이 없고 실패는 예외로 전파된다.**
+
+    이 함수는 "삼킨 반환값" 목록에 오를 수 없다 — 확인할 값이 없고 실패가 조용하지 않다.
+    호출부 분류는 전부 동일하다(**실패 방향이 안전**): 쓰기가 실패하면 상태가 전진하지
+    않으므로 다음 회차가 같은 범위를 다시 처리한다. 손해는 재처리이고 유실이 아니다.
+    sync에서는 예외가 `run()`을 뚫고 나가 skill(`set -euo pipefail`)에서 실패로 보이며,
+    백그라운드 스캐너(`wiki_source_scan`·`wiki_dedup_scan`)에서는 각자의 `main()`이 잡아
+    로그에 `EXCEPTION`으로 남긴다.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
     with open(tmp, "w", encoding="utf-8") as handle:
@@ -408,6 +417,10 @@ def run(cwd, *, json_output=False, dry_run=False, baseline_only=False):
                 compile_result = enqueue_compile_sources(
                     project_root, config, changed_files, snapshot, previous
                 )
+                # 스냅샷 전진 실패는 예외로 나간다(위 docstring). 그 경우 다음 sync가
+                # 같은 변경을 다시 감지해 재enqueue하고, worker가 이미 컴파일한 뒤라면
+                # 그 소스에 대한 유료 호출이 한 번 더 든다 — 재처리 방향이므로 유실은
+                # 없지만 공짜도 아니라는 뜻이다(실패가 조용하지 않아야 하는 이유).
                 write_state_atomic(out_state, snapshot)
                 reason = "synced"
             else:

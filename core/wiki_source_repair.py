@@ -204,9 +204,11 @@ def do_repoint(root: Path, config: dict, compile_cfg: dict, target_rel: str,
             # 원본은 그대로다(임시파일만 버려진다) — 실패 반환과 디스크 상태가 일치한다.
             return fail("card_unwritable")
         info = wsm.classify_card(updated, root, allow_roots)
-        # 원장 기록 실패를 삼키면 카드는 고쳐졌는데 대기 큐에서 내려가지 않아 같은 알림이
-        # 계속 뜨고, 사용자는 "고쳤는데 왜 또 나오나"를 알 수 없다. 카드 쓰기는 이미
-        # 성공했으므로 실패시키지 않고 출력에 표면화한다.
+        # 카드 쓰기(주 효과)는 위에서 이미 확인했고 이 원장 행은 부기다 — 실패해도 다음
+        # 스캔이 재감지해 자기치유한다(그 자체로는 "실패 방향이 안전" 분류). 그래도
+        # 표면화하는 이유는 이것이 **사용자가 직접 호출한 복구 명령**이어서다: 조용히
+        # 넘기면 "고쳤는데 왜 또 대기로 뜨나"가 설명 불가능해진다. 제어 흐름은 바꾸지
+        # 않고 출력 필드 하나만 더한다.
         ledger_ok = wsm.record(ledger, target_rel, wsm.ACTION_REPOINTED, info["missing"],
                                str((wc.parse_frontmatter(updated)[0] or {}).get("status") or "generated"),
                                "repair", {"from": old, "to": new_rel})
