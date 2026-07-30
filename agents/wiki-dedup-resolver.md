@@ -49,8 +49,14 @@ summary; from the `wiki-dedup` skill on an explicit user request → report the 
       substitutes that block wholesale every time the source file changes, and `status: verified`
       is no protection (`is_auto_writable_page` deliberately excludes `verified` so stale cards get
       re-verified) — anything folded inside the block is silently lost on the next source edit.
-      Everything outside the block survives regeneration, frontmatter included, so transplanting
-      the deleted page's `aliases`/`canonicalKey`/`sources` entries is safe. WRITE TRANSPLANTED
+      Everything outside the block survives REGENERATION, frontmatter included, so transplanting
+      the deleted page's `aliases`/`canonicalKey`/`sources` entries is safe against source edits.
+      **It does not survive card DELETION.** Machine verification deletes the keeper outright on
+      `fail` and on `inconclusive` (both default) and `verify-deleted.jsonl` records no body, so the
+      folded section is then unrecoverable — including the facts you just rescued from the pages you
+      deleted. That is the intended policy, not a gap (an unverifiable card must not stay in the
+      wiki). Fold the facts in anyway — that is what keeps the wiki correct — but do not treat the
+      keeper as the only copy of anything you cannot regenerate from its sources. WRITE TRANSPLANTED
       `sources` ENTRIES IN THE EMITTED FORM — one flow mapping per list item,
       `  - {kind: "file", path: "docs/a.md"}`. `core/recall.py` injects `sources[].path` as the
       link back to the original document and reads only that form (plus quoted keys, single

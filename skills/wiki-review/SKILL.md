@@ -70,8 +70,14 @@ host's own delegation mechanism (Codex's multi-agent tool, Hermes's `delegate_ta
         `qmd:auto:start`/`qmd:auto:end` block. `merge` substitutes that block wholesale with the
         candidate's generated summary (`core/wiki_review.py`), and later source edits regenerate it
         again; `status: verified` is no protection, since `is_auto_writable_page` deliberately
-        excludes `verified`. Only content outside the block survives — frontmatter included, so
-        transplanting `aliases`/`canonicalKey` is safe. If you transplant `sources` entries, write
+        excludes `verified`. Only content outside the block survives
+        REGENERATION — frontmatter included, so transplanting `aliases`/`canonicalKey` is safe
+        against source edits. **It does not survive card DELETION.** Machine verification deletes
+        the card outright on `fail` and on `inconclusive` (both default), and `verify-deleted.jsonl`
+        records no body — so a hand-written section outside the block is unrecoverable once that
+        happens. This is the intended policy, not a gap (an unverifiable card must not stay in the
+        wiki), so keep folding facts in to keep the wiki correct; just never treat a card as the
+        only copy of something you cannot regenerate from its sources. If you transplant `sources` entries, write
         them in the emitted form — one flow mapping per item, `  - {kind: "file", path: "docs/a.md"}`.
         `core/recall.py` injects `sources[].path` as the link back to the original document and
         reads only that form (plus quoted keys, single quotes, trailing comments); a block mapping
