@@ -110,7 +110,7 @@ title: "claude-runner — 구독 기반 Claude Code headless AI 실행 계층"
 | 3 | ✅ **완료** — `source_missing` 정책 | 삭제·downgrade 없이 감지·기록·표면화 + 사람 확인 복구(재지정). 원인이 개명이라 파괴적 조치 불가 |
 | 4 | ✅ **완료** — verifier engine 을 extractor 와 분리 | 문헌의 명시적 완화법. CLI 부재 시 degrade 경로 유지 |
 | 5 | ✅ **완료** — crowding 반복 측정 도구 + 라이브 baseline | 범위 축소: 라이브가 이미 `wikiOnly` 라 "raw 있는 상태의 recall baseline"은 존재하지 않는다. 남은 일은 인덱스 점유 측정의 **반복 가능화** |
-| 6 | 커버리지 백필 — 선행 4건 ✅ + 파일럿 25건 실측 완료, **전수는 미실행** | **비용 동의 필요.** 전수 936건 실측 기반 ≈ **23.4M 토큰**. 초기 추정 16~20M은 소스 길이를 과대평가했지만(median 4,033자, 상한 도달 83건뿐 → 소스 토큰만 보면 7.3M) 호출이 소스당 2회가 아니라 **카드당**이고(증폭 2.68배) extractor 입력의 **73%가 고정 wiki orientation**이라 결과적으로 상향됐다. 실측·전수 권고는 `bulk-wiki-backfill-spec.md` 6장 |
+| 6 | ~~커버리지 백필~~ → **전제 철회. 하지 않는다.** verify 처리량 + per-run cap만 ✅ | 목표는 커버리지가 아니라 **정확성**이다("중요하고 틀리지 않은 정보만 recall되면 된다"). recall은 `topN` 3만 주입하므로 커버리지를 올려도 주입량은 같고 바뀌는 건 "어느 카드가 이기는가"뿐이며, 카드 없는 문서의 대안(recall 무출력 → 에이전트가 원문 검색)이 어중간한 카드보다 낫다 — 그 경로는 2단계의 원문 경로 주입으로 이미 열려 있다. 남긴 것: verify 처리량(run당 3건은 백필과 무관하게 "정확한 카드가 늦게 보이는" 병목), per-run cap. 파일럿 25건은 **자동 생성 카드 정확도** 측정으로 전용했다(pass 80.6% / inconclusive 16.4% / fail 3.0%). 실측·철회 근거는 `bulk-wiki-backfill-spec.md` |
 | 7 | role `source` 도입 | qmd 등록과 compile 입력 분리. 8번 없이는 불필요 |
 | 8 | **raw on/off A/B → 프로젝트별 가역적 제거** | 게이트: 링크 무결성 · query coverage · source-read 성공률 · 재생성 가능성 · raw-search escape hatch |
 

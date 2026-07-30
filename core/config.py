@@ -160,10 +160,6 @@ COMPILE_TRIGGERS = {
     # 수동 sync(core/sync.py)가 스냅샷 diff로 찾아낸 소스 변경. git pull·rebase·외부
     # 편집은 PostToolUse 훅을 타지 않으므로 `post_tool_source`로는 잡히지 않는다.
     "post_sync_source",
-    # 명시적 per-run opt-in 백필(core/wiki_backfill.py)이 스냅샷과 무관하게 열거한 소스.
-    # sync가 닫는 구멍("앞으로의 변경 누락")과 달리 이것은 "한 번도 편집되지 않은 기존
-    # 문서"를 덮는다 — 자동 훅에서는 절대 발화하지 않는다(비용 동의가 run 단위다).
-    "backfill_source",
     "repeated_recall",
     "cross_file_conclusion",
     "manual",

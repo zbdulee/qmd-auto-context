@@ -1,9 +1,10 @@
-// Per-run throughput guards for bulk compile (bulk-wiki-backfill-spec 2.2 / 2.3).
+// Per-run throughput guards for the compile worker.
 //
-// 2.2: the compile worker had NO per-run cap — batch.maxItems is a start condition, so a
-//      queue of N drove N consecutive host CLI spawns in one worker process.
-// 2.3: verify was fixed at 3 per run, so a bulk backfill left most cards `generated`,
-//      which `compile.recallVerifiedOnly: true` hides from recall entirely.
+// cap: the worker had NO per-run cap — batch.maxItems is a start condition, so a queue of
+//      N drove N consecutive host CLI spawns in one worker process.
+// verify budget: verify was fixed at 3 per run, so editing ~10 documents left most of the
+//      resulting cards `generated` for several runs, and `compile.recallVerifiedOnly: true`
+//      (default) hides a `generated` card from recall. Accurate cards arrived late.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -57,7 +58,7 @@ function setupProject({ sources, compile: compileOverrides = {} }) {
       mode: 'auto-wiki',
       autoWrite: true,
       defaultStatus: 'generated',
-      triggers: ['post_tool_source', 'backfill_source', 'manual'],
+      triggers: ['post_tool_source', 'manual'],
       maxSourceChars: 12000,
       extractor: { argv: ['python3', adapter], timeout: 60 },
       // keep the run deterministic and daemon-free
@@ -71,7 +72,7 @@ function setupProject({ sources, compile: compileOverrides = {} }) {
     writeFileSync(join(dir, rel), `# ${rel}\n\nDurable decision: ${rel} records a real decision.\n`);
     queue.push(JSON.stringify({
       ts: '2026-07-30T00:00:00Z',
-      trigger: 'backfill_source',
+      trigger: 'post_tool_source',
       engine: 'claude',
       cwd: dir,
       source: { kind: 'file', path: rel, collection: 'proj-docs' },
@@ -142,7 +143,7 @@ test('verify budget rises to the cards the same run produced (no generated backl
     assert.equal(out.processed, 5);
     assert.equal(out.verifyQueued, 5);
     // Before this change the piggybacked pass verified 3 and left 2 cards `generated`,
-    // i.e. invisible to recall under recallVerifiedOnly.
+    // i.e. invisible to recall under recallVerifiedOnly until some later run picked them up.
     assert.equal(calls(logPath, 'verify').length, 5);
     assert.equal(readFileSync(join(dir, '.auto-context', 'compile', 'verify-queue.jsonl'), 'utf8'), '');
     for (const rel of sources) {

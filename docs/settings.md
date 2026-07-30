@@ -499,7 +499,7 @@ jq -c 'select(.event=="qmd_recall_shadow" and .verdict.selected_empty_raw_nonemp
 | `compile.autoWrite` | `false` | clean candidate를 wiki Markdown으로 직접 쓸지 여부입니다. |
 | `compile.defaultStatus` | `"generated"` | 새 wiki page의 기본 status입니다. |
 | `compile.requireReviewForCanon` | `true` | canon 승격에 검토 신호가 필요하다는 정책 플래그입니다. |
-| `compile.triggers` | `[]` | compile source를 만들 trigger 목록입니다. 보통 `post_tool_source`, `post_sync_source`, `manual`을 씁니다. `post_sync_source`는 수동 sync가 스냅샷 diff로 찾아낸 변경(git pull·rebase·외부 편집)을 compile 큐에 넣게 합니다 — 하위호환으로 `post_tool_source`만 있어도 sync 경유 enqueue는 허용됩니다. `backfill_source`는 명시적 백필(`wiki-backfill` skill)이 쓰는 라벨이며, 자동 발화 경로가 없고 위 두 라벨 중 하나만 있어도 백필은 허용됩니다. |
+| `compile.triggers` | `[]` | compile source를 만들 trigger 목록입니다. 보통 `post_tool_source`, `post_sync_source`, `manual`을 씁니다. `post_sync_source`는 수동 sync가 스냅샷 diff로 찾아낸 변경(git pull·rebase·외부 편집)을 compile 큐에 넣게 합니다 — 하위호환으로 `post_tool_source`만 있어도 sync 경유 enqueue는 허용됩니다. |
 | `compile.maxSourceChars` | `12000` | extractor에 넘길 source content 최대 길이입니다. |
 | `compile.maxAutoPageLines` | `120` | 자동 생성 wiki page의 최대 줄 수입니다. |
 | `compile.excludeStatusesFromRecall` | `["discarded", "contested"]` | recall에서 제외할 wiki status입니다. |
@@ -517,7 +517,7 @@ jq -c 'select(.event=="qmd_recall_shadow" and .verdict.selected_empty_raw_nonemp
 
 `maxItems`와 `maxPerRun`을 혼동하지 마십시오. 예전에는 상한이 아예 없어 `maxItems`를 넘겨
 처리가 시작되면 **큐에 든 전량**을 한 워커 프로세스가 순차 실행했습니다. 큐가 수백 건이면
-(백필·대량 `git pull` 뒤 sync) 단일 one-shot 워커가 유료 host CLI 호출을 수백 회 직렬로
+(대량 `git pull` 뒤 sync는 한 번에 최대 50건을 넣습니다) 단일 one-shot 워커가 유료 host CLI 호출을 수십~수백 회 직렬로
 돌립니다. `maxPerRun`은 그 실행 시간과 비용을 run 단위로 유계로 만들며, 넘친 항목은
 버리지 않고 큐에 남기므로 조용히 유실되지 않습니다(sync의 `QMD_SYNC_COMPILE_MAX`와 같은 성질).
 
@@ -553,7 +553,7 @@ jq -c 'select(.event=="qmd_recall_shadow" and .verdict.selected_empty_raw_nonemp
 | `compile.verify.crossEngine` | `"prefer"` | 검수 엔진을 카드를 만든 엔진과 분리합니다. `prefer`는 다른 엔진을 먼저 시도하고 없으면 같은 엔진으로 검수합니다(자기검증으로 기록). `require`는 다른 엔진만 허용하고 없으면 검수하지 않습니다(엔진별 `backends`/`builtins`가 필요합니다 — 레거시 `extractor.argv`·`extractor.default`는 엔진 귀속이 불가해 이 요구를 만족시키지 못합니다). `off`는 0.x 동작(카드를 만든 엔진)이며, 그 엔진이 귀속 불가면 풀의 첫 후보로 폴백합니다(폐기하면 그 카드가 영원히 검수되지 않습니다). |
 | `compile.verify.builtins` | `[]` | 검수 후보 엔진 목록(symbolic 이름만). 비면 `compile.extractor`의 `builtins` + 명시 `backends` 키를 물려받습니다. **카드를 만든 엔진은 이 목록에 없어도 `prefer`의 최후 후보로 남습니다** — 목록을 좁혀도(또는 이름을 잘못 적어도) self 폴백이 사라지지 않습니다. adapter argv 해석은 extractor와 같은 한 벌을 씁니다. |
 | `compile.verify.cooldownSeconds` | `600` | verifier 실패/timeout 뒤 재시도 cooldown입니다. |
-| `compile.verify.maxPerRun` | `3` | 한 번에 처리할 verify job 수의 **기본 예산**입니다. 실제 예산은 `max(maxPerRun, 그 run이 만든 카드 수)`입니다 — 고정값이면 카드를 만드는 속도가 검수하는 속도를 넘어 큐가 자라고, `recallVerifiedOnly` 기본값(`true`) 아래에서 `generated`로 남은 카드는 recall에 나오지 않습니다. 25장을 백필하고 3장만 검수하면 나머지는 다음 run들을 기다리는 동안 recall 효과가 0입니다. 생산량을 하한으로 두면 큐는 줄어들 수만 있습니다. |
+| `compile.verify.maxPerRun` | `3` | 한 번에 처리할 verify job 수의 **기본 예산**입니다. 실제 예산은 `max(maxPerRun, 그 run이 만든 카드 수)`입니다 — 고정값이면 카드를 만드는 속도가 검수하는 속도를 넘어 큐가 자라고, `recallVerifiedOnly` 기본값(`true`) 아래에서 `generated`로 남은 카드는 recall에 나오지 않습니다. 문서 10개를 편집해 카드 20장이 생겨도 3장만 검수하면 나머지는 다음 run들을 기다리는 동안 recall에 나오지 않습니다. 생산량을 하한으로 두면 큐는 줄어들 수만 있습니다. |
 | `compile.verify.skippedPath` | `.auto-context/compile/verify-skipped.jsonl` | inconclusive 삭제 억제 마커 파일입니다. |
 
 #### `onInconclusive` 기본값이 `delete`인 이유
@@ -622,8 +622,7 @@ timeout·비127 실패는 이미 CLI를 호출한 것이므로 다음 엔진으�
 ≈ 입력 9K 토큰 → 합계 대략 6M 입력 토큰). 새로 컴파일되는 카드부터 교차 검증됩니다.
 전량 재검증을 원하면 명시적 opt-in으로만 하십시오 — `verify-queue.jsonl`에 대상 카드의
 `{targetPath, sources, sourceHash, engine}` 행을 직접 append하고 `status`를 `generated`로
-되돌린 뒤 worker가 `maxPerRun`씩 드레인하게 하는 방식이며, 로드맵 6단계(백필)와 같은
-비용 게이트입니다.
+되돌린 뒤 worker가 `maxPerRun`씩 드레인하게 하는 방식입니다.
 
 #### 교차검증 주장의 조건 (귀속)
 
