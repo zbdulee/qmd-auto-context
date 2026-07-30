@@ -426,8 +426,11 @@ def process_job(root: Path, config: dict, compile_cfg: dict, job: dict) -> tuple
     if not collection or collection not in selected:
         append_jsonl(cpath, bounded_failure("extractor_failed", job, "invalid_source_scope"))
         return True, False, []
-    roles = config.get("collectionRoles") if isinstance(config.get("collectionRoles"), dict) else {}
-    if roles.get(collection, "raw") not in ("raw", "session"):
+    # enqueue와 **같은 판정**이어야 한다(config.COMPILE_SOURCE_ROLES) — 갈리면 큐에는
+    # 들어가는데 worker가 매번 invalid_source_scope로 버리는 무한 왕복이 된다.
+    # role `source`는 인덱싱되지 않을 뿐 compile 입력으로는 정상이다.
+    roles = qmd_config.role_map(config)
+    if not qmd_config.is_compile_source_collection(roles, collection):
         append_jsonl(cpath, bounded_failure("extractor_failed", job, "invalid_source_scope"))
         return True, False, []
     max_chars = int(compile_cfg.get("maxSourceChars", 12000) or 12000)

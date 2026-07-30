@@ -207,15 +207,21 @@ def index_composition(qmd_bin: str | None, project_roles: dict[str, str],
     by_role: dict[str, int] = {}
     for name, files in counts.items():
         if name in project_roles:
-            role = project_roles[name] or "unknown"
+            # 런타임이 실제로 적용하는 role로 라벨한다(`config.collection_role` —
+            # 미지 값은 raw로 fail-open). 원문 문자열을 그대로 쓰면 오타 role이 어떤
+            # 코드 경로도 인정하지 않는 제3의 버킷으로 baseline에 굳는다.
+            role = qmd_config.collection_role(project_roles, name)
         else:
             root = collection_root(qmd_bin, name)
             role = "unknown"
             if root:
                 found = qmd_config.find_project_config(root)
-                external_roles = found.get("config", {}).get("collectionRoles", {})
-                if isinstance(external_roles, dict) and external_roles.get(name):
-                    role = external_roles[name]
+                external_roles = qmd_config.role_map(found.get("config", {}))
+                # 키가 있을 때만 라벨한다 — 없으면 `unknown`을 유지한다(설정 파일이
+                # 없는 레거시 컬렉션을 `raw`로 단정하지 않는다는 기존 규칙). 있으면
+                # 값은 프로젝트 안 컬렉션과 **같은 SSOT**로 정규화한다.
+                if name in external_roles:
+                    role = qmd_config.collection_role(external_roles, name)
         roles[name] = role
         by_role[role] = by_role.get(role, 0) + files
     total = sum(counts.values())
@@ -705,11 +711,20 @@ def build_record(project_dir: str, args: argparse.Namespace) -> dict:
     config = found.get("config", {})
     project_root = found.get("projectRoot", project_dir)
     collections = config.get("collections", []) or []
-    roles = config.get("collectionRoles", {})
-    if not isinstance(roles, dict):
-        roles = {}
-    wiki_collections = [c for c in collections if roles.get(c) == "wiki"]
-    raw_collections = [c for c in collections if roles.get(c) != "wiki"]
+    roles = qmd_config.role_map(config)
+    # 세 목록은 **여집합이 아니다**. 이 도구는 qmd 인덱스 점유를 재므로 인덱스에 없는
+    # role `source`는 wiki에도 raw에도 들어가면 안 된다 — `!= "wiki"`로 raw를 정의하던
+    # 동안에는 source가 raw로 새어 "제거했는데도 raw가 남아 있다"는 판정이 나왔다.
+    # `sourceCollections`를 함께 남기는 이유: 8단계는 raw→source 전환 전/후를 이 원장으로
+    # 비교하는데, 목록의 합이 collections와 다르면 그 차이가 무엇인지 기록이 없으면
+    # "설정이 바뀐 것"인지 "측정이 틀린 것"인지 사후에 구분할 수 없다.
+    wiki_collections = qmd_config.wiki_collections(collections, roles)
+    raw_collections = qmd_config.recall_raw_collections(collections, roles)
+    source_collections = [
+        c for c in collections
+        if isinstance(c, str)
+        and qmd_config.collection_role(roles, c) == qmd_config.COLLECTION_ROLE_SOURCE
+    ]
     wiki_names = set(wiki_collections)
     record: dict = {
         "ts": now_iso(),
@@ -723,6 +738,7 @@ def build_record(project_dir: str, args: argparse.Namespace) -> dict:
             "collections": list(collections),
             "wikiCollections": wiki_collections,
             "rawCollections": raw_collections,
+            "sourceCollections": source_collections,
         },
         "limits": {
             "recallLimit": args.recall_limit,
@@ -750,8 +766,8 @@ def build_record(project_dir: str, args: argparse.Namespace) -> dict:
     )
     known_roles = dict(record["index"].get("roleByCollection", {})) if isinstance(
         record["index"].get("roleByCollection"), dict) else {}
-    for name, role in roles.items():
-        known_roles[name] = role
+    for name in roles:
+        known_roles[name] = qmd_config.collection_role(roles, name)
 
     if args.probe:
         probes = [{"query": q, "card": None, "source": "explicit", "kind": "explicit"}

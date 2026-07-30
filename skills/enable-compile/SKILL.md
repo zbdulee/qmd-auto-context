@@ -22,5 +22,5 @@ Turn on wiki auto-compile for the current project in one step.
 
 ## Safety
 
-- This enables background host-CLI execution on raw/session `.md` edits. Surface the disclosure to the user — do not enable silently.
+- This enables background host-CLI execution on raw/session/source `.md` edits. Surface the disclosure to the user — do not enable silently.
 - Do not bypass opt-in: the command refuses non-opted-in projects.

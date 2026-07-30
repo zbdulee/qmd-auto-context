@@ -8,6 +8,9 @@ import json
 import fnmatch
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parent.resolve()))
+import config as qmd_config
+
 
 def is_risky_path(path_str):
     p = Path(path_str).resolve()
@@ -119,7 +122,11 @@ def resolve_paths(cwd_str, config_json):
             "prompt": {"cwd": str(cwd), "suggestedRoot": str(suggested)},
         }
 
+    roles = qmd_config.role_map(config)
+
     entries = []
+    index_entries = []
+    source_entries = []
     for col in collections:
         matched_path = "."
         for pat, val in collection_paths.items():
@@ -129,9 +136,30 @@ def resolve_paths(cwd_str, config_json):
         if not safe_collection_path(cwd, matched_path, roots):
             print(f"skip unsafe collectionPath: {col} -> {matched_path}", file=sys.stderr)
             continue
-        entries.append({"name": col, "path": matched_path})
+        entry = {"name": col, "path": matched_path}
+        entries.append(entry)
+        if qmd_config.is_indexed_collection(roles, col):
+            index_entries.append(entry)
+        elif qmd_config.collection_role(roles, col) == qmd_config.COLLECTION_ROLE_SOURCE:
+            source_entries.append(entry)
 
-    return {"refused": False, "entries": entries}
+    # 세 목록의 관계: `entries` = `indexEntries` ⊎ `sourceEntries`.
+    #
+    # **`entries`의 항목 모양은 바꾸지 않는다**(`{name, path}`). role을 항목에 얹으면
+    # role을 안 쓰는 기존 프로젝트의 출력까지 달라지고, 무엇보다 downstream이 role
+    # 문자열을 **다시 비교**하게 된다 — 판정을 여기 한 곳에 두려는 목적과 반대다.
+    # 대신 role별로 이미 갈라 둔 목록을 준다:
+    #   entries       — 설정에 적힌 전부. compile source 경로(`core/sync.py`)가 쓴다
+    #   indexEntries  — qmd `collection add`/`update`/`embed` 대상(INDEXED_ROLES)
+    #   sourceEntries — role `source`. 인덱스에서 **빼야 할** 것(update.sh unregister)
+    # 미지 role은 `config.collection_role`이 `raw`로 fail-open하므로 indexEntries에 들어간다
+    # (role 도입 전 동작 = 안전한 방향).
+    return {
+        "refused": False,
+        "entries": entries,
+        "indexEntries": index_entries,
+        "sourceEntries": source_entries,
+    }
 
 
 def main():

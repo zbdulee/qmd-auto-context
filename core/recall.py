@@ -867,8 +867,8 @@ def is_wiki_meta_noise(result: dict, config: dict) -> bool:
     any query -- pure recall noise. Scoped to wiki-role collections so a genuine
     index.md/log.md in a non-wiki collection (e.g. a code repo README-style file)
     is left untouched."""
-    roles = config.get("collectionRoles", {})
-    if not isinstance(roles, dict) or roles.get(result.get("_collection", "")) != "wiki":
+    roles = qmd_config.role_map(config)
+    if not qmd_config.is_wiki_collection(roles, result.get("_collection", "")):
         return False
     base = qmd_uri_to_filepath(result.get("file", "") or "").rsplit("/", 1)[-1]
     return base in ("index.md", "log.md")
@@ -1390,12 +1390,21 @@ def main():
     if not collections:
         log_recall_event(log_path, "no_collections")
         return 0
+    # role `source`는 qmd에 등록조차 되지 않는 compile 전용 입력이므로 recall 질의 대상이
+    # 아니다. 이 지점부터 아래 전 경로가 `collections` 대신 이 목록을 쓴다 — 예전처럼
+    # `!= "wiki"` 여집합으로 raw를 정의하면 source가 raw로 새어 들어간다.
+    # role이 하나도 없거나 전부 raw/wiki/session이면 목록이 `collections`와 동일하다
+    # (순서 보존 → role `source`를 쓰지 않는 기존 프로젝트는 완전 무변화).
+    roles_config = qmd_config.role_map(config)
+    collections = qmd_config.indexed_collections(collections, roles_config)
+    if not collections:
+        log_recall_event(log_path, "no_indexed_collections")
+        return 0
     # wikiOnly: wiki role 컬렉션이 하나도 없으면 surface할 게 없다. fixture/live 무관하게
     # 여기서 조기 종료해 raw가 새지 않게 하고 진단 reason도 정확히 남긴다
     # (fixture 경로에서 no_results_after_filter로 잘못 찍히던 오탐 방지).
     if config.get("recallStrategy") == "wikiOnly":
-        _roles = config.get("collectionRoles", {}) if isinstance(config.get("collectionRoles"), dict) else {}
-        if not any(_roles.get(c) == "wiki" for c in collections):
+        if not qmd_config.wiki_collections(collections, roles_config):
             log_recall_event(log_path, "no_wiki_collections")
             return 0
     raw_collections = []
@@ -1443,12 +1452,11 @@ def main():
         # 모드에서 무조건 queried_wiki_first를 세우면 primary fixture의 non-wiki 결과가
         # wiki-scoped fail-closed로 drop돼 기존 혼합 fixture 테스트의 의미가 바뀐다.
         if raw_fixture_path and config.get("recallStrategy") == "hierarchical":
-            _roles = config.get("collectionRoles", {}) if isinstance(config.get("collectionRoles"), dict) else {}
-            _wiki = [c for c in collections if _roles.get(c) == "wiki"]
+            _wiki = qmd_config.wiki_collections(collections, roles_config)
             if _wiki:
                 queried_wiki_first = True
                 queried_collections = list(_wiki)
-                raw_collections = [c for c in collections if _roles.get(c) != "wiki"]
+                raw_collections = qmd_config.recall_raw_collections(collections, roles_config)
     else:
         if not daemon_alive(daemon_url):
             log_recall_event(log_path, "daemon_unreachable", daemon=daemon_url)
@@ -1485,9 +1493,8 @@ def main():
 
             strategy = config.get("recallStrategy")
             if strategy in ("hierarchical", "wikiOnly"):
-                roles = config.get("collectionRoles", {})
-                wiki_collections = [c for c in collections if roles.get(c) == "wiki"]
-                raw_collections = [c for c in collections if roles.get(c) != "wiki"]
+                wiki_collections = qmd_config.wiki_collections(collections, roles_config)
+                raw_collections = qmd_config.recall_raw_collections(collections, roles_config)
                 if wiki_collections:
                     queried_wiki_first = True
                     queried_collections = list(wiki_collections)
@@ -1545,7 +1552,7 @@ def main():
     annotated_cards: list[dict] = []
 
     def annotate_all(items: list[dict]) -> None:
-        roles_map = config.get("collectionRoles", {}) if isinstance(config.get("collectionRoles"), dict) else {}
+        roles_map = qmd_config.role_map(config)
         for result in items:
             if "_collection" not in result:
                 # 데몬 /query는 file을 qmd:// 스킴 없이 "collection/path"로도 반환한다 —
@@ -1553,7 +1560,7 @@ def main():
                 collection_guess = qmd_uri_to_collection(result.get("file", ""))
                 if collection_guess:
                     result["_collection"] = collection_guess
-            if roles_map.get(result.get("_collection", "")) != "wiki":
+            if not qmd_config.is_wiki_collection(roles_map, result.get("_collection", "")):
                 continue
             if not worth_annotating(result):
                 continue
@@ -1587,7 +1594,7 @@ def main():
     # "먼저" 적용한다. wiki 히트가 전부 제외 대상이면 cutoff 통과 집합이 비어
     # hierarchical backfill이 정상 트리거된다(예전엔 exclude가 backfill 뒤라 빈 출력이 됐다).
     compile_cfg = config.get("compile", {}) if isinstance(config.get("compile"), dict) else {}
-    roles = config.get("collectionRoles", {}) if isinstance(config.get("collectionRoles"), dict) else {}
+    roles = qmd_config.role_map(config)
     excluded_statuses = set(compile_cfg.get("excludeStatusesFromRecall", ["discarded", "contested"]))
     # recallVerifiedOnly(기본 True): 검수급(_wiki_reviewed) wiki 카드만 surface하고
     # 미검수 generated/tentative는 exclude와 동일하게 backfill 판정 "전"에 제거한다.
@@ -1620,7 +1627,7 @@ def main():
         for skip in skip_paths:
             if skip in filepath:
                 return "skip"
-        is_wiki = roles.get(r.get("_collection", "")) == "wiki"
+        is_wiki = qmd_config.is_wiki_collection(roles, r.get("_collection", ""))
         if (wiki_scoped or wiki_only) and not is_wiki:
             # wiki-scoped 쿼리(hierarchical/wikiOnly가 wiki 컬렉션만 조회) 결과는 정의상
             # wiki다. _collection이 안 풀려 role이 wiki가 아닌 결과는 status 검증 불가 +
@@ -1662,7 +1669,7 @@ def main():
         """hierarchical: wiki 히트가 하나라도 있으면 raw는 내린다."""
         if strategy != "hierarchical":
             return items
-        wiki_items = [r for r in items if roles.get(r.get("_collection", "")) == "wiki"]
+        wiki_items = [r for r in items if qmd_config.is_wiki_collection(roles, r.get("_collection", ""))]
         return wiki_items or items
 
     def rescue_allowed() -> bool:
@@ -1693,7 +1700,7 @@ def main():
         """
         accepts = []
         if strategy == "hierarchical":
-            accepts.append(lambda r: roles.get(r.get("_collection", "")) == "wiki")
+            accepts.append(lambda r: qmd_config.is_wiki_collection(roles, r.get("_collection", "")))
         accepts.append(lambda r: True)
         for accept in accepts:
             for position, r in enumerate(items, start=1):
@@ -1712,7 +1719,7 @@ def main():
         rescued, rescued_rank = rescue_one(results, wiki_scoped=queried_wiki_first)
         if rescued is not None:
             filtered_results = [rescued]
-            is_wiki_hit = roles.get(rescued.get("_collection", "")) == "wiki"
+            is_wiki_hit = qmd_config.is_wiki_collection(roles, rescued.get("_collection", ""))
             rank_fallback = (rescued_rank, "wiki" if (queried_wiki_first or is_wiki_hit) else "primary")
 
     if (
@@ -1867,6 +1874,11 @@ def main():
         output = {
             "hookSpecificOutput": {
                 "hookEventName": "UserPromptSubmit",
+                # 여기서 넘기는 것은 role **판정**이 아니라 표시용 tag map이다
+                # (`format_context`는 role이 없는 컬렉션에 이름을 그대로 tag로 쓴다).
+                # `collection_role`로 정규화하면 미설정 컬렉션의 tag가 이름에서 `raw`로
+                # 바뀌어 주입 바이트가 달라진다 — 판정 SSOT를 쓰지 않는 유일한 자리이고
+                # 의도된 것이다. role `source`는 애초에 질의되지 않아 여기 오지 않는다.
                 "additionalContext": format_context(
                     final_results, resolve_prefix_style(config),
                     config.get("collectionRoles", {}),

@@ -253,6 +253,53 @@ preflight_remove_risky() {
   done
 }
 
+# role `source`로 전환된 컬렉션을 qmd 인덱스에서 **실제로** 제거한다.
+#
+# 등록만 건너뛰는 것으로는 부족하다: 이미 인덱싱된 문서는 recall 질의 대상(collection
+# scope)에서만 빠지고 전역 FTS/vec 후보 창은 계속 점유한다 — 8단계가 측정하려는
+# crowding이 정확히 그 점유이므로, 남겨 두면 `raw` → `source` 전환의 전후 비교가
+# 무의미해진다.
+#
+# **settings.json은 건드리지 않는다.** collections/collectionPaths에 그대로 남으므로
+# role을 `raw`로 되돌리면 다음 SessionStart의 `collection add` + `qmd update` + `embed`가
+# 재등록·재인덱싱한다(가역성 — 되돌림에 필요한 것은 role 한 글자뿐이고 재색인 비용만 든다).
+# 이것이 root가 사라진 컬렉션을 설정에서 지우는 prune_missing_settings_collections와
+# 다른 점이다 — 저기는 소스 자체가 없어졌고, 여기는 사용자가 "색인만 빼라"고 말한 것이다.
+#
+# role 판정은 resolve_paths.py가 이미 끝냈다(`sourceEntries`). 여기서 role 문자열을 다시
+# 비교하지 않는다 — 판정이 두 벌로 갈리면 한쪽만 새 role을 알게 된다.
+unregister_source_collections() {
+  local resolved_json="$1"
+  [ -z "$resolved_json" ] && return 0
+  local source_names
+  source_names=$(printf '%s' "$resolved_json" | python3 -c 'import json,sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(0)
+if not isinstance(data, dict) or data.get("refused"):
+    raise SystemExit(0)
+for entry in data.get("sourceEntries") or []:
+    if isinstance(entry, dict) and isinstance(entry.get("name"), str):
+        print(entry["name"])' 2>>"$LOG") || return 0
+  [ -z "$source_names" ] && return 0
+
+  local registered
+  registered=$(qmd collection list 2>/dev/null | awk '/^[^ ]/ {print $1}')
+  [ -z "$registered" ] && return 0
+
+  while IFS= read -r name; do
+    [ -z "$name" ] && continue
+    if printf '%s\n' "$registered" | grep -qxF -- "$name"; then
+      log "UNREGISTER SOURCE COLLECTION: $name (role=source)"
+      qmd collection remove "$name" >>"$LOG" 2>&1 \
+        || log "UNREGISTER SOURCE COLLECTION FAILED: $name"
+    fi
+  done <<EOF
+$source_names
+EOF
+}
+
 acquire_lock() {
   if mkdir "$LOCKDIR" 2>/dev/null; then
     echo "$$" >"$LOCKDIR/pid"
@@ -398,6 +445,8 @@ collection_paths = raw.get("collectionPaths") if isinstance(raw.get("collectionP
 collection_paths = {key: value for key, value in collection_paths.items() if isinstance(key, str) and isinstance(value, str)}
 roots = qmd_resolve_paths.allowed_roots(raw)
 
+roles = qmd_config.role_map(raw)
+
 missing = []
 for collection in collections:
     matched_path = "."
@@ -411,7 +460,10 @@ for collection in collections:
     if not candidate.is_absolute():
         candidate = project_root / candidate
     if not candidate.is_dir():
-        missing.append(collection)
+        # role을 함께 넘긴다: role `source`는 qmd에 등록된 적이 없으므로
+        # `qmd collection remove`가 실패하고, 셸이 그것을 "제거 실패"로 읽어
+        # settings 정리를 영구히 건너뛴다(세션마다 WARN 반복).
+        missing.append(collection + "\t" + qmd_config.collection_role(roles, collection))
 
 if not missing:
     sys.exit(0)
@@ -423,10 +475,16 @@ PY
 
   local successful
   successful=""
-  while IFS= read -r name; do
+  while IFS="$(printf '\t')" read -r name role; do
     [ -z "$name" ] && continue
-    log "PRUNE MISSING COLLECTION: $name"
-    if qmd collection remove "$name" >>"$LOG" 2>&1; then
+    log "PRUNE MISSING COLLECTION: $name (role=${role:-raw})"
+    if [ "$role" = "source" ]; then
+      # 인덱싱 대상이 아니므로 qmd에서 지울 것이 없다 — settings 정리만 진행한다.
+      # (root가 사라진 compile source는 raw와 같은 이유로 설정에서도 무의미하다)
+      log "PRUNE MISSING COLLECTION: $name is role=source, skipping qmd remove"
+      successful="${successful}${name}
+"
+    elif qmd collection remove "$name" >>"$LOG" 2>&1; then
       successful="${successful}${name}
 "
     else
@@ -606,6 +664,7 @@ run_update() {
   fi
 
   preflight_remove_risky
+  unregister_source_collections "$resolved"
 
   # 3. Add collections
   #
@@ -616,8 +675,13 @@ run_update() {
   # 실패가 성공처럼 보였다. 즉 SessionStart 는 collection add 를 한 번도 하지 않았고
   # 컬렉션 등록·경로 변경이 반영되지 않았다(index_worker 경로가 대신 등록해 증상이 가려짐).
   # stderr 는 버리지 말고 LOG 로 보내고, entries 가 비면 명시적으로 경고를 남긴다.
+  #
+  # `indexEntries`(role이 INDEXED_ROLES인 것만)를 쓴다. `entries`를 쓰면 role `source`
+  # 컬렉션까지 qmd에 등록돼 "compile 입력이지만 인덱싱·recall 대상 아님"이라는 role의
+  # 정의가 무너진다. 필터는 resolve_paths.py가 하고 여기서 role 문자열을 다시 비교하지
+  # 않는다(판정 이중화 방지).
   local entries_tsv
-  entries_tsv=$(echo "$resolved" | python3 -c 'import json,sys; [print(e["name"] + "\t" + e["path"]) for e in json.load(sys.stdin).get("entries", [])]' 2>>"$LOG")
+  entries_tsv=$(echo "$resolved" | python3 -c 'import json,sys; [print(e["name"] + "\t" + e["path"]) for e in json.load(sys.stdin).get("indexEntries", [])]' 2>>"$LOG")
   if [ -z "$entries_tsv" ]; then
     log "WARN: no collection entries resolved — collection add skipped"
   fi
@@ -751,8 +815,42 @@ main() {
   notice_show="$(printf '%s' "$notice_info" | python3 -c 'import json,sys; print("yes" if json.load(sys.stdin).get("show") else "no")' 2>/dev/null || true)"
   if [ -n "$notice_engines" ] && [ "$notice_show" = "yes" ]; then
     echo "[qmd] wiki auto-compile이 활성화되어 있습니다 (엔진: $notice_engines)."
-    echo "      raw/session 컬렉션의 .md를 편집하면 백그라운드로 해당 CLI를 실행해 wiki 초안(generated)을 만듭니다."
+    echo "      raw/session/source 컬렉션의 .md를 편집하면 백그라운드로 해당 CLI를 실행해 wiki 초안(generated)을 만듭니다."
     echo "      끄려면 .auto-context/settings.json의 compile.extractor 를 제거하세요."
+  fi
+
+  # 미지 role 값 표면화. `collectionRoles`의 role 값이 닫힌 집합(raw/wiki/session/source)
+  # 밖이면 config.collection_role_map이 그 항목을 버리고 `raw`로 fail-open한다 —
+  # 저장소 관례(설정 오류로 훅을 죽이지 않는다)이고 `raw`는 role 도입 전 기본 동작이라
+  # 안전한 방향이지만, `"source"` 오타 하나가 "인덱싱 제외"를 조용히 "인덱싱"으로
+  # 뒤집는다. 그래서 fail-open의 **종점**을 여기 둔다: 이미 로드된 raw settings로
+  # 판정하고(추가 파일 읽기 0) notice_once로 TTL 억제하며, 오타를 고치면 재무장한다.
+  # config는 argv로 전달한다 — heredoc이 stdin을 차지하므로 파이프는 무시된다
+  # (stale-queue·root-path 안내와 동일 패턴).
+  invalid_roles=$(python3 - "$(dirname "$0")" "$config_json" <<'PY' 2>/dev/null || true
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(sys.argv[1]).resolve()))
+import config as qmd_config
+
+try:
+    cfg = json.loads(sys.argv[2] or "{}")
+except Exception:
+    raise SystemExit(0)
+if not isinstance(cfg, dict):
+    raise SystemExit(0)
+collections = [c for c in (cfg.get("collections") or []) if isinstance(c, str)]
+names = qmd_config.invalid_role_collections(cfg.get("collectionRoles"), collections)
+if names:
+    print(", ".join(names))
+PY
+)
+  if [ -n "$invalid_roles" ]; then
+    notice_once role-invalid "$workdir" "[qmd] collectionRoles의 role 값을 인식할 수 없어 raw로 처리했습니다: ${invalid_roles}. 허용값은 raw, wiki, session, source 입니다."
+  else
+    notice_clear role-invalid "$workdir"
   fi
 
   # Retroactive wiki dedup hint: if a scan (this run's or a past one's) queued
@@ -992,7 +1090,8 @@ except Exception:
     resolved = {}
 if not isinstance(resolved, dict) or resolved.get("refused"):
     raise SystemExit(0)
-entries = resolved.get("entries")
+# 색인 범위 안내이므로 색인되는 컬렉션만 본다(role `source`는 qmd에 등록되지 않는다).
+entries = resolved.get("indexEntries")
 if not isinstance(entries, list):
     raise SystemExit(0)
 
@@ -1349,7 +1448,7 @@ with os.fdopen(fd, "w", encoding="utf-8") as fh:
 os.replace(tmp, settings)
 print(f"[qmd] wiki auto-compile 활성화: {target}")
 print(f"      엔진: {', '.join(engines)} (해당 host CLI가 없으면 자동 skip)")
-print("      이제 raw/session 컬렉션의 .md를 편집하면 백그라운드로 해당 CLI를 실행해")
+print("      이제 raw/session/source 컬렉션의 .md를 편집하면 백그라운드로 해당 CLI를 실행해")
 print("      wiki 페이지(status: generated)를 초안 작성합니다.")
 print("      끄려면 settings.json의 compile.extractor 를 제거하세요.")
 PY

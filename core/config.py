@@ -16,6 +16,47 @@ LEGACY_AGENTS_DIR = ".agents"
 LEGACY_AGENTS_FILE_NAME = "qmd-recall.json"
 LOCAL_OPTOUT_DIR = Path(".config") / "qmd" / "optout"
 
+# ---------------------------------------------------------------------------
+# Collection roles (SSOT)
+#
+# 네 role은 **두 축의 조합**이다: qmd 인덱스에 등록되는가(=recall 대상), wiki compile의
+# 입력이 되는가. `source`는 "compile 입력이지만 인덱싱·recall 대상 아님"을 표현하기 위해
+# 도입됐다(로드맵 7단계) — raw를 인덱스에서 빼면서도 그 문서로 카드를 계속 만들기 위한
+# 선행 작업이다.
+#
+#   role      | qmd 등록/인덱싱/recall | compile 입력 | hierarchical raw backfill
+#   ----------|------------------------|--------------|--------------------------
+#   raw       | O                      | O            | O
+#   session   | O                      | O            | O
+#   wiki      | O                      | X            | X (wiki phase에서 먼저 질의)
+#   source    | X                      | O            | X
+#
+# 판정을 `roles.get(c) != "wiki"` 같은 **여집합**으로 쓰지 말 것. 세 번째 값이 들어오는
+# 순간 그 지점 전부가 오분류한다. 아래 집합과 헬퍼(`collection_role` 외)를 쓴다.
+COLLECTION_ROLE_RAW = "raw"
+COLLECTION_ROLE_WIKI = "wiki"
+COLLECTION_ROLE_SESSION = "session"
+COLLECTION_ROLE_SOURCE = "source"
+COLLECTION_ROLES = frozenset({
+    COLLECTION_ROLE_RAW,
+    COLLECTION_ROLE_WIKI,
+    COLLECTION_ROLE_SESSION,
+    COLLECTION_ROLE_SOURCE,
+})
+# role 미설정 = role 도입 전 동작(인덱싱 + compile 입력). 미지 값도 여기로 fail-open한다.
+DEFAULT_COLLECTION_ROLE = COLLECTION_ROLE_RAW
+# qmd `collection add`/`update`/`embed`, dirty queue, recall 질의 대상.
+INDEXED_ROLES = frozenset({COLLECTION_ROLE_RAW, COLLECTION_ROLE_WIKI, COLLECTION_ROLE_SESSION})
+# hierarchical raw backfill / flat recall의 non-wiki 대상(= 인덱싱되는 non-wiki).
+RECALL_RAW_ROLES = frozenset({COLLECTION_ROLE_RAW, COLLECTION_ROLE_SESSION})
+# wiki compile source가 될 수 있는 role.
+COMPILE_SOURCE_ROLES = frozenset({
+    COLLECTION_ROLE_RAW,
+    COLLECTION_ROLE_SESSION,
+    COLLECTION_ROLE_SOURCE,
+})
+# ---------------------------------------------------------------------------
+
 DEFAULT_CONFIG = {
     "name": "",
     "collections": [],
@@ -305,7 +346,6 @@ def builtin_extractor_engines(value):
 def collection_role_map(value, collections):
     if not isinstance(value, dict):
         return {}
-    allowed_roles = {"raw", "wiki", "session"}
     allowed_collections = set(collections)
     return {
         key: item
@@ -313,8 +353,86 @@ def collection_role_map(value, collections):
         if isinstance(key, str)
         and key in allowed_collections
         and isinstance(item, str)
-        and item in allowed_roles
+        and item in COLLECTION_ROLES
     }
+
+
+def invalid_role_collections(value, collections):
+    """`collectionRoles`에서 **role 값이 미지**라 무시된 collection 이름 목록.
+
+    `collection_role_map`이 그런 항목을 조용히 버리므로(fail-open → `raw`) 사용자
+    의도가 반영되지 않은 사실이 어디에도 남지 않는다. 이 함수의 결과는 SessionStart
+    notice로 표면화된다(`core/update.sh`) — 오타 하나가 "인덱싱 제외"를 "인덱싱"으로
+    뒤집으므로 조용히 넘어가면 안 된다. collection에 없는 키·비문자열 키는 role 오타가
+    아니라 무관한 항목이므로 세지 않는다.
+    """
+    if not isinstance(value, dict):
+        return []
+    allowed_collections = set(collections)
+    return sorted(
+        key
+        for key, item in value.items()
+        if isinstance(key, str)
+        and key in allowed_collections
+        and (not isinstance(item, str) or item not in COLLECTION_ROLES)
+    )
+
+
+def collection_role(roles, collection):
+    """collection의 유효 role. 미설정·미지 값은 `raw`(role 도입 전 기본 동작)다.
+
+    **역할 판정은 반드시 이 함수(또는 아래 헬퍼)를 거친다.** 예전에는 여러 곳이
+    `roles.get(c) != "wiki"`로 raw를 wiki의 **여집합**으로 정의했는데, `source` 같은
+    세 번째 값이 들어오면 그 지점 전부가 오분류한다(인덱싱 안 되는 컬렉션을 recall
+    질의에 넣는 등). 여집합을 쓰지 말고 양성 집합으로 판정한다.
+    """
+    if not isinstance(roles, dict):
+        return DEFAULT_COLLECTION_ROLE
+    value = roles.get(collection)
+    if isinstance(value, str) and value in COLLECTION_ROLES:
+        return value
+    return DEFAULT_COLLECTION_ROLE
+
+
+def role_map(config):
+    """config에서 `collectionRoles`를 안전하게 꺼낸다(dict가 아니면 빈 dict)."""
+    if not isinstance(config, dict):
+        return {}
+    value = config.get("collectionRoles")
+    return value if isinstance(value, dict) else {}
+
+
+def is_wiki_collection(roles, collection):
+    return collection_role(roles, collection) == COLLECTION_ROLE_WIKI
+
+
+def is_indexed_collection(roles, collection):
+    return collection_role(roles, collection) in INDEXED_ROLES
+
+
+def is_compile_source_collection(roles, collection):
+    return collection_role(roles, collection) in COMPILE_SOURCE_ROLES
+
+
+def wiki_collections(collections, roles):
+    return [c for c in collections if isinstance(c, str) and is_wiki_collection(roles, c)]
+
+
+def indexed_collections(collections, roles):
+    """qmd에 등록·질의되는 collection만. `source` role은 여기서 빠진다."""
+    return [c for c in collections if isinstance(c, str) and is_indexed_collection(roles, c)]
+
+
+def recall_raw_collections(collections, roles):
+    """hierarchical raw backfill 대상 = **인덱싱되는 non-wiki** collection.
+
+    `!= "wiki"` 여집합을 쓰면 안 되는 대표 지점이다 — `source`는 qmd에 등록조차
+    되지 않으므로 backfill 질의에 넣으면 그 컬렉션 이름이 데몬에서 무의미해진다.
+    """
+    return [
+        c for c in collections
+        if isinstance(c, str) and collection_role(roles, c) in RECALL_RAW_ROLES
+    ]
 
 
 def compile_config(value):

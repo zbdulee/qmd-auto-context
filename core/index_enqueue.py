@@ -40,6 +40,18 @@ def main():
     selected = select_collections(posttool.edited_paths(payload), cwd, config)
     if not selected:
         return 0
+    # dirty 큐는 **인덱싱 큐**다. role `source`는 qmd에 등록되지 않으므로 넣으면
+    # index_worker가 `collection add`로 도로 등록해 role을 무력화한다 — 즉 여기서
+    # 거르지 않으면 update.sh의 unregister와 매 편집마다 싸운다.
+    # collection_match 자체는 필터하지 않는다(compile enqueue가 같은 매핑을 쓰고
+    # 거기서는 source가 정상 입력이다). 필터는 소비자별로 여기 한 줄이다.
+    roles = qmd_config.role_map(config)
+    selected = {
+        name: path for name, path in selected.items()
+        if qmd_config.is_indexed_collection(roles, name)
+    }
+    if not selected:
+        return 0
     enqueue(selected)
     return 0
 

@@ -42,7 +42,7 @@
 | `name` | `""` | 프로젝트 표시 이름입니다. 동작상 필수는 아니지만 추천 설정에서 보통 채워집니다. |
 | `collections` | `[]` | qmd에 등록할 logical collection 이름 목록입니다. 비어 있으면 recall은 아무 것도 하지 않습니다. |
 | `collectionPaths` | `{}` | collection 이름별 프로젝트 상대 경로입니다. 일반 문서는 `docs`, wiki는 `.auto-context/wiki`처럼 지정합니다. **인덱싱 범위를 결정하는 유일한 설정입니다** — 아래 ["인덱싱 범위를 줄이는 방법"](#인덱싱-범위를-줄이는-방법) 참고. |
-| `collectionRoles` | `{}` | collection 역할입니다. 허용값은 `raw`, `wiki`, `session`입니다. |
+| `collectionRoles` | `{}` | collection 역할입니다. 허용값은 `raw`, `wiki`, `session`, `source`입니다. 미설정·미지 값은 `raw`로 처리합니다. 아래 ["Collection Roles"](#collection-roles) 참고. |
 | `recallStrategy` | `"hierarchical"` | `flat`은 모든 collection을 같이 검색합니다. `hierarchical`은 wiki를 먼저 보고 부족할 때 raw를 fallback으로 봅니다. `wikiOnly`는 wiki만 검색하고 raw fallback을 하지 않습니다(wiki에 없으면 무출력). wiki role collection이 없으면 `hierarchical`은 `flat`과 동일하게 동작합니다. |
 | `minScore` | `0.0` | recall 결과를 주입하기 위한 score 하한입니다. **유사도 임계가 아니라 사실상 순위 컷입니다** — 아래 "minScore는 유사도가 아니라 순위입니다" 참고. |
 | `rawFallbackMinScore` | `minScore` | `hierarchical`에서 wiki 결과가 없을 때 raw fallback 결과에 적용할 하한입니다. `minScore`와 동일하게 순위 컷으로 동작합니다. |
@@ -62,13 +62,68 @@
 ## Collection Roles
 
 `collectionRoles`는 같은 qmd collection이라도 recall과 compile에서 다르게 취급하기
-위한 역할입니다.
+위한 역할입니다. 네 role은 **두 축의 조합**입니다 — qmd 인덱스에 등록되는가(= recall
+대상이 되는가), wiki compile의 입력이 되는가.
 
-| Role | Meaning |
-|---|---|
-| `raw` | 원본 문서입니다. 자세하지만 파편적일 수 있습니다. wiki compile의 source가 될 수 있습니다. |
-| `wiki` | 정리된 장기기억입니다. `hierarchical` recall에서 먼저 검색됩니다. |
-| `session` | 세션 요약이나 중간 후보입니다. compile source가 될 수 있지만 일반 raw보다 낮은 우선순위로 운용하는 용도입니다. |
+| Role | qmd 등록·인덱싱 | recall 질의 | hierarchical raw fallback | wiki compile 입력 |
+|---|:---:|:---:|:---:|:---:|
+| `raw` | O | O | O | O |
+| `session` | O | O | O | O |
+| `wiki` | O | O | X (wiki phase에서 **먼저** 검색) | X |
+| `source` | **X** | **X** | **X** | O |
+
+- `raw` — 원본 문서입니다. 자세하지만 파편적일 수 있습니다.
+- `wiki` — 정리된 장기기억입니다. `hierarchical` recall에서 먼저 검색되고, 결과에는
+  카드 본문과 원문 경로가 함께 주입됩니다.
+- `session` — 세션 요약이나 중간 후보입니다. compile source가 될 수 있지만 일반 raw보다
+  낮은 우선순위로 운용하는 용도입니다. 인덱싱·recall 취급은 `raw`와 같습니다.
+- `source` — **카드의 원천이지만 검색 대상은 아닌 문서**입니다. 아래 참고.
+
+값을 적지 않았거나 인식할 수 없는 값(오타 등)을 적으면 `raw`로 처리합니다. 설정 오류로
+훅을 죽이지 않기 위한 fail-open이고 `raw`는 role 도입 전 동작이라 안전한 방향이지만,
+`"source"` 오타 하나가 "인덱싱 제외"를 조용히 "인덱싱"으로 뒤집으므로 SessionStart에
+한 줄 안내가 나옵니다(같은 조건에서는 TTL 동안 한 번만, 값을 고치면 재무장).
+
+### role `source` — 인덱싱하지 않고 카드만 만든다
+
+`source`는 그 문서를 **qmd에 등록하지 않습니다.** 따라서 recall이 그 문서를 직접
+찾아내는 일은 없고, 그 내용은 **그 문서로 만들어진 wiki 카드를 통해서만** recall에
+들어옵니다. 카드가 없는 `source` 문서는 recall 관점에서 존재하지 않습니다.
+
+```json
+{
+  "collections": ["my-project", "my-archive", "my-project-wiki"],
+  "collectionPaths": {
+    "my-project": "docs",
+    "my-archive": "docs/archive",
+    "my-project-wiki": ".auto-context/wiki"
+  },
+  "collectionRoles": {
+    "my-project": "raw",
+    "my-archive": "source",
+    "my-project-wiki": "wiki"
+  }
+}
+```
+
+경로별로 정리하면 이렇습니다.
+
+- **빠지는 것**: `qmd collection add`/`update`/`embed`, 편집 후 자동 인덱싱(dirty queue),
+  recall의 데몬 질의 대상, `hierarchical`의 raw fallback, `wikiOnly`의 wiki 판정
+- **그대로 남는 것**: 편집 훅과 sync의 wiki compile source 큐잉, compile worker의 소스
+  범위 검사, `collectionPaths` 경로 매핑
+
+이미 인덱싱된 collection을 `source`로 바꾸면 다음 SessionStart에 `qmd collection remove`로
+**실제로 인덱스에서 제거합니다.** 등록만 건너뛰면 그 문서는 collection scope에서만 빠지고
+전역 검색 후보 창은 계속 점유하기 때문입니다.
+
+**되돌리기는 role 값 하나만 바꾸면 됩니다.** `source` 기간에도 `collections`와
+`collectionPaths`는 그대로 두므로, `raw`로 되돌리면 다음 SessionStart의
+`collection add` + `update` + `embed`가 재등록·재인덱싱합니다(재색인 시간·임베딩 비용은
+다시 듭니다). 설정 파일에서 collection을 지우는 것과 다른 점이 이것입니다.
+
+모든 collection이 `source`이면 recall은 질의 없이 무출력으로 끝납니다(진단 로그의
+`reason`은 `no_indexed_collections`).
 
 ## Recall Strategy
 
@@ -471,7 +526,7 @@ jq -c 'select(.event=="qmd_recall_shadow" and .verdict.selected_empty_raw_nonemp
 
 ## Wiki Compile
 
-`compile`은 raw/session Markdown에서 `.auto-context/wiki` 문서를 자동으로
+`compile`은 raw/session/source Markdown에서 `.auto-context/wiki` 문서를 자동으로
 초안 작성하고 검증하는 설정입니다.
 
 권장 onboarding을 쓰면 보통 다음 형태가 들어갑니다.
@@ -964,7 +1019,7 @@ collection만 질의하므로 raw가 넓게 색인돼도 recall 결과에 들어
 ## Troubleshooting
 
 컨텍스트가 기대와 다르게 들어오면 에이전트에게 recall 진단을 요청하세요. 진단
-시에는 `no_collections`, `daemon_unreachable`, `query_failed`,
+시에는 `no_collections`, `no_indexed_collections`, `daemon_unreachable`, `query_failed`,
 `no_results_after_filter`, `selected` 같은 reason과 함께 score, drop 수,
 선택된 collection을 확인할 수 있습니다.
 
@@ -972,7 +1027,8 @@ collection만 질의하므로 raw가 넓게 색인돼도 recall 결과에 들어
 
 - `collections`에 대상 collection이 있는지
 - `collectionPaths`가 실제 존재하는 경로인지
-- `collectionRoles`가 collection 이름과 정확히 맞는지
+- `collectionRoles`가 collection 이름과 정확히 맞는지, role 값에 오타가 없는지
+  (인식할 수 없는 값은 `raw`로 처리되고 SessionStart에 한 줄 안내가 나옵니다)
 - `recallStrategy`가 `hierarchical`인지 `flat`인지
 - `minScore`/`rawFallbackMinScore`가 `topN`과 어긋나지 않는지 — 순위 컷이라
   `0.8`이면 `topN`과 무관하게 1건만 주입됩니다([위 절 참고](#minscore는-유사도가-아니라-순위입니다))

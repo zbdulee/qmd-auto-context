@@ -120,7 +120,7 @@ qmd가 설치되어 있지 않거나 백그라운드 서버가 응답하지 않�
 
 ## Wiki Compile
 
-wiki compile은 선택 기능입니다. 설정에서 raw/session 역할로 잡힌 Markdown을
+wiki compile은 선택 기능입니다. 설정에서 raw/session/source 역할로 잡힌 Markdown을
 편집하면 `.auto-context/wiki`에 정리된 wiki 초안을 만들 수 있습니다.
 처음 생성된 문서는 `generated` 상태이며, 별도 자동 검증이 원문과 생성 문서를
 다시 대조해 통과한 문서만 `verified`로 승격합니다. 사용자가 모든 문서를
@@ -134,7 +134,7 @@ wiki compile은 선택 기능입니다. 설정에서 raw/session 역할로 잡�
 wiki compile 켜줘.
 ```
 
-자동 compile은 raw/session 문서 범위 안의 Markdown만 대상으로 합니다.
+자동 compile은 raw/session/source 문서 범위 안의 Markdown만 대상으로 합니다.
 `.agents`, `.claude`, `.codex`, `.github`, `.auto-context`처럼 점으로 시작하는
 도구/메타데이터 경로는 자동 compile 대상에서 제외됩니다.
 

@@ -387,7 +387,7 @@ Dirty queue:
 
 ### 6. PostToolUse Wiki Compile Enqueue
 
-Goal: turn edited raw/session Markdown into durable generated wiki candidates
+Goal: turn edited raw/session/source Markdown into durable generated wiki candidates
 without storing raw transcript content in the hook path.
 
 ```text
@@ -631,7 +631,7 @@ Expected empty-output cases:
 - query timeout or malformed response;
 - no results after filters;
 - edit outside configured collection paths;
-- compile disabled or source outside raw/session Markdown scope.
+- compile disabled or source outside raw/session/source Markdown scope.
 
 To distinguish expected no-op from a bug, use:
 
@@ -694,7 +694,7 @@ When changing architecture-sensitive code, check these boundaries:
 - Do Claude, Codex, and Hermes still map to equivalent core behavior where the
   host protocol allows it?
 - Are qmd CLI and qmd HTTP contracts clearly separated?
-- If wiki compile changes, are `raw`/`session` scope, hidden-path rejection,
+- If wiki compile changes, are `raw`/`session`/`source` scope, hidden-path rejection,
   cooldown, queue preservation, and protected-page behavior covered?
 - If daemon or embed behavior changes, does reload still allow SQLite clean close?
 - Are manual skills still wrappers over core scripts rather than alternate

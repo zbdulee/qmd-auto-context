@@ -111,7 +111,7 @@ title: "claude-runner — 구독 기반 Claude Code headless AI 실행 계층"
 | 4 | ✅ **완료** — verifier engine 을 extractor 와 분리 | 문헌의 명시적 완화법. CLI 부재 시 degrade 경로 유지 |
 | 5 | ✅ **완료** — crowding 반복 측정 도구 + 라이브 baseline | 범위 축소: 라이브가 이미 `wikiOnly` 라 "raw 있는 상태의 recall baseline"은 존재하지 않는다. 남은 일은 인덱스 점유 측정의 **반복 가능화** |
 | 6 | ~~커버리지 백필~~ → **전제 철회. 하지 않는다.** verify 처리량 + per-run cap만 ✅ | 목표는 커버리지가 아니라 **정확성**이다("중요하고 틀리지 않은 정보만 recall되면 된다"). recall은 `topN` 3만 주입하므로 커버리지를 올려도 주입량은 같고 바뀌는 건 "어느 카드가 이기는가"뿐이며, 카드 없는 문서의 대안(recall 무출력 → 에이전트가 원문 검색)이 어중간한 카드보다 낫다 — 그 경로는 2단계의 원문 경로 주입으로 이미 열려 있다. 남긴 것: verify 처리량(run당 3건은 백필과 무관하게 "정확한 카드가 늦게 보이는" 병목), per-run cap. 파일럿 25건은 **자동 생성 카드 정확도** 측정으로 전용했다(pass 80.6% / inconclusive 16.4% / fail 3.0%). 실측·철회 근거는 `bulk-wiki-backfill-spec.md` |
-| 7 | role `source` 도입 | qmd 등록과 compile 입력 분리. 8번 없이는 불필요 |
+| 7 | ✅ **완료** — role `source` 도입 | qmd 등록과 compile 입력 분리. 8번 없이는 불필요 |
 | 8 | **raw on/off A/B → 프로젝트별 가역적 제거** | 게이트: 링크 무결성 · query coverage · source-read 성공률 · 재생성 가능성 · raw-search escape hatch |
 
 ### 완료 기록 (1·2·3·4단계)
@@ -314,6 +314,42 @@ title: "claude-runner — 구독 기반 Claude Code headless AI 실행 계층"
 - 1~4단계 회귀 0: 주입 stdout 이 6 시나리오 전부 `161ac2e` 와 **바이트 동일**(sha256 동일),
   라이브 불변식 유지(849장 876항목 / 주입 842 / drop 34 = missing 32 + kind_not_file 2,
   감지 verified 7 / generated 18)
+
+**7단계 — role `source`** (최종 상태는 `docs/settings.md` "Collection Roles"). 결론:
+
+- **role은 두 축의 조합이다** — qmd 인덱스에 등록되는가(= recall 대상), compile 입력이
+  되는가. `source`는 "compile 입력이지만 인덱싱·recall 대상 아님"이고, 8단계를
+  "제거하고 되돌릴 수 있게" 만드는 것이 유일한 목적이다. **제거를 유도하지 않는다** —
+  기본값·추천 설정은 그대로 `raw`이고 라이브 프로젝트의 role은 이번 변경에서 바꾸지 않았다
+- **가장 큰 수확은 `source` 자체가 아니라 여집합 판정의 제거다.** 여러 곳이
+  `roles.get(c) != "wiki"`로 raw를 wiki의 **여집합**으로 정의하고 있었고, 세 번째 값이
+  들어오는 순간 그 지점 전부가 오분류한다(source가 raw로 새어 데몬 질의·dirty 큐·raw
+  backfill에 들어간다). 게다가 role은 **이미 4종이 아니라 3종**이었다(`session`) — 즉
+  이 클래스는 `source` 이전부터 잠재해 있었다. 판정을 `core/config.py`의 양성 집합
+  (`INDEXED_ROLES`/`RECALL_RAW_ROLES`/`COMPILE_SOURCE_ROLES`)과 헬퍼로 모으고,
+  `test/collection-role-source.test.mjs`의 grep 가드가 재발을 막는다
+- **필터는 매핑이 아니라 소비자 쪽에 둔다.** `collection_match`는 그대로 두고
+  `index_enqueue`(dirty 큐)만 `INDEXED_ROLES`로 좁힌다 — 같은 매핑을 compile enqueue도
+  쓰고 거기서는 `source`가 정상 입력이다. `sync.py`도 같은 diff를 두 소비자로 가른다
+  (dirty 큐는 indexed만, compile 큐는 전부)
+- **등록을 건너뛰는 것만으로는 부족하다.** 이미 인덱싱된 문서는 collection scope에서만
+  빠지고 전역 FTS/vec 후보 창은 계속 점유한다 — 8단계가 재려는 것이 정확히 그 점유이므로
+  `update.sh`가 `qmd collection remove`로 실제 제거한다
+- **가역성은 settings를 안 건드리는 데서 나온다.** `collections`/`collectionPaths`는
+  `source` 기간에도 그대로이므로 role 한 글자를 `raw`로 되돌리면 다음 SessionStart의
+  `collection add`+`update`+`embed`가 재등록·재인덱싱한다(비용은 재색인 시간·임베딩).
+  root가 사라진 컬렉션을 설정에서 지우는 `prune_missing_settings_collections`와 다른
+  점이 이것이다 — 저기는 소스가 없어졌고 여기는 "색인만 빼라"이다
+- **fail-open에는 종점을 붙였다.** 미설정·미지 role은 `raw`(role 도입 전 동작)로
+  fail-open하지만 `"sourse"` 오타 하나가 "인덱싱 제외"를 조용히 "인덱싱"으로 뒤집는다 →
+  `invalid_role_collections`를 SessionStart `notice_once`로 표면화하고 값을 고치면 재무장한다
+- **`resolve_paths` 출력은 `entries` = `indexEntries` ⊎ `sourceEntries`이고 항목 모양은
+  `{name, path}` 그대로다.** role을 항목에 얹으면 downstream이 role 문자열을 다시 비교하게
+  되어 판정을 한 곳에 두려는 목적과 반대가 된다(그리고 role을 안 쓰는 프로젝트의 출력까지
+  달라진다)
+- 1~6단계 회귀 0: 주입 stdout이 6 시나리오 전부 `161ac2e`와 **바이트 동일**, 라이브
+  불변식 유지(930항목 / 주입 896 / drop 34 = missing 32 + kind_not_file 2, 감지
+  verified 7 / generated 18)
 
 ### 단계별 주의
 

@@ -400,7 +400,16 @@ def run(cwd, *, json_output=False, dry_run=False, baseline_only=False):
         snapshot, totals, changed, changed_files, warnings = build_snapshot(
             project_root, config_path, roots, previous
         )
-        queued = sorted(changed)
+        # 같은 diff가 두 소비자로 갈라진다. dirty 큐(=qmd 인덱싱)는 INDEXED_ROLES만,
+        # compile source 큐는 `changed_files` 그대로(role `source` 포함)다 — 그것이
+        # "인덱싱 안 되지만 카드는 만든다"는 role의 정의다. `collectionsQueued`는 dirty
+        # 큐에 실제로 들어간 것만 보고한다(보고와 행동이 갈리면 sync 결과를 못 믿는다).
+        sync_roles = qmd_config.role_map(config)
+        indexed_changed = {
+            name: root for name, root in changed.items()
+            if qmd_config.is_indexed_collection(sync_roles, name)
+        }
+        queued = sorted(indexed_changed)
         compile_result = {"queued": 0, "deferred": 0, "reason": "not_attempted"}
 
         if baseline_only:
@@ -411,7 +420,11 @@ def run(cwd, *, json_output=False, dry_run=False, baseline_only=False):
             reason = "dry_run"
         else:
             if changed:
-                dirty_queue.enqueue_collections(changed)
+                # role `source`만 바뀐 sync는 dirty 큐에 넣을 것이 없다. 그래도 compile
+                # enqueue와 스냅샷 전진은 해야 한다 — 안 하면 그 변경이 매 sync마다
+                # 재검출되고 compile이 같은 파일을 반복 큐잉한다(유료 호출 반복).
+                if indexed_changed:
+                    dirty_queue.enqueue_collections(indexed_changed)
                 # compile enqueue를 스냅샷 기록 "전"에 한다: 상한으로 미룬 파일의 스냅샷
                 # 엔트리를 되돌려 다음 sync가 다시 집게 하기 때문이다.
                 compile_result = enqueue_compile_sources(

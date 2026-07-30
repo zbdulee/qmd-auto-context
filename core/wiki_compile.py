@@ -947,10 +947,10 @@ def append_log(wiki_root: Path, action: str, target: Path, title: str) -> None:
 
 
 def find_wiki_collection(config: dict) -> tuple[str | None, str | None]:
-    roles = config.get("collectionRoles") if isinstance(config.get("collectionRoles"), dict) else {}
+    roles = qmd_config.role_map(config)
     paths = config.get("collectionPaths") if isinstance(config.get("collectionPaths"), dict) else {}
     for name in config.get("collections", []):
-        if roles.get(name) == "wiki":
+        if qmd_config.is_wiki_collection(roles, name):
             return name, paths.get(name, config.get("wikiPath", ".auto-context/wiki"))
     return None, None
 

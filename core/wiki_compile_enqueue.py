@@ -126,9 +126,11 @@ def _source_record(path_value, cwd, project_root, config, engine, trigger=POST_T
         return None
     # select_collections returns at most one collection for one edited path.
     collection = next(iter(selected.keys()))
-    roles = config.get("collectionRoles") if isinstance(config.get("collectionRoles"), dict) else {}
-    role = roles.get(collection, "raw")
-    if role not in ("raw", "session"):
+    # compile 입력 role: raw / session / source. `source`는 qmd에 등록되지 않는(=recall
+    # 되지 않는) 컬렉션이지만 카드의 원천으로는 그대로 산다 — 그것이 role의 존재 이유다.
+    # 판정은 config.COMPILE_SOURCE_ROLES 한 곳에서만 나온다(여집합 금지).
+    roles = qmd_config.role_map(config)
+    if not qmd_config.is_compile_source_collection(roles, collection):
         return None
     try:
         rel_path = resolved.relative_to(Path(project_root).resolve()).as_posix()

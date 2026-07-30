@@ -1275,8 +1275,10 @@ test('update core: entries 추출 python 한 줄이 SyntaxError 없이 TSV를 �
   // 원인 자체를 직접 단정한다: update.sh 안의 구현 문자열을 그대로 꺼내 실행하므로
   // f-string(또는 다른 quoting 사고)이 다시 들어오면 여기서 즉시 깨진다.
   const script = readFileSync(join(process.cwd(), 'core', 'update.sh'), 'utf8');
-  const line = script.split('\n').find(l => l.includes('get("entries", [])') && l.includes('python3 -c'));
-  assert.ok(line, 'entries 추출 python3 -c 한 줄을 update.sh에서 찾지 못했다');
+  // 키 이름은 role 도입(7단계)에서 entries → indexEntries 로 바뀌었다. 가드가 지키는
+  // 성질(구문 오류 없이 TSV를 내고 stderr를 버리지 않는다)은 그대로이므로 키만 따라간다.
+  const line = script.split('\n').find(l => l.includes('get("indexEntries", [])') && l.includes('python3 -c'));
+  assert.ok(line, 'collection add용 entries 추출 python3 -c 한 줄을 update.sh에서 찾지 못했다');
 
   // 버그의 은폐 절반: stderr 를 버리면 SyntaxError 가 다시 조용해진다.
   assert.doesNotMatch(line, /2>\/dev\/null/, `entries 추출 stderr를 /dev/null로 버리면 안 된다: ${line}`);
@@ -1286,12 +1288,18 @@ test('update core: entries 추출 python 한 줄이 SyntaxError 없이 TSV를 �
   assert.ok(code.includes('json.load'), `추출한 python 코드가 이상하다: ${code}`);
 
   // 실행: SyntaxError면 exit 1 → execFileSync throw.
+  // 동시에 role 계약도 못박는다 — collection add 대상은 indexEntries 뿐이고, role
+  // `source`만 담긴 entries/sourceEntries 는 여기로 새면 안 된다.
   const out = execFileSync('python3', ['-c', code], {
     encoding: 'utf8',
-    input: JSON.stringify({ entries: [{ name: 'a', path: 'docs' }, { name: 'b', path: 'notes' }] }),
+    input: JSON.stringify({
+      entries: [{ name: 'a', path: 'docs' }, { name: 'b', path: 'notes' }, { name: 'src', path: 'archive' }],
+      indexEntries: [{ name: 'a', path: 'docs' }, { name: 'b', path: 'notes' }],
+      sourceEntries: [{ name: 'src', path: 'archive' }],
+    }),
   });
   assert.equal(out, 'a\tdocs\nb\tnotes\n');
 
-  // entries 키가 없어도 조용히 빈 출력(기본값 경로).
+  // indexEntries 키가 없어도 조용히 빈 출력(기본값 경로).
   assert.equal(execFileSync('python3', ['-c', code], { encoding: 'utf8', input: '{}' }), '');
 });
