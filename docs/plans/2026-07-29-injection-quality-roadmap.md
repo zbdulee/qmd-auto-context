@@ -109,7 +109,7 @@ title: "claude-runner — 구독 기반 Claude Code headless AI 실행 계층"
 | 2 | ✅ **완료** — `sources.path` 주입 | 경로 안전성·존재성 검증, 중복 제거, 개수 제한. "카드 먼저, 원문은 대조 필요시" 지시 동반 |
 | 3 | ✅ **완료** — `source_missing` 정책 | 삭제·downgrade 없이 감지·기록·표면화 + 사람 확인 복구(재지정). 원인이 개명이라 파괴적 조치 불가 |
 | 4 | ✅ **완료** — verifier engine 을 extractor 와 분리 | 문헌의 명시적 완화법. CLI 부재 시 degrade 경로 유지 |
-| 5 | raw 있는 상태에서 shadow baseline 수집 | 측정을 **앞으로 당김**. 8번의 판정 근거 |
+| 5 | ✅ **완료** — crowding 반복 측정 도구 + 라이브 baseline | 범위 축소: 라이브가 이미 `wikiOnly` 라 "raw 있는 상태의 recall baseline"은 존재하지 않는다. 남은 일은 인덱스 점유 측정의 **반복 가능화** |
 | 6 | 커버리지 백필 | **비용 동의 필요**(969건 ≈ 16~20M 토큰). 소량 파일럿 → 중복률·verify 적체 확인 → 확대. 선행 4건은 `bulk-wiki-backfill-spec.md` |
 | 7 | role `source` 도입 | qmd 등록과 compile 입력 분리. 8번 없이는 불필요 |
 | 8 | **raw on/off A/B → 프로젝트별 가역적 제거** | 게이트: 링크 무결성 · query coverage · source-read 성공률 · 재생성 가능성 · raw-search escape hatch |
@@ -265,6 +265,33 @@ title: "claude-runner — 구독 기반 Claude Code headless AI 실행 계층"
 - **교차 검증 e2e 실측**: 임시 프로젝트에서 claude extractor(17s) → codex verifier(15s),
   verdict `pass`(claims 8), 카드에 `verifiedBy: "codex"` + `verifiedMode: cross-engine`.
   1·2·3단계 라이브 불변식 유지(876항목 / 주입 842 / drop 34 = missing 32 + kind_not_file 2,
+  감지 verified 7 / generated 18)
+
+**5단계 — crowding 반복 측정 + baseline** (상세·수치는
+`2026-07-30-raw-index-crowding-measurement.md` 의 "5단계" 절). 결론:
+
+- **원래 문구("raw 있는 상태에서 shadow baseline 수집")는 성립하지 않는다.** 라이브 두
+  프로젝트가 이미 `recallStrategy: wikiOnly` 라 raw 는 recall 되지 않는다 — 남은 문제는
+  인덱스 점유뿐이고 그것은 이미 수동 측정됐다. 5단계에 남은 일은 그 측정을 **프로젝트별로
+  반복 가능하게** 만들어 8단계가 제거 전/후를 비교하게 하는 것이다
+- **창 점유율은 recall 피해가 아니다(정정).** "창 21칸 중 wiki 2칸 → 약 10배" 추론은
+  recall 의 limit 이 내부 창과 같다는 전제를 요구하는데, recall 은 `limit: 8`이고 내부 창은
+  21~28 이다. 도달 가능한 wiki pool 이 8보다 크면 recall 은 8칸을 그대로 받는다 — 그래서
+  도구는 `windowCrowding`(창 점유 사실)과 `recallStarvation`(실제 칸 손실)을 **분리**해
+  보고한다. 넓은 프로브 3종에서 굶는 것은 1/3 이고, 원 측정의 프로브를 재생하면 그것은
+  가장 나쁜 쪽(8칸 중 2칸, 굶은 칸 6)이었다
+- **shadow 확장이 아니라 별도 진단 CLI** (`core/crowding_probe.py`). 필터 없는 전역 질의 ×
+  큰 limit × 천장 사다리는 blocking hook 예산에 들어갈 수 없고, shadow 의 프로브(사용자
+  프롬프트)는 재현되지 않는다. 어떤 hook 도 이 모듈을 import 하지 않고 테스트가 고정한다
+- **프로브는 wiki 코퍼스에서 결정적으로 파생**한다 — 판정용은 카드 title 의 상위 빈도
+  어휘(좁은 질의는 창을 못 채워 구조적으로 판정 불가), 대조군은 title 표집.
+  **lex 는 최빈 토큰 하나만** 보낸다(qmd 가 한 lex 문자열의 term 을 AND 결합한다)
+- **리터럴 8 을 `recall.DAEMON_QUERY_LIMIT` 로 모았다.** 측정 기준 limit 이 recall 이
+  실제로 보내는 값과 갈리면 측정이 무의미해지는데, 그 값이 세 곳에 흩어져 있었다
+- 원장은 append-only JSONL 이고 기본 위치가 **프로젝트 밖**이다 — 측정이 측정 대상을
+  변경하면 baseline 의 전제(라이브 카드·설정 불변)가 깨진다
+- 1~4단계 회귀 0: 주입 stdout 이 6 시나리오 전부 `161ac2e` 와 **바이트 동일**(sha256 동일),
+  라이브 불변식 유지(849장 876항목 / 주입 842 / drop 34 = missing 32 + kind_not_file 2,
   감지 verified 7 / generated 18)
 
 ### 단계별 주의

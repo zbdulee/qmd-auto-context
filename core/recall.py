@@ -23,6 +23,12 @@ DEFAULT_DAEMON_URL = "http://localhost:8483"
 DEFAULT_HEALTH_TIMEOUT = 2.0
 QUERY_TIMEOUT = 5.0
 
+# 데몬 /query에 요청하는 후보 수. skipPaths·minScore·topN 등 모든 후속 필터가 이
+# 상한 **안에서만** 고를 수 있으므로, "recall이 실제로 몇 칸을 받는가"를 재는 crowding
+# 진단(core/crowding_probe.py)이 이 값과 갈리면 측정이 무의미해진다. 본 질의와 shadow
+# 질의에 리터럴 8이 각각 박혀 있던 것을 상수 하나로 모았다(값은 동일 — 동작 무변화).
+DAEMON_QUERY_LIMIT = 8
+
 # shadow query(진단 전용) 예산. 데몬은 single-thread이고 UserPromptSubmit은 blocking
 # hook이라, 진단 query는 본 recall 질의에 "직렬로" 추가된다. 따라서 본 recall의
 # queryTimeout(기본 5s)을 그대로 쓰지 않고 훨씬 짧은 per-query timeout + 전체
@@ -1177,7 +1183,7 @@ def run_shadow_query(
     payload = {
         "searches": searches,
         "collections": collections,
-        "limit": 8,
+        "limit": DAEMON_QUERY_LIMIT,
         "minScore": 0,
         "timeout": timeout,
         "rerank": False,
@@ -1454,7 +1460,7 @@ def main():
                         {"type": "vec", "query": vector_query},
                     ],
                     "collections": query_collections,
-                    "limit": 8,
+                    "limit": DAEMON_QUERY_LIMIT,
                     "minScore": 0,
                     "timeout": config.get("queryTimeout", QUERY_TIMEOUT),
                     "rerank": False,
