@@ -394,41 +394,46 @@ def batch_ready(kept: list, idle_seconds: int, max_items: int, flush_all: bool) 
     return max(ages, default=0) >= idle_seconds
 
 
-def process_job(root: Path, config: dict, compile_cfg: dict, job: dict) -> tuple[bool, bool]:
-    """Return (processed, preserve_job)."""
+def process_job(root: Path, config: dict, compile_cfg: dict, job: dict) -> tuple[bool, bool, int]:
+    """Return (processed, preserve_job, verify_jobs_enqueued).
+
+    The third element is how many cards this job handed to the verify queue
+    (wiki_compile reports it per candidate). main() sums it and gives the number
+    to the piggybacked verify pass so verification keeps pace with production.
+    """
     cpath = candidate_path(root, compile_cfg)
     raw_source = job.get("source")
     source = raw_source if isinstance(raw_source, dict) else {}
     rel = source.get("path")
     if not isinstance(rel, str) or not rel:
         append_jsonl(cpath, bounded_failure("extractor_failed", job, "missing_source_path"))
-        return True, False
+        return True, False, 0
     src = (root / rel).resolve()
     try:
         src.relative_to(root)
     except ValueError:
         append_jsonl(cpath, bounded_failure("extractor_failed", job, "unsafe_source_path"))
-        return True, False
+        return True, False, 0
     if src.suffix.lower() != ".md":
         append_jsonl(cpath, bounded_failure("extractor_failed", job, "invalid_source_scope"))
-        return True, False
+        return True, False, 0
     if is_hidden_source_path(rel):
         append_jsonl(cpath, bounded_failure("extractor_failed", job, "invalid_source_scope"))
-        return True, False
+        return True, False, 0
     selected = select_collections([str(src)], str(root), config) or {}
     collection = source.get("collection", "")
     if not collection or collection not in selected:
         append_jsonl(cpath, bounded_failure("extractor_failed", job, "invalid_source_scope"))
-        return True, False
+        return True, False, 0
     roles = config.get("collectionRoles") if isinstance(config.get("collectionRoles"), dict) else {}
     if roles.get(collection, "raw") not in ("raw", "session"):
         append_jsonl(cpath, bounded_failure("extractor_failed", job, "invalid_source_scope"))
-        return True, False
+        return True, False, 0
     max_chars = int(compile_cfg.get("maxSourceChars", 12000) or 12000)
     bounded = read_source_bounded(src, max_chars)
     if bounded is None:
         append_jsonl(cpath, bounded_failure("extractor_failed", job, "source_unreadable"))
-        return True, False
+        return True, False, 0
     content, source_truncated = bounded
     # Cost guard, checked BEFORE any extractor spawn: this exact source content already
     # produced a card the verifier could not adjudicate and that was deleted. Retrying
@@ -436,7 +441,7 @@ def process_job(root: Path, config: dict, compile_cfg: dict, job: dict) -> tuple
     # changes, so the source is compiled again on its own.
     if verify_suppression_hash(root, compile_cfg, rel) == wc.source_body_hash(content):
         append_jsonl(cpath, bounded_failure("skipped", job, "verify_inconclusive_suppressed"))
-        return True, False
+        return True, False, 0
 
     extractor = compile_cfg.get("extractor") if isinstance(compile_cfg.get("extractor"), dict) else {}
     timeout = int(extractor.get("timeout", 30) or 30)
@@ -444,10 +449,10 @@ def process_job(root: Path, config: dict, compile_cfg: dict, job: dict) -> tuple
     primary, default = resolve_extractor_argv(compile_cfg, engine)
     if primary is None and default is None:
         append_jsonl(cpath, bounded_failure("needs_extractor", job, "missing_extractor"))
-        return True, False
+        return True, False, 0
     if cooldown_active(root):
         append_jsonl(cpath, bounded_failure("needs_extractor", job, "cooldown_active"))
-        return False, True
+        return False, True, 0
 
     wiki_root = (root / config.get("wikiPath", ".auto-context/wiki")).resolve()
     wiki_ctx = orientation(root)
@@ -481,20 +486,21 @@ def process_job(root: Path, config: dict, compile_cfg: dict, job: dict) -> tuple
         extracted, reason, returncode = run_extractor(default, payload, timeout, root)
     if returncode == 127:
         append_jsonl(cpath, bounded_failure("needs_extractor", job, "extractor_unavailable"))
-        return False, True  # CLI absent: preserve for when it's installed
+        return False, True, 0  # CLI absent: preserve for when it's installed
     if reason:
         append_jsonl(cpath, bounded_failure("extractor_failed", job, reason))
         if reason in ("invalid_extractor_json", "missing_candidates"):
-            return True, False  # permanent: drop
+            return True, False, 0  # permanent: drop
         cooldown_seconds = int(extractor.get("cooldownSeconds", 600) or 600)
         set_cooldown(root, cooldown_seconds)
-        return False, True  # transient: cooldown + preserve
+        return False, True, 0  # transient: cooldown + preserve
 
     candidates = extracted.get("candidates") if isinstance(extracted, dict) else None
     if not isinstance(candidates, list):
         append_jsonl(cpath, bounded_failure("extractor_failed", job, "missing_candidates"))
-        return True, False  # permanent: drop
+        return True, False, 0  # permanent: drop
     failed_compile = False
+    verify_queued = 0
     for candidate in candidates:
         if not isinstance(candidate, dict):
             continue
@@ -514,23 +520,33 @@ def process_job(root: Path, config: dict, compile_cfg: dict, job: dict) -> tuple
         result = compile_candidate(root, candidate)
         if not isinstance(result, dict) or result.get("action") in {"rejected", "conflict"}:
             failed_compile = True
+            continue
+        # wiki_compile은 verify 큐에 실제로 넣었을 때만 이 플래그를 준다(generated 카드 +
+        # verify.enabled + 안전한 큐 경로). 카드 수를 세거나 큐 파일 줄 수를 재는 대신
+        # 쓰는 쪽의 사실을 그대로 받는다 — 판정 조건을 여기 복제하면 어긋난다.
+        if result.get("verifyQueued") is True:
+            verify_queued += 1
     if failed_compile:
         append_jsonl(cpath, bounded_failure("compile_failed", job, "writer_rejected"))
-        return False, True
-    return True, False
+        return False, True, verify_queued
+    return True, False, verify_queued
 
 
-def _run_verify_pass(root: Path, config: dict, compile_cfg: dict) -> None:
+def _run_verify_pass(root: Path, config: dict, compile_cfg: dict, produced: int = 0) -> None:
     """Piggyback the auto-verify queue drain after compile work (fail-open).
 
     verify must never break the compile worker — errors are swallowed after
     leaving a trace in extractor.log (a systemic verify failure must not die
     silently); the verify queue keeps its own claim/requeue semantics inside
     run().
+
+    `produced` is how many verify jobs THIS run enqueued. Passing it makes the
+    verify budget at least as large as the run's own production, so the verify
+    queue cannot grow faster than it drains (see wiki_verify_worker.run).
     """
     try:
         import wiki_verify_worker
-        wiki_verify_worker.run(root, config, compile_cfg)
+        wiki_verify_worker.run(root, config, compile_cfg, produced=produced)
     except Exception:
         try:
             log = root / ".auto-context" / "compile" / "extractor.log"
@@ -587,28 +603,41 @@ def main():
             print(json.dumps({"processed": 0, "remaining": len(kept) + len(malformed)}, ensure_ascii=False))
         return 0
 
+    # per-run 상한. `maxItems`(처리 시작 조건)와 다르다 — 이것이 한 run에서 spawn하는
+    # host CLI 수의 실제 상한이다. 초과분은 requeue되어 다음 kick이 집어 가므로 조용히
+    # 유실되지 않는다(core/sync.py의 큐 투입 상한과 같은 성질).
+    max_per_run = max(1, int(batch_cfg.get("maxPerRun", 10) or 10))
     rows = [(raw, job) for raw, job in kept]
-    remaining = list(malformed)
+    overflow = [raw for raw, _ in rows[max_per_run:]]
+    rows = rows[:max_per_run]
+    remaining = list(malformed) + overflow
     processed_count = 0
+    verify_queued = 0
     try:
         for idx, (raw_line, job) in enumerate(rows):
             try:
-                processed, preserve = process_job(root, config, compile_cfg, job)
+                processed, preserve, queued = process_job(root, config, compile_cfg, job)
             except Exception:
                 remaining.append(raw_line)
                 remaining.extend(line for line, _ in rows[idx + 1:])
                 raise
             if processed:
                 processed_count += 1
+            verify_queued += queued
             if preserve:
                 remaining.append(raw_line)
     finally:
         requeue_lines(queue, remaining)
         claimed.unlink(missing_ok=True)
         queue.touch(exist_ok=True)
-    _run_verify_pass(root, config, compile_cfg)
+    _run_verify_pass(root, config, compile_cfg, produced=verify_queued)
     if args.json:
-        print(json.dumps({"processed": processed_count, "remaining": len(remaining)}, ensure_ascii=False))
+        print(json.dumps({
+            "processed": processed_count,
+            "remaining": len(remaining),
+            "deferred": len(overflow),
+            "verifyQueued": verify_queued,
+        }, ensure_ascii=False))
     return 0
 
 

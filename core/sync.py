@@ -260,19 +260,29 @@ def compile_engine(compile_cfg):
     QMD_ENGINE이 없는 수동 sync에서도 해석 가능한 값을 남겨야 한다 — 아니면 job이
     `missing_extractor`로 실패한다. builtin adapter가 호출하는 host CLI 바이너리 이름이
     engine 이름과 같아서(claude/codex/hermes) 설정에 적힌 builtins 순서대로 PATH를 훑는다.
+
+    **`backends`만 설정한 프로젝트도 해석해야 한다.** builtins가 비고 backends에 명시 argv만
+    적은 설정(라이브 service-engineering이 그 형태다)에서 예전에는 `unknown`을 돌려줬고,
+    worker의 `resolve_extractor_argv`는 `backends["unknown"]`을 찾지 못해 그 프로젝트의
+    수동 enqueue가 전부 `missing_extractor`로 죽었다 — QMD_ENGINE을 넣어 주는 hook 경로에서만
+    우연히 살아 있던 분기다. backends 키도 같은 규칙(엔진 이름 == host CLI 이름)으로 훑는다.
     """
     extractor = compile_cfg.get("extractor") if isinstance(compile_cfg.get("extractor"), dict) else {}
     raw_builtins = extractor.get("builtins")
     builtins = [e for e in raw_builtins if isinstance(e, str)] if isinstance(raw_builtins, list) else []
-    backends = extractor.get("backends") if isinstance(extractor.get("backends"), dict) else {}
+    raw_backends = extractor.get("backends") if isinstance(extractor.get("backends"), dict) else {}
+    backends = [e for e in raw_backends if isinstance(e, str)]
     env_engine = os.environ.get("QMD_ENGINE")
     if isinstance(env_engine, str) and (env_engine in builtins or env_engine in backends):
         return env_engine
-    for engine in builtins:
+    # builtins를 먼저 본다(기존 우선순위 유지). 그 다음이 명시 backends다.
+    for engine in list(builtins) + [e for e in backends if e not in builtins]:
         if shutil.which(engine):
             return engine
     if builtins:
         return builtins[0]
+    if backends:
+        return backends[0]
     return env_engine if isinstance(env_engine, str) and env_engine else qmd_config.UNKNOWN_ENGINE
 
 

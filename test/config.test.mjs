@@ -128,7 +128,7 @@ test('wiki recall 신규 필드는 additive로 normalize 된다', () => {
     maxAutoPageLines: 80,
     maxSourceChars: 12000,
     extractor: { argv: ['python3', 'scripts/extract.py'], timeout: 30, cooldownSeconds: 600 },
-    batch: { idleSeconds: 90, maxItems: 5 },
+    batch: { idleSeconds: 90, maxItems: 5, maxPerRun: 10 },
     semanticDedup: { enabled: true, threshold: 0.82, topK: 3, similarPageMaxChars: 12000, autoMergeThreshold: 0.9, maxPairsPerScan: 10, candidateMinScore: 0.3, judge: JUDGE_DEFAULTS },
     verify: {
       enabled: true,
@@ -532,15 +532,15 @@ test('compile extractor cooldownSeconds is preserved and defaults to 600', () =>
   assert.equal(withDefault.compile.extractor.cooldownSeconds, 600);
 });
 
-test('compile.batch normalizes idleSeconds and maxItems; defaults to 90/5 when omitted', () => {
+test('compile.batch normalizes idleSeconds/maxItems/maxPerRun; defaults to 90/5/10 when omitted', () => {
   const withBatch = loadConfig(JSON.stringify({
     compile: {
       enabled: true,
       mode: 'guarded',
-      batch: { idleSeconds: 10, maxItems: 2 },
+      batch: { idleSeconds: 10, maxItems: 2, maxPerRun: '4' },
     },
   }));
-  assert.deepEqual(withBatch.compile.batch, { idleSeconds: 10, maxItems: 2 });
+  assert.deepEqual(withBatch.compile.batch, { idleSeconds: 10, maxItems: 2, maxPerRun: 4 });
 
   const withDefaults = loadConfig(JSON.stringify({
     compile: {
@@ -548,7 +548,7 @@ test('compile.batch normalizes idleSeconds and maxItems; defaults to 90/5 when o
       mode: 'guarded',
     },
   }));
-  assert.deepEqual(withDefaults.compile.batch, { idleSeconds: 90, maxItems: 5 });
+  assert.deepEqual(withDefaults.compile.batch, { idleSeconds: 90, maxItems: 5, maxPerRun: 10 });
 });
 
 test('compile.semanticDedup normalizes enabled/threshold/topK; defaults to true/0.82/3 when omitted', () => {

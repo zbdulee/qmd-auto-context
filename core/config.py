@@ -66,6 +66,14 @@ DEFAULT_CONFIG = {
         "batch": {
             "idleSeconds": 90,
             "maxItems": 5,
+            # **처리 시작 조건(maxItems)과 다르다.** maxItems는 "이만큼 모이면 지금 돌려라"이고
+            # 이 값은 "한 run에서 host CLI를 이보다 많이 spawn하지 마라"는 상한이다. 예전에는
+            # 상한이 아예 없어 큐에 든 전량을 한 워커가 연속 실행했다 — 백필로 큐가 수백
+            # 건이 되면 단일 one-shot 워커가 수백 회 유료 호출을 직렬로 돌린다. 초과분은
+            # 큐에 되돌려(requeue) 다음 kick이 집어 가므로 조용히 유실되지 않는다.
+            # 기본 10은 평상시 편집 흐름(큐 1~5건)에 영향이 없고, run 하나를 extractor 10회
+            # + 피기백 verify 10회로 유계로 만든다.
+            "maxPerRun": 10,
         },
         "semanticDedup": {
             "enabled": True,
@@ -152,6 +160,10 @@ COMPILE_TRIGGERS = {
     # 수동 sync(core/sync.py)가 스냅샷 diff로 찾아낸 소스 변경. git pull·rebase·외부
     # 편집은 PostToolUse 훅을 타지 않으므로 `post_tool_source`로는 잡히지 않는다.
     "post_sync_source",
+    # 명시적 per-run opt-in 백필(core/wiki_backfill.py)이 스냅샷과 무관하게 열거한 소스.
+    # sync가 닫는 구멍("앞으로의 변경 누락")과 달리 이것은 "한 번도 편집되지 않은 기존
+    # 문서"를 덮는다 — 자동 훅에서는 절대 발화하지 않는다(비용 동의가 run 단위다).
+    "backfill_source",
     "repeated_recall",
     "cross_file_conclusion",
     "manual",
@@ -323,9 +335,14 @@ def compile_config(value):
     result["extractor"] = normalized_extractor
     raw_batch = value.get("batch")
     batch = raw_batch if isinstance(raw_batch, dict) else {}
+    default_batch = defaults.get("batch") if isinstance(defaults.get("batch"), dict) else {}
     result["batch"] = {
         "idleSeconds": coerce_int(batch.get("idleSeconds", 90), 90),
         "maxItems": coerce_int(batch.get("maxItems", 5), 5),
+        "maxPerRun": coerce_int(
+            batch.get("maxPerRun", default_batch.get("maxPerRun", 10)),
+            default_batch.get("maxPerRun", 10),
+        ),
     }
     raw_semantic = value.get("semanticDedup")
     semantic = raw_semantic if isinstance(raw_semantic, dict) else {}

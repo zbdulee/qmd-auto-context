@@ -422,6 +422,36 @@ test("engine falls back to a configured builtin when QMD_ENGINE is unset", () =>
   }
 });
 
+test("engine resolves from extractor.backends when builtins is empty", () => {
+  // A live project configures explicit backends only (no builtins). That returned
+  // "unknown", which the worker cannot map to an adapter -> every manually enqueued
+  // job died with missing_extractor. Only the hook path (which sets QMD_ENGINE)
+  // happened to work.
+  const envInfo = makeEnv();
+  delete envInfo.env.QMD_ENGINE;
+  const dir = makeProject();
+  mkdirSync(join(dir, "docs"), { recursive: true });
+  writeSettings(dir, {
+    compile: {
+      extractor: {
+        dispatch: "by-engine",
+        backends: { claude: ["scripts/extract.sh", "claude"], codex: ["scripts/extract.sh", "codex"] },
+        builtins: [],
+        default: [],
+        timeout: 120,
+      },
+    },
+  });
+  writeFileSync(join(dir, "docs", "a.md"), "a\n");
+  try {
+    const result = runSync(dir, envInfo);
+    assert.equal(result.compileQueued, 1);
+    assert.ok(["claude", "codex"].includes(compileRecords(dir)[0].engine));
+  } finally {
+    cleanup(envInfo, dir);
+  }
+});
+
 test("sync never runs the compile worker or an extractor", () => {
   const envInfo = makeEnv();
   const dir = makeProject();

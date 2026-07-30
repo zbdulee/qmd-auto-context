@@ -733,8 +733,21 @@ def _dedup_by_target(rows: list) -> list:
     return [(latest[key][0], latest[key][1]) for key in order]
 
 
-def run(root: Path, config: dict, compile_cfg: dict) -> dict:
-    """Drain (part of) the verify queue. Caller has already passed compile gating."""
+def run(root: Path, config: dict, compile_cfg: dict, produced: int = 0) -> dict:
+    """Drain (part of) the verify queue. Caller has already passed compile gating.
+
+    `produced` = verify jobs the CALLING run just enqueued. The per-run budget is
+    `max(maxPerRun, produced)` because a fixed budget makes the queue grow faster
+    than it drains whenever a run compiles more cards than it verifies: with the
+    old fixed 3, a bulk backfill of N cards needed ceil(N/3) later runs before the
+    last card could leave `generated`, and under the default
+    `compile.recallVerifiedOnly: true` a `generated` card is invisible to recall.
+    Backfilling 924 sources that way meant ~308 runs of zero recall benefit.
+    Tying the floor to this run's own production makes verification keep pace with
+    production by construction — the backlog can only shrink, never grow — while
+    leaving the ordinary edit path untouched (one edit produces one or two cards,
+    far under the standing default).
+    """
     result = {"processed": 0, "remaining": 0}
     vcfg = verify_cfg_of(compile_cfg)
     if not vcfg.get("enabled", True):
@@ -762,8 +775,9 @@ def run(root: Path, config: dict, compile_cfg: dict) -> dict:
     malformed = [raw for raw, job in rows if job is None]
     kept = _dedup_by_target(rows)
     max_per_run = int(vcfg.get("maxPerRun", 3) or 3)
-    to_process = kept[:max_per_run]
-    remaining = [raw for raw, _ in kept[max_per_run:]] + malformed
+    budget = max(max_per_run, produced if isinstance(produced, int) and produced > 0 else 0)
+    to_process = kept[:budget]
+    remaining = [raw for raw, _ in kept[budget:]] + malformed
     processed_count = 0
     try:
         for idx, (raw_line, job) in enumerate(to_process):

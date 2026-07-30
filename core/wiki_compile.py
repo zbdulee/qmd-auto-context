@@ -539,6 +539,11 @@ def write_jsonl_atomic(path: Path, rows: list[dict]) -> None:
 # the whole premise of deleting instead of keeping contested cards — never holds.
 MACHINE_DELETE_ACTION = "verify-deleted"
 
+# 명시적 백필(core/wiki_backfill.py)이 큐 레코드에 남기는 trigger. 여기서 리터럴을 따로 들지
+# 않고 `config.COMPILE_TRIGGERS`와 같은 문자열을 쓴다 — 값이 갈리면 아래 "백필은 신규만"
+# 가드가 조용히 죽어 기존 verified 카드가 다시 삭제 위험에 놓인다.
+BACKFILL_TRIGGER = "backfill_source"
+
 
 def same_generated_identity(row: dict, record: dict) -> bool:
     if row.get("targetPath") and row.get("targetPath") == record.get("targetPath"):
@@ -1266,6 +1271,24 @@ def main() -> int:
     target.parent.mkdir(parents=True, exist_ok=True)
     page = markdown_page(candidate, summary, status, redactions, h)
     action = "created"
+    if target.exists() and record["trigger"] == BACKFILL_TRIGGER:
+        # **백필은 신규 카드만 만든다.** 백필의 입력은 "카드가 없는 소스"인데, extractor가
+        # 이미 존재하는 카드 경로를 targetPath로 고르면 `updated` 경로가 그 카드의 auto
+        # 블록을 재생성하고 status를 `generated`로 리셋한다 — 그러면 기계 검수가 다시 걸리고
+        # `onInconclusive: delete` 기본값 아래에서 **이미 verified였던 기존 카드가 삭제될 수
+        # 있다**(파일럿 실측 1/67건: verified 카드가 백필 경유 update → inconclusive → 삭제).
+        # 편집 훅 경로에서는 소스가 실제로 바뀌었으므로 갱신이 옳지만, 백필에는 갱신할
+        # 근거가 없다(소스는 그대로다). 큐에 남기지 않고 이 후보만 버린다 — 재시도해도
+        # 같은 결론이고 host CLI는 이미 호출됐다.
+        record["action"] = "skipped"
+        record["reason"] = "backfill_would_update_existing"
+        append_jsonl(candidate_path, record)
+        print(json.dumps({
+            "action": "skipped",
+            "reason": "backfill_would_update_existing",
+            "targetPath": record["targetPath"],
+        }, ensure_ascii=False))
+        return 0
     if target.exists():
         old = target.read_text(encoding="utf-8")
         auto_writable, findings = is_auto_writable_page(target)
@@ -1328,11 +1351,13 @@ def main() -> int:
     # 기계 검수(auto-verify) enqueue: generated로 쓰인 카드만 대상. verify worker가
     # 카드 주장 vs 원문을 대조해 verified 승격 또는 (onFail) 삭제한다.
     verify_cfg = compile_cfg.get("verify") if isinstance(compile_cfg.get("verify"), dict) else {}
+    verify_queued = False
     if verify_cfg.get("enabled", True) and status == "generated":
         verify_queue_path = safe_compile_file(
             root, compile_dir, verify_cfg.get("queuePath", ".auto-context/compile/verify-queue.jsonl")
         )
         if verify_queue_path is not None:
+            verify_queued = True
             append_jsonl(verify_queue_path, {
                 "ts": now_iso(),
                 "targetPath": record["targetPath"],
@@ -1343,6 +1368,10 @@ def main() -> int:
             })
 
     result = {"action": action, "targetPath": record["targetPath"]}
+    # 이 카드가 기계 검수 큐에 실려 있는지를 호출자(compile worker)가 알아야 한다: 한 run이
+    # 만든 검수 부채만큼 같은 run의 verify 예산을 늘려 큐가 배수보다 빨리 자라지 않게 한다.
+    if verify_queued:
+        result["verifyQueued"] = True
     if not index_ok:
         result["indexWriteFailed"] = True
         append_jsonl(candidate_path, {**record, "indexWriteFailed": True})
