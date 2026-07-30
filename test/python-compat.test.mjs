@@ -29,8 +29,27 @@ def ann_nodes(tree):
 def has_bitor(node):
     return any(isinstance(n, ast.BinOp) and isinstance(n.op, ast.BitOr) for n in ast.walk(node))
 
+SKIP_PARTS = {'node_modules', '.git', '.worktrees', '__pycache__'}
+
+def shipped_py(root):
+    """저장소의 모든 .py — core/ 최상위만이 아니다.
+
+    처음엔 core/ 최상위만 비재귀로 훑어 **배포되는 13개 파일이 가드 밖**이었다:
+    core/extractors/(host CLI adapter 4개 + __init__), hermes_adapter/(플러그인
+    진입점 3개), root __init__.py, test/helpers/. 그 중 어디에 PEP 604 가 들어가도
+    시스템 python 3.9 에서 import 가 죽는데 테스트가 잡지 못했다 — 이 가드가 막으려는
+    바로 그 클래스다(발견 시점 실제 위험은 0건이었으므로 구멍이지 결함은 아니었다).
+
+    주의: 이 문자열은 JS String.raw 템플릿 안에 있다 — 백틱을 쓰면 리터럴이 조기
+    종료돼 테스트 파일 자체가 로드에 실패한다(실제로 한 번 그랬다).
+    """
+    for p in sorted(pathlib.Path(root).rglob('*.py')):
+        if any(part in SKIP_PARTS or part.startswith('.tmp-') for part in p.parts):
+            continue
+        yield p
+
 offenders = []
-for p in sorted(pathlib.Path(sys.argv[1], 'core').glob('*.py')):
+for p in shipped_py(sys.argv[1]):
     src = p.read_text(encoding='utf-8')
     tree = ast.parse(src)
     future = any(
@@ -47,7 +66,7 @@ for p in sorted(pathlib.Path(sys.argv[1], 'core').glob('*.py')):
 print(json.dumps(offenders, ensure_ascii=False))
 `;
 
-test('CRITICAL: core 모듈은 PEP 604 annotation 을 쓰면 future import 를 갖는다 (시스템 python 3.9 에서 훅이 죽지 않게)', () => {
+test('CRITICAL: 배포되는 모든 python 모듈은 PEP 604 annotation 을 쓰면 future import 를 갖는다 (시스템 python 3.9 에서 훅이 죽지 않게)', () => {
   const out = execFileSync('python3', ['-c', DETECT, ROOT], { encoding: 'utf8' });
   const offenders = JSON.parse(out);
   assert.deepStrictEqual(
@@ -58,12 +77,17 @@ test('CRITICAL: core 모듈은 PEP 604 annotation 을 쓰면 future import 를 �
   );
 });
 
-test('core 모듈은 python 3.9 를 하한으로 파싱된다 (3.10+ 전용 구문 금지)', () => {
+test('배포되는 모든 python 모듈은 python 3.9 를 하한으로 파싱된다 (3.10+ 전용 구문 금지)', () => {
   // match 문(3.10)·except*(3.11) 등 future import 로 구제되지 않는 구문을 차단한다.
   const script = String.raw`
 import ast, json, pathlib, sys
+SKIP_PARTS = {'node_modules', '.git', '.worktrees', '__pycache__'}
+def shipped_py(root):
+    for q in sorted(pathlib.Path(root).rglob('*.py')):
+        if any(x in SKIP_PARTS or x.startswith('.tmp-') for x in q.parts): continue
+        yield q
 bad = []
-for p in sorted(pathlib.Path(sys.argv[1], 'core').glob('*.py')):
+for p in shipped_py(sys.argv[1]):
     tree = ast.parse(p.read_text(encoding='utf-8'))
     for n in ast.walk(tree):
         if type(n).__name__ in ('Match', 'TryStar'):
@@ -73,7 +97,7 @@ print(json.dumps(bad, ensure_ascii=False))
   const bad = JSON.parse(execFileSync('python3', ['-c', script, ROOT], { encoding: 'utf8' }));
   assert.deepStrictEqual(
     bad, [],
-    `python 3.10+ 전용 구문을 쓰는 core 모듈: ${JSON.stringify(bad)}. ` +
+    `python 3.10+ 전용 구문을 쓰는 모듈: ${JSON.stringify(bad)}. ` +
     `future import 로는 구제되지 않으므로 3.9 호환 구문으로 바꿔라.`
   );
 });
