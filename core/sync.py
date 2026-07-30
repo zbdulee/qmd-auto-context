@@ -273,7 +273,7 @@ def compile_engine(compile_cfg):
             return engine
     if builtins:
         return builtins[0]
-    return env_engine if isinstance(env_engine, str) and env_engine else "unknown"
+    return env_engine if isinstance(env_engine, str) and env_engine else qmd_config.UNKNOWN_ENGINE
 
 
 def compile_candidates(project_root, config, compile_cfg, changed_files):

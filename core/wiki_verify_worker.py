@@ -50,6 +50,15 @@ VERIFY_SKIPPED_DEFAULT = ".auto-context/compile/verify-skipped.jsonl"
 VERIFY_DELETED_DEFAULT = ".auto-context/compile/verify-deleted.jsonl"
 VERDICT_VALUES = {"pass", "fail", "inconclusive"}
 MAX_SOURCES = 3
+# 엔진에 귀속되지 않는 argv(레거시 `extractor.argv`, `extractor.default`)의 cooldown 키.
+# 엔진 라벨로 식히면 실제로 실패한 것은 default argv인데 그 엔진의 adapter까지 막힌다.
+UNATTRIBUTED_KEY = "(unattributed)"
+
+
+def extractor_builtins(compile_cfg: dict) -> list[str]:
+    raw = compile_cfg.get("extractor")
+    extractor = raw if isinstance(raw, dict) else {}
+    return [e for e in (extractor.get("builtins") or []) if isinstance(e, str) and e]
 
 
 def verify_engine_pool(compile_cfg: dict, vcfg: dict) -> list[str]:
@@ -59,12 +68,18 @@ def verify_engine_pool(compile_cfg: dict, vcfg: dict) -> list[str]:
     (`compile.extractor.builtins` + explicitly configured `backends` keys — the shape
     both dogfood projects use). Only engine LABELS live here; argv resolution stays in
     wiki_compile_worker.resolve_extractor_argv so there is one rule, not two.
+
+    This list does NOT have to contain the producing engine: under "prefer" that engine
+    is always appended as the LAST candidate (plan_verify_attempts), so narrowing the
+    pool — or typing an engine name wrong — can never take the self-verify fallback away.
+    Replacing the fallback was measured to strand builtins-only projects (the
+    `--enable-compile` default shape) on `missing_extractor`.
     """
     picked = [e for e in (vcfg.get("builtins") or []) if isinstance(e, str) and e]
     if not picked:
         raw = compile_cfg.get("extractor")
         extractor = raw if isinstance(raw, dict) else {}
-        picked = [e for e in (extractor.get("builtins") or []) if isinstance(e, str) and e]
+        picked = extractor_builtins(compile_cfg)
         backends = extractor.get("backends") if isinstance(extractor.get("backends"), dict) else {}
         picked += sorted(name for name in backends if isinstance(name, str) and name)
     ordered = []
@@ -75,9 +90,9 @@ def verify_engine_pool(compile_cfg: dict, vcfg: dict) -> list[str]:
 
 
 def plan_verify_attempts(
-    compile_cfg: dict, vcfg: dict, producing: str
+    compile_cfg: dict, vcfg: dict, producing: str, cooled=()
 ) -> tuple[list[dict], str, str]:
-    """Ordered verify attempts → ([{engine, argv, mode}], crossEngine mode, empty reason).
+    """Ordered verify attempts → ([{engine, argv, mode, key}], crossEngine mode, empty reason).
 
     Step 4 of the injection-quality roadmap: prefer an engine OTHER than the one that
     wrote the card. Self-review measurably degrades LLM judgment (Huang et al. ICLR'24)
@@ -90,30 +105,56 @@ def plan_verify_attempts(
         would leave every card `generated`, and `recallVerifiedOnly` (default true)
         would then erase the whole wiki from recall with no human-review path to
         recover. A weaker-but-labelled check beats no wiki.
-      - "require" drops it. Callers preserve the job instead of dropping it.
+      - "require" drops it, and fails CLOSED when the producer cannot be attributed.
+        Callers preserve the job instead of dropping it.
       - "off" is the 0.x path: producing engine only.
 
-    Unattributable argv — legacy `compile.extractor.argv` (one argv serves every engine)
-    and the `extractor.default` fallback — carries no engine label, so it can never back
-    a cross-engine claim and is recorded as mode `unknown`. Under "require" it is not
-    offered at all: that knob promises "never self-verify", and an argv whose engine is
-    unknown cannot keep the promise. `require` therefore needs per-engine `backends`
-    (or `builtins`).
+    `cooled` are cooldown keys whose last paid call failed (non-127); they are skipped so
+    the NEXT run degrades to the next candidate. This is what keeps "one paid call per
+    card per run" from turning into "verification never happens": a run never retries a
+    failed engine, and a later run never retries it either until its cooldown expires.
+
+    **A cross-engine claim requires an attributable producer.** `producing` must resolve
+    to a per-engine argv in the current pool; the `"unknown"` sentinel
+    (config.UNKNOWN_ENGINE, what enqueue writes when the host is unknown), a label
+    outside the pool, and cards built through `extractor.default` all fail that test. In
+    that case no candidate can be shown to differ from the producer, so every attempt is
+    mode `unknown` and "require" refuses outright. Unattributable argv — legacy
+    `compile.extractor.argv` (one argv serves every engine) and the `extractor.default`
+    fallback — is likewise `unknown` and is not offered under "require".
     """
     pool = verify_engine_pool(compile_cfg, vcfg)
     mode = vcfg.get("crossEngine", "prefer")
     if mode not in qmd_config.VERIFY_CROSS_ENGINE:
         mode = "prefer"
+    cooled = set(cooled)
     legacy = wcw.legacy_extractor_argv(compile_cfg)
     if legacy is not None:
         if mode == "require":
             return [], mode, "cross_engine_unavailable"
-        return [{"engine": producing, "argv": legacy, "mode": qmd_config.VERIFIED_MODE_UNKNOWN}], "off", ""
+        if UNATTRIBUTED_KEY in cooled:
+            return [], mode, "engines_cooling"
+        return [{
+            "engine": producing, "argv": legacy,
+            "mode": qmd_config.VERIFIED_MODE_UNKNOWN, "key": UNATTRIBUTED_KEY,
+        }], "off", ""
+
+    # 생성 엔진이 builtin adapter로 카드를 만들었다면 그 adapter로 검수할 수 있어야 한다 —
+    # verify.builtins가 좁혀져 있어도(또는 오타여도) self 폴백이 사라지면 안 된다.
+    resolve_builtins = list(pool)
+    if producing and producing in extractor_builtins(compile_cfg) and producing not in resolve_builtins:
+        resolve_builtins.append(producing)
+    producing_attributable = bool(
+        producing and producing != qmd_config.UNKNOWN_ENGINE
+        and wcw.resolve_extractor_argv(compile_cfg, producing, builtins=resolve_builtins)[0] is not None
+    )
+    if mode == "require" and not producing_attributable:
+        # 어느 후보도 "생성 엔진과 다르다"를 증명할 수 없다 → 약속을 지킬 수 없으므로 거부.
+        return [], mode, "cross_engine_unavailable"
+
     if mode == "off":
         order = [producing] if producing else pool[:1]
-    elif not producing:
-        # 카드를 만든 엔진이 불명이면 무엇이 자기검증인지 확정할 수 없다 — 순서를 바꾸지
-        # 않고 풀 순서대로 시도하며 mode는 unknown으로 남긴다(거짓 cross-engine 주장 금지).
+    elif not producing_attributable:
         order = list(pool)
     else:
         others = [e for e in pool if e != producing]
@@ -121,39 +162,46 @@ def plan_verify_attempts(
 
     attempts: list[dict] = []
     seen_argv: list[list[str]] = []
+    skipped_cooling = 0
     # extractor.default는 엔진과 무관하므로 후보 순회 밖에서 한 번 구한다 — 후보가 0건인
     # 설정(builtins/backends 없이 default만)에서도 기존 폴백이 살아 있어야 한다.
     _, default_argv = wcw.resolve_extractor_argv(compile_cfg, "", builtins=[])
     for engine in order:
-        primary, _ = wcw.resolve_extractor_argv(compile_cfg, engine, builtins=pool)
+        primary, _ = wcw.resolve_extractor_argv(compile_cfg, engine, builtins=resolve_builtins)
         if primary is None or primary in seen_argv:
             continue
         seen_argv.append(primary)
-        if not producing:
+        if engine in cooled:
+            skipped_cooling += 1
+            continue
+        if not producing_attributable:
             attempt_mode = qmd_config.VERIFIED_MODE_UNKNOWN
         elif engine == producing:
             attempt_mode = qmd_config.VERIFIED_MODE_SELF
         else:
             attempt_mode = qmd_config.VERIFIED_MODE_CROSS
-        attempts.append({"engine": engine, "argv": primary, "mode": attempt_mode})
+        attempts.append({"engine": engine, "argv": primary, "mode": attempt_mode, "key": engine})
     if default_argv is not None and default_argv not in seen_argv and mode != "require":
         # extractor.default는 엔진에 귀속되지 않는다 — 라벨은 기존 동작(카드를 만든 엔진)을
-        # 유지하되 mode는 unknown이다. require에서는 제공하지 않는다(엔진 불명은 "다른
-        # 엔진"을 보장하지 못한다).
-        attempts.append({
-            "engine": producing or (order[0] if order else ""),
-            "argv": default_argv,
-            "mode": qmd_config.VERIFIED_MODE_UNKNOWN,
-        })
+        # 유지하되 mode는 unknown이고 cooldown 키도 엔진과 분리한다(엔진 라벨로 식히면
+        # 실제로 실패한 것은 default argv인데 그 엔진의 adapter가 함께 막힌다).
+        if UNATTRIBUTED_KEY in cooled:
+            skipped_cooling += 1
+        else:
+            attempts.append({
+                "engine": producing or (order[0] if order else ""),
+                "argv": default_argv,
+                "mode": qmd_config.VERIFIED_MODE_UNKNOWN,
+                "key": UNATTRIBUTED_KEY,
+            })
     if attempts:
         return attempts, mode, ""
-    # 어떤 argv도 안 나온 이유를 구분한다: 설정 자체가 없으면(기존 동작) 잡을 버리고,
-    # crossEngine:"require"가 유일한 후보를 걸러낸 것이면 두 번째 CLI가 설정될 때까지
-    # 잡을 보존한다(카드는 generated로 남는다 — 삭제되지 않는다).
-    if mode == "require" and producing:
-        fallback, default = wcw.resolve_extractor_argv(compile_cfg, producing, builtins=pool + [producing])
-        if fallback is not None or default is not None:
-            return [], mode, "cross_engine_unavailable"
+    # 빈 결과의 사유를 구분한다: cooldown(일시적, 큐 보존) / require가 걸러냄(설정·설치
+    # 상태, 큐 보존) / 설정 자체가 없음(기존 동작, 잡 폐기).
+    if skipped_cooling:
+        return [], mode, "engines_cooling"
+    if mode == "require" and producing_attributable:
+        return [], mode, "cross_engine_unavailable"
     return [], mode, "missing_extractor"
 
 
@@ -162,24 +210,44 @@ def verify_cfg_of(compile_cfg: dict) -> dict:
     return raw if isinstance(raw, dict) else {}
 
 
-def verify_cooldown_path(root: Path) -> Path:
-    # compile cooldown과 분리 — extractor 실패가 verify를 막거나 그 반대가 되지 않게.
-    return root / ".auto-context" / "compile" / "verify-cooldown"
+def engine_cooldown_path(root: Path) -> Path:
+    # compile cooldown과 분리(extractor 실패가 verify를 막지 않게) + **엔진 단위**로 분리.
+    # 0.x의 전역 `verify-cooldown`을 대체한다: 전역이면 한 엔진의 non-127 실패가 그 프로젝트의
+    # 모든 카드 검수를 막았고, 선호 엔진이 계속 같은 실패를 반복하는 상태(인증 안 된 CLI 등)에서
+    # 다음 후보로 degrade하지 못해 **검수가 영구 정지**했다 — `recallVerifiedOnly` 기본값
+    # 아래에서 그것은 wiki가 recall에서 사라지는 것과 같다.
+    return root / ".auto-context" / "compile" / "verify-engine-cooldown.json"
 
 
-def verify_cooldown_active(root: Path) -> bool:
+def load_engine_cooldowns(root: Path) -> dict:
+    """{cooldown key: expiry epoch}. 읽기 실패는 fail-open(빈 dict) — 식힘 기록을 못 읽는
+    것이 검수를 막는 이유가 되면 안 된다(최악은 한 번 더 시도하는 것이다)."""
     try:
-        expiry = float(verify_cooldown_path(root).read_text(encoding="utf-8").strip())
+        raw = json.loads(engine_cooldown_path(root).read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return False
-    return datetime.now(timezone.utc).timestamp() < expiry
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        key: float(value) for key, value in raw.items()
+        if isinstance(key, str) and isinstance(value, (int, float)) and not isinstance(value, bool)
+    }
 
 
-def set_verify_cooldown(root: Path, seconds: int) -> None:
-    path = verify_cooldown_path(root)
+def cooling_engines(root: Path) -> set:
+    now = datetime.now(timezone.utc).timestamp()
+    return {key for key, expiry in load_engine_cooldowns(root).items() if now < expiry}
+
+
+def set_engine_cooldown(root: Path, key: str, seconds: int) -> None:
+    """이 후보를 seconds 동안 후보에서 제외한다(만료 항목은 쓰기 때 정리해 파일을 유계로 둔다)."""
+    now = datetime.now(timezone.utc).timestamp()
+    entries = {k: v for k, v in load_engine_cooldowns(root).items() if v > now}
+    entries[key or UNATTRIBUTED_KEY] = now + max(0, seconds)
+    path = engine_cooldown_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    expiry = datetime.now(timezone.utc).timestamp() + max(0, seconds)
-    path.write_text(f"{expiry}\n", encoding="utf-8")
+    # 원자적 쓰기(wiki_compile SSOT) — 실패해도 기존 식힘 기록이 잘리지 않는다.
+    wc.write_text_atomic(path, json.dumps(entries, ensure_ascii=False, sort_keys=True) + "\n")
 
 
 def log_verdict(log_path: Path, payload: dict) -> None:
@@ -383,10 +451,16 @@ def record_source_missing(root: Path, config: dict, compile_cfg: dict, rel: str,
 
 
 def base_record(job: dict) -> dict:
+    """attempt 이전에도 쓸 수 있는 레코드 필드.
+
+    `engine`은 여기에 두지 않는다 — 시도가 있기 전에는 "검수 엔진"이 없고, 같은 키가
+    줄에 따라 생성 엔진/검수 엔진 두 의미를 가지면 집계가 오염된다. 생성 엔진은 항상
+    `producedBy`, 실제로 판정을 낸 엔진은 항상 `engine`이다.
+    """
     return {
         "ts": wcw.now_iso(),
         "targetPath": job.get("targetPath", ""),
-        "engine": job.get("engine", ""),
+        "producedBy": job.get("engine", ""),
     }
 
 
@@ -433,17 +507,19 @@ def process_verify_job(
         return True, False
 
     producing = job.get("engine") if isinstance(job.get("engine"), str) else ""
-    attempts, cross_mode, empty_reason = plan_verify_attempts(compile_cfg, vcfg, producing)
+    cooled = cooling_engines(root)
+    attempts, cross_mode, empty_reason = plan_verify_attempts(compile_cfg, vcfg, producing, cooled)
     if not attempts:
         log_verdict(log_path, {
-            **base_record(job), "result": "skipped", "reason": empty_reason,
-            "crossEngine": cross_mode, "producedBy": producing,
+            **base_record(job),
+            "result": "deferred" if empty_reason != "missing_extractor" else "skipped",
+            "reason": empty_reason, "crossEngine": cross_mode,
+            "enginesCooling": sorted(cooled),
         })
-        # crossEngine:"require"에서 다른 엔진이 없는 것은 설정/설치 상태이지 영구 판정이
-        # 아니다 — 두 번째 CLI가 생기면 검증되도록 잡을 보존한다(CLI 부재 127과 같은 결).
-        return (False, True) if empty_reason == "cross_engine_unavailable" else (True, False)
-    if verify_cooldown_active(root):
-        return False, True
+        # 설정 자체가 없으면(missing_extractor) 기존대로 잡을 폐기한다. 나머지(식힘 중,
+        # require가 후보를 걸러냄)는 설정/설치/시간의 함수이므로 잡을 보존한다 — 카드는
+        # generated로 남고 삭제되지 않는다.
+        return (True, False) if empty_reason == "missing_extractor" else (False, True)
 
     timeout = int(vcfg.get("timeout", 120) or 120)
     payload = {
@@ -454,11 +530,17 @@ def process_verify_job(
         "sources": sources,
         "timeout": timeout,
     }
-    # 실패 분류 경계: **127(CLI 부재)만** 다음 후보 엔진으로 넘어간다. 127은 host CLI를
-    # 아예 실행하지 못한 것이라 토큰이 들지 않으므로 재시도가 공짜다. timeout·비127 실패는
-    # 이미 CLI를 호출한 것이므로 다음 엔진으로 넘기면 같은 카드에 대해 사용자 계정이 두 번
-    # 청구된다 — 기존대로 cooldown + 큐 보존이다. 어느 경로도 verdict를 만들지 않으므로
-    # transient가 inconclusive(=삭제)로 흐를 수 없다는 계약이 유지된다.
+    # 실패 분류 경계 — 두 요구를 동시에 만족시켜야 한다:
+    #  (1) 한 run 안에서 같은 카드에 **유료 호출은 1회**다. 그래서 다음 후보로 넘어가는
+    #      조건은 127(CLI 부재, host CLI를 실행하지도 못해 토큰 0)뿐이고, timeout·비127
+    #      실패는 이미 호출한 것이라 그 run 에서 다른 엔진을 부르지 않는다.
+    #  (2) 그러면서 **run 을 넘어가면 다음 후보로 degrade** 해야 한다. 실패한 후보를
+    #      `set_engine_cooldown`으로 엔진 단위로 식혀 두면 다음 run 의 planner 가 그 후보를
+    #      건너뛰고 다음 후보(최종적으로 생성 엔진)를 시도한다 — run 당 유료 호출은 여전히
+    #      1회다. 전역 cooldown 이던 0.x 는 (1)만 지키고 (2)를 못 지켜, 선호 엔진이 계속
+    #      실패하는 상태(인증 안 된 CLI 등)에서 검수가 영구 정지했다.
+    # 어느 경로도 verdict 를 만들지 않으므로 transient 가 inconclusive(=삭제)로 흐를 수
+    # 없다는 계약은 그대로다.
     attempted: list[str] = []
     attempt = attempts[0]
     parsed = reason = returncode = None
@@ -469,22 +551,36 @@ def process_verify_job(
         if returncode != 127:
             break
     if returncode == 127:
+        # 과금 0인 경로지만 조용히 끝내지 않는다 — 어느 후보를 시도했는지 남지 않으면
+        # "검수가 왜 안 되는가"를 사후에 규명할 수 없다.
+        log_verdict(log_path, {
+            **base_record(job), "result": "deferred", "reason": "extractor_unavailable",
+            "crossEngine": cross_mode, "enginesAttempted": attempted,
+            "enginesCooling": sorted(cooled),
+        })
         return False, True  # 후보 전원 CLI 부재: 설치되면 재시도
     engine = attempt["engine"]
     verified_mode = attempt["mode"]
     provenance = {
         "engine": engine,
         "verifiedMode": verified_mode,
-        "producedBy": producing,
         "crossEngine": cross_mode,
         "enginesAttempted": attempted,
+        # 식힘 중인 후보를 판정 줄에도 남긴다 — `self` 통과가 "다른 엔진이 없어서"인지
+        # "다른 엔진이 실패해서 degrade한 것"인지 이 필드 없이는 구분되지 않는다.
+        "enginesCooling": sorted(cooled),
     }
     if reason:
         if reason == "invalid_extractor_json":
             log_verdict(log_path, {**base_record(job), **provenance, "result": "skipped", "reason": reason})
             return True, False  # permanent: drop
-        set_verify_cooldown(root, int(vcfg.get("cooldownSeconds", 600) or 600))
-        return False, True  # transient: cooldown + preserve
+        # 이 후보는 이번 run 의 유료 호출을 소진했다 — 식혀 두고 다음 run 이 다음 후보로.
+        set_engine_cooldown(root, attempt["key"], int(vcfg.get("cooldownSeconds", 600) or 600))
+        log_verdict(log_path, {
+            **base_record(job), **provenance, "result": "deferred", "reason": reason,
+            "cooledKey": attempt["key"],
+        })
+        return False, True  # transient: per-engine cooldown + preserve
 
     verdict = parsed.get("verdict") if isinstance(parsed, dict) else None
     if verdict not in VERDICT_VALUES:

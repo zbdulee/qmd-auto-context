@@ -174,7 +174,7 @@ def bounded_failure(action: str, job: dict, reason: str) -> dict:
     return {
         "ts": now_iso(),
         "trigger": job.get("trigger", "post_tool_source"),
-        "engine": job.get("engine", "unknown"),
+        "engine": job.get("engine", qmd_config.UNKNOWN_ENGINE),
         "action": action,
         "reason": reason,
         "source": {
@@ -440,7 +440,7 @@ def process_job(root: Path, config: dict, compile_cfg: dict, job: dict) -> tuple
 
     extractor = compile_cfg.get("extractor") if isinstance(compile_cfg.get("extractor"), dict) else {}
     timeout = int(extractor.get("timeout", 30) or 30)
-    engine = job.get("engine", "unknown")
+    engine = job.get("engine", qmd_config.UNKNOWN_ENGINE)
     primary, default = resolve_extractor_argv(compile_cfg, engine)
     if primary is None and default is None:
         append_jsonl(cpath, bounded_failure("needs_extractor", job, "missing_extractor"))
@@ -461,7 +461,7 @@ def process_job(root: Path, config: dict, compile_cfg: dict, job: dict) -> tuple
         wiki_ctx["similarPages"] = similar_pages
     payload = {
         "cwd": str(root),
-        "engine": job.get("engine", "unknown"),
+        "engine": job.get("engine", qmd_config.UNKNOWN_ENGINE),
         "trigger": job.get("trigger", "post_tool_source"),
         "source": {
             "kind": "file",
@@ -504,8 +504,13 @@ def process_job(root: Path, config: dict, compile_cfg: dict, job: dict) -> tuple
         if file_source not in sources:
             sources.append(file_source)
         candidate["sources"] = sources
-        candidate.setdefault("trigger", job.get("trigger", "post_tool_source"))
-        candidate.setdefault("engine", job.get("engine", ""))
+        # **모델 출력을 신뢰 판정에 쓰지 않는다.** candidate는 extractor(모델) 출력이므로
+        # setdefault면 모델이 낸 값이 이긴다 — `engine`이 그렇게 위조되면 자기검증이
+        # `verifiedMode: cross-engine`으로 승격된다(생성 엔진은 job이 정하는 사실이고 모델의
+        # 의견이 아니다). 2단계에서 `triggers` raw 방출로 모델이 `status: verified`를 위조할
+        # 수 있었던 것과 같은 클래스다. trigger도 큐 잡이 SSOT다.
+        candidate["trigger"] = job.get("trigger", "post_tool_source")
+        candidate["engine"] = job.get("engine", "")
         result = compile_candidate(root, candidate)
         if not isinstance(result, dict) or result.get("action") in {"rejected", "conflict"}:
             failed_compile = True

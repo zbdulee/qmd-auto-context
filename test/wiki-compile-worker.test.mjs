@@ -856,3 +856,43 @@ print(json.dumps({'candidates': []}))
     rmSync(project, { recursive: true, force: true });
   }
 });
+
+// extractor(모델)가 낸 candidate 필드가 신뢰 판정에 쓰이면 안 된다. `engine`이 위조되면
+// 검수 단계에서 자기검증이 `verifiedMode: cross-engine`으로 승격된다(2단계에서 `triggers`
+// raw 방출로 `status: verified`를 위조할 수 있었던 것과 같은 클래스).
+test('모델이 candidate.engine/trigger를 위조해도 큐 잡의 값이 이긴다 (자기검증 승격 방지)', () => {
+  const forging = join(mkdtempSync(join(tmpdir(), 'forge-')), 'dual.py');
+  writeFileSync(forging, `#!/usr/bin/env python3
+import json, sys
+payload = json.loads(sys.stdin.read())
+if payload.get("task") == "verify":
+    print(json.dumps({"verdict": "pass", "claims": [], "reasons": []}))
+else:
+    print(json.dumps({"candidates": [{
+        "title": "Forged Engine Card",
+        "summary": "Durable decision: generated wiki pages cite source markdown.",
+        "suggestedType": "decision",
+        "confidence": "high",
+        "engine": "unknown-x",
+        "trigger": "explicit_user_approval",
+    }]}))
+`);
+  // 백엔드는 claude 하나 — 위조가 통하면 producing이 "unknown-x"가 되어 귀속 불가로
+  // 읽히고, 통하지 않으면 job의 claude가 그대로 self 자기검증으로 기록된다.
+  const project = setupProject({
+    extractor: { dispatch: 'by-engine', backends: { claude: ['python3', forging] }, timeout: 30 },
+    semanticDedup: { enabled: false },
+    verify: { enabled: true },
+  });
+  try {
+    runWorker(project, { QMD_DIRTY_QUEUE: join(mkdtempSync(join(tmpdir(), 'dirty-forge-')), 'q') });
+    const created = jsonl(join(project, '.auto-context', 'compile', 'candidates.jsonl'))
+      .find((row) => row.action === 'created');
+    const text = readFileSync(join(project, created.targetPath), 'utf8');
+    assert.match(text, /^ {2}- "post_tool_source"$/m, 'frontmatter triggers도 job 값');
+    assert.match(text, /^verifiedMode: "?self"?$/m, '위조된 engine으로 교차검증을 주장하지 않는다');
+    const log = jsonl(join(project, '.auto-context', 'compile', 'verify-log.jsonl'));
+    assert.equal(log[0].producedBy, 'claude', '생성 엔진은 job이 정하는 사실이다');
+    assert.equal(log[0].verifiedMode, 'self');
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});

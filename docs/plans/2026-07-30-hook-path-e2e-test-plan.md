@@ -1,0 +1,93 @@
+# 훅 경유 E2E 테스트 계획 (1~8단계 완료 후)
+
+주입 품질 로드맵 1~8단계를 마친 뒤 **실제 훅 경유**로 전 흐름을 검증하는 계획.
+사용자 결정: **8단계까지 완료 후 실행**, 규모는 **문서 4~6건**(두 프로젝트에 각 2~3건).
+
+## 왜 별도 계획이 필요한가 — cache staleness 는 버전으로 탐지되지 않는다
+
+2026-07-30 실측:
+
+| 위치 | 상태 | `core/recall.py` |
+|---|---|---|
+| dev repo | `161ac2e`, **push 안 된 커밋 15개** | 1899줄 |
+| marketplace clone | `54c94a2` (0.22.1) | 962줄 |
+| cache `0.22.2` | 내용은 낡음 | 962줄 |
+| cache `0.22.1` | 오늘 08:56 수정됨 | 962줄 |
+
+**dev repo 와 cache 가 같은 버전 번호(0.22.2)인데 내용이 다르다.** `BODY_LINE_PREFIX`(1단계)·
+`injectSourcePathsPerCard`(2단계)·`resolve_existing_source`·`write_text_atomic`(3단계) 마커가
+cache 전 버전에서 0건이고, 3단계 신규 파일(`core/wiki_source_*.py`)도 없다.
+
+즉 **버전 문자열 비교로는 stale 을 판정할 수 없다.** 이 세션에서 실제로 이 함정에 걸렸다 —
+개발은 0.21.0~0.22.x 에서 진행되는 동안 훅은 cache 0.19.11 을 실행했고, 그동안의 "라이브 검증"은
+전부 `python3 core/recall.py` **직접 호출**이었다(훅 경유가 아니었다).
+
+**판정 기준은 내용이다**: 아래 마커가 cache 에 존재하는지 확인한다.
+
+```bash
+C=~/.claude/plugins/cache/qmd-auto-context-marketplace/qmd-auto-context/<version>
+wc -l "$C/core/recall.py"                     # dev repo 와 같은지
+ls "$C/core/" | grep wiki_source              # 3단계 신규 파일
+grep -c BODY_LINE_PREFIX "$C/core/recall.py"  # 1단계
+grep -c injectSourcePathsPerCard "$C/core/recall.py"  # 2단계
+grep -c write_text_atomic "$C/core/wiki_compile.py"   # 3단계
+```
+
+## 배포 체인
+
+```
+dev repo  →  GitHub  →  marketplaces/<name>/ (git clone)  →  cache/<marketplace>/<plugin>/<version>/
+```
+
+cache 는 **버전 디렉터리 이름**으로 구분한다. `0.22.2` 가 이미 낡은 내용으로 존재하므로 같은
+번호로 덮으면 어느 것이 무엇인지 알 수 없게 된다 → **버전 bump 가 선행 조건이다.**
+
+## Phase A — 코드를 실제로 도는 플러그인에 넣기
+
+1. **버전 bump** (CLAUDE.md 체크리스트: 매니페스트 7곳 + `test/probe-manifest.test.mjs`).
+   1~8단계 분량이므로 minor bump.
+2. **cache 수동 설치** — 새 버전 디렉터리에 복사. push 없이 로컬만으로 가능하므로
+   **테스트 통과 후 push** 가 순서상 안전하다(원격 반영은 되돌리기 어렵다).
+   사용자가 Remote Control 환경에서 `/plugin` 을 쓸 수 없었던 선례가 있다.
+3. **훅이 새 코드를 실행하는지 확인** — 위 마커 확인 + `python3 core/recall.py` 직접 호출이
+   **아닌** 실제 훅 경유 주입 관찰. 이 단계가 지난번에 빠졌다.
+
+## Phase B — 검증할 흐름
+
+`claude -p` 로 라이브 프로젝트(`../service-engineering`, `../novel/귀신은 약효가 돌 때 보인다`)에
+문서를 쓰며 각 지점을 관찰한다. 전 구간에서 `QMD_RECALL_LOG` 를 켜 둔다.
+
+| # | 단계 | 확인 |
+|---|---|---|
+| 1 | SessionStart | `update` 실행, stdout 무출력(또는 예상된 notice 1줄) |
+| 2 | 문서 작성 | PostToolUse → dirty 큐 + compile source 큐 적재 |
+| 3 | compile worker | extractor 호출 → `.auto-context/wiki/` 에 카드 생성 |
+| 4 | verify worker | **extractor 와 다른 엔진**으로 검증(4단계) → `status: verified`, `verifiedBy` ≠ extractor engine |
+| 5 | 새 프롬프트 | 그 카드가 본문 `  \| ` 인용 + 원문 경로 `  ↳ ` 로 주입 |
+| 6 | 소스 개명 | source scan 감지 → 원장 1행 + SessionStart notice → `wiki-source-repair --list` → `--repoint` 복구 |
+| 7 | 로그 | `reason`·`card_read_*`·`bodies_*`·`sources_*`·`source_drop_reasons` — **조용한 실패 0** |
+
+6행이 3단계 전체를 훅 경유로 처음 태우는 지점이다.
+
+## 비용과 영향 범위
+
+- 문서 1건당 **extractor + verifier = host CLI 호출 2회 이상이 사용자 계정에 청구된다.**
+  4단계 교차 검증이 붙으면 엔진이 둘이므로 더 늘어난다. 4~6건 = 대략 20~30회.
+- 라이브 저장소에 **실제 파일과 실제 wiki 카드가 생성된다.** 생성 경로·카드 목록을 남겨
+  되돌릴 수 있게 한다.
+- 개명 테스트(6행)는 **기존 파일을 개명**한다 — 테스트 전용으로 만든 파일에만 적용한다.
+
+## 사용자가 수용한 리스크
+
+E2E 를 8단계 뒤로 미루므로, 훅 경유에서만 드러나는 결함이 늦게 발견되면 **여러 단계를 되짚어야
+한다.** 이 트레이드오프를 명시적으로 선택했다(2026-07-30).
+
+완화: 각 단계에서 `python3 core/<script>.py` 직접 호출로 검증하되 **그것이 훅 경유와 다르다는
+것을 기록**하고, Phase B 에서 재검증할 항목을 이 문서에 누적한다.
+
+### Phase B 에서 재검증할 항목 (단계 진행 중 누적)
+
+- 1단계: 카드 본문 인용 접두 `  | `, frontmatter title, project-root 상대 경로
+- 2단계: `  ↳ ` 원문 경로, 3단 우선순위 안내문, `injectSourcePathsPerCard` 상한
+- 3단계: 소스 전멸 감지 → 원장 → notice → repair 재지정, 원자적 쓰기(실패 주입은 훅 경유로 불가)
+- 4단계: (구현 후 추가)

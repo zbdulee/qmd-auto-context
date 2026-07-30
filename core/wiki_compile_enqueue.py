@@ -18,7 +18,7 @@ import posttool
 from collection_match import select_collections
 
 
-DEFAULT_ENGINE = "unknown"
+DEFAULT_ENGINE = qmd_config.UNKNOWN_ENGINE
 
 # 편집 훅 경로의 trigger 라벨. 수동 sync 경로는 `post_sync_source`를 쓴다(core/sync.py).
 POST_TOOL_TRIGGER = "post_tool_source"

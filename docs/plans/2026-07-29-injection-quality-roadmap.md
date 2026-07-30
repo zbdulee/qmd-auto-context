@@ -216,7 +216,21 @@ title: "claude-runner — 구독 기반 Claude Code headless AI 실행 계층"
   않기로 한 카드에 하향 배지는 자기모순 + 배지가 주입마다 토큰을 먹어 목표와 반대). 노출
   측정은 주입이 아니라 frontmatter `verifiedMode` 와 로그의
   `verifiedMode`/`producedBy`/`enginesAttempted` 로 한다(삭제는 `verify-deleted.jsonl`에도)
-- **실패 분류 경계는 "127 만 다음 엔진"** 이다. 127 은 CLI 를 실행하지도 못한 상태라 토큰이
+- **리뷰 2라운드에서 잡힌 것(major 2 + minor 3)**: (a) "127 만 폴백" 규칙이 **영구 정지**를
+  만들었다 — 선호 엔진이 non-127 로 계속 실패하면(인증 안 된 CLI·verdict 미출력·timeout, 전부
+  `lib.py` 의 비127 경로) 전역 cooldown 이 만료돼도 같은 엔진을 다시 부르고 로그는 0줄이었다.
+  해법은 실패를 **후보 단위로 기억**하는 것이다: run 당 유료 호출 1회(원래 근거)를 지키면서
+  run 을 넘어가면 다음 후보 → 최종적으로 생성 엔진까지 degrade 한다. (b) 교차검증 주장이
+  **모델 출력으로 위조 가능**했다(`candidate.setdefault("engine", …)` → 모델 값이 이김).
+  생성 엔진은 큐 잡이 SSOT 이고 worker 가 덮어쓴다. 귀속 불가 라벨(sentinel `"unknown"`·풀 밖
+  라벨·`extractor.default` 산출)은 `unknown` 이고 `require` 는 fail-closed 다 — sentinel 이
+  리터럴로 갈려 있어 기존 빈 문자열 가드가 죽은 분기였던 것도 여기서 통일했다. (c)
+  `verify.builtins` 가 풀을 **대체**해 생성 엔진이 후보에서 탈락했고(builtins-only =
+  `--enable-compile` 기본형에서 `missing_extractor` 영구 drop), 이제 생성 엔진은 `prefer` 의
+  최후 후보로 항상 남는다. (d) 127·transient·식힘 경로가 로그 0줄이었다(`deferred` 1줄로 수정).
+  (e) 로그의 `engine` 키가 줄마다 생성/검수 두 의미를 가졌다 → `producedBy`(생성) /
+  `engine`(검수)로 분리
+- **실패 분류 경계는 "127 만 다음 엔진(한 run 안에서)"** 이다. 127 은 CLI 를 실행하지도 못한 상태라 토큰이
   0 이므로 재시도가 공짜고, timeout·비127 실패는 이미 호출한 것이라 다음 엔진으로 넘기면
   같은 카드에 이중 과금이 된다(기존대로 cooldown + 보존). 어느 경로도 verdict 를 만들지
   않으므로 transient → inconclusive(=삭제) 오분류가 구조적으로 불가능하다
@@ -232,6 +246,9 @@ title: "claude-runner — 구독 기반 Claude Code headless AI 실행 계층"
   거짓이 아니고, 지금 채우면 없던 사실을 만든다). 반대로 리셋 시에는 값만 비우지 않고
   **키째로 제거**한다 — `verifiedBy: ""` 는 "한 번 검수를 통과한 카드"로 읽히는 잔재다
   (라이브 5장)
+- **남은 자기검증은 dedup judge** 이고 후속 작업이다 — `plan_verify_attempts` 재사용은 안 된다
+  (카드 두 장의 생산자가 다르거나 불명이라 무엇이 자기검증인지 확정되지 않는다). 생산자가
+  확실한 write-time gate 만 확장하는 것이 타당하다
 - **교차 검증 e2e 실측**: 임시 프로젝트에서 claude extractor(17s) → codex verifier(15s),
   verdict `pass`(claims 8), 카드에 `verifiedBy: "codex"` + `verifiedMode: cross-engine`.
   1·2·3단계 라이브 불변식 유지(876항목 / 주입 842 / drop 34 = missing 32 + kind_not_file 2,

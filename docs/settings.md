@@ -533,7 +533,7 @@ jq -c 'select(.event=="qmd_recall_shadow" and .verdict.selected_empty_raw_nonemp
 | `compile.verify.onFail` | `"delete"` | 검증 실패(카드가 원문과 모순) 시 동작입니다. 허용값은 `delete`, `contested`, `none`입니다. |
 | `compile.verify.onInconclusive` | `"delete"` | 검증 판정 불가(verifier가 대조하지 못함) 시 동작입니다. 값 집합은 `onFail`과 같습니다. `none`이 "현행 유지"(카드를 `generated`로 남김)입니다. |
 | `compile.verify.crossEngine` | `"prefer"` | 검수 엔진을 카드를 만든 엔진과 분리합니다. `prefer`는 다른 엔진을 먼저 시도하고 없으면 같은 엔진으로 검수합니다(자기검증으로 기록). `require`는 다른 엔진만 허용하고 없으면 검수하지 않습니다(엔진별 `backends`/`builtins`가 필요합니다 — 레거시 `extractor.argv`·`extractor.default`는 엔진 귀속이 불가해 이 요구를 만족시키지 못합니다). `off`는 0.x 동작(카드를 만든 엔진)입니다. |
-| `compile.verify.builtins` | `[]` | 검수 후보 엔진 목록(symbolic 이름만). 비면 `compile.extractor`의 `builtins` + 명시 `backends` 키를 물려받습니다. adapter argv 해석은 extractor와 같은 한 벌을 씁니다. |
+| `compile.verify.builtins` | `[]` | 검수 후보 엔진 목록(symbolic 이름만). 비면 `compile.extractor`의 `builtins` + 명시 `backends` 키를 물려받습니다. **카드를 만든 엔진은 이 목록에 없어도 `prefer`의 최후 후보로 남습니다** — 목록을 좁혀도(또는 이름을 잘못 적어도) self 폴백이 사라지지 않습니다. adapter argv 해석은 extractor와 같은 한 벌을 씁니다. |
 | `compile.verify.cooldownSeconds` | `600` | verifier 실패/timeout 뒤 재시도 cooldown입니다. |
 | `compile.verify.maxPerRun` | `3` | 한 번에 처리할 verify job 수입니다. |
 | `compile.verify.skippedPath` | `.auto-context/compile/verify-skipped.jsonl` | inconclusive 삭제 억제 마커 파일입니다. |
@@ -572,6 +572,12 @@ recall에서 사라집니다.** 사람 검수를 전제하지 않으므로 복�
 | `verifiedMode: unknown` | 엔진 귀속이 불가합니다 — 레거시 `extractor.argv`(하나의 argv가 모든 엔진을 담당), `extractor.default` 폴백, 또는 카드를 만든 엔진이 기록되지 않은 잡입니다. |
 | 필드 없음 | 이 기능 이전에 검수된 카드입니다. **자기검증일 가능성이 높습니다**(실측 655/688). 없음은 `cross-engine`을 뜻하지 않습니다. |
 
+**남은 자기검증: dedup judge.** 중복 판정(`wiki_dedup_judge`)은 여전히 카드를 만든
+엔진을 hint로 받습니다. `plan_verify_attempts`를 그대로 재사용할 수는 없습니다 — dedup은
+카드 **두 장**을 비교하고 그 둘의 생산자가 다르거나 불명일 수 있어 무엇이 자기검증인지
+확정되지 않습니다. 생산자가 확실한 write-time gate 만 교차 엔진으로 확장하는 것이 타당하고,
+이는 **후속 작업**입니다.
+
 **recall은 `verifiedMode`를 읽지 않습니다.** `self`도 `cross-engine`과 동일하게 캐논급으로
 주입됩니다. 주입에 신뢰 하향 배지를 붙이지 않는 이유는 `source_missing`에서와 같습니다 —
 recall에서 내리지 않기로 한 카드에 하향 표식을 붙이는 것은 자기모순이고, 배지는 주입마다
@@ -595,6 +601,55 @@ timeout·비127 실패는 이미 CLI를 호출한 것이므로 다음 엔진으�
 `{targetPath, sources, sourceHash, engine}` 행을 직접 append하고 `status`를 `generated`로
 되돌린 뒤 worker가 `maxPerRun`씩 드레인하게 하는 방식이며, 로드맵 6단계(백필)와 같은
 비용 게이트입니다.
+
+#### 교차검증 주장의 조건 (귀속)
+
+"다른 엔진이 검수했다"는 주장은 **카드를 만든 엔진이 특정될 때만** 성립합니다. `producing`
+라벨이 현재 풀에서 엔진별 argv로 해석되지 않으면 — sentinel `"unknown"`(호스트를 알 수 없을 때
+enqueue가 쓰는 값), 풀 밖 라벨, `extractor.default`로 만들어진 카드 — 어떤 후보도 "생성 엔진과
+다르다"를 증명할 수 없습니다. 그때는 모든 시도가 `verifiedMode: unknown`이고 `require`는
+**fail-closed**(검수하지 않고 잡 보존)입니다.
+
+생성 엔진 라벨은 **큐 잡이 SSOT**입니다. `candidate.engine`은 extractor(모델) 출력이므로 값을
+신뢰하지 않고 worker가 잡의 값으로 덮어씁니다 — 그러지 않으면 모델이 스키마 밖 필드 하나로
+자기검증을 `cross-engine`으로 승격시킬 수 있습니다(2단계에서 `triggers` raw 방출로
+`status: verified`를 위조할 수 있었던 것과 같은 클래스).
+
+#### 후보 단위 cooldown (`verify-engine-cooldown.json`)
+
+**한 카드에 대한 유료 호출은 run 당 1회**입니다. 그래서 다음 후보로 넘어가는 조건은
+exit 127(host CLI 부재, 토큰 0)뿐이고 timeout·비127 실패는 그 run 에서 다른 엔진을 부르지
+않습니다. 그런데 그것만으로는 **선호 엔진이 계속 같은 이유로 실패하면(인증 안 된 CLI, verdict
+미출력, timeout) 검수가 영구 정지**합니다 — 0.x의 전역 `verify-cooldown`이 그 상태였고,
+`recallVerifiedOnly` 기본값 아래에서 그것은 wiki가 recall에서 사라지는 것과 같습니다.
+
+그래서 실패는 **후보 단위로 기억**합니다: 실패한 후보를 `cooldownSeconds` 동안
+`.auto-context/compile/verify-engine-cooldown.json`에 기록하고, 다음 run 의 후보 선정에서
+건너뜁니다. 결과적으로 run 당 유료 호출은 여전히 1회이고, run 을 넘어가면 다음 후보로 →
+최종적으로 생성 엔진(self)까지 degrade 합니다. 전역 cooldown과 달리 한 엔진의 실패가 다른
+카드·다른 엔진의 검수를 막지 않습니다. 엔진에 귀속되지 않는 argv(레거시 `extractor.argv`,
+`extractor.default`)는 `(unattributed)` 키로 따로 식히므로 그 엔진의 adapter가 함께 막히지
+않습니다. 만료 항목은 쓰기 시 정리되어 파일이 무계로 커지지 않습니다.
+
+#### 실패 유형과 결과
+
+| 실패 유형 | host CLI 호출 | 카드 | 큐 | cooldown | 로그 |
+|---|---|---|---|---|---|
+| `pass` verdict | 1(유료) | `verified` 스탬프 | 소비 | — | `verified` |
+| `fail` verdict | 1(유료) | `onFail`(기본 삭제) | 소비 | — | `deleted`/`contested`/`kept` + `verify-deleted.jsonl` |
+| `inconclusive` verdict | 1(유료) | `onInconclusive`(기본 삭제) | 소비 | — | 같음 + `verify-skipped.jsonl` |
+| exit 127 (후보 전원 부재) | 0(무료) | 불변(`generated`) | **보존** | 없음(설치 즉시 재시도) | `deferred`/`extractor_unavailable` |
+| timeout·비127 실패 | 1(유료) | 불변(`generated`) | **보존** | **그 후보만** | `deferred` + `cooledKey` |
+| 잘못된 JSON(`invalid_extractor_json`) | 1(유료) | 불변(`generated`) | 폐기 | 없음 | `skipped` |
+| verdict 값 불량(`invalid_verdict`) | 1(유료) | 불변(`generated`) | 폐기 | 없음 | `skipped` |
+| 후보 전원 식힘 중 | 0 | 불변(`generated`) | **보존** | 유지 | `deferred`/`engines_cooling` |
+| `require` + 귀속 불가/후보 없음 | 0 | 불변(`generated`) | **보존** | — | `deferred`/`cross_engine_unavailable` |
+| extractor 설정 없음 | 0 | 불변(`generated`) | 폐기 | — | `skipped`/`missing_extractor` |
+| 소스 전멸 | 0 | 불변(`generated`) | 소비 | — | `skipped`/`source_missing` + `source-missing.jsonl` |
+
+**카드를 삭제하는 행은 verdict 세 줄뿐이고, 그 셋은 유효 JSON verdict 를 받은 뒤에만 도달
+합니다.** transient(127·timeout·실행 실패)는 전부 "카드 불변 + 큐 보존"이므로 verifier CLI가
+없거나 깨진 머신에서 카드가 삭제되는 경로가 없습니다.
 
 #### 증명 필드 위생
 

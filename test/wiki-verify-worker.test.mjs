@@ -84,6 +84,11 @@ function runVerifyWorker(project, env = {}) {
   });
 }
 
+function engineCooldown(project) {
+  const path = join(project, '.auto-context', 'compile', 'verify-engine-cooldown.json');
+  return existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : {};
+}
+
 function jsonl(path) {
   if (!existsSync(path)) return [];
   return readFileSync(path, 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
@@ -267,7 +272,9 @@ test('transient(timeout)는 inconclusive로 오분류되지 않는다 — 카드
   try {
     runVerifyWorker(project);
     assert.equal(existsSync(join(project, CARD_REL)), true);
-    assert.equal(existsSync(join(project, '.auto-context', 'compile', 'verify-cooldown')), true);
+    // 실패한 후보만 식힌다(0.x의 전역 verify-cooldown 대체) — 전역이면 한 엔진 실패가
+    // 프로젝트 전체 검수를 막고 다음 후보로 degrade하지 못했다.
+    assert.deepEqual(Object.keys(engineCooldown(project)), ['(unattributed)']);
     assert.equal(jsonl(join(project, '.auto-context', 'compile', 'verify-skipped.jsonl')).length, 0);
   } finally { rmSync(project, { recursive: true, force: true }); }
 });
@@ -283,14 +290,14 @@ test('verifier CLI 부재(127) → 큐 보존(설치 대기)', () => {
   } finally { rmSync(project, { recursive: true, force: true }); }
 });
 
-test('verifier timeout → verify-cooldown 생성 + 큐 보존 (compile cooldown과 분리)', () => {
+test('verifier timeout → 후보 단위 cooldown 생성 + 큐 보존 (compile cooldown과 분리)', () => {
   const slow = join(mkdtempSync(join(tmpdir(), 'verifier-slow-')), 'verify.py');
   writeFileSync(slow, '#!/usr/bin/env python3\nimport time\ntime.sleep(5)\n');
   const project = setupProject({ extractorArgv: ['python3', slow], verify: { timeout: 1 } });
   try {
     const out = JSON.parse(runVerifyWorker(project));
     assert.equal(out.processed, 0);
-    assert.equal(existsSync(join(project, '.auto-context', 'compile', 'verify-cooldown')), true);
+    assert.ok(Object.keys(engineCooldown(project)).length > 0);
     assert.equal(existsSync(join(project, '.auto-context', 'compile', 'cooldown')), false, 'compile cooldown은 건드리지 않음');
     assert.match(readFileSync(join(project, '.auto-context', 'compile', 'verify-queue.jsonl'), 'utf8'), /test-card\.md/);
   } finally { rmSync(project, { recursive: true, force: true }); }
@@ -576,6 +583,8 @@ function mockEngine(name, tracker, behavior) {
   const script = join(mkdtempSync(join(tmpdir(), `verifier-${name}-`)), `${name}.py`);
   const body = {
     absent: 'sys.exit(127)',
+    // 인증 안 된 host CLI: lib.py가 CLI의 비0 종료코드를 그대로 전파한다(비127).
+    exit1: 'sys.exit(1)',
     slow: 'import time\ntime.sleep(5)',
   }[behavior] || `print(json.dumps({"verdict": ${JSON.stringify(behavior)}, "claims": [{"claim": "c", "supported": ${behavior === 'pass' ? 'True' : 'False'}, "quote": "q", "sourcePath": "docs/source.md"}], "reasons": ["by ${name}"]}))`;
   writeFileSync(script, `#!/usr/bin/env python3
@@ -700,7 +709,7 @@ test('실패 분류 경계: 다른 엔진 timeout은 다음 엔진으로 넘기�
     // timeout은 이미 host CLI를 호출한 것이다 — 다음 엔진으로 넘기면 같은 카드에 대해
     // 사용자 계정이 두 번 청구된다. 127(실행 자체 실패, 과금 0)만 다음 후보로 넘어간다.
     assert.deepEqual(calls(tracker), ['codex'], 'timeout 후 claude로 재시도하지 않는다');
-    assert.equal(existsSync(join(project, '.auto-context', 'compile', 'verify-cooldown')), true);
+    assert.deepEqual(Object.keys(engineCooldown(project)), ['codex'], '실패한 후보만 식힌다');
     assert.match(readFileSync(join(project, CARD_REL), 'utf8'), /^status: generated$/m);
     // transient가 inconclusive(=삭제)로 흐르지 않았음을 확인
     assert.equal(jsonl(join(project, '.auto-context', 'compile', 'verify-skipped.jsonl')).length, 0);
@@ -813,5 +822,166 @@ test('후보 엔진이 0건이어도 extractor.default 폴백은 유지된다(pr
     const text = readFileSync(join(project, CARD_REL), 'utf8');
     assert.match(text, /^status: verified$/m);
     assert.match(text, /^verifiedMode: "?unknown"?$/m);
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});
+
+// ---------------------------------------------------------------------------
+// 리뷰 반영: non-127 실패의 run 간 degrade (전역 cooldown → 후보 단위)
+// ---------------------------------------------------------------------------
+
+test('선호 엔진 non-127 실패 → 다음 run이 다음 후보로 degrade, run당 유료 호출 1회', () => {
+  const tracker = trackerFile('degrade-runs');
+  const project = setupProject({
+    extractor: {
+      dispatch: 'by-engine',
+      timeout: 30,
+      // codex는 인증 안 된 CLI처럼 exit 1(비127)로 죽는다 — lib.py가 CLI 비0을 그대로
+      // 전파하는 경로이므로 실제로 흔한 상태다.
+      backends: { claude: mockEngine('claude', tracker, 'pass'), codex: mockEngine('codex', tracker, 'exit1') },
+    },
+  });
+  try {
+    // run1: 선호 후보 codex가 유료 호출 1회를 소진하고 실패 → 카드·큐 보존, codex 식힘
+    assert.equal(JSON.parse(runVerifyWorker(project)).processed, 0);
+    assert.deepEqual(calls(tracker), ['codex']);
+    assert.deepEqual(Object.keys(engineCooldown(project)), ['codex']);
+    assert.match(readFileSync(join(project, CARD_REL), 'utf8'), /^status: generated$/m);
+    assert.equal(jsonl(join(project, '.auto-context', 'compile', 'verify-log.jsonl')).length, 1,
+      'transient도 로그 1줄 — 0.x는 0줄이라 영구 정지를 진단할 수 없었다');
+
+    // run2: codex는 식힘 중이므로 건너뛰고 생성 엔진으로 degrade. 이 run의 유료 호출도 1회.
+    assert.equal(JSON.parse(runVerifyWorker(project)).processed, 1);
+    assert.deepEqual(calls(tracker), ['codex', 'claude'], 'run당 유료 호출 1회 유지');
+    const text = readFileSync(join(project, CARD_REL), 'utf8');
+    assert.match(text, /^status: verified$/m, '영구 정지하지 않는다');
+    assert.match(text, /^verifiedMode: "?self"?$/m);
+    const log = jsonl(join(project, '.auto-context', 'compile', 'verify-log.jsonl'));
+    assert.equal(log[0].result, 'deferred');
+    assert.equal(log[0].cooledKey, 'codex');
+    assert.deepEqual(log[1].enginesCooling, ['codex']);
+    assert.equal(log[1].result, 'verified');
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});
+
+test('후보 전원 식힘 중 → 잡 보존 + engines_cooling 로그 (드롭 아님)', () => {
+  const tracker = trackerFile('all-cooling');
+  const project = setupProject({
+    extractor: {
+      dispatch: 'by-engine',
+      timeout: 30,
+      backends: { claude: mockEngine('claude', tracker, 'exit1'), codex: mockEngine('codex', tracker, 'exit1') },
+    },
+  });
+  try {
+    runVerifyWorker(project);  // codex 실패 → 식힘
+    runVerifyWorker(project);  // claude 실패 → 식힘
+    const out = JSON.parse(runVerifyWorker(project));  // 전원 식힘
+    assert.equal(out.processed, 0);
+    assert.deepEqual(calls(tracker), ['codex', 'claude'], '식힘 중에는 유료 호출 0');
+    assert.match(
+      readFileSync(join(project, '.auto-context', 'compile', 'verify-queue.jsonl'), 'utf8'),
+      /test-card\.md/, '잡 보존 — 식힘이 풀리면 재시도');
+    const log = jsonl(join(project, '.auto-context', 'compile', 'verify-log.jsonl'));
+    assert.equal(log[log.length - 1].reason, 'engines_cooling');
+    assert.deepEqual(log[log.length - 1].enginesCooling, ['claude', 'codex']);
+    assert.equal(existsSync(join(project, CARD_REL)), true, '삭제되지 않는다');
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});
+
+test('CLI 부재(127)는 로그 1줄을 남기고 후보를 식히지 않는다(과금 0, 설치 즉시 재시도)', () => {
+  const tracker = trackerFile('absent-log');
+  const project = setupProject({
+    extractor: {
+      dispatch: 'by-engine',
+      timeout: 30,
+      backends: { claude: mockEngine('claude', tracker, 'absent'), codex: mockEngine('codex', tracker, 'absent') },
+    },
+  });
+  try {
+    runVerifyWorker(project);
+    const log = jsonl(join(project, '.auto-context', 'compile', 'verify-log.jsonl'));
+    assert.equal(log[0].result, 'deferred');
+    assert.equal(log[0].reason, 'extractor_unavailable');
+    assert.deepEqual(log[0].enginesAttempted, ['codex', 'claude']);
+    assert.deepEqual(engineCooldown(project), {}, '127은 식히지 않는다');
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});
+
+test('귀속 불가 라벨(sentinel "unknown"): prefer는 cross-engine을 주장하지 않고 require는 fail-closed', () => {
+  for (const [mode, expect] of [['prefer', 'unknown'], ['require', null]]) {
+    const tracker = trackerFile(`unattributed-${mode}`);
+    const project = setupProject({
+      jobOverrides: { engine: 'unknown' },
+      verify: { crossEngine: mode },
+      extractor: {
+        dispatch: 'by-engine',
+        timeout: 30,
+        backends: { claude: mockEngine('claude', tracker, 'pass'), codex: mockEngine('codex', tracker, 'pass') },
+      },
+    });
+    try {
+      runVerifyWorker(project);
+      if (expect === null) {
+        assert.deepEqual(calls(tracker), [], 'require는 생성 엔진을 특정할 수 없으면 검수하지 않는다');
+        assert.match(readFileSync(join(project, CARD_REL), 'utf8'), /^status: generated$/m);
+        assert.equal(jsonl(join(project, '.auto-context', 'compile', 'verify-log.jsonl'))[0].reason,
+          'cross_engine_unavailable');
+        assert.match(readFileSync(join(project, '.auto-context', 'compile', 'verify-queue.jsonl'), 'utf8'),
+          /test-card\.md/, '잡 보존');
+      } else {
+        assert.match(readFileSync(join(project, CARD_REL), 'utf8'),
+          new RegExp(`^verifiedMode: "?${expect}"?$`, 'm'));
+      }
+    } finally { rmSync(project, { recursive: true, force: true }); }
+  }
+});
+
+test('verify.builtins를 좁혀도 prefer에서 생성 엔진은 최후 후보로 남는다', () => {
+  const tracker = trackerFile('builtins-narrow');
+  const project = setupProject({
+    // builtins-only(--enable-compile 기본형) + verify.builtins가 codex만 지정.
+    verify: { builtins: ['codex'] },
+    extractor: { dispatch: 'by-engine', timeout: 30, builtins: ['claude', 'codex'], backends: {} },
+  });
+  try {
+    const plan = execFileSync('python3', ['-c', `
+import json, sys; sys.path.insert(0, 'core')
+import wiki_verify_worker as w
+cfg = {"extractor": {"dispatch": "by-engine", "builtins": ["claude", "codex"], "backends": {}}}
+attempts, mode, reason = w.plan_verify_attempts(cfg, {"builtins": ["codex"]}, "claude")
+print(json.dumps([[a["engine"], a["mode"]] for a in attempts]))
+`], { cwd: process.cwd(), encoding: 'utf8' });
+    assert.deepEqual(JSON.parse(plan), [['codex', 'cross-engine'], ['claude', 'self']]);
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});
+
+test('verify.builtins 오타는 영구 drop이 아니라 self 폴백으로 degrade한다', () => {
+  const tracker = trackerFile('builtins-typo');
+  const adapter = mockEngine('claude', tracker, 'pass');
+  const project = setupProject({
+    verify: { builtins: ['codexx'] },   // 오타 — 해석되는 argv가 없다
+    extractor: { dispatch: 'by-engine', timeout: 30, backends: { claude: adapter } },
+  });
+  try {
+    assert.equal(JSON.parse(runVerifyWorker(project)).processed, 1);
+    assert.deepEqual(calls(tracker), ['claude']);
+    assert.match(readFileSync(join(project, CARD_REL), 'utf8'), /^status: verified$/m);
+    assert.equal(readFileSync(join(project, '.auto-context', 'compile', 'verify-queue.jsonl'), 'utf8'), '',
+      'missing_extractor 영구 drop이 아니다');
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});
+
+test('로그 키 의미 고정: attempt 이전 줄은 producedBy만, 이후 줄은 engine=검수 엔진', () => {
+  const tracker = trackerFile('log-keys');
+  const project = setupProject({
+    cardStatus: 'verified',   // attempt 이전 skip(not_generated)
+    extractor: { dispatch: 'by-engine', timeout: 30, backends: { codex: mockEngine('codex', tracker, 'pass') } },
+  });
+  try {
+    runVerifyWorker(project);
+    const row = jsonl(join(project, '.auto-context', 'compile', 'verify-log.jsonl'))[0];
+    assert.equal(row.reason, 'not_generated');
+    assert.equal(row.producedBy, 'claude');
+    assert.equal('engine' in row, false, '검수 엔진이 없는 줄에 engine 키를 쓰지 않는다');
   } finally { rmSync(project, { recursive: true, force: true }); }
 });

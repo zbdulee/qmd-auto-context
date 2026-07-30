@@ -140,6 +140,11 @@ VERIFIED_MODE_UNKNOWN = "unknown"
 VERIFIED_MODES = {VERIFIED_MODE_CROSS, VERIFIED_MODE_SELF, VERIFIED_MODE_UNKNOWN}
 # status: verified/contested와 **함께** 써야 하는 증명 필드. 리셋 시 함께 제거된다.
 VERIFY_PROOF_FIELDS = ("verifiedBy", "verifiedAt", "verifiedMode")
+# 생성 엔진을 알 수 없을 때 큐/레코드에 쓰는 sentinel. **리터럴을 각자 들고 있으면 안 된다** —
+# `wiki_verify_worker`가 "귀속 불가"를 이 값으로 판정하므로(교차검증 주장 금지) 생산 측
+# (`wiki_compile_enqueue`·`sync`·`wiki_compile_worker`)과 같은 문자열이어야 한다. 갈려 있던
+# 동안 planner의 빈 문자열 가드가 사실상 죽은 분기였다.
+UNKNOWN_ENGINE = "unknown"
 COMPILE_TRIGGERS = {
     "explicit_user_approval",
     "post_session_summary",
