@@ -63,16 +63,26 @@ DEFAULT_CONFIG = {
             "timeout": 30,
             "cooldownSeconds": 600,
         },
+        # 한 소스에서 컴파일할 후보 카드 수 상한. **candidates 길이는 모델 출력이고 예전에는
+        # 어디에도 상한이 없었다** — worker가 `for candidate in candidates:`로 전량을 순회했고,
+        # 신규 카드마다 write-time dedup judge(유료)가 붙고 각 카드가 verify 큐(유료)로 가므로
+        # 모델이 한 run의 과금 규모를 정하는 구조였다(실측: 소스 5건 + 모델이 카드 40장 →
+        # 한 run 유료 호출 205회). 프롬프트의 "쪼개지 말라"는 요청이지 한계가 아니다.
+        "maxCardsPerSource": 10,
         "batch": {
             "idleSeconds": 90,
             "maxItems": 5,
             # **처리 시작 조건(maxItems)과 다르다.** maxItems는 "이만큼 모이면 지금 돌려라"이고
-            # 이 값은 "한 run에서 host CLI를 이보다 많이 spawn하지 마라"는 상한이다. 예전에는
-            # 상한이 아예 없어 큐에 든 전량을 한 워커가 연속 실행했다 — 백필로 큐가 수백
-            # 건이 되면 단일 one-shot 워커가 수백 회 유료 호출을 직렬로 돌린다. 초과분은
-            # 큐에 되돌려(requeue) 다음 kick이 집어 가므로 조용히 유실되지 않는다.
-            # 기본 10은 평상시 편집 흐름(큐 1~5건)에 영향이 없고, run 하나를 extractor 10회
-            # + 피기백 verify 10회로 유계로 만든다.
+            # 이 값은 "한 run에서 extractor를 이보다 많이 spawn하지 마라"는 상한이다. 예전에는
+            # 상한이 아예 없어 큐에 든 전량을 한 워커가 연속 실행했다(큐 수백 건 = 유료 호출
+            # 수백 회 직렬). 초과분은 큐에 되돌려(requeue) 다음 kick이 집어 가므로 조용히
+            # 유실되지 않는다.
+            #
+            # **이 값이 보장하는 것은 extractor 호출 수뿐이다.** 한 run의 유료 호출 총량은
+            # extractor(≤ maxPerRun) + dedup judge(≤ 쓰인 카드 수) + verify(아래 예산)이고,
+            # 카드 수는 `compile.maxCardsPerSource`가, verify는 `VERIFY_PRODUCED_HARD_CAP`이
+            # 각각 유계로 만든다. 예전 주석은 "extractor 10회 + verify 10회로 유계"라고
+            # 적었지만 verify는 카드 수를 따르므로 실측과 어긋난 거짓 계약이었다.
             "maxPerRun": 10,
         },
         "semanticDedup": {
@@ -125,6 +135,22 @@ MAX_INJECT_SUMMARY_CHARS = 4000
 # injectSourcePathsPerCard 상한. 이 값이 카드당 stat() 호출 수이자 주입 줄 수의 상한이므로
 # (topN × 이 값) blocking hook 예산을 유계로 둔다. 관측 최대 소스 수는 4다.
 MAX_INJECT_SOURCE_PATHS_PER_CARD = 10
+
+# 유료 host CLI 호출 수를 정하는 값들의 **상한 클램프**. 이 값들은 "설정 오류나 모델 출력이
+# 과금 규모를 정하지 못한다"를 보장하는 자리이므로 설정으로 다시 열지 않는다.
+#   - MAX_COMPILE_PER_RUN: `compile.batch.maxPerRun`(= run당 extractor 호출 수). 예전에는
+#     `99999999`도 그대로 통과해 한 run이 수만 회 호출을 시도할 수 있었다.
+#   - MAX_CARDS_PER_SOURCE: `compile.maxCardsPerSource`(= 소스당 카드 수, 모델 출력 상한).
+#   - MAX_VERIFY_PER_RUN: `compile.verify.maxPerRun`(사람이 명시한 검수 예산).
+#   - VERIFY_PRODUCED_HARD_CAP: **모델 출력에서 유도된** 검수 예산의 상한. verify 예산은
+#     `max(verify.maxPerRun, min(생산량, 이 값))`이라 사람이 적은 값은 언제나 존중되고
+#     모델이 만든 카드 수는 이 상한을 넘겨 과금을 늘릴 수 없다. 30은 기본 배치
+#     (maxPerRun 10 × 실측 카드 증폭 2.68 ≈ 27)를 덮어 정상 흐름의 즉시 검수를 유지하면서
+#     퇴화한 run(카드 200장)의 호출 폭발을 막는 값이다.
+MAX_COMPILE_PER_RUN = 50
+MAX_CARDS_PER_SOURCE = 50
+MAX_VERIFY_PER_RUN = 50
+VERIFY_PRODUCED_HARD_CAP = 30
 
 COMPILE_MODES = {"off", "candidates", "guarded", "auto-wiki"}
 WIKI_STATUSES = {"generated", "verified", "reviewed", "canon", "tentative", "contested", "discarded", "superseded"}
@@ -213,6 +239,18 @@ def coerce_nonneg_int(value, default, maximum=None):
     if result < 0:
         return default
     if maximum is not None and result > maximum:
+        return maximum
+    return result
+
+
+def coerce_capped_int(value, default, maximum):
+    """1 이상 maximum 이하로 강제한다(유료 호출 수를 정하는 필드 전용).
+
+    `coerce_int`는 양수면 무엇이든 통과시키므로 `99999999`가 그대로 run당 호출 상한이
+    됐다. 문자열(`"100"`)도 `int()`로 통과하는데 문제는 형이 아니라 **크기**다.
+    """
+    result = coerce_int(value, default)
+    if result > maximum:
         return maximum
     return result
 
@@ -314,6 +352,10 @@ def compile_config(value):
     result["canonSignals"] = string_list(value.get("canonSignals"), defaults["canonSignals"])
     result["maxAutoPageLines"] = coerce_int(value.get("maxAutoPageLines", defaults["maxAutoPageLines"]), defaults["maxAutoPageLines"])
     result["maxSourceChars"] = coerce_int(value.get("maxSourceChars", defaults["maxSourceChars"]), defaults["maxSourceChars"])
+    result["maxCardsPerSource"] = coerce_capped_int(
+        value.get("maxCardsPerSource", defaults["maxCardsPerSource"]),
+        defaults["maxCardsPerSource"], MAX_CARDS_PER_SOURCE,
+    )
     raw_extractor = value.get("extractor")
     extractor = raw_extractor if isinstance(raw_extractor, dict) else {}
     default_extractor = defaults.get("extractor") if isinstance(defaults.get("extractor"), dict) else {"argv": [], "timeout": 30}
@@ -335,9 +377,9 @@ def compile_config(value):
     result["batch"] = {
         "idleSeconds": coerce_int(batch.get("idleSeconds", 90), 90),
         "maxItems": coerce_int(batch.get("maxItems", 5), 5),
-        "maxPerRun": coerce_int(
+        "maxPerRun": coerce_capped_int(
             batch.get("maxPerRun", default_batch.get("maxPerRun", 10)),
-            default_batch.get("maxPerRun", 10),
+            default_batch.get("maxPerRun", 10), MAX_COMPILE_PER_RUN,
         ),
     }
     raw_semantic = value.get("semanticDedup")
@@ -383,7 +425,10 @@ def compile_config(value):
         "skippedPath": verify.get("skippedPath") if isinstance(verify.get("skippedPath"), str) and verify.get("skippedPath") else default_verify["skippedPath"],
         "deletedPath": verify.get("deletedPath") if isinstance(verify.get("deletedPath"), str) and verify.get("deletedPath") else default_verify["deletedPath"],
         "cooldownSeconds": coerce_int(verify.get("cooldownSeconds", default_verify["cooldownSeconds"]), default_verify["cooldownSeconds"]),
-        "maxPerRun": coerce_int(verify.get("maxPerRun", default_verify["maxPerRun"]), default_verify["maxPerRun"]),
+        "maxPerRun": coerce_capped_int(
+            verify.get("maxPerRun", default_verify["maxPerRun"]),
+            default_verify["maxPerRun"], MAX_VERIFY_PER_RUN,
+        ),
     }
     return result
 

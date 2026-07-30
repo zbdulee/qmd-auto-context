@@ -204,20 +204,25 @@ def do_repoint(root: Path, config: dict, compile_cfg: dict, target_rel: str,
             # 원본은 그대로다(임시파일만 버려진다) — 실패 반환과 디스크 상태가 일치한다.
             return fail("card_unwritable")
         info = wsm.classify_card(updated, root, allow_roots)
-        wsm.record(ledger, target_rel, wsm.ACTION_REPOINTED, info["missing"],
-                   str((wc.parse_frontmatter(updated)[0] or {}).get("status") or "generated"),
-                   "repair", {"from": old, "to": new_rel})
+        # 원장 기록 실패를 삼키면 카드는 고쳐졌는데 대기 큐에서 내려가지 않아 같은 알림이
+        # 계속 뜨고, 사용자는 "고쳤는데 왜 또 나오나"를 알 수 없다. 카드 쓰기는 이미
+        # 성공했으므로 실패시키지 않고 출력에 표면화한다.
+        ledger_ok = wsm.record(ledger, target_rel, wsm.ACTION_REPOINTED, info["missing"],
+                               str((wc.parse_frontmatter(updated)[0] or {}).get("status") or "generated"),
+                               "repair", {"from": old, "to": new_rel})
     if wsm.all_sources_missing(info):
         # 정상 경로에서는 도달하지 않는다(재지정 대상은 존재가 확인된 파일이므로 살아 있는
         # 소스가 최소 1개 생긴다). 재지정 직후 그 파일이 사라진 레이스에 대한 방어다 —
         # 최신 행이 repointed로 남으면 "대기 = 최신 행이 detected" 정의에서 빠져
         # 완전히 깨진 카드가 조용히 사라진다. 일부만 소실인 카드는 스캐너와 같은 규칙으로
         # 대기 대상이 아니고, 남은 깨진 링크는 출력의 stillMissing으로 사용자에게 알린다.
-        wsm.record_detection(root, compile_cfg, target_rel,
-                             str((wc.parse_frontmatter(updated)[0] or {}).get("status") or "generated"),
-                             info["missing"], "repair")
+        if not wsm.record_detection(root, compile_cfg, target_rel,
+                                    str((wc.parse_frontmatter(updated)[0] or {}).get("status") or "generated"),
+                                    info["missing"], "repair"):
+            ledger_ok = False
     print(json.dumps({"ok": True, "action": "repointed", "targetPath": target_rel,
-                      "from": old, "to": new_rel, "stillMissing": info["missing"]},
+                      "from": old, "to": new_rel, "stillMissing": info["missing"],
+                      **({} if ledger_ok else {"ledgerWriteFailed": True})},
                      ensure_ascii=False))
     return 0
 

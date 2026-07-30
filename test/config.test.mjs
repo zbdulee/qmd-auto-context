@@ -127,6 +127,7 @@ test('wiki recall 신규 필드는 additive로 normalize 된다', () => {
     canonSignals: ['확정'],
     maxAutoPageLines: 80,
     maxSourceChars: 12000,
+    maxCardsPerSource: 10,
     extractor: { argv: ['python3', 'scripts/extract.py'], timeout: 30, cooldownSeconds: 600 },
     batch: { idleSeconds: 90, maxItems: 5, maxPerRun: 10 },
     semanticDedup: { enabled: true, threshold: 0.82, topK: 3, similarPageMaxChars: 12000, autoMergeThreshold: 0.9, maxPairsPerScan: 10, candidateMinScore: 0.3, judge: JUDGE_DEFAULTS },

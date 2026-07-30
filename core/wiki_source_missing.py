@@ -369,9 +369,14 @@ def record_dismissal(root: Path, compile_cfg: dict, target_rel: str) -> tuple[bo
         if state is None or state.get("action") != ACTION_DETECTED:
             return False, {}
         missing = [p for p in (state.get("missingSources") or []) if isinstance(p, str)]
-        record(path, target_rel, ACTION_DISMISSED, missing,
-               str(state.get("status") or ""), "repair")
-    return True, {"missingSources": missing_key(missing), "status": state.get("status", "")}
+        # 기록 실패를 삼키면 "무시했다"가 원장에 남지 않아 다음 스캔이 같은 카드를 다시
+        # 대기로 올린다. 호출자가 사용자에게 그대로 말할 수 있도록 결과에 담는다.
+        dismissed = record(path, target_rel, ACTION_DISMISSED, missing,
+                           str(state.get("status") or ""), "repair")
+    info = {"missingSources": missing_key(missing), "status": state.get("status", "")}
+    if not dismissed:
+        info["ledgerWriteFailed"] = True
+    return True, info
 
 
 def allow_roots_of(config: dict) -> list[Path]:

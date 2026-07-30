@@ -43,7 +43,7 @@ def load_entries(claimed: Path) -> list[tuple[str, dict | None]]:
     return rows
 
 
-def write_new_page(root: Path, wiki_root: Path, candidate: dict, extra_frontmatter: dict | None = None) -> tuple[Path, str]:
+def write_new_page(root: Path, wiki_root: Path, candidate: dict, extra_frontmatter: dict | None = None) -> tuple[Path, str, bool]:
     suggested_type = candidate.get("suggestedType") if candidate.get("suggestedType") in wc.ALLOWED_TYPES else "concept"
     title = str(candidate.get("title") or "Untitled").strip() or "Untitled"
     slug = wc.re.sub(r"[^A-Za-z0-9가-힣]+", "-", title.lower()).strip("-") or "wiki-page"
@@ -61,13 +61,16 @@ def write_new_page(root: Path, wiki_root: Path, candidate: dict, extra_frontmatt
     # 원자적 쓰기(wiki_compile SSOT) — 절단된 카드가 완성된 카드처럼 인덱싱·주입되지 않게.
     if not wc.write_text_atomic(target, page):
         raise OSError(f"card write failed: {target}")
+    frontmatter_ok = True
     if extra_frontmatter:
-        wc.patch_frontmatter_fields(target, extra_frontmatter)
+        # 반환값을 삼키면 `supersedes:` 같은 관계 필드가 조용히 빠진 카드가 남는다 —
+        # 카드는 존재하는데 무엇을 대체했는지 기록이 없어 감사 추적이 끊긴다.
+        frontmatter_ok = wc.patch_frontmatter_fields(target, extra_frontmatter)
     # 인덱스는 항법이라 실패해도 카드 생성을 되돌리지 않는다(wiki_compile과 같은 결).
     # 원자적 쓰기이므로 실패했더라도 기존 인덱스는 온전하다.
     wc.update_index(wiki_root, target, title)
     wc.append_log(wiki_root, "created", target, title)
-    return target, title
+    return target, title, frontmatter_ok
 
 
 def resolve_entry(root: Path, wiki_root: Path, config: dict, entry: dict, action: str) -> dict:
@@ -88,16 +91,16 @@ def resolve_entry(root: Path, wiki_root: Path, config: dict, entry: dict, action
         return {"action": "discarded"}
 
     if action == "separate":
-        target, _ = write_new_page(root, wiki_root, candidate)
+        target, _, _ = write_new_page(root, wiki_root, candidate)
         return {"action": "created", "targetPath": target.relative_to(root).as_posix()}
 
     if action == "merge":
         if not match_exists:
-            target, _ = write_new_page(root, wiki_root, candidate)
+            target, _, _ = write_new_page(root, wiki_root, candidate)
             return {"action": "created", "targetPath": target.relative_to(root).as_posix(), "fallback": "stale_match"}
         writable, findings = wc.is_auto_writable_page(matched_path)
         if not writable:
-            target, _ = write_new_page(root, wiki_root, candidate)
+            target, _, _ = write_new_page(root, wiki_root, candidate)
             return {
                 "action": "created",
                 "targetPath": target.relative_to(root).as_posix(),
@@ -121,21 +124,29 @@ def resolve_entry(root: Path, wiki_root: Path, config: dict, entry: dict, action
 
     if action == "supersede":
         if not match_exists:
-            target, _ = write_new_page(root, wiki_root, candidate)
+            target, _, _ = write_new_page(root, wiki_root, candidate)
             return {"action": "created", "targetPath": target.relative_to(root).as_posix(), "fallback": "stale_match"}
-        new_target, _ = write_new_page(
+        new_target, _, supersedes_recorded = write_new_page(
             root, wiki_root, candidate,
             extra_frontmatter={"supersedes": matched_path.relative_to(root).as_posix()},
         )
-        wc.patch_frontmatter_fields(matched_path, {
+        # 반환값을 삼키면 옛 카드가 `status: verified`로 남아 **두 카드가 동시에 캐논**이 된다
+        # (supersede의 요점은 옛 카드를 recall에서 내리는 것이다). 실패는 결과에 표면화해
+        # 호출자(skill/agent)가 손으로 마무리할 수 있게 한다.
+        superseded_ok = wc.patch_frontmatter_fields(matched_path, {
             "status": "superseded",
             "supersededBy": new_target.relative_to(root).as_posix(),
         })
-        return {
+        result = {
             "action": "created",
             "targetPath": new_target.relative_to(root).as_posix(),
             "supersedes": matched_path.relative_to(root).as_posix(),
         }
+        if not superseded_ok:
+            result["supersededStatusWriteFailed"] = matched_path.relative_to(root).as_posix()
+        if not supersedes_recorded:
+            result["supersedesFieldWriteFailed"] = True
+        return result
 
     return {"action": "rejected", "reason": "unknown_action"}
 

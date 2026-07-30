@@ -513,7 +513,12 @@ jq -c 'select(.event=="qmd_recall_shadow" and .verdict.selected_empty_raw_nonemp
 |---|---:|---|
 | `compile.batch.idleSeconds` | `90` | 큐에 든 가장 오래된 항목이 이 시간을 넘기면 개수가 모자라도 처리를 시작합니다. |
 | `compile.batch.maxItems` | `5` | **처리 시작 조건**입니다. 큐가 이만큼 모이면 즉시 시작합니다. 상한이 아닙니다. |
-| `compile.batch.maxPerRun` | `10` | **한 run이 처리하는 소스 수의 상한**입니다. 초과분은 큐에 되돌려(requeue) 다음 kick이 집어 갑니다. |
+| `compile.batch.maxPerRun` | `10` | **한 run이 처리하는 소스 수의 상한**입니다(= extractor 호출 수). 초과분은 큐에 되돌려(requeue) 다음 kick이 집어 갑니다. 50을 넘겨 적어도 50으로 잘립니다. |
+| `compile.maxCardsPerSource` | `10` | **한 소스에서 컴파일할 카드 수의 상한**입니다. `candidates` 길이는 extractor(모델)가 정하고, 카드 1장마다 dedup judge 1회 + verify 1회가 붙으므로 상한이 없으면 모델이 그 run의 과금 규모를 정합니다. 초과분은 `candidates.jsonl`에 `skipped`/`cards_per_source_cap`으로 기록되며 잡은 requeue되지 않습니다(재처리는 extractor 재호출 = 이중 과금). 50으로 클램프됩니다. |
+
+한 run의 유료 host CLI 호출 총량은 **extractor(≤ `batch.maxPerRun`) + dedup judge(≤ 쓰인 카드
+수) + verify(아래 예산)**입니다. 세 항목이 각각 유계여야 총량이 유계이고, 그래서
+`maxCardsPerSource`가 필요합니다 — `batch.maxPerRun`만으로는 extractor 호출 수만 보장됩니다.
 
 `maxItems`와 `maxPerRun`을 혼동하지 마십시오. 예전에는 상한이 아예 없어 `maxItems`를 넘겨
 처리가 시작되면 **큐에 든 전량**을 한 워커 프로세스가 순차 실행했습니다. 큐가 수백 건이면
@@ -553,7 +558,7 @@ jq -c 'select(.event=="qmd_recall_shadow" and .verdict.selected_empty_raw_nonemp
 | `compile.verify.crossEngine` | `"prefer"` | 검수 엔진을 카드를 만든 엔진과 분리합니다. `prefer`는 다른 엔진을 먼저 시도하고 없으면 같은 엔진으로 검수합니다(자기검증으로 기록). `require`는 다른 엔진만 허용하고 없으면 검수하지 않습니다(엔진별 `backends`/`builtins`가 필요합니다 — 레거시 `extractor.argv`·`extractor.default`는 엔진 귀속이 불가해 이 요구를 만족시키지 못합니다). `off`는 0.x 동작(카드를 만든 엔진)이며, 그 엔진이 귀속 불가면 풀의 첫 후보로 폴백합니다(폐기하면 그 카드가 영원히 검수되지 않습니다). |
 | `compile.verify.builtins` | `[]` | 검수 후보 엔진 목록(symbolic 이름만). 비면 `compile.extractor`의 `builtins` + 명시 `backends` 키를 물려받습니다. **카드를 만든 엔진은 이 목록에 없어도 `prefer`의 최후 후보로 남습니다** — 목록을 좁혀도(또는 이름을 잘못 적어도) self 폴백이 사라지지 않습니다. adapter argv 해석은 extractor와 같은 한 벌을 씁니다. |
 | `compile.verify.cooldownSeconds` | `600` | verifier 실패/timeout 뒤 재시도 cooldown입니다. |
-| `compile.verify.maxPerRun` | `3` | 한 번에 처리할 verify job 수의 **기본 예산**입니다. 실제 예산은 `max(maxPerRun, 그 run이 만든 카드 수)`입니다 — 고정값이면 카드를 만드는 속도가 검수하는 속도를 넘어 큐가 자라고, `recallVerifiedOnly` 기본값(`true`) 아래에서 `generated`로 남은 카드는 recall에 나오지 않습니다. 문서 10개를 편집해 카드 20장이 생겨도 3장만 검수하면 나머지는 다음 run들을 기다리는 동안 recall에 나오지 않습니다. 생산량을 하한으로 두면 큐는 줄어들 수만 있습니다. |
+| `compile.verify.maxPerRun` | `3` | 한 번에 처리할 verify job 수의 **기본 예산**입니다. 실제 예산은 `max(maxPerRun, min(그 run이 만든 카드 수, 30))`입니다 — 고정값이면 카드를 만드는 속도가 검수하는 속도를 넘어 큐가 자라고, `recallVerifiedOnly` 기본값(`true`) 아래에서 `generated`로 남은 카드는 recall에 나오지 않습니다(문서 10개를 편집해 카드 20장이 생겨도 3장만 검수하면 나머지는 다음 run들을 기다립니다). 생산량을 하한으로 두면 큐는 줄어들 수만 있습니다. **생산량에 씌운 상한 30**은 그 값이 모델 출력(`candidates` 길이)에서 유도되기 때문입니다 — 없으면 카드 40장을 낸 run이 verify 200회를 돌려 모델이 청구액을 정합니다. 사람이 적은 `maxPerRun`은 언제나 존중되며 50으로 클램프됩니다. 처리 순서는 **그 run이 만든 카드 먼저**이고(예산만 키우면 FIFO가 오래된 backlog에 다 쓰고 새 카드는 `generated`로 남습니다) backlog에는 1건이 항상 예약됩니다. |
 | `compile.verify.skippedPath` | `.auto-context/compile/verify-skipped.jsonl` | inconclusive 삭제 억제 마커 파일입니다. |
 
 #### `onInconclusive` 기본값이 `delete`인 이유

@@ -297,6 +297,73 @@ def candidate_identity_tiers(candidate: dict) -> list[tuple[str, list[str]]]:
     return tiers
 
 
+def source_paths_of(sources) -> set[str]:
+    """`sources` 목록 → 경로 집합. **두 표기를 모두 받는다.**
+
+    candidate(모델 출력)는 dict 목록이지만, 카드 frontmatter를 `parse_frontmatter`로 읽으면
+    flow mapping이 **raw 문자열**로 남는다(`{kind: file, path: "docs/a.md"}`). 한 표기만
+    보면 카드 쪽이 항상 빈 집합이 되어 "소스가 겹치는가" 판정이 조용히 죽는다.
+    역파싱은 `yaml_scalars.load_flow_mapping`(SSOT)을 쓴다.
+    """
+    if not isinstance(sources, list):
+        return set()
+    paths = set()
+    for item in sources:
+        if isinstance(item, str):
+            fields, _issue = yaml_scalars.load_flow_mapping(item)
+            item = fields
+        if not isinstance(item, dict):
+            continue
+        path = item.get("path")
+        if isinstance(path, str) and path.strip():
+            paths.add(path.strip())
+    return paths
+
+
+def explicit_target_agrees(target: Path, candidate: dict) -> tuple[bool, str]:
+    """Does a model-chosen `targetPath` actually name the candidate's own card?
+
+    `resolve_target` trusts `targetPath` over identity lookup, so an extractor that
+    emits an unrelated existing path sends a **different** card's page down the
+    `updated` branch. Measured consequences, both bad:
+      - verify says `inconclusive` → the card is DELETED, and anything a human wrote
+        outside `qmd:auto:end` is gone for good (verify-deleted.jsonl stores no body).
+        This is the live `지킴진단-…md` loop.
+      - verify says `pass` → only the auto block is replaced, so the body states facts
+        from source B while `sources:`/`title` still describe A. Provenance is silently
+        wrong and the injected `↳` source path points at the wrong file.
+
+    Agreement means the candidate shares an identity value (canonicalKey / alias /
+    title, via the same `identity_keys` normalisation the index uses) OR at least one
+    `sources[].path` with the page on disk. Either is enough: a re-extraction of the
+    same document legitimately renames a card, and a renamed source legitimately keeps
+    the identity. Neither → route to review instead of overwriting.
+
+    Unreadable/unparsable frontmatter returns True (fail-open): that page is already
+    handled by `is_auto_writable_page`, and blocking writes on a parse failure would
+    stall compile for a card nobody can fix from here.
+    """
+    try:
+        text = target.read_text(encoding="utf-8")
+    except OSError:
+        return True, ""
+    meta, ok = parse_frontmatter(text)
+    if not ok:
+        return True, ""
+    existing_keys: set[str] = set()
+    for value in identity_values_from_meta(meta):
+        existing_keys |= identity_keys(value)
+    candidate_keys: set[str] = set()
+    for _reason, values in candidate_identity_tiers(candidate):
+        for value in values:
+            candidate_keys |= identity_keys(value)
+    if existing_keys & candidate_keys:
+        return True, ""
+    if source_paths_of(meta.get("sources")) & source_paths_of(candidate.get("sources")):
+        return True, ""
+    return False, "identity_mismatch"
+
+
 def lookup_identity(candidate: dict, identity_index: dict[str, set[Path]]) -> tuple[str, list[Path]]:
     for reason, values in candidate_identity_tiers(candidate):
         matches = set()
@@ -475,6 +542,9 @@ def trim_jsonl(path: Path, max_bytes: int = LOG_MAX_BYTES) -> None:
         if path.stat().st_size <= max_bytes:
             return
         lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+        # 유일하게 반환값을 보지 않아도 되는 자리다: 원자적 쓰기라 실패해도 원본 로그가
+        # 온전하고(잘리지 않는다) 할 일은 "다음 호출에서 다시 시도"뿐이다. 실패를 표면화할
+        # 채널도 없다(이 함수는 로그 쓰기 경로 안에서 불린다).
         write_text_atomic(path, "".join(lines[len(lines) // 2:]))
     except OSError:
         pass
@@ -1266,6 +1336,35 @@ def main() -> int:
     target.parent.mkdir(parents=True, exist_ok=True)
     page = markdown_page(candidate, summary, status, redactions, h)
     action = "created"
+    if target.exists() and target_reason == "explicit":
+        # 모델이 고른 경로가 **다른 카드**를 가리키면 갱신이 아니라 검토로 보낸다. 갱신의
+        # 근거는 "같은 카드의 소스가 바뀌었다"이고, identity·source가 하나도 겹치지 않으면
+        # 그 근거가 없다. 여기서 덮으면 (a) 다음 verify가 inconclusive를 내면 카드가 삭제되고
+        # `auto:end` 밖 사람이 쓴 섹션이 영구 소실되며(원장에 본문이 없다), (b) pass를 내면
+        # 본문은 새 소스의 사실인데 frontmatter의 sources·title은 옛 카드로 남아 provenance가
+        # 조용히 틀린다(2단계 `↳` 원문 경로가 엉뚱한 파일을 가리킨다).
+        # identity 조회로 찾은 경로(`target_reason != "explicit"`)는 정의상 일치하므로 통과.
+        agrees, mismatch = explicit_target_agrees(target, candidate)
+        if not agrees:
+            entry = {
+                "ts": now_iso(),
+                "candidate": record,
+                "matchedPath": record["targetPath"],
+                "matchedScore": 0,
+                "suggestedAction": "merge",
+                "reason": mismatch,
+            }
+            if merge_needed_path is not None:
+                append_jsonl(merge_needed_path, entry)
+            record["action"] = "merge-needed"
+            record["lint"] = {"verdict": "needs_review", "findings": [mismatch]}
+            append_jsonl(candidate_path, record)
+            print(json.dumps({
+                "action": "merge-needed",
+                "reason": mismatch,
+                "targetPath": record["targetPath"],
+            }, ensure_ascii=False))
+            return 0
     if target.exists():
         old = target.read_text(encoding="utf-8")
         auto_writable, findings = is_auto_writable_page(target)
@@ -1296,6 +1395,7 @@ def main() -> int:
         print(json.dumps({"action": "write-failed", "targetPath": record["targetPath"]}, ensure_ascii=False))
         return 1
 
+    status_reset_failed = False
     if action == "updated":
         # updated 경로는 AUTO_BLOCK만 치환하고 기존 frontmatter를 보존하므로, 이전
         # verified/contested 상태가 새 내용에 그대로 붙는 stale 검증이 된다 — 쓰기
@@ -1306,7 +1406,14 @@ def main() -> int:
             # 증명 필드는 빈 값으로 남기지 않고 **키째로 지운다** — `verifiedBy: ""`는
             # "한 번 기계 검수를 통과한 카드"로 읽히는 잔재고, 리셋된 카드에 그 흔적이
             # 남으면 안 된다(라이브 5장이 그 형태였다).
-            patch_frontmatter_fields(target, {"status": status, **clear_verification_updates(old_meta)})
+            #
+            # **반환값을 삼키면 안 된다.** 이 패치가 실패하면 카드 본문은 새 내용인데
+            # status는 `verified`로 남아 정확히 이 코드가 막으려던 stale 검증이 된다. 게다가
+            # 아래 verify enqueue는 `status == "generated"`만 대상이므로 재검증도 일어나지
+            # 않는다 — 조용히 "검수된 카드"로 남는 최악의 조합이다. 실패를 표면화하고
+            # **status와 무관하게 verify 큐에 넣어** 다음 run이 카드를 다시 대조하게 한다.
+            if not patch_frontmatter_fields(target, {"status": status, **clear_verification_updates(old_meta)}):
+                status_reset_failed = True
 
     record["action"] = action
     append_jsonl(candidate_path, record)
@@ -1329,7 +1436,7 @@ def main() -> int:
     # 카드 주장 vs 원문을 대조해 verified 승격 또는 (onFail) 삭제한다.
     verify_cfg = compile_cfg.get("verify") if isinstance(compile_cfg.get("verify"), dict) else {}
     verify_queued = False
-    if verify_cfg.get("enabled", True) and status == "generated":
+    if verify_cfg.get("enabled", True) and (status == "generated" or status_reset_failed):
         verify_queue_path = safe_compile_file(
             root, compile_dir, verify_cfg.get("queuePath", ".auto-context/compile/verify-queue.jsonl")
         )
@@ -1349,6 +1456,9 @@ def main() -> int:
     # 만든 검수 부채만큼 같은 run의 verify 예산을 늘려 큐가 배수보다 빨리 자라지 않게 한다.
     if verify_queued:
         result["verifyQueued"] = True
+    if status_reset_failed:
+        record["statusResetFailed"] = True
+        result["statusResetFailed"] = True
     if not index_ok:
         result["indexWriteFailed"] = True
         append_jsonl(candidate_path, {**record, "indexWriteFailed": True})

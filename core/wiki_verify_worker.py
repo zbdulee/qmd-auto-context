@@ -635,7 +635,14 @@ def process_verify_job(
     }
     if verdict == "pass":
         # status와 증명 필드는 한 쓰기로 함께 나간다(wc.stamp_verification이 유일한 경로).
-        wc.stamp_verification(target, "verified", engine, verified_mode)
+        # **반환값을 삼키면 안 된다.** 스탬프가 실패하면(디렉터리 권한·ENOSPC) 카드는
+        # `generated`로 남는데 로그에는 `verified`가 기록되고 큐에서도 사라져, 재시도 없이
+        # 유료 호출만 소모되고 `recallVerifiedOnly` 기본값 아래 그 카드가 **영구 비가시**가
+        # 된다(실측: 카드 디렉터리 chmod 500). 실패는 로그에 남기고 **잡을 보존**해 다음
+        # run이 다시 시도하게 한다 — 판정 자체는 유효하므로 재검증은 같은 결론을 낸다.
+        if not wc.stamp_verification(target, "verified", engine, verified_mode):
+            log_verdict(log_path, {**record, "result": "stamp_failed", "stampStatus": "verified"})
+            return False, True
         reindex_wiki(root, config)
         log_verdict(log_path, {**record, "result": "verified"})
         return True, False
@@ -643,11 +650,12 @@ def process_verify_job(
     # 여기까지 왔다는 것은 verifier가 유효 JSON verdict를 반환했다는 뜻이다 — CLI 부재(127)와
     # timeout/실행 실패는 위에서 이미 큐 보존으로 빠져나갔으므로 transient가 삭제로 흐를 수 없다.
     action = vcfg.get("onFail", "delete") if verdict == "fail" else vcfg.get("onInconclusive", "delete")
-    apply_negative_verdict(
+    applied = apply_negative_verdict(
         root, config, compile_cfg, vcfg, target, engine, verified_mode, action, verdict,
         sources, record, log_path
     )
-    return True, False
+    # 적용되지 않았으면(감사 원장 쓰기 실패·스탬프 실패) 잡을 보존해 다시 시도한다.
+    return (True, False) if applied else (False, True)
 
 
 def defer_or_drop(
@@ -689,12 +697,23 @@ def apply_negative_verdict(
     root: Path, config: dict, compile_cfg: dict, vcfg: dict, target: Path, engine: str,
     verified_mode: str, action: str, verdict: str, sources: list[dict], record: dict,
     log_path: Path,
-) -> None:
-    """Apply a fail/inconclusive verdict. Only inconclusive leaves a suppression marker."""
+) -> bool:
+    """Apply a fail/inconclusive verdict. Only inconclusive leaves a suppression marker.
+
+    Returns whether the verdict was applied. `False` means the caller must preserve the
+    job: the only reason is that the durable deletion ledger could not be written, and
+    machine verification is the one gate that removes cards.
+    """
     if action == "delete":
         # 감사 레코드를 먼저 쓴다 — 여기서 죽으면 "설명 없는 삭제"가 아니라
         # "삭제되지 않은 카드에 대한 레코드 1줄"만 남는 쪽으로 실패해야 한다.
-        record_verify_deletion(root, vcfg, sources, record, verdict)
+        # **반환값도 확인한다**(예외만 보면 안 된다): `False`면 원장에 한 줄도 남지 않으므로
+        # 삭제를 **하지 않는다**. 미검수 카드가 하루 더 남는 것과 설명 없이 사라진 카드는
+        # 등급이 다르다 — 후자는 복구도 사후 판단도 불가능하다(원장에 본문이 없다).
+        # 잡을 보존해 다음 run이 다시 시도한다.
+        if not record_verify_deletion(root, vcfg, sources, record, verdict):
+            log_verdict(log_path, {**record, "result": "delete_blocked", "reason": "audit_ledger_unwritable"})
+            return False
         # tombstone은 세우지 않는다 — 소스가 고쳐지면 재컴파일→재검증이 다시 열려야 한다.
         target.unlink(missing_ok=True)
         record_machine_delete(root, compile_cfg, record, verdict)
@@ -705,15 +724,22 @@ def apply_negative_verdict(
             suppressed = record_verify_suppression(root, vcfg, sources, record, verdict)
         reindex_wiki(root, config)
         log_verdict(log_path, {**record, "result": "deleted", "suppressedSources": suppressed})
-        return
+        return True
     if action == "contested":
-        wc.stamp_verification(target, "contested", engine, verified_mode)
+        # pass 경로와 같은 이유로 반환값을 확인한다. 여기서 실패하면 카드가 `generated`로
+        # 남아 recall에서 빠지므로(비가시) 조용히 넘기면 안 된다. 이 함수는 (processed,
+        # preserve)를 돌려주지 않으므로 실패 사실을 로그로만 표면화한다 — 다음 소스 변경이
+        # 카드를 재생성하고 다시 검수 대상이 된다.
+        if not wc.stamp_verification(target, "contested", engine, verified_mode):
+            log_verdict(log_path, {**record, "result": "stamp_failed", "stampStatus": "contested"})
+            return False
         reindex_wiki(root, config)
         log_verdict(log_path, {**record, "result": "contested"})
-        return
+        return True
     # none: 카드를 건드리지 않는다. inconclusive에서는 이것이 0.x 하위호환 경로 —
     # generated로 남아 recallVerifiedOnly 기본값 아래 recall에서 제외된다.
     log_verdict(log_path, {**record, "result": "inconclusive" if verdict == "inconclusive" else "kept"})
+    return True
 
 
 def _dedup_by_target(rows: list) -> list:
@@ -733,20 +759,31 @@ def _dedup_by_target(rows: list) -> list:
     return [(latest[key][0], latest[key][1]) for key in order]
 
 
-def run(root: Path, config: dict, compile_cfg: dict, produced: int = 0) -> dict:
+def run(
+    root: Path, config: dict, compile_cfg: dict, produced_targets: list[str] | None = None
+) -> dict:
     """Drain (part of) the verify queue. Caller has already passed compile gating.
 
-    `produced` = verify jobs the CALLING run just enqueued. The per-run budget is
-    `max(maxPerRun, produced)` because a fixed budget makes the queue grow faster
-    than it drains whenever a run compiles more cards than it verifies: with the
-    old fixed 3, a bulk backfill of N cards needed ceil(N/3) later runs before the
-    last card could leave `generated`, and under the default
-    `compile.recallVerifiedOnly: true` a `generated` card is invisible to recall.
-    Backfilling 924 sources that way meant ~308 runs of zero recall benefit.
-    Tying the floor to this run's own production makes verification keep pace with
-    production by construction — the backlog can only shrink, never grow — while
-    leaving the ordinary edit path untouched (one edit produces one or two cards,
-    far under the standing default).
+    `produced_targets` = card paths the CALLING run just enqueued. Two things depend
+    on it and both were wrong before:
+
+    **Budget.** A fixed `maxPerRun` makes the queue grow faster than it drains
+    whenever a run compiles more cards than it verifies, and a `generated` card is
+    invisible to recall under the default `compile.recallVerifiedOnly: true` — so
+    editing ten documents left accurate cards unusable for several runs. The budget
+    is therefore `max(maxPerRun, min(len(produced_targets), VERIFY_PRODUCED_HARD_CAP))`:
+      - a human's explicit `maxPerRun` is always honoured (it is a human decision),
+      - the part derived from **model output** is capped, because `produced` comes
+        from `len(candidates)` and the model decides that number. Without the cap a
+        single degenerate extractor response (40 cards) drove 200 paid verify calls
+        in one run — the model deciding how much the user is billed.
+
+    **Order.** Sizing the budget is not enough: the queue is FIFO, so `kept[:budget]`
+    spent the enlarged budget on the OLDEST backlog and left this run's own cards
+    `generated` — the exact outcome the enlargement was meant to prevent (measured:
+    4 backlog + 2 new, budget 2 → the 2 backlog cards verified, both new ones not).
+    This run's cards are processed first; leftover budget drains backlog, and one
+    slot is always reserved for backlog so it cannot starve during a bulk period.
     """
     result = {"processed": 0, "remaining": 0}
     vcfg = verify_cfg_of(compile_cfg)
@@ -774,10 +811,27 @@ def run(root: Path, config: dict, compile_cfg: dict, produced: int = 0) -> dict:
 
     malformed = [raw for raw, job in rows if job is None]
     kept = _dedup_by_target(rows)
-    max_per_run = int(vcfg.get("maxPerRun", 3) or 3)
-    budget = max(max_per_run, produced if isinstance(produced, int) and produced > 0 else 0)
-    to_process = kept[:budget]
-    remaining = [raw for raw, _ in kept[budget:]] + malformed
+    max_per_run = max(1, min(
+        int(vcfg.get("maxPerRun", 3) or 3), qmd_config.MAX_VERIFY_PER_RUN
+    ))
+    produced = {t for t in (produced_targets or []) if isinstance(t, str) and t}
+    budget = max(max_per_run, min(len(produced), qmd_config.VERIFY_PRODUCED_HARD_CAP))
+    # 이 run이 만든 카드 먼저, 그 다음 backlog. 큐 순서를 바꾸는 것이 아니라 **처리 순서**만
+    # 정한다(`kept`는 이미 `_dedup_by_target`가 targetPath별 latest-wins로 재구성한 목록이고
+    # FIFO는 계약이 아니다). 처리되지 않은 줄은 전부 `remaining`으로 되돌아가므로 유실이 없다.
+    fresh = [item for item in kept if item[1].get("targetPath") in produced]
+    backlog = [item for item in kept if item[1].get("targetPath") not in produced]
+    take_fresh = fresh[:budget]
+    leftover = budget - len(take_fresh)
+    if leftover == 0 and backlog:
+        # **기아 방지 예약 1건.** 생산량이 예산을 다 먹는 run이 연속되면 backlog가 영원히
+        # 밀린다. 유료 호출 1회를 더 쓰는 대신 backlog가 항상 전진한다(상한은 여전히 유계:
+        # budget + 1).
+        leftover = 1
+    take_backlog = backlog[:leftover]
+    to_process = take_fresh + take_backlog
+    deferred = [raw for raw, _ in fresh[len(take_fresh):]] + [raw for raw, _ in backlog[len(take_backlog):]]
+    remaining = deferred + malformed
     processed_count = 0
     try:
         for idx, (raw_line, job) in enumerate(to_process):
@@ -797,6 +851,13 @@ def run(root: Path, config: dict, compile_cfg: dict, produced: int = 0) -> dict:
         queue.touch(exist_ok=True)
     result["processed"] = processed_count
     result["remaining"] = len(remaining)
+    result["budget"] = budget
+    result["freshProcessed"] = len(take_fresh)
+    result["backlogProcessed"] = len(take_backlog)
+    # 모델 출력이 예산을 밀어올리려다 상한에 걸린 사실은 관측 가능해야 한다 — 이 줄이 없으면
+    # "카드를 40장 만들었는데 30장만 검수됐다"가 조용한 상태로 남는다.
+    if len(produced) > qmd_config.VERIFY_PRODUCED_HARD_CAP:
+        result["producedCapped"] = len(produced)
     return result
 
 
