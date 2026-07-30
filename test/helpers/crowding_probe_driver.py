@@ -38,31 +38,52 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 RAW_DOCS = [f"proj/raw{i}.md" for i in range(1, 26)]
 WIKI_DOCS = [f"proj-wiki/concepts/card{i}.md" for i in range(1, 21)]
 
-# 시나리오별 (전역 창의 raw 수, 도달 가능한 wiki pool 크기)
+# 시나리오별 (전역 창의 raw 수, 필터 질의가 내는 wiki 수)
 SCENARIOS = {
-    # pool 3 < recall limit 8 → 굶는다
+    # post-filter 형태(필터 결과 ⊆ 전역 창) + wiki 3 < recall limit 8 → 판정 불가, 상한 5
     "crowded": (25, 3),
-    # pool 12 >= 8 → 창은 raw가 먹었지만 recall은 8칸을 다 받는다
+    # post-filter 형태 + wiki 12 >= 8 → 굶은 칸 상한 0
     "insulated": (25, 12),
-    # 창에 raw가 0 → 되찾을 칸이 없어 pool이 작아도 starved 0 이어야 한다
+    # 전역 결과에 raw 0 → 되찾을 칸이 없어 상한도 0 이어야 한다
     "all-wiki": (0, 2),
+    # 필터 결과가 전역 창 밖 문서를 낸다 → 독립 검색 증명
+    "scoped": (25, 12),
 }
+# 프로브마다 wiki 수를 다르게 만든다. 같은 수가 반복되면 detect_engine_cap 이 cap 으로
+# 의심하므로(그게 lex-cap 시나리오의 요지) ambiguous 분기를 시험하려면 값이 달라야 한다.
+seen_queries: list[str] = []
+# scoped: 필터 질의가 전역 창에 **없던** 문서를 낸다 → 독립 검색 증명 → 판정 가능
+SCOPED_EXTRA = [f"proj-wiki/concepts/scoped{i}.md" for i in range(1, 6)]
+# lex-cap: 어휘가 다른 프로브들이 **같은 수**를 반복한다(cap 서명). 전역 창의 wiki 부분집합과
+# 정확히 일치시켜 scoped 증명이 나오지 않게 한다 → engine_cap_suspected 로만 판정 불가.
+LEX_CAP_WIKI = 20
+LEX_CAP_GLOBAL_RAW = 20
 
 payloads: list[dict] = []
 scenario = "crowded"
 
 
-def _pool() -> list[str]:
-    return WIKI_DOCS[:SCENARIOS.get(scenario, SCENARIOS["crowded"])[1]]
+def _wiki_hits(query: str) -> list[str]:
+    if scenario == "lex-cap":
+        return WIKI_DOCS[:LEX_CAP_WIKI]
+    if query not in seen_queries:
+        seen_queries.append(query)
+    base = SCENARIOS.get(scenario, SCENARIOS["crowded"])[1]
+    return WIKI_DOCS[:base + seen_queries.index(query)]
 
 
-def _global_window(limit: int) -> list[str]:
+def _global_window(query: str, limit: int) -> list[str]:
+    if scenario == "lex-cap":
+        return (RAW_DOCS[:LEX_CAP_GLOBAL_RAW] + _wiki_hits(query))[:limit]
     raw_count = SCENARIOS.get(scenario, SCENARIOS["crowded"])[0]
-    return (RAW_DOCS[:raw_count] + _pool())[:limit]
+    return (RAW_DOCS[:raw_count] + _wiki_hits(query))[:limit]
 
 
-def _filtered(limit: int) -> list[str]:
-    return _pool()[:limit]
+def _filtered(query: str, limit: int) -> list[str]:
+    if scenario == "scoped":
+        # 전역 창 앞에 오지 않는 문서를 먼저 내놓아 newVsGlobal > 0 을 만든다.
+        return (SCOPED_EXTRA + _wiki_hits(query))[:limit]
+    return _wiki_hits(query)[:limit]
 
 
 class _Handler(http.server.BaseHTTPRequestHandler):
@@ -82,10 +103,21 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         payloads.append(payload)
         if scenario == "bad-response":
             body = b'{"results": "not-a-list"}'
+        elif scenario == "null-response":
+            # object 가 아닌 JSON — 예전엔 `.get` 이 AttributeError 로 실행 전체를 죽였다.
+            body = b"null"
+        elif scenario == "array-response":
+            body = b"[1, 2, 3]"
+        elif scenario == "query-500":
+            self.send_response(500)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         else:
             limit = payload.get("limit") or 0
-            files = (_filtered(limit) if payload.get("collections")
-                     else _global_window(limit))
+            query = ((payload.get("searches") or [{}])[0]).get("query", "")
+            files = (_filtered(query, limit) if payload.get("collections")
+                     else _global_window(query, limit))
             body = json.dumps({
                 "results": [{"file": f, "title": f, "score": 1} for f in files]
             }).encode("utf-8")
@@ -149,11 +181,27 @@ def run_unit(expr: str) -> int:
     return 0
 
 
+def run_unit_exec(script: str) -> int:
+    """`result` 변수를 JSON으로 낸다. `captured()`로 대상 코드의 stdout을 회수한다."""
+    import io
+    import contextlib
+    sys.path.insert(0, str(REPO_ROOT / "core"))
+    import crowding_probe as cp  # noqa: F401
+    buffer = io.StringIO()
+    scope = {"cp": cp, "json": json, "captured": buffer.getvalue}
+    with contextlib.redirect_stdout(buffer):
+        exec(script, scope)  # noqa: S102 - 테스트 드라이버
+    print(json.dumps(scope.get("result"), ensure_ascii=False))
+    return 0
+
+
 def main() -> int:
     global scenario
     options = json.loads(sys.argv[1]) if len(sys.argv) > 1 else {}
     if options.get("action") == "unit":
         return run_unit(options["unit"])
+    if options.get("action") == "unit_exec":
+        return run_unit_exec(options["unit"])
     scenario = options.get("scenario", "crowded")
 
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)

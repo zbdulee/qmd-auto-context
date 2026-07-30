@@ -267,29 +267,50 @@ title: "claude-runner — 구독 기반 Claude Code headless AI 실행 계층"
   1·2·3단계 라이브 불변식 유지(876항목 / 주입 842 / drop 34 = missing 32 + kind_not_file 2,
   감지 verified 7 / generated 18)
 
-**5단계 — crowding 반복 측정 + baseline** (상세·수치는
+**5단계 — crowding 반복 측정 + baseline** (`cebff29` → 리뷰 반영 `HEAD`. 상세·수치는
 `2026-07-30-raw-index-crowding-measurement.md` 의 "5단계" 절). 결론:
 
 - **원래 문구("raw 있는 상태에서 shadow baseline 수집")는 성립하지 않는다.** 라이브 두
-  프로젝트가 이미 `recallStrategy: wikiOnly` 라 raw 는 recall 되지 않는다 — 남은 문제는
-  인덱스 점유뿐이고 그것은 이미 수동 측정됐다. 5단계에 남은 일은 그 측정을 **프로젝트별로
-  반복 가능하게** 만들어 8단계가 제거 전/후를 비교하게 하는 것이다
-- **창 점유율은 recall 피해가 아니다(정정).** "창 21칸 중 wiki 2칸 → 약 10배" 추론은
-  recall 의 limit 이 내부 창과 같다는 전제를 요구하는데, recall 은 `limit: 8`이고 내부 창은
-  21~28 이다. 도달 가능한 wiki pool 이 8보다 크면 recall 은 8칸을 그대로 받는다 — 그래서
-  도구는 `windowCrowding`(창 점유 사실)과 `recallStarvation`(실제 칸 손실)을 **분리**해
-  보고한다. 넓은 프로브 3종에서 굶는 것은 1/3 이고, 원 측정의 프로브를 재생하면 그것은
-  가장 나쁜 쪽(8칸 중 2칸, 굶은 칸 6)이었다
+  프로젝트가 이미 `recallStrategy: wikiOnly` 라 raw 는 recall 되지 않으므로 그 baseline 은
+  존재하지 않는다 — 남은 일은 인덱스 점유 측정을 **프로젝트별로 반복 가능하게** 만들어
+  8단계가 제거 전/후를 비교하게 하는 것이다
+- **대원칙: 틀린 판정은 없는 판정보다 나쁘다.** 리뷰 라운드에서 major 4건이 나왔고 셋이
+  판정의 타당성이었다. 산출물이 8단계 결정 근거이므로 관측이 두 세계를 구분하지 못하면
+  `measurable: false` + 이유로 보고한다
+- **선행 측정의 결론 두 개가 모두 틀렸다.** (a) "창 21칸 중 wiki 2칸 → 약 10배"는 recall 의
+  limit 이 내부 창과 같다는 전제를 요구하지만 recall 은 `limit: 8`, 내부 창은 21~28 이다.
+  (b) "lex 는 crowding 없음"은 결론만 맞고 근거가 틀렸다 — **lex 는 컬렉션당 20 · 전역 병합
+  40 cap** 이라 `40` 은 창이 아니고, "새로 등장 6~16"은 wiki 가 자기 20칸 cap 을 받은 것이다
+- **1차 구현의 lex 판정은 극성이 뒤집혀 있었다.** `'호갱노노'`(피해 0, 필터 20 = 창의 wiki
+  20)를 crowding 으로, `'판정'`(필터 20 > 창의 wiki 16)을 crowding 아님으로 집계했다 — 즉
+  **피해 없는 프로브만** 근거로 삼고 증거 있는 프로브를 배제했다. 정정: 두 세계를 가르는
+  **양성 증거는 하나**(필터 결과가 전역 창의 부분집합이 **아님** → 독립 검색 증명, 엔진의
+  성질이라 경로 전체에 적용)이고, lex 는 그 증거로 `recallStarvation: false`가 **증명**된다
+- **`starvedSlots` 는 피해가 아니라 상한이고 하한은 없다(항상 0).** `wikiPoolDeep`("도달
+  가능한 pool")은 실제로는 **점유당한 창 안의 wiki 수**라 이름이 측정을 잘못 말했다 →
+  `wikiInDeepWindow` / `starvedSlotsUpperBound` + `…LowerBound` 로 개명. 비-wiki cap 은
+  반례를 막지 못한다(headline 프로브가 pool 2 / 비-wiki 19 로 상한 6 을 내지만 "밀려남"과
+  "매칭 2건뿐"은 여전히 구분 불가). **구분은 raw 제거 후 재측정으로만 결정된다**
+- **`windowCrowding` boolean 을 제거했다** — 창 점유(구성 사실)를 "crowding"으로 부르면
+  recall 피해로 오독되고, 그 오독이 이 도구가 정정하려는 오류 자체다. 창 구성은 숫자로만 낸다
+- **오차는 양방향이다.** 프로브를 wiki 어휘에서 파생하므로 wiki 에 유리하다(novel wiki 는
+  인덱스의 4% 인데 recall 창의 wiki 칸 평균 58% = 약 14배 enrichment) → 굶은 칸은 **과소**.
+  반대로 cap 을 창으로 오인하면 **과대**(1차 구현). 표본은 넓은 프로브 3개·신뢰구간 없음이고,
+  표본 수가 binding constraint 가 아니다(식별 불가라 늘려도 판정이 안 나온다)
+- **fail-open 구멍 둘**: (a) 응답이 object 가 아니면(`null`·배열) `.get` 이 AttributeError 로
+  **실행 전체를 죽였고 append 가 마지막 1회뿐이라 앞선 질의가 전부 유실**됐다 → 질의는 어떤
+  응답에도 status 로만 답하고 `build_record` 예외도 `status: error` 레코드를 남긴다.
+  (b) **전 질의 실패 런이 `status: "ok"` 로 원장에 남아** 열화된 after 가 온전한 before 와
+  조용히 비교됐다 → `status` ∈ {ok, degraded, all_queries_failed, budget_exhausted, error} +
+  `comparable` 로 배제 가능하게 했다(예산 소진은 응답 실패와 분리해 "왜"를 남긴다)
 - **shadow 확장이 아니라 별도 진단 CLI** (`core/crowding_probe.py`). 필터 없는 전역 질의 ×
   큰 limit × 천장 사다리는 blocking hook 예산에 들어갈 수 없고, shadow 의 프로브(사용자
   프롬프트)는 재현되지 않는다. 어떤 hook 도 이 모듈을 import 하지 않고 테스트가 고정한다
-- **프로브는 wiki 코퍼스에서 결정적으로 파생**한다 — 판정용은 카드 title 의 상위 빈도
-  어휘(좁은 질의는 창을 못 채워 구조적으로 판정 불가), 대조군은 title 표집.
-  **lex 는 최빈 토큰 하나만** 보낸다(qmd 가 한 lex 문자열의 term 을 AND 결합한다)
-- **리터럴 8 을 `recall.DAEMON_QUERY_LIMIT` 로 모았다.** 측정 기준 limit 이 recall 이
-  실제로 보내는 값과 갈리면 측정이 무의미해지는데, 그 값이 세 곳에 흩어져 있었다
-- 원장은 append-only JSONL 이고 기본 위치가 **프로젝트 밖**이다 — 측정이 측정 대상을
-  변경하면 baseline 의 전제(라이브 카드·설정 불변)가 깨진다
+- **리터럴 8 을 `recall.DAEMON_QUERY_LIMIT` 로 모았다** — 측정 기준 limit 이 recall 이 실제
+  보내는 값과 갈리면 측정이 무의미해지는데 두 곳에 흩어져 있었다
+- 원장은 append-only JSONL 이고 SSOT 는 repo 파일 `docs/plans/data/crowding-baseline.jsonl`
+  이다(1차 레코드도 지우지 않고 `label`/`schema` 로 구분). 기본 경로는 프로젝트 밖 —
+  측정이 측정 대상을 변경하면 baseline 의 전제가 깨진다
 - 1~4단계 회귀 0: 주입 stdout 이 6 시나리오 전부 `161ac2e` 와 **바이트 동일**(sha256 동일),
   라이브 불변식 유지(849장 876항목 / 주입 842 / drop 34 = missing 32 + kind_not_file 2,
   감지 verified 7 / generated 18)

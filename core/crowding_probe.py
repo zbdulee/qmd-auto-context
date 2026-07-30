@@ -27,32 +27,49 @@ frontmatter 파서, 로그 append)에서 하고 실행 경로는 분리한다:
 
 이 모듈은 어떤 hook에서도 import되지 않는다 — blocking hook 비용은 **구조적으로 0**이다.
 
-## 판정 — 창 점유와 recall 피해를 **분리**한다
+## 판정 — 측정할 수 없는 것은 "측정 불가"로 보고한다
 
-프로브 하나에 대해 같은 검색을 (a) 필터 없이 (b) 프로젝트 wiki 컬렉션으로 필터해서,
-두 limit에서 각각 비교한다(질의 4회). 필터 결과에 전역 창에 없던 문서가 **새로
-등장하면** 필터가 그 창 이전에 적용된 것이다.
+**틀린 판정은 없는 판정보다 나쁘다.** 이 산출물이 8단계(raw 제거) 결정 근거이므로,
+관측이 두 세계를 구분하지 못하면 판정을 내지 않고 `measurable: false` + 이유를 남긴다.
 
-두 층이 갈리고, 이 도구는 갈린 채로 보고한다:
+측정: 프로브 하나에 같은 검색을 (a) 필터 없이 (b) 프로젝트 wiki 컬렉션으로 필터해
+두 limit(recall 실제 limit, 큰 deep limit)에서 비교한다(질의 4회).
 
-- `windowCrowding` — 엔진 **내부 창**(deep limit)을 비-wiki가 점유하는가. 원 측정이
-  본 값이고, 여기서도 재현된다(필터 시 새 문서 0 = 창 이후 필터).
-- `recallStarvation` — 그 점유가 **recall이 실제로 받는 후보 수를 줄이는가**. raw
-  제거의 이득은 이쪽에만 있다.
+recall이 raw 때문에 굶을 수 있는 경로는 **하나뿐**이다: 엔진이 전역 후보 창을 먼저
+만들고 **그 다음에** 컬렉션 필터를 적용하는 경우(post-filter). 그러면
+recall이 받는 수 = min(limit, |전역 창 ∩ wiki|)이고, raw가 창을 비우면 그 수가 늘 수
+있다. 반대로 엔진이 컬렉션별로 **독립 검색**한 뒤 병합하면 raw 유무는 recall이 받는
+후보에 영향이 없다.
 
-**둘은 실제로 갈린다.** recall은 `limit: 8`로 질의하는데(`recall.DAEMON_QUERY_LIMIT`),
-그 limit에서는 wiki 필터 질의가 전역 창에 없던 문서를 새로 내놓는다(실측:
-service-engineering vec 전역 8칸 중 wiki 3칸 → wiki 필터 8칸, 새로 등장 5). 즉 내부
-창 21~28칸을 raw가 먹어도, 도달 가능한 wiki pool이 8보다 크면 recall은 굶지 않는다.
-피해는 `wikiPoolDeep < recallLimit`일 때만 생기고 그 부족분이 `starvedSlots`다.
+이 둘을 가르는 **양성 증거**는 하나다: `filteredDeep`에 전역 창에 없던 문서가 등장하면
+(`newVsGlobal > 0`) 필터 결과가 전역 창의 부분집합이 아니므로 **독립 검색이 증명된다**.
+이는 질의별 성질이 아니라 **엔진의 성질**이라 한 프로브의 증명이 그 경로 전체에 적용된다.
 
-**창 점유율만 보고 "recall이 10배 손해"라고 읽으면 안 된다** — 그 추론은 recall의
-limit이 내부 창과 같다는 전제를 요구하고, 실제로는 8 대 21~28이다.
+- `filterOrder: "scoped_retrieval_proven"` → raw는 recall이 받는 후보를 줄일 수 없다.
+  `recallStarvation: false`가 **증명**된다(가정이 아니다).
+- `filterOrder: "unresolved"` → `newVsGlobal == 0`. post-filter와도, 독립 검색인데 결과가
+  우연히 일치한 것과도 모두 일치한다 → **측정 불가**. 굶은 칸은 상한만 보고한다.
 
-프로브 종류를 둘로 나눈다: 카드 title은 너무 좁아 내부 창을 채우지 못하므로(실측
-점유 1~2칸) **wiki 코퍼스 상위 빈도 어휘**로 만든 넓은 프로브가 판정을 담당하고,
-title 프로브는 "평상시 좁은 질의에서는 무슨 일이 일어나는가"를 같은 레코드에 남긴다
-(`narrowProbeSummary`).
+실측(2026-07-30): **lex는 컬렉션당 20 · 전역 병합 40 cap**이라 `40`은 창이 아니라 cap이고,
+`'판정'` 프로브에서 필터 결과 20 > 창의 wiki 16 이므로 **독립 검색이 증명된다**.
+**vec은 6/6 프로브에서 필터 결과가 창의 wiki 부분집합과 정확히 일치**하고 창에 0칸이던
+컬렉션을 scope하면 0을 돌려준다 — post-filter와 일치하지만 유사도 floor로도 설명되므로
+증명은 아니다 → vec은 `unresolved`다.
+
+## `starvedSlotsUpperBound`는 피해가 아니라 상한이다
+
+`min(recallLimit − min(recallLimit, wikiInDeepWindow), 비-wiki 점유 칸)`.
+**하한은 이 도구가 제공하지 않는다(항상 0).** `wikiInDeepWindow`는 "도달 가능한 wiki
+총량"이 아니라 **점유당한 창 안의 wiki 수**이므로, 그 값이 작은 것이 "매칭이 적어서"인지
+"밀려나서"인지 구분되지 않는다. 그 구분은 **raw를 제거해 재측정할 때만** 결정된다 —
+이 도구의 존재 이유가 전/후를 같은 방법으로 비교 가능하게 만드는 것이다.
+8단계가 이 값을 피해로 읽으면 과대 판정한다.
+
+## 프로브 편향
+
+프로브를 wiki 코퍼스에서 파생하므로 wiki에 유리하게 편향된다(실측: novel wiki는 인덱스의
+4%인데 recall 창의 wiki 칸 평균 58% = 약 14배 enrichment). 즉 굶은 칸은 **과소** 추정이다.
+좁은 프로브(카드 title)는 창을 못 채워 별도로 남긴다(`narrowProbeSummary`).
 """
 from __future__ import annotations
 
@@ -74,7 +91,7 @@ import config as qmd_config
 import keywords as qmd_keywords
 import recall as qmd_recall
 
-SCHEMA = "qmd_crowding_probe/1"
+SCHEMA = "qmd_crowding_probe/2"
 
 DEFAULT_PROBES = 3
 DEFAULT_TITLE_PROBES = 2
@@ -202,6 +219,7 @@ def index_composition(qmd_bin: str | None, project_roles: dict[str, str],
         roles[name] = role
         by_role[role] = by_role.get(role, 0) + files
     total = sum(counts.values())
+    wiki_files = by_role.get("wiki", 0)
     return {
         "status": "ok",
         "collections": len(counts),
@@ -210,7 +228,16 @@ def index_composition(qmd_bin: str | None, project_roles: dict[str, str],
         "byCollection": counts,
         "roleByCollection": roles,
         "projectWikiFiles": sum(counts.get(n, 0) for n in wiki_names),
+        # **비-wiki가 headline 이다.** role별 분류는 설정 파일이 있는 컬렉션에만 가능해
+        # 레거시 컬렉션이 unknown 으로 빠지는데(이 머신 1034 파일), 창 점유 관점에서는
+        # raw 든 unknown 이든 똑같이 wiki 를 밀어내는 쪽이다. 이름 기반 추정(`*-manuscript`
+        # → raw)과 설정 기반 분류가 갈려 보이던 것은 실은 같은 수를 다른 입도로 센 것이다.
+        "wikiFiles": wiki_files,
+        "nonWikiFiles": total - wiki_files,
+        "nonWikiShare": round((total - wiki_files) / total, 3) if total else None,
         "roleSource": "project-config + per-collection root lookup",
+        "roleNote": "설정 파일이 없는 레거시 컬렉션은 unknown이다(추측하지 않는다). "
+                    "비-wiki 집계는 unknown을 포함하므로 판정에 영향이 없다.",
     }
 
 
@@ -323,13 +350,30 @@ def title_probes(titled: list[tuple[str, str]], count: int) -> list[dict]:
 
 
 class Budget:
-    """질의 수·간격·전체 wall-clock을 한곳에서 유계로 만든다."""
+    """질의 수·간격·전체 wall-clock을 한곳에서 유계로 만들고 **실패 수를 센다**.
+
+    실패 수가 필요한 이유: append-only 전/후 원장에서 열화된 "after"가 온전한 "before"와
+    조용히 비교되면 안 된다. 레코드 `status`/`comparable`이 이 카운터에서 나온다.
+    """
 
     def __init__(self, interval: float, budget: float) -> None:
         self.interval = max(0.0, interval)
         self.deadline = time.monotonic() + max(0.0, budget)
+        # attempts = 실제로 HTTP 를 시도한 수, queries 는 하위호환 별칭.
         self.queries = 0
+        self.ok = 0
+        self.failures = 0
+        # 예산 소진으로 **시도조차 못 한** 질의. 실패와 구분해야 status 가 "왜"를 남긴다.
+        self.budget_skips = 0
         self._last = 0.0
+
+    def status(self) -> str:
+        if self.ok == 0 and (self.failures or self.budget_skips):
+            return "budget_exhausted" if self.budget_skips and not self.failures \
+                else "all_queries_failed"
+        if self.failures or self.budget_skips:
+            return "degraded"
+        return "ok"
 
     def exhausted(self) -> bool:
         return time.monotonic() >= self.deadline
@@ -351,6 +395,7 @@ def query_daemon(daemon_url: str, searches: list[dict], collections: list[str] |
     키를 생략하는 경로를 반드시 유지해야 한다.
     """
     if budget.exhausted():
+        budget.budget_skips += 1
         return {"status": "budget_exhausted"}
     payload: dict = {
         "searches": searches,
@@ -361,6 +406,7 @@ def query_daemon(daemon_url: str, searches: list[dict], collections: list[str] |
     }
     if collections is not None:
         if not collections:
+            budget.failures += 1
             return {"status": "no_collections"}
         payload["collections"] = list(collections)
     budget.before_query()
@@ -373,11 +419,18 @@ def query_daemon(daemon_url: str, searches: list[dict], collections: list[str] |
         )
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             body = resp.read().decode("utf-8")
-        results = json.loads(body).get("results", [])
-    except (urllib.error.URLError, OSError, ValueError, json.JSONDecodeError):
+        parsed = json.loads(body)
+        # 응답이 object가 아니면(`null`·배열·문자열) `.get`이 AttributeError를 던져
+        # **실행 전체가 죽고 원장에 아무것도 남지 않았다** — append는 마지막에 1회뿐이라
+        # 앞선 질의가 전부 유실된다. 진단 경로는 어떤 응답에도 status로만 답해야 한다.
+        results = parsed.get("results", []) if isinstance(parsed, dict) else None
+    except Exception:  # noqa: BLE001 - 진단 질의는 절대 예외를 밖으로 내지 않는다
+        budget.failures += 1
         return {"status": "unavailable"}
     if not isinstance(results, list):
+        budget.failures += 1
         return {"status": "bad_response"}
+    budget.ok += 1
     # 결과 수를 `files` 길이로 센다 — `file`이 없는 항목은 컬렉션 귀속이 불가해 창 구성
     # 집계에 쓸 수 없다. len(results)를 따로 두면 두 카운트가 갈려 오독을 만든다.
     files = []
@@ -412,13 +465,13 @@ def measure_path(daemon_url: str, path_type: str, probe_query: str,
                  timeout: float, budget: Budget) -> dict:
     """한 프로브 × 한 경로(vec|lex): 두 limit × {전역, wiki 필터} = 질의 4회.
 
-    **recall_limit(=recall이 실제로 쓰는 limit)에서 재는 것이 본체다.** crowding이
-    recall을 해치는 유일한 경로는 "wiki 후보가 recall의 칸 수를 못 채우는 것"이므로,
-    deep_limit(엔진 내부 창)만 재면 창 점유율은 나오지만 **피해 여부는 나오지 않는다**.
+    두 limit 이 하는 일이 다르다:
+    - `recall_limit`(=recall이 실제로 보내는 limit) — recall이 **받는 후보 수**를 잰다.
+      피해가 있다면 그것이 줄어드는 형태로만 나타난다.
+    - `deep_limit` — 필터 순서 판정(`scopedRetrievalProven`)과 전역 결과 구성.
+      **lex에서는 이 값이 창이 아니라 엔진 cap일 수 있다**(`detect_engine_cap`).
 
-    deep_limit 쌍은 두 가지를 준다: (a) 엔진 내부 창의 크기·컬렉션 구성(이 문서군의
-    원 측정과 대조 가능), (b) `wikiPoolDeep` — 창을 통해 도달 가능한 wiki 문서 총량.
-    이 pool이 recall_limit보다 작을 때만 raw 제거가 recall에 칸을 더 줄 수 있다.
+    어느 limit 에서도 "밀려난 wiki 문서 수"는 직접 관측되지 않는다 — 상한만 나온다.
     """
     searches = [{"type": path_type, "query": probe_query}]
     blocks = {
@@ -454,27 +507,31 @@ def measure_path(daemon_url: str, path_type: str, probe_query: str,
         }
 
     recall_filled = entry["filteredRecall"]["count"]
-    pool_deep = entry["filteredDeep"]["count"]
+    wiki_in_deep = entry["filteredDeep"]["count"]
     entry["recallSlotsFilled"] = recall_filled
     entry["recallSlotsUnfilled"] = max(0, recall_limit - recall_filled)
-    entry["wikiPoolDeep"] = pool_deep
-    # recall limit에서 필터가 창 **이전**에 적용된다(= 창에 없던 wiki 문서가 등장).
-    # 이것이 참이면 recall은 전역 경쟁 결과와 무관하게 자기 limit만큼 wiki 후보를 받는다
-    # — 즉 raw가 전역 창을 얼마나 점유하든 recall은 그만큼 굶지 않는다.
-    entry["filterBeforeRecallWindow"] = entry["filteredRecall"]["newVsGlobal"] > 0
-    # 엔진 내부 창(deep)에서 필터가 창 이후인가. 창에 비-wiki가 하나도 없으면 걸러낼
-    # 것이 없어 "새로 등장 0"이 공허하게 참이 된다 → 그 경우는 undetermined(None)다.
+    # **이름 주의**: "도달 가능한 wiki pool"이 아니다. 필터 질의가 deep limit에서 낸
+    # wiki 문서 수이고, post-filter 엔진에서는 그것이 곧 |전역 창 ∩ wiki|다. 이 값이
+    # 작은 것이 "매칭이 적어서"인지 "밀려나서"인지는 이 관측으로 구분되지 않는다.
+    entry["wikiInDeepWindow"] = wiki_in_deep
     non_wiki_deep = entry["globalDeep"]["slots"] - entry["globalDeep"]["projectWikiSlots"]
     entry["deepWindowNonWikiSlots"] = non_wiki_deep
-    entry["deepFilterAfterWindow"] = (
-        None if non_wiki_deep == 0 else entry["filteredDeep"]["newVsGlobal"] == 0)
-    # raw 제거가 recall에 칸을 더 줄 수 있는 조건: 도달 가능한 wiki pool이 recall limit
-    # 보다 작을 때. 다만 **되찾을 수 있는 칸은 비-wiki가 점유한 칸을 넘지 못한다** —
-    # 창이 전부 wiki인데 pool이 2건이면 매칭 문서가 2건뿐인 것이고 raw와 무관하다
-    # (좁은 프로브에서 pool 2 / 비-wiki 0인데 6칸 굶었다고 세던 오산).
-    entry["poolBelowRecallLimit"] = pool_deep < recall_limit
-    entry["starvedSlots"] = min(
-        max(0, recall_limit - min(recall_limit, pool_deep)), non_wiki_deep)
+
+    # 관측만 남긴다(추론 아님): recall limit에서 필터 결과에 창에 없던 문서가 몇 건인가.
+    # 예전엔 이 값 > 0 을 "필터가 창 이전"의 증거로 썼으나 **틀렸다** — post-filter
+    # 엔진도 큰 전역 창을 만든 뒤 limit으로 자르므로, 작은 limit의 전역 결과에는 없던
+    # 문서가 필터 결과에 있을 수 있다. 필터 순서 판정은 deep limit에서만 성립한다.
+    entry["newInFilteredAtRecallLimit"] = entry["filteredRecall"]["newVsGlobal"]
+
+    # **유일한 양성 증거**: deep limit에서 필터 결과가 전역 창의 부분집합이 아니다
+    # → 필터 질의가 전역 창을 걸러낸 것이 아니라 독립 검색을 했다(엔진의 성질).
+    entry["scopedRetrievalProven"] = entry["filteredDeep"]["newVsGlobal"] > 0
+    # 우리 deep limit이 필터 결과를 잘랐으면 wikiInDeepWindow가 절단값이라 판정 불가.
+    entry["filteredDeepTruncated"] = wiki_in_deep >= deep_limit
+    entry["starvedSlotsUpperBound"] = min(
+        max(0, recall_limit - min(recall_limit, wiki_in_deep)), non_wiki_deep)
+    # 하한은 이 도구가 제공하지 않는다. 필드로 못박아 8단계가 상한을 피해로 읽지 못하게 한다.
+    entry["starvedSlotsLowerBound"] = 0
     entry["informative"] = entry["globalDeep"]["slots"] > 0
     if not entry["informative"]:
         entry["skipReason"] = "no_global_results"
@@ -515,72 +572,131 @@ def ceiling_ladder(daemon_url: str, probe_query: str, timeout: float,
 # ---------------------------------------------------------------- verdict
 
 
-def summarize_path(entries: list[dict]) -> dict:
-    """경로 하나의 판정. 두 층을 **분리해서** 낸다.
+def detect_engine_cap(entries: list[dict], deep_limit: int) -> dict:
+    """엔진의 결과 수 **cap**을 창과 구분한다.
 
-    - `windowCrowding`: 엔진 내부 창을 비-wiki가 점유하는가(구성 사실).
-    - `recallStarvation`: 그 점유가 **recall이 받는 칸 수를 실제로 줄이는가**(피해).
-      raw 제거의 이득은 이쪽에만 있다. 두 값이 갈릴 수 있고 실제로 갈린다 —
-      창은 raw가 먹었는데 wiki pool이 recall limit보다 크면 recall은 굶지 않는다.
+    실측(2026-07-30): qmd의 lex(FTS)는 **컬렉션당 20 · 전역 병합 40** cap이다. 그래서
+    `deepLimit=200`에서 나온 `40`은 "내부 창 크기"가 아니라 cap이고, `wikiInDeepWindow=20`
+    도 cap 값이다 — 이 값으로 굶은 칸을 계산하면 `--recall-limit > 20`에서 **확정 오탐**이다.
+
+    감지 신호: 어휘가 다른 프로브 둘 이상이 **정확히 같은** 결과 수를 냈고 그 값이
+    deep limit 미만이면 cap이다. 서로 다른 질의의 매칭 문서 수가 우연히 같은 값으로
+    반복될 확률은 낮다. `suspected`로만 부르고(증명 아님) 판정은 보수적인 쪽으로만
+    움직인다 — 오탐이면 이미 `unresolved`였을 판정의 **이유만** 바뀐다.
+    """
+    signals = {}
+    for key, field in (("filtered", "wikiInDeepWindow"), ("global", "slots")):
+        counts = [
+            (e[field] if field != "slots" else e["globalDeep"]["slots"])
+            for e in entries if e.get("informative")
+        ]
+        repeated = sorted({c for c in counts if counts.count(c) >= 2 and 0 < c < deep_limit})
+        if repeated:
+            signals[key] = repeated
+    return {"suspected": bool(signals), "repeatedCounts": signals}
+
+
+def summarize_path(entries: list[dict], deep_limit: int) -> dict:
+    """경로 하나의 판정. **측정 불가는 판정하지 않는다.**
+
+    raw가 recall을 굶길 수 있는 경로는 "전역 창을 만든 뒤 컬렉션 필터"(post-filter)
+    하나뿐이다. 그것을 반증하는 양성 증거(`scopedRetrievalProven`)가 있으면
+    `recallStarvation: false`를 **증명**하고, 없으면 `measurable: false`로 남긴다.
+
+    `windowCrowding` 같은 boolean은 두지 않는다 — 창 점유(구성 사실)를 "crowding"으로
+    부르면 recall 피해로 오독되고, 그 오독이 이 도구가 정정하려는 바로 그 오류다.
+    창 구성은 숫자로만 낸다(`deepWindowNonWikiSlots`/`deepWindowNonWikiShare`).
     """
     informative = [e for e in entries if e.get("informative")]
-    starved = [e for e in informative if e.get("starvedSlots", 0) > 0]
+    cap = detect_engine_cap(entries, deep_limit)
     summary: dict = {
         "probesMeasured": len(entries),
         "probesInformative": len(informative),
         "skipReasons": sorted({e["skipReason"] for e in entries if e.get("skipReason")}),
         "recallLimit": informative[0]["recallLimit"] if informative else None,
-        # recall이 실제로 쓰는 limit에서의 전역 창 점유(칸 수)
+        "deepLimit": deep_limit,
+        # recall이 실제로 쓰는 limit에서의 전역 창 점유(구성 사실)
         "recallWindowSlots": [e["globalRecall"]["slots"] for e in informative],
         "recallWindowWikiSlots": [e["globalRecall"]["projectWikiSlots"] for e in informative],
-        # 엔진 내부 창(deep)의 점유 — 원 측정과 대조 가능한 값
+        # deep limit에서의 전역 결과 구성. **lex에서는 창이 아니라 cap일 수 있다.**
         "deepWindowSlots": [e["globalDeep"]["slots"] for e in informative],
         "deepWindowWikiSlots": [e["globalDeep"]["projectWikiSlots"] for e in informative],
         "deepWindowNonWikiSlots": [e["deepWindowNonWikiSlots"] for e in informative],
         # recall이 실제로 받는 것
         "recallSlotsFilled": [e["recallSlotsFilled"] for e in informative],
-        "wikiPoolDeep": [e["wikiPoolDeep"] for e in informative],
-        "starvedSlots": [e["starvedSlots"] for e in informative],
-        "probesFilterBeforeRecallWindow": len(
-            [e for e in informative if e.get("filterBeforeRecallWindow")]),
-        "probesDeepFilterAfterWindow": len(
-            [e for e in informative if e.get("deepFilterAfterWindow") is True]),
-        "probesDeepFilterUndetermined": len(
-            [e for e in informative if e.get("deepFilterAfterWindow") is None]),
-        "probesStarved": len(starved),
+        "wikiInDeepWindow": [e["wikiInDeepWindow"] for e in informative],
+        "newInFilteredAtDeepLimit": [e["filteredDeep"]["newVsGlobal"] for e in informative],
+        "starvedSlotsUpperBound": [e["starvedSlotsUpperBound"] for e in informative],
+        "starvedSlotsLowerBound": [0 for _ in informative],
+        "probesScopedRetrievalProven": len(
+            [e for e in informative if e.get("scopedRetrievalProven")]),
+        "engineCap": cap,
     }
+    total_slots = sum(summary["deepWindowSlots"])
+    summary["deepWindowNonWikiShare"] = (
+        round(sum(summary["deepWindowNonWikiSlots"]) / total_slots, 3)
+        if total_slots else None)
+
     if not informative:
-        summary["windowCrowding"] = None
-        summary["recallStarvation"] = None
-        summary["basis"] = "undetermined: 전역 질의가 결과를 내지 못했다"
+        summary.update({
+            "filterOrder": "unresolved", "measurable": False,
+            "recallStarvation": None, "reason": "no_results",
+            "basis": "전역 질의가 결과를 내지 못했다 — 판정하지 않는다",
+        })
         return summary
-    non_wiki = sum(summary["deepWindowNonWikiSlots"])
-    summary["windowCrowding"] = bool(
-        non_wiki > 0 and summary["probesDeepFilterAfterWindow"] > 0)
-    summary["recallStarvation"] = bool(starved)
-    if starved:
-        summary["basis"] = (
-            f"프로브 {len(starved)}/{len(informative)}에서 도달 가능한 wiki pool이 "
-            f"recall limit보다 작다 → raw 제거가 그 칸을 채울 수 있다(제거 후 확인 필요)")
-    elif summary["windowCrowding"]:
-        summary["basis"] = (
-            "엔진 내부 창은 비-wiki가 점유하지만(창 이후 필터), 도달 가능한 wiki pool이 "
-            "recall limit 이상이라 recall이 받는 칸 수는 줄지 않는다")
-    else:
-        summary["basis"] = "전역 창 점유도 recall 칸 손실도 관측되지 않는다"
+    if any(e.get("filteredDeepTruncated") for e in informative):
+        summary.update({
+            "filterOrder": "unresolved", "measurable": False,
+            "recallStarvation": None, "reason": "truncated_by_deep_limit",
+            "basis": "필터 결과가 우리 deep limit에 걸려 잘렸다 — --deep-limit을 올려 재측정하라",
+        })
+        return summary
+    if summary["probesScopedRetrievalProven"] > 0:
+        # 엔진의 성질이므로 한 프로브의 증명이 그 경로 전체에 적용된다.
+        summary.update({
+            "filterOrder": "scoped_retrieval_proven", "measurable": True,
+            "recallStarvation": False, "reason": "scoped_retrieval_proven",
+            "basis": (
+                f"프로브 {summary['probesScopedRetrievalProven']}/{len(informative)}에서 "
+                "필터 결과가 전역 창의 부분집합이 아니다 → 필터 질의는 전역 창을 걸러낸 것이 "
+                "아니라 독립 검색이다(엔진 성질) → 비-wiki 인덱스는 recall이 받는 후보를 "
+                "줄일 수 없다. 창 점유 수치는 구성 사실일 뿐 피해가 아니다"),
+        })
+        return summary
+    if cap["suspected"]:
+        summary.update({
+            "filterOrder": "unresolved", "measurable": False,
+            "recallStarvation": None, "reason": "engine_cap_suspected",
+            "basis": (
+                f"프로브 여럿이 같은 결과 수를 반복한다({cap['repeatedCounts']}) → 창이 아니라 "
+                "엔진 cap이다. cap 값으로 계산한 굶은 칸은 무의미하므로 판정하지 않는다"),
+        })
+        return summary
+    summary.update({
+        "filterOrder": "unresolved", "measurable": False,
+        "recallStarvation": None, "reason": "post_filter_vs_scoped_retrieval_ambiguous",
+        "basis": (
+            "deep limit에서 필터 결과가 전역 창의 wiki 부분집합과 일치한다 — post-filter"
+            "(밀려남)와도, 독립 검색인데 매칭이 그것뿐인 경우와도 모두 일치한다. "
+            "starvedSlotsUpperBound는 상한이고 하한은 0이다 → raw 제거 후 재측정으로만 결정된다"),
+    })
     return summary
 
 
 LIMITATIONS = [
-    "이 머신의 전역 인덱스 구성 한 회차 측정이다. raw:wiki 비율이 다른 프로젝트에서는 창 점유율이 달라진다.",
-    "측정 대상 프로젝트 밖 컬렉션의 role은 그 컬렉션 root에서 settings.json을 찾아 읽는다 — 설정 파일이 없는 레거시 컬렉션은 unknown이다(추측하지 않는다). 판정 산식은 영향받지 않는다: 비-wiki 칸 수를 '전체 - 프로젝트 wiki'로 세므로 unknown은 정확히 비-wiki로 집계된다.",
-    "raw 제거 후 실제로 wiki가 창을 채우는지는 제거해야 확인된다(8단계). 창 구성이 인덱스 구성에 비례한다는 관측에서 추론한 값이다.",
+    "**starvedSlotsUpperBound는 상한이고 하한은 0이다(도구가 하한을 제공하지 않는다).** wikiInDeepWindow가 작은 것이 '매칭이 적어서'인지 '밀려나서'인지 이 관측으로는 구분되지 않는다 — raw를 제거해 재측정할 때만 결정된다(8단계). 이 값을 피해로 읽으면 과대 판정이다.",
+    "filterOrder가 unresolved인 경로는 recallStarvation을 판정하지 않는다(null). 관측이 post-filter와 독립 검색을 구분하지 못하기 때문이고, 틀린 판정을 남기는 것보다 낫다.",
+    "scoped_retrieval_proven은 한 프로브의 관측을 **엔진의 성질**로 일반화한 것이다(질의별 성질이 아니라는 전제). qmd 구현이 바뀌면 다시 재야 한다.",
+    "deep limit에서의 전역 결과 수는 창일 수도 엔진 cap일 수도 있다. 실측 qmd 2.5.3 lex는 컬렉션당 20 · 전역 병합 40 cap이며, detect_engine_cap이 '어휘가 다른 프로브 둘 이상이 같은 수를 반복'하는 신호로 이를 감지한다 — suspected이고 증명은 아니다.",
+    "**프로브가 wiki 쪽으로 편향돼 있다(오차 방향).** 프로브를 wiki 카드 어휘에서 파생하므로 wiki가 유리하다 — 실측 novel wiki는 인덱스의 4%인데 recall 창의 wiki 칸이 평균 58%(약 14배 enrichment), service-engineering은 24% 대 37.5%다. 따라서 굶은 칸(상한)은 **과소** 추정이다. 반대로 cap을 창으로 오인하면 과대가 되므로 오차는 **양방향**이다.",
+    "**표본이 넓은 프로브 3개이고 신뢰구간이 없다.** 'N/3 프로브' 류의 비율은 8단계 판정 근거로 부족하다. 다만 표본 수가 binding constraint가 아니다 — 위 식별 불가(상한만) 문제 때문에 프로브를 늘려도 판정이 나오지 않는다. 비-wiki 어휘 대조군 프로브는 넣지 않았다(같은 이유로 판정을 만들지 못하고, raw 소스 코퍼스 스캔이 추가로 필요하다). 외부 프로브 집합은 --probe로 넣을 수 있다.",
+    "이 머신의 전역 인덱스 구성 한 회차 측정이다. 비-wiki 비율이 다른 프로젝트에서는 창 점유율이 달라진다.",
+    "측정 대상 프로젝트 밖 컬렉션의 role은 그 컬렉션 root에서 settings.json을 찾아 읽는다 — 설정 파일이 없는 레거시 컬렉션은 unknown이다(추측하지 않는다). headline은 role이 아니라 nonWikiFiles이므로 판정에 영향이 없다.",
     "rerank=True 경로는 측정하지 않는다 — recall이 rerank:false로 질의하므로 측정도 같은 경로만 본다.",
-    "프로브는 wiki 코퍼스에서 결정적으로 파생한다(넓은 프로브=상위 빈도 어휘, 좁은 프로브=카드 title). 실제 사용자 프롬프트 분포가 아니며, 카드가 추가/삭제되면 같은 count에서도 파생 결과가 달라진다 — 전/후를 축자 동일 프로브로 비교하려면 이전 레코드의 probes[].query를 --probe로 넘긴다.",
-    "starvedSlots는 '창 이후 필터'라는 관측을 전제로 한 상한 추정이다 — raw가 없으면 그 칸이 wiki로 채워진다는 보장이 아니라, 채워질 수 있는 칸 수다. 실제 충족은 제거 후에만 확인된다.",
-    "판정은 넓은 프로브만 쓴다. 좁은 프로브는 내부 창을 채우지 못해 구조적으로 피해가 0이고 narrowProbeSummary에 따로 남는다.",
+    "프로브는 wiki 코퍼스에서 결정적으로 파생한다(넓은=상위 빈도 어휘, 좁은=카드 title). 실제 사용자 프롬프트 분포가 아니며, 카드가 추가/삭제되면 같은 count에서도 파생 결과가 달라진다 — 전/후를 축자 동일 프로브로 비교하려면 이전 레코드의 probes[].query를 --probe로 넘긴다.",
+    "판정은 넓은 프로브만 쓴다. 좁은 프로브는 전역 결과를 채우지 못해 별도로 남는다(narrowProbeSummary).",
     "lex 질의는 그룹의 최빈 토큰 하나만 보낸다(qmd가 한 lex 문자열의 term을 AND 결합하므로). vec 질의는 토큰 전체를 보낸다 — 두 경로의 질의 문자열이 다르므로 경로 간 절대 비교는 하지 않는다.",
-    "lex 경로의 crowding 없음은 현재 인덱스 크기에서의 결과다. FTS 창 대비 인덱스가 커지면 vec과 같은 문제를 겪는다.",
+    "status가 ok가 아닌 레코드(degraded/all_queries_failed/error/budget_exhausted)는 comparable:false다. 전/후 비교에서 배제하라 — 살아남은 프로브만으로 계산된 summary가 온전한 레코드와 섞이면 안 된다.",
 ]
 
 
@@ -681,17 +797,24 @@ def build_record(project_dir: str, args: argparse.Namespace) -> dict:
     verdict_kinds = {"broad", "explicit"}
     verdict_set = [m for m in measured if m["kind"] in verdict_kinds] or measured
     record["summary"] = {
-        path_type: summarize_path([m[path_type] for m in verdict_set])
+        path_type: summarize_path(
+            [m[path_type] for m in verdict_set], args.deep_limit)
         for path_type in ("vec", "lex")
     }
     record["summary"]["basedOnProbeKinds"] = sorted({m["kind"] for m in verdict_set})
     record["narrowProbeSummary"] = {
         path_type: summarize_path(
-            [m[path_type] for m in measured if m["kind"] == "narrow"])
+            [m[path_type] for m in measured if m["kind"] == "narrow"], args.deep_limit)
         for path_type in ("vec", "lex")
     }
+    # status가 질의 성공률을 반영해야 한다. append-only 전/후 원장에서 열화된 "after"가
+    # 온전한 "before"와 조용히 비교되면 안 되고, `comparable: false`가 그 배제 스위치다.
     record["queries"] = budget.queries
-    record["status"] = "budget_exhausted" if budget.exhausted() else "ok"
+    record["queriesOk"] = budget.ok
+    record["queryFailures"] = budget.failures
+    record["queryBudgetSkips"] = budget.budget_skips
+    record["status"] = budget.status()
+    record["comparable"] = record["status"] == "ok"
     return record
 
 
@@ -766,21 +889,34 @@ def main(argv: list[str] | None = None) -> int:
             "--probes/--title-probes는 0 이상이어야 한다\n")
         return 1
     project_dir = str(Path(args.project).expanduser())
-    record = build_record(project_dir, args)
+    # build_record 안의 어떤 예외로도 **레코드가 유실되면 안 된다** — append는 여기서
+    # 1회뿐이라, 예외가 밖으로 나가면 그 실행의 모든 질의 결과가 사라진다.
+    try:
+        record = build_record(project_dir, args)
+    except Exception as exc:  # noqa: BLE001
+        record = {
+            "ts": now_iso(), "schema": SCHEMA, "label": args.label or "",
+            "project": {"root": project_dir},
+            "status": "error", "comparable": False,
+            "error": type(exc).__name__, "errorDetail": str(exc)[:500],
+        }
     text = json.dumps(record, ensure_ascii=False)
+    # 도구 자체의 실패(`error`)는 exit code로도 알린다. 열화된 측정(`degraded` 등)은
+    # 정상 종료다 — 레코드가 `comparable: false`로 스스로 말한다.
+    failed = record.get("status") == "error"
     if args.stdout:
         sys.stdout.write(text + "\n")
-        return 0
+        return 1 if failed else 0
     out = Path(args.out).expanduser() if args.out else default_out_path(
-        record["project"]["root"])
+        record.get("project", {}).get("root") or project_dir)
     if not append_record(out, record):
         sys.stderr.write(f"crowding_probe: 원장 쓰기 실패 {out}\n")
         sys.stdout.write(text + "\n")
         return 1
     sys.stderr.write(
         f"crowding_probe: {record.get('status')} → {out} "
-        f"(queries={record.get('queries', 0)})\n")
-    return 0
+        f"(queries={record.get('queries', 0)}, ok={record.get('queriesOk', 0)})\n")
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

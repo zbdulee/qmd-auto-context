@@ -51,59 +51,109 @@ test('recall 이 보내는 limit 과 측정 기준 limit 이 같은 상수다', 
 
 // --- 판정 ------------------------------------------------------------------
 
-test('crowded: 창 이후 필터 + pool < recall limit → windowCrowding·recallStarvation 둘 다', () => {
-  const r = drive({ scenario: 'crowded', out: 'stdout' });
+test('scoped_retrieval_proven: 필터 결과가 창 밖 문서를 내면 굶지 않음이 증명된다', () => {
+  const r = drive({ scenario: 'scoped', out: 'stdout' });
   assert.deepEqual(r.exit_codes, [0]);
   const rec = r.records[0];
   assert.equal(rec.status, 'ok');
+  assert.equal(rec.comparable, true);
   const vec = rec.summary.vec;
   assert.equal(vec.recallLimit, 8);
-  // 전역 창 8칸 중 wiki 는 raw 25건에 밀려 0칸이다.
-  assert.deepEqual(vec.recallWindowSlots, [8, 8, 8]);
-  assert.deepEqual(vec.recallWindowWikiSlots, [0, 0, 0], 'raw 25건이 8칸을 다 먹는다');
-  // deep 창은 28칸(raw 25 + wiki 3)이고 필터 결과는 그 wiki 부분집합 → 창 이후 필터.
-  assert.deepEqual(vec.deepWindowSlots, [28, 28, 28]);
+  assert.equal(vec.probesScopedRetrievalProven, 3);
+  assert.equal(vec.filterOrder, 'scoped_retrieval_proven');
+  assert.equal(vec.measurable, true);
+  assert.equal(vec.recallStarvation, false, '증명된 false — 가정이 아니다');
+  assert.match(vec.basis, /독립 검색이다\(엔진 성질\)/);
+  // 창 점유는 여전히 숫자로 남지만 boolean 판정으로 승격되지 않는다.
   assert.deepEqual(vec.deepWindowNonWikiSlots, [25, 25, 25]);
-  assert.equal(vec.probesDeepFilterAfterWindow, 3);
-  // pool 3 < limit 8, 비-wiki 칸 25 → recall은 3칸만 받고 5칸이 굶는다.
-  assert.deepEqual(vec.recallSlotsFilled, [3, 3, 3]);
-  assert.deepEqual(vec.wikiPoolDeep, [3, 3, 3]);
-  assert.deepEqual(vec.starvedSlots, [5, 5, 5]);
-  assert.equal(vec.windowCrowding, true);
-  assert.equal(vec.recallStarvation, true);
+  assert.equal(typeof vec.deepWindowNonWikiShare, 'number');
+  assert.ok(!('windowCrowding' in vec), '창 점유를 crowding boolean 으로 부르지 않는다');
 });
 
-test('insulated: 창은 raw 가 먹었지만 pool ≥ recall limit → 굶지 않는다(두 층 분리)', () => {
-  const r = drive({ scenario: 'insulated', out: 'stdout' });
+test('ambiguous: 필터 결과가 창의 wiki 부분집합이면 판정하지 않는다(상한만)', () => {
+  const r = drive({ scenario: 'crowded', out: 'stdout' });
+  const rec = r.records[0];
+  const vec = rec.summary.vec;
+  assert.equal(vec.probesScopedRetrievalProven, 0);
+  assert.deepEqual(vec.newInFilteredAtDeepLimit, [0, 0, 0]);
+  assert.equal(vec.filterOrder, 'unresolved');
+  assert.equal(vec.measurable, false);
+  assert.equal(vec.recallStarvation, null, '판정하지 않는다(false 도 true 도 아님)');
+  assert.equal(vec.reason, 'post_filter_vs_scoped_retrieval_ambiguous');
+  // 상한은 남기고 하한은 항상 0 임을 필드로 못박는다.
+  assert.ok(vec.starvedSlotsUpperBound.some((v) => v > 0));
+  assert.deepEqual(vec.starvedSlotsLowerBound, [0, 0, 0]);
+  assert.match(vec.basis, /상한이고 하한은 0이다/);
+  // 예전 이름은 남아 있으면 안 된다(피해로 오독되는 이름).
+  for (const dead of ['starvedSlots', 'wikiPoolDeep', 'windowCrowding',
+    'probesDeepFilterAfterWindow', 'probesStarved']) {
+    assert.ok(!(dead in vec), `${dead} 는 제거된 이름이다`);
+  }
+});
+
+test('lex cap: 어휘가 다른 프로브가 같은 수를 반복하면 창이 아니라 cap 으로 판정 불가', () => {
+  const r = drive({ scenario: 'lex-cap', out: 'stdout' });
+  const lex = r.records[0].summary.lex;
+  assert.equal(lex.engineCap.suspected, true);
+  assert.deepEqual(lex.engineCap.repeatedCounts.filtered, [20],
+    '컬렉션당 cap 값이 그대로 반복된다');
+  assert.deepEqual(lex.engineCap.repeatedCounts.global, [40], '전역 병합 cap');
+  assert.equal(lex.filterOrder, 'unresolved');
+  assert.equal(lex.measurable, false);
+  assert.equal(lex.recallStarvation, null);
+  assert.equal(lex.reason, 'engine_cap_suspected');
+  assert.match(lex.basis, /창이 아니라 엔진 cap/);
+});
+
+test('cap 값이 다르면 cap 으로 의심하지 않는다(오탐 경계)', () => {
+  const vec = drive({ scenario: 'crowded', out: 'stdout' }).records[0].summary.vec;
+  assert.equal(vec.engineCap.suspected, false,
+    '프로브마다 결과 수가 다르면 매칭 수이지 cap 이 아니다');
+  assert.deepEqual(vec.engineCap.repeatedCounts, {});
+});
+
+test('scoped 증명이 cap 의심보다 우선한다(증명 > 휴리스틱)', () => {
+  const detect = 'cp.detect_engine_cap([{"informative": True, "wikiInDeepWindow": 20,'
+    + ' "globalDeep": {"slots": 40}}, {"informative": True, "wikiInDeepWindow": 20,'
+    + ' "globalDeep": {"slots": 40}}], 200)';
+  assert.equal(unit(detect).suspected, true, 'cap 서명 자체는 감지된다');
+  // 같은 데이터에 scoped 증명이 있으면 measurable:true 로 간다.
+  const proven = 'cp.summarize_path([{"informative": True, "recallLimit": 8,'
+    + ' "wikiInDeepWindow": 20, "deepWindowNonWikiSlots": 20, "recallSlotsFilled": 8,'
+    + ' "scopedRetrievalProven": True, "filteredDeepTruncated": False,'
+    + ' "starvedSlotsUpperBound": 0, "globalRecall": {"slots": 8, "projectWikiSlots": 0},'
+    + ' "globalDeep": {"slots": 40, "projectWikiSlots": 20},'
+    + ' "filteredDeep": {"newVsGlobal": 4}}], 200)';
+  const s = unit(proven);
+  assert.equal(s.measurable, true);
+  assert.equal(s.recallStarvation, false);
+  assert.equal(s.reason, 'scoped_retrieval_proven');
+  assert.equal(s.engineCap.suspected, false, '프로브 1개면 반복이 없다');
+});
+
+test('deep limit 에 걸려 잘린 필터 결과는 판정하지 않는다', () => {
+  const r = drive({
+    scenario: 'insulated', out: 'stdout', argv: ['--deep-limit', '9'],
+  });
   const vec = r.records[0].summary.vec;
-  assert.deepEqual(vec.recallWindowWikiSlots, [0, 0, 0], '전역 8칸은 전부 raw');
-  assert.equal(vec.probesFilterBeforeRecallWindow, 3,
-    'recall limit 에서는 wiki 필터가 창에 없던 문서를 낸다');
-  assert.equal(vec.probesDeepFilterAfterWindow, 3, 'deep 에서는 창 이후 필터로 보인다');
-  assert.deepEqual(vec.wikiPoolDeep, [12, 12, 12]);
-  assert.deepEqual(vec.recallSlotsFilled, [8, 8, 8], 'recall 은 8칸을 다 받는다');
-  assert.deepEqual(vec.starvedSlots, [0, 0, 0]);
-  assert.equal(vec.windowCrowding, true, '창 점유 사실은 유지된다');
-  assert.equal(vec.recallStarvation, false, '그래도 recall 피해는 없다');
-  assert.match(vec.basis, /recall이 받는 칸 수는 줄지 않는다/);
+  assert.equal(vec.filterOrder, 'unresolved');
+  assert.equal(vec.measurable, false);
+  assert.equal(vec.reason, 'truncated_by_deep_limit');
+  assert.match(vec.basis, /--deep-limit을 올려 재측정/);
 });
 
-test('all-wiki: 창에 비-wiki 가 0칸이면 pool 이 작아도 굶은 칸은 0이다', () => {
+test('all-wiki: 창에 비-wiki 가 0칸이면 굶은 칸 상한도 0이다', () => {
   const r = drive({ scenario: 'all-wiki', out: 'stdout' });
   const vec = r.records[0].summary.vec;
   assert.deepEqual(vec.deepWindowNonWikiSlots, [0, 0, 0]);
-  assert.deepEqual(vec.wikiPoolDeep, [2, 2, 2], 'pool 은 recall limit 미만');
-  assert.deepEqual(vec.starvedSlots, [0, 0, 0],
+  assert.ok(vec.wikiInDeepWindow.every((v) => v < 8), 'wiki 수는 recall limit 미만');
+  assert.deepEqual(vec.starvedSlotsUpperBound, [0, 0, 0],
     '되찾을 수 있는 칸은 비-wiki 점유 칸을 넘지 못한다');
-  assert.equal(vec.recallStarvation, false);
-  assert.deepEqual(
-    r.records[0].measurements[0].vec.deepFilterAfterWindow, null,
-    '걸러낼 비-wiki 가 없으면 필터 순서는 undetermined 다');
-  assert.equal(vec.probesDeepFilterUndetermined, 3);
+  assert.equal(vec.deepWindowNonWikiShare, 0);
 });
 
-test('starvedSlots 산식은 (미충족 칸, 비-wiki 점유 칸) 중 작은 값이다', () => {
-  // recall limit 8 / pool 4 / 비-wiki 2 → 미충족 4 지만 되찾을 칸은 2 뿐이다.
+test('starvedSlotsUpperBound 산식은 (미충족 칸, 비-wiki 점유 칸) 중 작은 값이다', () => {
+  // recall limit 8 / wiki 4 / 비-wiki 2 → 미충족 4 지만 되찾을 칸은 2 뿐이다.
   assert.deepEqual(
     unit('[min(max(0, 8 - min(8, 4)), 2), min(max(0, 8 - min(8, 4)), 9), min(max(0, 8 - min(8, 9)), 9)]'),
     [2, 4, 0]);
@@ -119,17 +169,90 @@ test('데몬 미응답: 레코드는 남고 exit 0, 예외 없음', () => {
   assert.equal(r.stderr, '', 'stderr 에 traceback 이 없다');
 });
 
-test('손상 응답(results 가 배열 아님): informative false 로 degrade', () => {
+test('손상 응답(results 가 배열 아님): 예외 없이 판정 불가로 degrade', () => {
   const r = drive({ scenario: 'bad-response', out: 'stdout' });
   assert.deepEqual(r.exit_codes, [0]);
   const rec = r.records[0];
-  assert.equal(rec.status, 'ok');
   for (const path of ['vec', 'lex']) {
     assert.equal(rec.summary[path].probesInformative, 0);
     assert.deepEqual(rec.summary[path].skipReasons, ['query_failed']);
-    assert.equal(rec.summary[path].windowCrowding, null);
+    assert.equal(rec.summary[path].measurable, false);
     assert.equal(rec.summary[path].recallStarvation, null);
+    assert.equal(rec.summary[path].reason, 'no_results');
   }
+});
+
+// MAJOR 3 회귀: object 가 아닌 JSON 응답에서 실행 전체가 죽고 원장에 아무것도
+// 남지 않았다(append 는 마지막 1회뿐이라 앞선 질의가 전부 유실된다).
+for (const scenario of ['null-response', 'array-response']) {
+  test(`${scenario}: 예외로 실행이 죽지 않고 부분 결과가 원장에 남는다`, () => {
+    const r = drive({ scenario, out: 'ledger' });
+    assert.deepEqual(r.exit_codes, [0], 'exit 1 로 죽지 않는다');
+    assert.equal(r.ledger.length, 1, '레코드가 유실되지 않는다');
+    assert.equal(r.ledger[0].status, 'all_queries_failed');
+    assert.equal(r.ledger[0].comparable, false);
+    assert.ok(r.ledger[0].queryFailures > 0);
+    assert.equal(r.ledger[0].queryFailures, r.ledger[0].queries);
+    assert.ok(!/Traceback/.test(r.stderr), 'traceback 이 새지 않는다');
+  });
+}
+
+// MAJOR 4 회귀: 전 질의 실패 런이 status "ok" 로 원장에 남아 온전한 before 와
+// 조용히 비교됐다.
+test('전 질의 실패(HTTP 500): status 가 ok 가 아니고 comparable:false', () => {
+  const r = drive({ scenario: 'query-500', out: 'ledger' });
+  assert.deepEqual(r.exit_codes, [0]);
+  assert.equal(r.ledger.length, 1);
+  const rec = r.ledger[0];
+  assert.equal(rec.status, 'all_queries_failed');
+  assert.equal(rec.comparable, false);
+  assert.equal(rec.queryFailures, rec.queries);
+  assert.equal(rec.summary.vec.measurable, false);
+});
+
+test('부분 실패: status degraded + comparable:false 로 비교에서 배제된다', () => {
+  // 예산을 프로브 하나만 통과할 만큼 준다 → 이후 질의는 budget_exhausted 로 실패한다.
+  const r = drive({
+    scenario: 'scoped', out: 'ledger',
+    argv: ['--probes', '2', '--title-probes', '0', '--budget', '0.35',
+      '--interval', '0.05'],
+  });
+  assert.deepEqual(r.exit_codes, [0]);
+  const rec = r.ledger[0];
+  assert.equal(rec.status, 'degraded', '살아남은 프로브만으로 ok 라고 하지 않는다');
+  assert.equal(rec.comparable, false);
+  assert.ok(rec.queriesOk > 0, '일부는 성공했다');
+  assert.ok(rec.queryBudgetSkips > 0, '나머지는 예산 소진으로 시도조차 못 했다');
+  // 예산 소진은 실패와 구분해 남긴다 — status 가 "왜"를 잃지 않게 한다.
+  assert.equal(rec.queryFailures, 0);
+});
+
+test('예산 소진만 있고 성공이 0이면 budget_exhausted 로 구분된다', () => {
+  const r = drive({ scenario: 'scoped', out: 'stdout', argv: ['--budget', '0'] });
+  const rec = r.records[0];
+  assert.equal(rec.status, 'budget_exhausted');
+  assert.equal(rec.comparable, false);
+  assert.equal(rec.queriesOk, 0);
+  assert.equal(rec.queryFailures, 0, '예산 소진은 응답 실패가 아니다');
+  assert.ok(rec.queryBudgetSkips > 0);
+});
+
+test('build_record 예외도 status:error 레코드로 남는다(질의 결과 유실 금지)', () => {
+  const got = drive({
+    action: 'unit_exec',
+    unit: [
+      'def boom(*a, **k): raise RuntimeError("boom")',
+      'cp.build_record = boom',
+      'rc = cp.main([".", "--stdout", "--no-index-composition"])',
+      'result = {"rc": rc, "printed": captured()}',
+    ].join('\n'),
+  });
+  assert.equal(got.rc, 1, '예외는 exit 1 로 알리되 프로세스는 정상 종료한다');
+  const rec = JSON.parse(got.printed);
+  assert.equal(rec.status, 'error');
+  assert.equal(rec.comparable, false);
+  assert.equal(rec.error, 'RuntimeError');
+  assert.equal(rec.schema, 'qmd_crowding_probe/2');
 });
 
 test('wiki 컬렉션 없음 / 컬렉션 없음: 질의 0건으로 조기 종료', () => {
@@ -166,7 +289,7 @@ test('원장은 append-only JSONL — 두 번 실행하면 두 줄이 남는다'
   assert.deepEqual(r.exit_codes, [0, 0]);
   assert.equal(r.ledger.length, 2, '덮어쓰지 않고 누적한다(전/후 비교가 자산)');
   for (const rec of r.ledger) {
-    assert.equal(rec.schema, 'qmd_crowding_probe/1');
+    assert.equal(rec.schema, 'qmd_crowding_probe/2');
     assert.equal(rec.label, 'before');
     assert.ok(rec.ts && rec.project && rec.limits && rec.summary);
     assert.ok(Array.isArray(rec.limitations) && rec.limitations.length >= 5);
