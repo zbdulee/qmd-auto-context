@@ -352,9 +352,33 @@ DELETE) 과거 제거들이 남긴 잔해다. qmd 의 orphan 정의(활성 docum
 
 → **vec 은 post-filter 가 아니다. raw 의 인덱스 존재가 wiki vec 후보를 밀어낼 수 없다.**
 
-남은 `starvedSlotsUpperBound: 2`(se 프로브 1개)는 deep 창이 26/40 으로 **포화되지 않은** 상태이고
-wiki 매칭이 6건뿐이다 — "밀려남" 이 아니라 **"매칭이 적음"** 이다. 5단계가 구분할 수 없다고
-기록한 그 애매함이 scoped retrieval 증명으로 해소됐다.
+### 정정 (리뷰 반영) — 그 잔여 상한은 "매칭이 적음" 이 아니라 **무효한 지표**였다
+
+당시 기록: "남은 `starvedSlotsUpperBound: 2`(se 프로브 1개)는 deep 창이 26/40 으로 포화되지
+않은 상태이고 wiki 매칭이 6건뿐이므로 '밀려남' 이 아니라 '매칭이 적음' 이다."
+
+**이 설명이 틀렸다.** 값이 작은 이유를 해석한 것인데, 문제는 값의 크기가 아니라 **산식이
+적용될 전제가 사라졌다**는 것이다. `starvedSlotsUpperBound` 는 "전역 창을 만든 뒤 컬렉션
+필터"(post-filter)를 가정한 상한이고, 같은 프로브에서 `scopedRetrievalProven: true` 라면
+비-wiki 인덱스가 wiki 후보를 밀어낼 **경로 자체가 없다** → 상한은 **0** 이다. 즉 위 잔여값은
+"작지만 남은 피해 가능성" 이 아니라 8단계 결론과 **모순되는 무효값**이었고, 해석으로 넘긴
+것이 놓친 지점이다.
+
+재현(설명용 최소 예): `globalDeep=[wiki 1, raw 7]`, `filteredDeep=[wiki 2]`, 양쪽 recall
+동일 → 구 산식은 `{"scopedRetrievalProven": true, "starvedSlotsUpperBound": 6,
+"recallStarvation": false}` 를 냈다. 증명과 상한이 같은 줄에서 서로를 부정한다.
+
+**수정**: `scopedRetrievalProven` 인 경로에서 상한은 0 이고, 근거는
+`starvedSlotsUpperBoundBasis`(`scoped_retrieval_proven` | `post_filter_assumption`)로 남는다
+— 0 을 냈을 때 "굶음이 없다" 와 "산식이 적용되지 않았다" 를 사후에 구분할 수 있어야 한다.
+
+> **⚠ 이전 레코드는 구 산식이다.** `docs/plans/data/crowding-baseline.jsonl` 은 append-only
+> 이므로 지우지 않는다. `schema` 가 `qmd_crowding_probe/1`·`/2` 인 레코드의
+> `starvedSlotsUpperBound` 는 post-filter 가정으로 계산된 값이라, `scopedRetrievalProven`
+> 이 true 인 프로브에서도 0 이 아니다. 전/후 비교나 집계에서는 **스키마로 걸러라**
+> (`qmd_crowding_probe/3` 이상이 새 산식). 8단계의 결론 자체는 `filteredDeep.newVsGlobal`
+> 관측(증명)에 의존하고 상한값에 의존하지 않으므로 **변하지 않는다.** 새 라벨로 재측정할
+> 때는 데몬이 single-thread 이므로 `--interval`·`--budget` 을 쓴다.
 
 ## 지금까지의 정정 이력 (같은 문서 안에서 세 번 뒤집혔다)
 
@@ -399,9 +423,14 @@ deep 창 40 → 3~23). **즉 `--probe` 재생은 vec 비교에는 유효하지�
 
 1. **raw 인덱스를 제거하지 않는다.** 양 경로에서 이득이 0 으로 증명됐고, 제거는 되돌리기
    비용(재등록·재임베딩)과 raw-search escape hatch 상실을 대가로 아무 것도 주지 않는다.
-2. **role `source`(7단계)는 유지한다.** 이 결론이 그 기능을 무효화하지 않는다 — "인덱싱은
-   빼고 카드는 만든다" 는 여전히 표현 가능해야 하고(대용량 raw 를 새로 붙이는 프로젝트),
-   기본값은 `raw` 이므로 아무도 이 경로로 밀려가지 않는다.
-3. **orphan 벡터 정리를 주기적으로 한다.** 63.8% 가 죽은 벡터였고 `collection remove` 가
+2. **role `source`(7단계)는 유지한다. 죽은 기능이 아니다.** 이 결론이 그 기능을 무효화하지
+   않는다 — 향후 대용량 자료를 "compile 입력이지만 검색 제외" 로 표현할 가치가 있고(대량 raw
+   를 새로 붙이는 프로젝트), 기본값은 `raw` 이므로 아무도 이 경로로 밀려가지 않는다.
+   **다만 이 role 이 현재 프로젝트에서 raw 제거를 정당화하지는 않는다.**
+3. **`↳` 원문 경로 주입(2단계)도 유지한다.** provenance·대조 경로로 유효하다. **그러나 이것이
+   "raw 를 인덱스에 두지 않아도 된다" 의 전제는 아니다** — 두 이득은 별개이고, 위 측정은
+   raw 미등록의 recall 이득이 0 임을 보였을 뿐 `↳` 의 가치와 무관하다. 문서에서 두 주장을
+   묶어 쓰지 말 것(`docs/settings.md` 의 "원문 경로 주입" 절이 그렇게 쓰여 있었고 고쳤다).
+4. **orphan 벡터 정리를 주기적으로 한다.** 63.8% 가 죽은 벡터였고 `collection remove` 가
    그것을 남기는 것이 상류 동작이므로 계속 쌓인다. `qmd cleanup` 을 운영 절차에 넣을지는
    별도 판단(이 플러그인이 대신 호출할 수도 있으나 사용자 인덱스를 만지는 일이다).

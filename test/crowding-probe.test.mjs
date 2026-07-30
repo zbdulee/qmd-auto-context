@@ -252,7 +252,7 @@ test('build_record 예외도 status:error 레코드로 남는다(질의 결과 �
   assert.equal(rec.status, 'error');
   assert.equal(rec.comparable, false);
   assert.equal(rec.error, 'RuntimeError');
-  assert.equal(rec.schema, 'qmd_crowding_probe/2');
+  assert.equal(rec.schema, 'qmd_crowding_probe/3');
 });
 
 test('wiki 컬렉션 없음 / 컬렉션 없음: 질의 0건으로 조기 종료', () => {
@@ -289,7 +289,7 @@ test('원장은 append-only JSONL — 두 번 실행하면 두 줄이 남는다'
   assert.deepEqual(r.exit_codes, [0, 0]);
   assert.equal(r.ledger.length, 2, '덮어쓰지 않고 누적한다(전/후 비교가 자산)');
   for (const rec of r.ledger) {
-    assert.equal(rec.schema, 'qmd_crowding_probe/2');
+    assert.equal(rec.schema, 'qmd_crowding_probe/3');
     assert.equal(rec.label, 'before');
     assert.ok(rec.ts && rec.project && rec.limits && rec.summary);
     assert.ok(Array.isArray(rec.limitations) && rec.limitations.length >= 5);
@@ -467,4 +467,39 @@ test('ceiling 천장은 최종 count 에 처음 도달한 limit 이다', () => {
   assert.equal(ceiling.plateauCount, 28);
   assert.equal(ceiling.plateauFromLimit, 60, '마지막 rung(200)이 아니라 60 이어야 한다');
   assert.equal(ceiling.limitBound, false);
+});
+
+// 8단계 결론과 지표가 모순됐다: `scopedRetrievalProven` 이면 비-wiki 인덱스가 wiki 후보를
+// 밀어낼 **경로 자체가 없으므로** 굶은 칸 상한은 0 이어야 하는데, 구 산식은 전역 deep 결과로
+// 계산해 잔여값을 냈다. 그 잔여값을 "매칭이 적음" 으로 설명해 넘긴 것이 놓친 지점이다.
+test('scoped 증명이면 굶은 칸 상한은 0 이다 (구 산식은 > 0 을 냈다)', () => {
+  const r = drive({ scenario: 'scoped-sparse', out: 'stdout' });
+  const vec = r.records[0].summary.vec;
+  const entry = r.records[0].measurements.flatMap((m) => (m.vec ? [m.vec] : []))
+    .find((e) => e.informative && e.scopedRetrievalProven);
+  assert.ok(entry, 'scoped 증명 프로브가 있어야 시나리오가 성립한다');
+  // 구 산식이 > 0 을 냈을 조건을 명시적으로 고정한다(이 테스트가 회귀를 잡는 이유).
+  assert.ok(entry.deepWindowNonWikiSlots > 0, '전역 창에 비-wiki 가 있다');
+  assert.ok(entry.wikiInDeepWindow < entry.recallLimit, 'wiki 매칭이 recall limit 미만');
+  assert.equal(entry.starvedSlotsUpperBound, 0,
+    '독립 검색이 증명된 경로의 상한은 0 이다(구 산식은 recallLimit - wiki 로 > 0 을 냈다)');
+  assert.equal(entry.starvedSlotsUpperBoundBasis, 'scoped_retrieval_proven');
+  assert.equal(vec.recallStarvation, false);
+  assert.deepEqual(vec.starvedSlotsUpperBound, vec.starvedSlotsUpperBound.map(() => 0));
+  assert.deepEqual(vec.starvedSlotsUpperBoundBasis, ['scoped_retrieval_proven']);
+  assert.match(vec.basis, /starvedSlotsUpperBound는 0이다/);
+});
+
+test('증명이 없는 경로는 post_filter_assumption 근거로 상한을 낸다', () => {
+  const r = drive({ scenario: 'crowded', out: 'stdout' });
+  const vec = r.records[0].summary.vec;
+  assert.deepEqual(vec.starvedSlotsUpperBoundBasis, ['post_filter_assumption']);
+  assert.ok(vec.starvedSlotsUpperBound.some((n) => n > 0),
+    '가정이 남은 경로에서는 상한이 그대로 나온다(기존 동작)');
+  assert.equal(vec.recallStarvation, null, '판정하지 않는다');
+});
+
+test('레코드 스키마가 /3 이면 새 산식이다(구 레코드 구분용)', () => {
+  const r = drive({ scenario: 'scoped-sparse', out: 'stdout' });
+  assert.equal(r.records[0].schema, 'qmd_crowding_probe/3');
 });

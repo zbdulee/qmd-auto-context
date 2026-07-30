@@ -91,7 +91,11 @@ import config as qmd_config
 import keywords as qmd_keywords
 import recall as qmd_recall
 
-SCHEMA = "qmd_crowding_probe/2"
+# `/3`: `starvedSlotsUpperBound`가 `scopedRetrievalProven`인 경로에서 0이 되고
+# `starvedSlotsUpperBoundBasis`가 근거를 남긴다. `/1`·`/2` 레코드의 그 값은 **구 산식**
+# (post-filter 가정)으로 계산된 것이라 증명된 경로에서도 0이 아니다 — 원장은 append-only라
+# 지우지 않으므로, 전/후 비교 시 스키마로 걸러야 한다.
+SCHEMA = "qmd_crowding_probe/3"
 
 DEFAULT_PROBES = 3
 DEFAULT_TITLE_PROBES = 2
@@ -465,6 +469,19 @@ def window_composition(files: list[str], known: dict[str, str],
     }
 
 
+def starved_bound_basis(entry: dict) -> str:
+    """`starvedSlotsUpperBound`가 어느 전제 위에서 계산됐는가 — 규칙은 여기 한 곳이다.
+
+    `measure_path`(레코드 작성)와 `summarize_path`(집계)가 같은 함수를 쓴다. 집계 쪽에서
+    저장된 키를 그냥 읽으면, 키가 없는 구 스키마·합성 entry에서 KeyError로 죽거나(측정 전체
+    유실) 조용히 다른 규칙으로 갈린다.
+    """
+    stored = entry.get("starvedSlotsUpperBoundBasis")
+    if isinstance(stored, str) and stored:
+        return stored
+    return "scoped_retrieval_proven" if entry.get("scopedRetrievalProven") else "post_filter_assumption"
+
+
 def measure_path(daemon_url: str, path_type: str, probe_query: str,
                  wiki_collections: list[str], known_roles: dict[str, str],
                  wiki_names: set[str], recall_limit: int, deep_limit: int,
@@ -531,10 +548,20 @@ def measure_path(daemon_url: str, path_type: str, probe_query: str,
 
     # **유일한 양성 증거**: deep limit에서 필터 결과가 전역 창의 부분집합이 아니다
     # → 필터 질의가 전역 창을 걸러낸 것이 아니라 독립 검색을 했다(엔진의 성질).
-    entry["scopedRetrievalProven"] = entry["filteredDeep"]["newVsGlobal"] > 0
+    proven = entry["filteredDeep"]["newVsGlobal"] > 0
+    entry["scopedRetrievalProven"] = proven
     # 우리 deep limit이 필터 결과를 잘랐으면 wikiInDeepWindow가 절단값이라 판정 불가.
     entry["filteredDeepTruncated"] = wiki_in_deep >= deep_limit
-    entry["starvedSlotsUpperBound"] = min(
+    # **상한 산식은 post-filter 가정 위에서만 성립한다.** 컬렉션별 독립 검색이 증명되면
+    # 비-wiki 인덱스가 wiki 후보를 밀어낼 **경로 자체가 없으므로** 상한은 0이다. 예전에는
+    # 증명이 있어도 전역 deep 결과로 계산해, 8단계 결론("제거 이득 0")과 모순되는 잔여
+    # `starvedSlotsUpperBound`를 냈다(실측 `globalDeep`=[wiki 1, raw 7] / `filteredDeep`=
+    # [wiki 2] / 양쪽 recall 동일에서 `scopedRetrievalProven: true` + `starvedUB: 6`).
+    # 그 잔여값은 "매칭이 적음"으로 설명해 넘길 것이 아니라 **무효한 지표**였다.
+    # 근거를 필드로 남긴다 — 0을 냈을 때 "굶음이 없다"와 "산식이 적용되지 않았다"를
+    # 사후에 구분할 수 있어야 한다.
+    entry["starvedSlotsUpperBoundBasis"] = starved_bound_basis(entry)
+    entry["starvedSlotsUpperBound"] = 0 if proven else min(
         max(0, recall_limit - min(recall_limit, wiki_in_deep)), non_wiki_deep)
     # 하한은 이 도구가 제공하지 않는다. 필드로 못박아 8단계가 상한을 피해로 읽지 못하게 한다.
     entry["starvedSlotsLowerBound"] = 0
@@ -633,6 +660,8 @@ def summarize_path(entries: list[dict], deep_limit: int) -> dict:
         "wikiInDeepWindow": [e["wikiInDeepWindow"] for e in informative],
         "newInFilteredAtDeepLimit": [e["filteredDeep"]["newVsGlobal"] for e in informative],
         "starvedSlotsUpperBound": [e["starvedSlotsUpperBound"] for e in informative],
+        "starvedSlotsUpperBoundBasis": sorted(
+            {starved_bound_basis(e) for e in informative}),
         "starvedSlotsLowerBound": [0 for _ in informative],
         "probesScopedRetrievalProven": len(
             [e for e in informative if e.get("scopedRetrievalProven")]),
@@ -666,7 +695,8 @@ def summarize_path(entries: list[dict], deep_limit: int) -> dict:
                 f"프로브 {summary['probesScopedRetrievalProven']}/{len(informative)}에서 "
                 "필터 결과가 전역 창의 부분집합이 아니다 → 필터 질의는 전역 창을 걸러낸 것이 "
                 "아니라 독립 검색이다(엔진 성질) → 비-wiki 인덱스는 recall이 받는 후보를 "
-                "줄일 수 없다. 창 점유 수치는 구성 사실일 뿐 피해가 아니다"),
+                "줄일 수 없다. 창 점유 수치는 구성 사실일 뿐 피해가 아니고, "
+                "starvedSlotsUpperBound는 0이다(밀어낼 경로 자체가 없다)"),
         })
         return summary
     if cap["suspected"]:
@@ -684,13 +714,15 @@ def summarize_path(entries: list[dict], deep_limit: int) -> dict:
         "basis": (
             "deep limit에서 필터 결과가 전역 창의 wiki 부분집합과 일치한다 — post-filter"
             "(밀려남)와도, 독립 검색인데 매칭이 그것뿐인 경우와도 모두 일치한다. "
-            "starvedSlotsUpperBound는 상한이고 하한은 0이다 → raw 제거 후 재측정으로만 결정된다"),
+            "starvedSlotsUpperBound는 post-filter 가정 위의 상한이고 하한은 0이다. "
+            "8단계 실측에서는 orphan 벡터를 정리해 창에 여유를 만들자 독립 검색이 드러났다"
+            "(scoped_retrieval_proven) — 이 애매함의 해소 경로는 raw 제거가 아니라 그쪽이다"),
     })
     return summary
 
 
 LIMITATIONS = [
-    "**starvedSlotsUpperBound는 상한이고 하한은 0이다(도구가 하한을 제공하지 않는다).** wikiInDeepWindow가 작은 것이 '매칭이 적어서'인지 '밀려나서'인지 이 관측으로는 구분되지 않는다 — raw를 제거해 재측정할 때만 결정된다(8단계). 이 값을 피해로 읽으면 과대 판정이다.",
+    "**starvedSlotsUpperBound는 상한이고 하한은 0이다(도구가 하한을 제공하지 않는다).** 그리고 이 산식은 post-filter 가정 위에서만 성립한다 — `scopedRetrievalProven`인 경로에서는 비-wiki 인덱스가 wiki 후보를 밀어낼 경로가 없으므로 상한이 **0**이고, 그 사실은 `starvedSlotsUpperBoundBasis`로 구분된다. 가정이 남아 있는 경로(`post_filter_assumption`)에서는 wikiInDeepWindow가 작은 것이 '매칭이 적어서'인지 '밀려나서'인지 이 관측으로 구분되지 않는다. 이 값을 피해로 읽으면 과대 판정이다.",
     "filterOrder가 unresolved인 경로는 recallStarvation을 판정하지 않는다(null). 관측이 post-filter와 독립 검색을 구분하지 못하기 때문이고, 틀린 판정을 남기는 것보다 낫다.",
     "scoped_retrieval_proven은 한 프로브의 관측을 **엔진의 성질**로 일반화한 것이다(질의별 성질이 아니라는 전제). qmd 구현이 바뀌면 다시 재야 한다.",
     "deep limit에서의 전역 결과 수는 창일 수도 엔진 cap일 수도 있다. 실측 qmd 2.5.3 lex는 컬렉션당 20 · 전역 병합 40 cap이며, detect_engine_cap이 '어휘가 다른 프로브 둘 이상이 같은 수를 반복'하는 신호로 이를 감지한다 — suspected이고 증명은 아니다.",

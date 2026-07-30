@@ -18,6 +18,14 @@ deletion therefore records (sourcePath, bounded source body hash) in
 verify-skipped.jsonl, and wiki_compile_worker.process_job skips those sources
 *before* spawning an extractor. Same body-hash suppression pattern as
 dedup-skipped.jsonl: unchanged content is never re-billed, changed content retries.
+That marker is written BEFORE the card is unlinked and a failed write blocks the
+delete (fail-closed), and run() refuses to spend a paid call at all when either
+fail-closed ledger is unwritable (preflight_block_reason).
+
+The source documents replayed against a card are the ones the QUEUE knows, not the
+ones the model listed: candidate["sources"] is extractor output and load_sources
+reads only the first MAX_SOURCES entries, so model-chosen decoys could otherwise
+become the entire evidence base for a `verified` card.
 
 Every deletion (fail and inconclusive alike) also appends one row to
 verify-deleted.jsonl, the untrimmed audit ledger — verify-log.jsonl logs passes too and
@@ -292,8 +300,19 @@ def log_verdict(log_path: Path, payload: dict) -> None:
     wc.trim_jsonl(log_path)
 
 
-def verify_skipped_path(root: Path, vcfg: dict) -> Path | None:
-    return wcw.safe_compile_file(root, vcfg.get("skippedPath", VERIFY_SKIPPED_DEFAULT))
+def verify_skipped_path(root: Path, vcfg: dict) -> Path:
+    """inconclusive 삭제의 억제 마커 경로. **`verify_deleted_path`와 같이 폴백한다.**
+
+    예전에는 `None`을 돌려줄 수 있었고 그것이 `verify_deleted_path`가 이미 닫은 것과 **같은
+    과금 루프의 입구**였다: compile 디렉터리 밖을 가리키는 `skippedPath`(자연스러운 오타)가
+    config 검증을 통과하고 `safe_compile_file`이 None을 내면 억제 마커가 **한 줄도 기록되지
+    않아** unchanged source가 재컴파일→재검수→재삭제를 반복하고 매 반복이 유료 호출이다.
+    오타가 과금 루프가 되어서는 안 되므로 기본 경로로 떨어진다 — 사용자가 적은 경로가
+    무시되는 것이 더 나은 실패다(그 사실은 원장이 기본 위치에 생기는 것으로 보인다).
+    """
+    return wcw.safe_compile_file(root, vcfg.get("skippedPath", VERIFY_SKIPPED_DEFAULT)) or (
+        root / ".auto-context" / "compile" / "verify-skipped.jsonl"
+    )
 
 
 def verify_deleted_path(root: Path, vcfg: dict) -> Path:
@@ -312,32 +331,31 @@ def verify_deleted_path(root: Path, vcfg: dict) -> Path:
     )
 
 
-def ledger_writable(path: Path) -> bool:
-    """삭제 원장에 append할 수 있는가 — **유료 호출 전에** 확인하는 preflight.
+# 유료 호출 전 원장 쓰기 가능성 판정. 정의는 `wiki_compile`이 SSOT다 — dedup scan도 같은
+# 판정을 쓰므로 여기서 재구현하면 게이트가 두 벌이 된다(같은 클래스가 그렇게 재발했다).
+ledger_writable = wc.ledger_writable
 
-    fail-closed(원장 없으면 삭제 안 함)는 옳지만 **종점이 없으면 과금 루프**가 된다: 판정을
-    받고(유료) 원장 쓰기에 실패해 잡을 보존하면 다음 run이 같은 카드를 다시 유료로 판정한다.
-    cooldown이나 억제 마커로 끊는 방법도 있지만, 그 파일들 역시 같은 디렉터리에 쓰므로
-    "아무것도 못 쓰는 상태"에서는 함께 실패한다. **가장 확실한 종점은 유료 호출을 아예 하지
-    않는 것**이고, 그래서 판정 전에 여기서 막는다(호출 0회 = 루프 없음).
 
-    **원장 파일을 만들지는 않는다.** 삭제가 없었으면 파일도 없어야 한다(원장의 존재 자체가
-    "이 프로젝트에서 카드가 지워졌다"로 읽히고, 기존 테스트도 그 계약을 고정한다). 그래서
-    부모 디렉터리에 임시 파일을 만들어 지우는 방식으로 쓰기 가능성만 확인하고(디렉터리 부재·
-    권한·ENOSPC를 모두 잡는다), 목표 경로가 이미 있으면 **일반 파일인지** 따로 본다
-    (디렉터리를 `deletedPath`로 적은 경우가 실측된 실패 모드다).
+def preflight_block_reason(root: Path, vcfg: dict) -> str:
+    """유료 검수를 시작하기 전에 막아야 할 사유(없으면 빈 문자열).
+
+    fail-closed 원장이 둘이다. **둘 다** 쓸 수 없으면 유료 호출을 하지 않는다:
+      - `verify-deleted.jsonl` — 모든 기계 삭제의 감사 원장(fail·inconclusive 공통).
+      - `verify-skipped.jsonl` — inconclusive 삭제의 억제 마커. 이것이 없으면 unchanged
+        source가 재컴파일→재검수→재삭제를 반복하고 매 반복이 유료 호출이다.
+    억제 마커는 `onInconclusive`가 실제로 삭제일 때만 필요하므로 그 경우에만 검사한다 —
+    무조건 검사하면 `onInconclusive: none|contested` 프로젝트의 검수를 이유 없이 막는다.
+
+    `run()`(큐 claim 전)과 `core/update.sh`의 SessionStart notice가 **같은 함수**를 부른다.
+    판정을 두 곳에서 재구현하면 "막혔는데 아무도 안 알려주는" 상태가 다시 생긴다.
     """
-    try:
-        if path.exists() and not path.is_file():
-            return False
-        path.parent.mkdir(parents=True, exist_ok=True)
-        probe = path.with_name(f".{path.name}.probe-{os.getpid()}")
-        with open(probe, "w", encoding="utf-8"):
-            pass
-        probe.unlink(missing_ok=True)
-        return True
-    except OSError:
-        return False
+    if not ledger_writable(verify_deleted_path(root, vcfg)):
+        return "audit_ledger_unwritable"
+    if vcfg.get("onInconclusive", "delete") == "delete" and not ledger_writable(
+        verify_skipped_path(root, vcfg)
+    ):
+        return "suppression_ledger_unwritable"
+    return ""
 
 
 def load_verify_suppressions(path: Path | None) -> dict[str, str]:
@@ -433,8 +451,16 @@ def record_verify_deletion(
 
 def record_verify_suppression(
     root: Path, vcfg: dict, sources: list[dict], record: dict, verdict: str
-) -> int:
+) -> tuple[int, bool]:
     """Mark every source of a deleted card so it is not recompiled unchanged.
+
+    Returns `(rows written, all writes succeeded)`. **The second value must not be
+    dropped.** `0` rows is legitimate (a card whose sources are all gone has nothing
+    to suppress and cannot be recompiled from them either), so the count alone cannot
+    tell "nothing to write" from "the write failed" — and the caller has to fail
+    CLOSED on the latter, exactly as it does for the deletion ledger. Swallowing it
+    deleted the card with no marker, so the unchanged source went through
+    compile -> verify -> delete again on the next run, each pass a paid host-CLI call.
 
     Never trim_jsonl'd: dropping a row here reopens the billing loop it was written
     to close. Rows also carry verdict/reasons/targetPath, so this doubles as a
@@ -445,25 +471,28 @@ def record_verify_suppression(
     wiki_compile_worker's pre-extraction check compares like with like.
     """
     path = verify_skipped_path(root, vcfg)
-    if path is None:
-        return 0
     written = 0
     for src in sources:
         rel = src.get("path")
         content = src.get("content")
         if not (isinstance(rel, str) and rel and isinstance(content, str)):
             continue
-        wc.append_jsonl(path, {
-            "sourcePath": rel,
-            "sourceBodyHash": wc.source_body_hash(content),
-            "targetPath": record.get("targetPath", ""),
-            "verdict": verdict,
-            "reasons": record.get("reasons", []),
-            "engine": record.get("engine", ""),
-            "deletedAt": wcw.now_iso(),
-        })
+        # **예외도 실패로 접는다**(삭제 감사 원장과 같은 이유): `append_jsonl`이 OSError를
+        # 전파하면 standalone worker가 traceback으로 죽어 어디에도 흔적이 남지 않는다.
+        try:
+            wc.append_jsonl(path, {
+                "sourcePath": rel,
+                "sourceBodyHash": wc.source_body_hash(content),
+                "targetPath": record.get("targetPath", ""),
+                "verdict": verdict,
+                "reasons": record.get("reasons", []),
+                "engine": record.get("engine", ""),
+                "deletedAt": wcw.now_iso(),
+            })
+        except OSError:
+            return written, False
         written += 1
-    return written
+    return written, True
 
 
 def reindex_wiki(root: Path, config: dict) -> None:
@@ -487,21 +516,41 @@ def card_state(target: Path) -> tuple[str | None, dict, str, str]:
 
 
 def load_sources(root: Path, job: dict, max_chars: int) -> list[dict]:
-    sources = job.get("sources") if isinstance(job.get("sources"), list) else []
+    """검증에 쓸 원문. **잡의 실제 소스가 모델 제공 항목에 밀려나지 않는다.**
+
+    `job["sources"]`는 extractor(모델) 출력이 섞인 목록이고 여기는 앞에서 `MAX_SOURCES`
+    개만 읽는다. 모델 목록이 앞에 오던 동안에는 모델이 decoy 3개를 내면 카드가 **실제
+    원문 없이** 검증돼 `verified`가 됐다 — `recallVerifiedOnly` 기본값에서 그것은
+    "인용 가능한 캐논"이므로 검증 전제 자체가 무력화된다.
+
+    그래서 `job["authoritativeSources"]`(큐 잡이 아는 실제 소스, `wiki_compile`이 기록)를
+    **먼저** 읽고 그 항목들은 `MAX_SOURCES` 상한으로 **자르지 않는다**. 모델 항목은 남는
+    예산만 채운다. 0.x 잡·수동 compile 경로에는 이 키가 없어 기존 동작 그대로다.
+
+    같은 경로는 한 번만 읽는다(권위 항목은 `sources`에도 들어 있다).
+    """
+    raw_auth = job.get("authoritativeSources")
+    authoritative = raw_auth if isinstance(raw_auth, list) else []
+    raw_model = job.get("sources")
+    model = raw_model if isinstance(raw_model, list) else []
     loaded = []
-    for src in sources:
-        if len(loaded) >= MAX_SOURCES:
+    seen: set[str] = set()
+    # 권위 항목이 전부 앞에 오므로, 예산 소진 판정을 만나는 것은 모델 항목뿐이다.
+    for src, forced in [(s, True) for s in authoritative] + [(s, False) for s in model]:
+        if not forced and len(loaded) >= MAX_SOURCES:
             break
         if not isinstance(src, dict) or src.get("kind") != "file":
             continue
         rel = src.get("path")
-        if not isinstance(rel, str) or not rel:
+        if not isinstance(rel, str) or not rel or rel in seen:
             continue
         path = (root / rel).resolve()
         try:
             path.relative_to(root)
         except ValueError:
             continue
+        # 읽기 실패해도 같은 경로를 다시 시도하지 않는다(결과가 같고 I/O만 늘어난다).
+        seen.add(rel)
         try:
             text = path.read_text(encoding="utf-8")
         except OSError:
@@ -746,8 +795,10 @@ def apply_negative_verdict(
     """Apply a fail/inconclusive verdict. Only inconclusive leaves a suppression marker.
 
     Returns whether the verdict was applied. `False` means the caller must preserve the
-    job: the only reason is that the durable deletion ledger could not be written, and
-    machine verification is the one gate that removes cards.
+    job. Two things can block a delete, and both are ledgers that must exist before the
+    card goes away: the durable deletion audit (`verify-deleted.jsonl`) and, for
+    `inconclusive`, the billing-loop suppression marker (`verify-skipped.jsonl`).
+    Machine verification is the one gate that removes cards.
     """
     if action == "delete":
         # 감사 레코드를 먼저 쓴다 — 여기서 죽으면 "설명 없는 삭제"가 아니라
@@ -759,14 +810,26 @@ def apply_negative_verdict(
         if not record_verify_deletion(root, vcfg, sources, record, verdict):
             log_verdict(log_path, {**record, "result": "delete_blocked", "reason": "audit_ledger_unwritable"})
             return False
+        # **억제 마커도 삭제 전에 쓰고 실패에 fail-closed한다.** fail은 판정이 결정적이라
+        # 마커가 없어도 되지만, inconclusive("verifier가 판정 못함")는 같은 소스에서 재현될
+        # 확률이 높아 마커 없이 지우면 재컴파일→재검수→재삭제가 반복되고 **매 반복이 유료
+        # 호출**이다(재현: 안전영역 밖 `verify-skipped.jsonl` → 카드는 사라지고 삭제 원장만
+        # 남은 채 unchanged source가 다시 처리됐다). 삭제 감사 원장에 이미 적용한 처방을
+        # 여기에도 적용한다 — 삭제 전에 쓰고, 못 쓰면 지우지 않고 잡을 보존한다.
+        # 순서는 감사 원장 → 억제 마커 → 삭제다. 억제 마커를 먼저 쓰면 감사 원장 실패 시
+        # "지워지지도 않은 카드의 소스가 영구 억제"되어 그 소스가 다시는 컴파일되지 않는다.
+        suppressed = 0
+        if verdict == "inconclusive":
+            suppressed, suppression_ok = record_verify_suppression(root, vcfg, sources, record, verdict)
+            if not suppression_ok:
+                log_verdict(log_path, {
+                    **record, "result": "delete_blocked",
+                    "reason": "suppression_ledger_unwritable", "suppressedSources": suppressed,
+                })
+                return False
         # tombstone은 세우지 않는다 — 소스가 고쳐지면 재컴파일→재검증이 다시 열려야 한다.
         target.unlink(missing_ok=True)
         record_machine_delete(root, compile_cfg, record, verdict)
-        suppressed = 0
-        if verdict == "inconclusive":
-            # fail은 판정이 결정적이라 마커가 없어도 되지만, inconclusive는 같은 소스에서
-            # 재현될 확률이 높아 마커 없이는 재컴파일→재삭제 과금 루프가 열린다.
-            suppressed = record_verify_suppression(root, vcfg, sources, record, verdict)
         reindex_wiki(root, config)
         log_verdict(log_path, {**record, "result": "deleted", "suppressedSources": suppressed})
         return True
@@ -841,13 +904,15 @@ def run(
     if log_path is None:
         log_path = root / ".auto-context" / "compile" / "verify-log.jsonl"
 
-    # **유료 호출 전 preflight: 삭제 원장에 쓸 수 없으면 검수하지 않는다.**
+    # **유료 호출 전 preflight: fail-closed 원장에 쓸 수 없으면 검수하지 않는다.**
     # fail-closed 삭제(원장 없이는 지우지 않는다)는 유지하지만 그 실패에 종점이 없으면
     # 과금 루프가 된다 — 판정 1회(유료) → 원장 실패 → 잡 보존 → 다음 run 재판정(유료)…
     # 큐를 claim하기 **전에** 막으므로 host CLI 호출이 0회이고 잡·카드는 그대로다.
-    # 사용자 표면화는 SessionStart(`core/update.sh`)가 같은 프로브를 돌려 notice_once로 한다.
-    if not ledger_writable(verify_deleted_path(root, vcfg)):
-        result["reason"] = "audit_ledger_unwritable"
+    # 대상은 삭제 감사 원장과 inconclusive 억제 마커 **둘 다**다(preflight_block_reason).
+    # 사용자 표면화는 SessionStart(`core/update.sh`)가 같은 함수를 돌려 notice_once로 한다.
+    blocked = preflight_block_reason(root, vcfg)
+    if blocked:
+        result["reason"] = blocked
         return result
 
     # 0.x 전역 cooldown 파일의 고아 정리 — 이제 읽지도 쓰지도 않으므로 남아 있으면 "검수가

@@ -215,7 +215,7 @@ print(json.dumps({'verdict': 'pass', 'claims': [], 'reasons': []}))
 // failed, the job was preserved, and the next run paid again. Measured: 3 runs, 3 paid
 // verify calls, card still `generated` (invisible under recallVerifiedOnly), no cooldown and
 // no suppression marker, and the only trace was in a log that gets trimmed.
-function stampProject({ deletedPath, onFail = 'delete' } = {}) {
+function stampProject({ deletedPath, skippedPath, onFail = 'delete', onInconclusive, verdict = 'fail' } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'qwiki-ledger-'));
   const cardRel = '.auto-context/wiki/concepts/ledger-card.md';
   mkdirSync(join(dir, '.auto-context', 'compile'), { recursive: true });
@@ -228,7 +228,7 @@ import json, sys, pathlib
 json.loads(sys.stdin.read())
 with pathlib.Path(${JSON.stringify(callLog)}).open('a') as h:
     h.write('call\\n')
-print(json.dumps({'verdict': 'fail', 'claims': [], 'reasons': ['source contradicts card']}))
+print(json.dumps({'verdict': ${JSON.stringify(verdict)}, 'claims': [], 'reasons': ['source contradicts card']}))
 `);
   writeFileSync(join(dir, 'docs', 'source.md'), '# s\n\nDurable claim: the source says something else.\n');
   writeFileSync(join(dir, '.auto-context', 'settings.json'), JSON.stringify({
@@ -241,7 +241,12 @@ print(json.dumps({'verdict': 'fail', 'claims': [], 'reasons': ['source contradic
       enabled: true, mode: 'auto-wiki', autoWrite: true, defaultStatus: 'generated',
       triggers: ['post_tool_source'], maxSourceChars: 12000,
       extractor: { argv: ['python3', verifier], timeout: 60 },
-      verify: { enabled: true, timeout: 60, maxPerRun: 3, onFail, ...(deletedPath ? { deletedPath } : {}) },
+      verify: {
+        enabled: true, timeout: 60, maxPerRun: 3, onFail,
+        ...(onInconclusive ? { onInconclusive } : {}),
+        ...(deletedPath ? { deletedPath } : {}),
+        ...(skippedPath ? { skippedPath } : {}),
+      },
     },
   }));
   writeFileSync(join(dir, cardRel), [
@@ -355,6 +360,133 @@ v.main()
     const log = jsonl(join(dir, '.auto-context', 'compile', 'verify-log.jsonl'));
     assert.equal(log.at(-1).result, 'delete_blocked');
     assert.equal(log.at(-1).reason, 'audit_ledger_unwritable');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// 6단계에서 삭제 감사 원장에 적용한 처방(삭제 전 기록 + 실패에 fail-closed + 유료 호출 전
+// preflight)이 **억제 원장에는 적용되지 않았다**. inconclusive 삭제는 마커 없이는 unchanged
+// source가 재컴파일→재검수→재삭제를 반복하고 매 반복이 유료 호출이다.
+test('inconclusive: 억제 원장 쓰기 실패면 카드를 지우지 않는다 (fail-closed)', () => {
+  const { dir, cardRel } = stampProject({ verdict: 'inconclusive' });
+  try {
+    const py = `import sys
+sys.argv = ['wiki_verify_worker.py', '--cwd', ${JSON.stringify(dir)}, '--json']
+sys.path.insert(0, ${JSON.stringify(process.cwd() + '/core')})
+import wiki_verify_worker as v
+real = v.wc.append_jsonl
+def boom(path, payload):
+    if 'verify-skipped' in str(path):
+        raise OSError('ENOSPC')
+    return real(path, payload)
+v.wc.append_jsonl = boom
+v.ledger_writable = lambda path: True   # preflight 통과 → 쓰기 시점에서 실패
+v.main()
+`;
+    const out = execFileSync('python3', ['-c', py], {
+      cwd: process.cwd(), encoding: 'utf8',
+      env: { ...process.env, QMD_DIRTY_QUEUE: join(dir, 'dirty-queue') },
+    });
+    const parsed = JSON.parse(out.trim());
+    assert.equal(parsed.processed, 0);
+    assert.equal(parsed.remaining, 1, '잡 보존 → 재시도 가능');
+    assert.equal(existsSync(join(dir, cardRel)), true,
+      '억제 마커 없이 지우면 재컴파일→재삭제 과금 루프가 열린다');
+    const log = jsonl(join(dir, '.auto-context', 'compile', 'verify-log.jsonl'));
+    assert.equal(log.at(-1).result, 'delete_blocked');
+    assert.equal(log.at(-1).reason, 'suppression_ledger_unwritable');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// 종점: fail-closed 만으로는 "판정(유료) → 원장 실패 → 잡 보존 → 재판정(유료)" 루프가
+// 남는다. 유료 호출 **전에** 막아야 호출 0회가 된다.
+test('inconclusive 삭제 설정 + 억제 원장 불가 → 유료 호출 0회로 선차단', () => {
+  const { dir, callLog } = stampProject({
+    verdict: 'inconclusive', skippedPath: '.auto-context/compile/skip-as-dir',
+  });
+  try {
+    // 경로는 안전영역 안이지만 **디렉터리**다 → append 불가(실측된 실패 모드).
+    mkdirSync(join(dir, '.auto-context', 'compile', 'skip-as-dir'), { recursive: true });
+    const parsed = runVerify(dir);
+    assert.equal(parsed.reason, 'suppression_ledger_unwritable');
+    assert.equal(parsed.processed, 0);
+    assert.equal(existsSync(callLog), false, 'verifier(유료)를 부르지 않았다');
+    assert.equal(
+      readFileSync(join(dir, '.auto-context', 'compile', 'verify-queue.jsonl'), 'utf8').trim().length > 0,
+      true, '큐를 claim하지 않았으므로 잡이 그대로 있다');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// `onInconclusive`가 삭제가 아니면 억제 마커가 필요 없다 — 무조건 검사하면 그 프로젝트의
+// 검수를 이유 없이 막는다.
+test('onInconclusive=none이면 억제 원장 불가가 검수를 막지 않는다', () => {
+  const { dir, callLog } = stampProject({
+    verdict: 'inconclusive', onInconclusive: 'none',
+    skippedPath: '.auto-context/compile/skip-as-dir',
+  });
+  try {
+    mkdirSync(join(dir, '.auto-context', 'compile', 'skip-as-dir'), { recursive: true });
+    const parsed = runVerify(dir);
+    assert.equal(parsed.reason, undefined, '선차단되지 않는다');
+    assert.equal(parsed.processed, 1);
+    assert.equal(existsSync(callLog), true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// `verify_deleted_path`가 이미 닫은 것과 같은 오타→과금 루프 입구. skippedPath 오타가
+// "마커가 한 줄도 안 남는" 상태를 만들면 안 된다.
+test('안전영역 밖 skippedPath는 None이 아니라 기본 경로로 폴백한다', () => {
+  const out = execFileSync('python3', ['-c', `import sys, pathlib, json
+sys.path.insert(0, ${JSON.stringify(process.cwd() + '/core')})
+import wiki_verify_worker as v
+root = pathlib.Path('/tmp/qmd-skipped-fallback')
+p = v.verify_skipped_path(root, {'skippedPath': '../../outside.jsonl'})
+print(json.dumps({'path': str(p)}))
+`], { cwd: process.cwd(), encoding: 'utf8' });
+  const r = JSON.parse(out.trim());
+  assert.equal(r.path, '/tmp/qmd-skipped-fallback/.auto-context/compile/verify-skipped.jsonl');
+});
+
+// MAJOR 1 층 2: 순서가 아니라 **필드**가 보장이어야 한다. 모델 항목이 MAX_SOURCES를 채워도
+// `authoritativeSources`는 잘리지 않는다.
+test('load_sources는 MAX_SOURCES와 무관하게 authoritativeSources를 읽는다', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'qwiki-loadsrc-'));
+  try {
+    mkdirSync(join(dir, 'docs'), { recursive: true });
+    for (const name of ['real.md', 'd1.md', 'd2.md', 'd3.md']) {
+      writeFileSync(join(dir, 'docs', name), `# ${name}\n`);
+    }
+    const job = {
+      authoritativeSources: [{ kind: 'file', path: 'docs/real.md', collection: 'c' }],
+      // 모델 목록에는 실제 소스가 **없다**(또는 뒤에 있다) — 예전 코드는 d1..d3만 읽었다.
+      sources: [
+        { kind: 'file', path: 'docs/d1.md' },
+        { kind: 'file', path: 'docs/d2.md' },
+        { kind: 'file', path: 'docs/d3.md' },
+        { kind: 'file', path: 'docs/real.md' },
+      ],
+    };
+    const out = execFileSync('python3', ['-c', `import sys, json, pathlib
+sys.path.insert(0, ${JSON.stringify(process.cwd() + '/core')})
+import wiki_verify_worker as v
+job = json.loads(sys.stdin.read())
+loaded = v.load_sources(pathlib.Path(${JSON.stringify(dir)}).resolve(), job, 12000)
+print(json.dumps([s['path'] for s in loaded]))
+`], { cwd: process.cwd(), encoding: 'utf8', input: JSON.stringify(job) });
+    const paths = JSON.parse(out.trim());
+    assert.equal(paths[0], 'docs/real.md', '권위 소스가 먼저');
+    assert.equal(paths.filter((p) => p === 'docs/real.md').length, 1, '같은 경로는 한 번만 읽는다');
+    // 총 읽기 수는 여전히 MAX_SOURCES로 유계다(권위 항목이 예산을 함께 쓴다) — 권위
+    // 항목이 상한보다 많을 때만 초과하고, 실제로는 잡당 1건이다.
+    assert.deepEqual(paths, ['docs/real.md', 'docs/d1.md', 'docs/d2.md'],
+      '권위 소스가 예산을 먼저 차지하고 모델 항목이 남은 칸을 채운다');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

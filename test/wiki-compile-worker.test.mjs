@@ -896,3 +896,96 @@ else:
     assert.equal(log[0].verifiedMode, 'self');
   } finally { rmSync(project, { recursive: true, force: true }); }
 });
+
+// 같은 클래스의 가장 깊은 사례: 모델의 `candidate.sources`가 **검증 근거**를 결정할 수
+// 있었다. verifier는 목록 앞에서 MAX_SOURCES(3)개만 읽으므로 decoy 3개면 카드가 실제
+// 원문 없이 검증돼 `verified`(= recallVerifiedOnly 기본값에서 인용 가능한 캐논)가 된다.
+test('모델 decoy sources가 실제 소스를 밀어내지 못한다 (검증 근거의 권위는 큐)', () => {
+  const seen = join(mkdtempSync(join(tmpdir(), 'seen-')), 'verify-sources.json');
+  const dual = join(mkdtempSync(join(tmpdir(), 'decoy-')), 'dual.py');
+  writeFileSync(dual, `#!/usr/bin/env python3
+import json, pathlib, sys
+payload = json.loads(sys.stdin.read())
+if payload.get("task") == "verify":
+    pathlib.Path(${JSON.stringify(seen)}).write_text(
+        json.dumps([s["path"] for s in payload["sources"]]), encoding="utf-8")
+    print(json.dumps({"verdict": "pass", "claims": [], "reasons": []}))
+else:
+    print(json.dumps({"candidates": [{
+        "title": "Decoy Sources Card",
+        "summary": "Durable decision: generated wiki pages cite source markdown.",
+        "suggestedType": "decision",
+        "confidence": "high",
+        "sources": [
+            {"kind": "file", "path": "docs/d1.md", "collection": "proj-docs"},
+            {"kind": "file", "path": "docs/d2.md", "collection": "proj-docs"},
+            {"kind": "file", "path": "docs/d3.md", "collection": "proj-docs"},
+            {"kind": "file", "path": "docs/source.md", "collection": "other"},
+        ],
+    }]}))
+`);
+  const project = setupProject({
+    extractor: { dispatch: 'by-engine', backends: { claude: ['python3', dual] }, timeout: 30 },
+    semanticDedup: { enabled: false },
+    verify: { enabled: true },
+  });
+  try {
+    // decoy가 실제로 읽히는 파일이어야 밀어내기가 재현된다(읽기 실패는 예산을 안 먹는다).
+    for (const name of ['d1.md', 'd2.md', 'd3.md']) {
+      writeFileSync(join(project, 'docs', name), `# ${name}\n\nDecoy body.\n`);
+    }
+    runWorker(project, { QMD_DIRTY_QUEUE: join(mkdtempSync(join(tmpdir(), 'dirty-decoy-')), 'q') });
+    const created = jsonl(join(project, '.auto-context', 'compile', 'candidates.jsonl'))
+      .find((row) => row.action === 'created');
+    assert.ok(created, 'card written');
+
+    // 1) 카드 frontmatter: 실제 소스가 맨 앞. `collection`만 다른 모델 중복은 제거된다.
+    const text = readFileSync(join(project, created.targetPath), 'utf8');
+    const sourceLines = text.split('\n')
+      .slice(text.split('\n').findIndex((l) => l === 'sources:') + 1)
+      .filter((l) => l.startsWith('  - '));
+    assert.match(sourceLines[0], /path: "docs\/source\.md"/, '실제 소스가 목록 맨 앞');
+    assert.equal(sourceLines.filter((l) => l.includes('docs/source.md')).length, 1,
+      'collection만 다른 모델 중복은 제거된다');
+
+    // 2) verify 잡: 실제 소스를 별도 필드로 못박는다(순서 계약에만 의존하지 않는다).
+    const queued = jsonl(join(project, '.auto-context', 'compile', 'verify-queue.jsonl'));
+    const job = queued.at(-1) || {};
+    if (job.authoritativeSources) {
+      assert.deepEqual(job.authoritativeSources.map((s) => s.path), ['docs/source.md']);
+    }
+
+    // 3) verifier가 실제로 읽은 소스 — decoy가 실제 원문을 밀어내지 못했다.
+    const loaded = JSON.parse(readFileSync(seen, 'utf8'));
+    assert.ok(loaded.includes('docs/source.md'),
+      `실제 원문 없이 검증됐다: ${JSON.stringify(loaded)}`);
+    assert.equal(loaded[0], 'docs/source.md', '실제 원문이 먼저 읽힌다');
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});
+
+// `authoritativeSources`는 verify 잡 전용 필드다. 카드 frontmatter로 새면 모델 제공 키가
+// 노출되고, 읽는 쪽(recall.frontmatter_source_entries)이 모르는 키가 카드에 남는다.
+test('authoritativeSources는 카드 frontmatter로 새지 않는다', () => {
+  const extractor = join(mkdtempSync(join(tmpdir(), 'auth-fm-')), 'extract.py');
+  writeFileSync(extractor, `#!/usr/bin/env python3
+import json
+print(json.dumps({'candidates': [{
+  'title': 'Authoritative Field Card',
+  'summary': 'Durable decision: generated wiki pages cite source markdown.',
+  'suggestedType': 'decision',
+  'confidence': 'high',
+}]}))
+`);
+  const project = setupProject({
+    extractor: { argv: ['python3', extractor], timeout: 30 },
+    semanticDedup: { enabled: false },
+    verify: { enabled: false },
+  });
+  try {
+    runWorker(project, { QMD_DIRTY_QUEUE: join(mkdtempSync(join(tmpdir(), 'dirty-auth-')), 'q') });
+    const created = jsonl(join(project, '.auto-context', 'compile', 'candidates.jsonl'))
+      .find((row) => row.action === 'created');
+    const text = readFileSync(join(project, created.targetPath), 'utf8');
+    assert.ok(!text.includes('authoritativeSources'), 'frontmatter에 새지 않는다');
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});

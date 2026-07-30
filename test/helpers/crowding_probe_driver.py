@@ -48,6 +48,9 @@ SCENARIOS = {
     "all-wiki": (0, 2),
     # 필터 결과가 전역 창 밖 문서를 낸다 → 독립 검색 증명
     "scoped": (25, 12),
+    # scoped 증명 + wiki 매칭이 recall limit 미만 → **구 산식이면 상한 > 0** 이 나온다.
+    # 8단계 결론("독립 검색이면 밀어낼 경로가 없다")과 모순되는 값을 재현하는 시나리오다.
+    "scoped-sparse": (25, 1),
 }
 # 프로브마다 wiki 수를 다르게 만든다. 같은 수가 반복되면 detect_engine_cap 이 cap 으로
 # 의심하므로(그게 lex-cap 시나리오의 요지) ambiguous 분기를 시험하려면 값이 달라야 한다.
@@ -80,6 +83,9 @@ def _global_window(query: str, limit: int) -> list[str]:
 
 
 def _filtered(query: str, limit: int) -> list[str]:
+    if scenario == "scoped-sparse":
+        # 창 밖 문서 1건만 낸다 → newVsGlobal > 0(증명)이면서 필터 결과 수는 recall limit 미만.
+        return (SCOPED_EXTRA[:1] + _wiki_hits(query))[:limit]
     if scenario == "scoped":
         # 전역 창 앞에 오지 않는 문서를 먼저 내놓아 newVsGlobal > 0 을 만든다.
         return (SCOPED_EXTRA + _wiki_hits(query))[:limit]

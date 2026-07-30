@@ -1055,10 +1055,13 @@ except Exception:
       notice_clear source-missing "$workdir"
     fi
 
-    # 삭제 원장에 쓸 수 없으면 기계 검수가 **아무 카드도 검수하지 못한다**(fail-closed
-    # 삭제의 preflight가 유료 호출 전에 멈춘다). 그 상태로 두면 새 카드가 계속 `generated`로
-    # 쌓이고 `recallVerifiedOnly` 기본값에서 recall에 하나도 나오지 않는데, 흔적은 트림되는
-    # verify-log 뿐이라 사용자가 알 방법이 없었다. 판정은 Python이 SSOT다(bash 재구현 금지).
+    # fail-closed 원장에 쓸 수 없으면 기계 검수가 **아무 카드도 검수하지 못한다**(유료 호출
+    # 전 preflight가 멈춘다). 그 상태로 두면 새 카드가 계속 `generated`로 쌓이고
+    # `recallVerifiedOnly` 기본값에서 recall에 하나도 나오지 않는데, 흔적은 트림되는
+    # verify-log 뿐이라 사용자가 알 방법이 없었다. 판정은 Python이 SSOT다(bash 재구현 금지) —
+    # worker의 preflight와 **같은 함수**(preflight_block_reason)를 부르므로 두 판정이 갈릴 수
+    # 없다. 사유는 삭제 감사 원장(verify-deleted)과 inconclusive 억제 마커(verify-skipped)로
+    # 갈린다.
     ledger_blocked="$(python3 -c 'import sys
 sys.path.insert(0, sys.argv[1])
 import config as c, wiki_verify_worker as v
@@ -1071,13 +1074,19 @@ if not compile_cfg.get("enabled") or not vcfg.get("enabled", True):
 else:
     import pathlib
     root = pathlib.Path(found["projectRoot"]).resolve()
-    print("" if v.ledger_writable(v.verify_deleted_path(root, vcfg)) else "blocked")
+    print(v.preflight_block_reason(root, vcfg))
 ' "$(dirname "$0")" "$workdir" 2>/dev/null || true)"
-    if [ "$ledger_blocked" = "blocked" ]; then
-      notice_once verify-ledger "$workdir" "[qmd] 기계 검수 중단 — 삭제 감사 원장(.auto-context/compile/verify-deleted.jsonl)에 쓸 수 없습니다. 새 wiki 카드가 검수되지 않아 recall에 나오지 않습니다. compile 디렉터리 권한과 compile.verify.deletedPath 설정을 확인하세요."
-    else
-      notice_clear verify-ledger "$workdir"
-    fi
+    case "$ledger_blocked" in
+      audit_ledger_unwritable)
+        notice_once verify-ledger "$workdir" "[qmd] 기계 검수 중단 — 삭제 감사 원장(.auto-context/compile/verify-deleted.jsonl)에 쓸 수 없습니다. 새 wiki 카드가 검수되지 않아 recall에 나오지 않습니다. compile 디렉터리 권한과 compile.verify.deletedPath 설정을 확인하세요."
+        ;;
+      suppression_ledger_unwritable)
+        notice_once verify-ledger "$workdir" "[qmd] 기계 검수 중단 — 억제 원장(.auto-context/compile/verify-skipped.jsonl)에 쓸 수 없습니다. 이 원장 없이 inconclusive 삭제를 진행하면 같은 소스가 반복 재컴파일되어 유료 호출이 되풀이됩니다. compile 디렉터리 권한과 compile.verify.skippedPath 설정을 확인하세요."
+        ;;
+      *)
+        notice_clear verify-ledger "$workdir"
+        ;;
+    esac
   fi
 
   # 헬스체크: config·reason 검사 통과 후, fork 직전 1회 실행 (main() 호출에서만).

@@ -112,7 +112,7 @@ title: "claude-runner — 구독 기반 Claude Code headless AI 실행 계층"
 | 5 | ✅ **완료** — crowding 반복 측정 도구 + 라이브 baseline | 범위 축소: 라이브가 이미 `wikiOnly` 라 "raw 있는 상태의 recall baseline"은 존재하지 않는다. 남은 일은 인덱스 점유 측정의 **반복 가능화** |
 | 6 | ~~커버리지 백필~~ → **전제 철회. 하지 않는다.** verify 처리량 + per-run cap만 ✅ | 목표는 커버리지가 아니라 **정확성**이다("중요하고 틀리지 않은 정보만 recall되면 된다"). recall은 `topN` 3만 주입하므로 커버리지를 올려도 주입량은 같고 바뀌는 건 "어느 카드가 이기는가"뿐이며, 카드 없는 문서의 대안(recall 무출력 → 에이전트가 원문 검색)이 어중간한 카드보다 낫다 — 그 경로는 2단계의 원문 경로 주입으로 이미 열려 있다. 남긴 것: verify 처리량(run당 3건은 백필과 무관하게 "정확한 카드가 늦게 보이는" 병목), per-run cap. 파일럿 25건은 **자동 생성 카드 정확도** 측정으로 전용했다(pass 80.6% / inconclusive 16.4% / fail 3.0%). 실측·철회 근거는 `bulk-wiki-backfill-spec.md` |
 | 7 | ✅ **완료** — role `source` 도입 | qmd 등록과 compile 입력 분리. 8번 없이는 불필요 |
-| 8 | **raw on/off A/B → 프로젝트별 가역적 제거** | 게이트: 링크 무결성 · query coverage · source-read 성공률 · 재생성 가능성 · raw-search escape hatch |
+| 8 | ✅ **완료 — 결론은 "제거하지 않는다"** | raw on/off A/B 를 실행한 결과 **제거 이득이 0 으로 증명됐다**(lex 는 5단계, vec 은 orphan 벡터 26,438행 정리 후 이번에 — 양 경로 모두 컬렉션별 독립 검색). 그래서 가역적 제거 실험 자체가 불필요해졌고 파괴적 조작은 하지 않았다. 게이트(링크 무결성 · query coverage · source-read 성공률 · 재생성 가능성 · raw-search escape hatch)는 실행되지 않았다 — 평가할 제거가 없다. 실측·근거는 `docs/plans/2026-07-30-raw-index-crowding-measurement.md` 8단계 |
 
 ### 완료 기록 (1·2·3·4단계)
 
@@ -272,8 +272,8 @@ title: "claude-runner — 구독 기반 Claude Code headless AI 실행 계층"
 
 - **원래 문구("raw 있는 상태에서 shadow baseline 수집")는 성립하지 않는다.** 라이브 두
   프로젝트가 이미 `recallStrategy: wikiOnly` 라 raw 는 recall 되지 않으므로 그 baseline 은
-  존재하지 않는다 — 남은 일은 인덱스 점유 측정을 **프로젝트별로 반복 가능하게** 만들어
-  8단계가 제거 전/후를 비교하게 하는 것이다
+  존재하지 않는다 — 남은 일은 인덱스 점유 측정을 **프로젝트별로 반복 가능하게** 만드는
+  것이다(당시 목적은 8단계의 제거 전/후 비교였지만, 8단계는 제거 없이 결론이 났다)
 - **대원칙: 틀린 판정은 없는 판정보다 나쁘다.** 리뷰 라운드에서 major 4건이 나왔고 셋이
   판정의 타당성이었다. 산출물이 8단계 결정 근거이므로 관측이 두 세계를 구분하지 못하면
   `measurable: false` + 이유로 보고한다
@@ -290,7 +290,11 @@ title: "claude-runner — 구독 기반 Claude Code headless AI 실행 계층"
   가능한 pool")은 실제로는 **점유당한 창 안의 wiki 수**라 이름이 측정을 잘못 말했다 →
   `wikiInDeepWindow` / `starvedSlotsUpperBound` + `…LowerBound` 로 개명. 비-wiki cap 은
   반례를 막지 못한다(headline 프로브가 pool 2 / 비-wiki 19 로 상한 6 을 내지만 "밀려남"과
-  "매칭 2건뿐"은 여전히 구분 불가). **구분은 raw 제거 후 재측정으로만 결정된다**
+  "매칭 2건뿐"은 여전히 구분 불가). **당시 결론이었던 "구분은 raw 제거 후 재측정으로만
+  결정된다" 는 8단계에서 정정됐다** — 구분을 준 것은 제거가 아니라 orphan 벡터 정리(창에
+  여유가 생겨 독립 검색이 드러났다)였고, 그 증명 이후 이 상한 산식 자체가 무효다.
+  8단계 리뷰에서 `scopedRetrievalProven` 인 경로의 상한을 **0** 으로 고쳤다(구 산식으로
+  계산된 값이 8단계 결론과 모순됐다). 스키마 `qmd_crowding_probe/3` 이상이 새 산식이다
 - **`windowCrowding` boolean 을 제거했다** — 창 점유(구성 사실)를 "crowding"으로 부르면
   recall 피해로 오독되고, 그 오독이 이 도구가 정정하려는 오류 자체다. 창 구성은 숫자로만 낸다
 - **오차는 양방향이다.** 프로브를 wiki 어휘에서 파생하므로 wiki 에 유리하다(novel wiki 는

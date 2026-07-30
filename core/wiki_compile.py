@@ -501,6 +501,38 @@ def append_jsonl(path: Path, payload: dict) -> None:
         handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
 
 
+def ledger_writable(path: Path) -> bool:
+    """이 원장에 append할 수 있는가 — **유료 host CLI 호출 전에** 확인하는 preflight.
+
+    fail-closed 원장(쓸 수 없으면 그 판정을 적용하지 않는다)은 옳지만 **종점이 없으면
+    과금 루프**가 된다: 유료 판정 1회 → 원장 쓰기 실패 → 작업 보존 → 다음 run 재판정(유료).
+    cooldown이나 억제 마커로 끊는 방법도 있지만 그 파일들 역시 같은 디렉터리에 쓰므로
+    "아무것도 못 쓰는 상태"에서는 함께 실패한다. **가장 확실한 종점은 유료 호출을 아예
+    하지 않는 것**이고, 그래서 판정 전에 여기서 막는다(호출 0회 = 루프 없음).
+
+    **원장 파일을 만들지는 않는다.** 기록이 없었으면 파일도 없어야 한다(원장의 존재 자체가
+    "이 프로젝트에서 그 일이 있었다"로 읽히고 기존 테스트도 그 계약을 고정한다). 그래서
+    부모 디렉터리에 임시 파일을 만들어 지우는 방식으로 쓰기 가능성만 확인하고(디렉터리
+    부재·권한·ENOSPC를 모두 잡는다), 목표 경로가 이미 있으면 **일반 파일인지** 따로 본다
+    (디렉터리를 원장 경로로 적은 경우가 실측된 실패 모드다).
+
+    `wiki_verify_worker`(삭제 감사·inconclusive 억제 원장)와 `wiki_dedup_scan`
+    (`dedup-skipped.jsonl` 억제 원장)이 같은 판정을 쓴다 — 유료 호출 전 게이트가 두 벌이
+    되면 한쪽만 고쳐지고 다른 쪽에서 같은 루프가 남는다(실제로 그렇게 재발했다).
+    """
+    try:
+        if path.exists() and not path.is_file():
+            return False
+        path.parent.mkdir(parents=True, exist_ok=True)
+        probe = path.with_name(f".{path.name}.probe-{os.getpid()}")
+        with open(probe, "w", encoding="utf-8"):
+            pass
+        probe.unlink(missing_ok=True)
+        return True
+    except OSError:
+        return False
+
+
 def read_jsonl(path: Path) -> list[dict]:
     """append-only 로그/큐 읽기. 못 읽는 줄은 **건너뛴다**(fail-open).
 
@@ -768,6 +800,42 @@ def source_flow_entries(sources) -> list:
         if flow:
             entries.append(flow)
     return entries
+
+
+def authoritative_sources(candidate: dict) -> list:
+    """큐 잡이 아는 **실제** 소스 목록 — 모델이 밀어낼 수 없는 검증 근거.
+
+    `sources`는 extractor(모델) 출력이 섞인 목록이고 verifier는 그 목록 앞에서
+    `MAX_SOURCES`(3)개만 읽는다. 실제 소스를 앞에 두는 것만으로도 밀려나지 않지만,
+    그 보장이 **목록 순서**라는 암묵 계약이면 다음 편집에서 조용히 깨지고 그때 깨지는
+    것은 "검증됐다"는 주장 자체다. 그래서 사실을 별도 필드로 못박는다.
+
+    **frontmatter로는 나가지 않는다** — `markdown_page`는 `sources`만 읽으므로 이 값이
+    카드에 새지 않고, 따라서 `dump_flow_mapping`의 키 화이트리스트(일반 식별자)에
+    새 키가 노출되는 문제도 없다. 값은 여기서 닫힌 스키마(kind/path/collection)로
+    재구성한다 — 큐 잡을 손으로 고친 경우에도 모델 제공 키가 그대로 흐르지 않는다.
+    비면 키를 만들지 않으므로 수동 compile 경로(`wiki_extract`)의 잡 형태는 불변이다.
+
+    `kind: "file"` 판정은 `recall.SOURCE_KIND_FILE`·`wiki_verify_worker.load_sources`와
+    **같은 집합이어야 한다**(recall.py의 그 상수 주석이 이 계약을 기록한다).
+    """
+    raw = candidate.get("authoritativeSources")
+    if not isinstance(raw, list):
+        return []
+    out = []
+    for item in raw:
+        if not isinstance(item, dict) or item.get("kind") != "file":
+            continue
+        path = item.get("path")
+        if not isinstance(path, str) or not path.strip():
+            continue
+        collection = item.get("collection")
+        out.append({
+            "kind": "file",
+            "path": path,
+            "collection": collection if isinstance(collection, str) else "",
+        })
+    return out
 
 
 def markdown_page(candidate: dict, summary: str, status: str, redactions: list[str], h: str) -> str:
@@ -1447,10 +1515,14 @@ def main() -> int:
         )
         if verify_queue_path is not None:
             verify_queued = True
+            # 실제 소스를 별도 필드로 넘긴다 — verifier가 `MAX_SOURCES` 상한과 무관하게
+            # 반드시 읽어야 하는 근거다(모델이 준 `sources` 항목이 밀어낼 수 없다).
+            authoritative = authoritative_sources(candidate)
             append_jsonl(verify_queue_path, {
                 "ts": now_iso(),
                 "targetPath": record["targetPath"],
                 "sources": record["sources"],
+                **({"authoritativeSources": authoritative} if authoritative else {}),
                 "sourceHash": h,
                 "engine": candidate.get("engine") if isinstance(candidate.get("engine"), str) else "",
                 "trigger": record["trigger"],

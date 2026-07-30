@@ -394,6 +394,17 @@ def batch_ready(kept: list, idle_seconds: int, max_items: int, flush_all: bool) 
     return max(ages, default=0) >= idle_seconds
 
 
+def is_same_file_source(item, rel: str) -> bool:
+    """모델이 준 `sources` 항목이 큐 잡의 실제 소스와 같은 파일을 가리키는가.
+
+    판정은 **경로만** 본다 — `collection`은 메타이고 소스를 식별하는 것은 경로다.
+    (0.x의 dict 완전 일치는 `collection`이 다른 중복을 남겼다.)
+    """
+    if not isinstance(item, dict) or item.get("kind") != "file":
+        return False
+    return item.get("path") == rel
+
+
 def process_job(root: Path, config: dict, compile_cfg: dict, job: dict) -> tuple[bool, bool, list[str]]:
     """Return (processed, preserve_job, verify_target_paths).
 
@@ -532,12 +543,28 @@ def process_job(root: Path, config: dict, compile_cfg: dict, job: dict) -> tuple
     for candidate in candidates:
         if not isinstance(candidate, dict):
             continue
-        raw_sources = candidate.get("sources")
-        sources = raw_sources if isinstance(raw_sources, list) else []
+        # **검증 근거의 권위는 큐가 갖는다.** `candidate["sources"]`는 extractor(모델)
+        # 출력이고, verifier(`wiki_verify_worker.load_sources`)는 목록 **앞에서**
+        # `MAX_SOURCES`(3)개만 읽는다. 모델 목록을 앞에 두고 실제 소스를 뒤에 붙이던
+        # 동안에는 모델이 decoy 3개를 내면 카드가 실제 원문 없이 검증되고
+        # `verified`(= `recallVerifiedOnly` 기본값에서 인용 가능한 캐논)가 됐다
+        # (재현: decoy `d1,d2,d3` + 실제 `real.md` → verifier가 읽은 것은 d1·d2·d3,
+        # 실제 소스 미포함). `engine`/`trigger`를 setdefault → 대입으로 바꾼 것과 같은
+        # 결이다 — 사실은 큐가 정하고 모델은 의견만 낸다.
+        #
+        # 같은 경로를 가리키는 모델 항목은 버린다(`collection`만 다른 중복도 포함).
+        # 예전의 `file_source not in sources`는 dict 완전 일치라 `collection`이 다른
+        # 중복을 남겨 같은 파일을 두 번 읽게 했다.
         file_source = {"kind": "file", "path": rel, "collection": source.get("collection", "")}
-        if file_source not in sources:
-            sources.append(file_source)
-        candidate["sources"] = sources
+        raw_sources = candidate.get("sources")
+        model_sources = raw_sources if isinstance(raw_sources, list) else []
+        candidate["sources"] = [file_source] + [
+            item for item in model_sources if not is_same_file_source(item, rel)
+        ]
+        # 순서만으로도 밀려나지 않지만 그 보장이 **목록 순서**라는 암묵 계약에 걸려 있으면
+        # 다음 편집에서 조용히 깨진다. 실제 소스를 별도 필드로 못박아 verifier가
+        # `MAX_SOURCES`와 무관하게 반드시 읽게 한다(wiki_compile이 verify 잡으로 전달).
+        candidate["authoritativeSources"] = [dict(file_source)]
         # **모델 출력을 신뢰 판정에 쓰지 않는다.** candidate는 extractor(모델) 출력이므로
         # setdefault면 모델이 낸 값이 이긴다 — `engine`이 그렇게 위조되면 자기검증이
         # `verifiedMode: cross-engine`으로 승격된다(생성 엔진은 job이 정하는 사실이고 모델의

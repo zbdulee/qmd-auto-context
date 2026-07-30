@@ -202,7 +202,7 @@ def record_judged_distinct(
     cache: dict[str, str | None],
     info: dict,
     suppressions: dict[tuple[str, str], tuple[str, str]] | None = None,
-) -> None:
+) -> bool:
     """Record a machine "distinct" verdict in dedup-skipped.jsonl.
 
     Same schema and body-hash keying as wiki_dedup_resolve.record_skip, so the
@@ -210,27 +210,38 @@ def record_judged_distinct(
     not re-billed to the user) until one of the two bodies changes. `judgedBy`
     keeps machine verdicts distinguishable from resolver skips in the audit trail.
     Unreadable pages record nothing -- a missing hash would suppress forever.
+
+    Returns whether the durable row was written. `False` means the suppression
+    ledger itself failed, which is the same class as the verify workers' ledgers:
+    the paid judge call already happened, and without the marker the next scan
+    re-judges the identical pair and bills the user again. The caller stops judging
+    for the rest of the scan instead of swallowing it. A missing hash (unreadable
+    page) is NOT a failure -- nothing was judged worth suppressing.
     """
     hash_a = current_body_hash(wiki_root, key[0], cache)
     hash_b = current_body_hash(wiki_root, key[1], cache)
     if hash_a is None or hash_b is None:
-        return
+        return True
     if suppressions is not None:
         # Also suppress in-scan: the same pair surfaces again from the other page's
         # own query, and re-judging it would bill the user twice for one verdict.
         suppressions[key] = (hash_a, hash_b)
     if skipped_path is None:
-        return
-    wc.append_jsonl(skipped_path, {
-        "pageA": key[0],
-        "pageB": key[1],
-        "pageAHash": hash_a,
-        "pageBHash": hash_b,
-        "skippedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-        "judgeVerdict": "distinct",
-        "judgeReason": info.get("reason", ""),
-        "judgedBy": info.get("engine", ""),
-    })
+        return False
+    try:
+        wc.append_jsonl(skipped_path, {
+            "pageA": key[0],
+            "pageB": key[1],
+            "pageAHash": hash_a,
+            "pageBHash": hash_b,
+            "skippedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "judgeVerdict": "distinct",
+            "judgeReason": info.get("reason", ""),
+            "judgedBy": info.get("engine", ""),
+        })
+    except OSError:
+        return False
+    return True
 
 
 def run(cwd: str) -> None:
@@ -306,6 +317,17 @@ def run(cwd: str) -> None:
     # score-threshold behavior verbatim -- see wiki_dedup_judge for why the score
     # cannot express duplication on its own.
     judging = judge.is_available(compile_cfg)
+    ledger_blocked = judging and not (
+        skipped_path is not None and wc.ledger_writable(skipped_path)
+    )
+    if ledger_blocked:
+        # **유료 judge 호출 전 preflight** — verify worker와 같은 처방이다. 억제 원장에 쓸 수
+        # 없으면 `distinct` 판정이 기록되지 않아 다음 scan이 같은 쌍을 다시 판정하고, 매 scan이
+        # 유료 호출이다(scan당 `maxPairsPerScan`회). 가장 확실한 종점은 호출을 아예 하지 않는
+        # 것이므로 판정 없이 레거시 score 게이트로 degrade한다(무료, `OUTCOME_UNAVAILABLE`과
+        # 같은 경로). judge 없이는 score 게이트가 사실상 아무것도 큐하지 않으므로 이 degrade의
+        # 대가는 "이번 scan은 중복을 못 찾는다"뿐이다 — 유료 루프보다 낮은 등급이다.
+        judging = False
     retrieval_floor = float(semantic_cfg.get("candidateMinScore", 0.3)) if judging else threshold
     judge_budget = judge.max_pairs_per_scan(compile_cfg) if judging else 0
 
@@ -397,7 +419,15 @@ def run(cwd: str) -> None:
                         # until one of the two bodies actually changes.
                         if verdict == "distinct":
                             judged_distinct += 1
-                            record_judged_distinct(wiki_root, skipped_path, key, hash_cache, info, suppressions)
+                            if not record_judged_distinct(
+                                wiki_root, skipped_path, key, hash_cache, info, suppressions
+                            ):
+                                # 억제 원장 쓰기 실패 → 이 판정은 다음 scan에 재과금된다.
+                                # 그 이상 유료 호출을 하지 않고 이번 scan을 멈춘다(잡·스냅샷
+                                # 보존). transient judge 실패와 같은 처리다.
+                                advance = False
+                                judge_stalled = True
+                                break
                         continue
                     pair_info = info
             wc.append_jsonl(queue_path, {
@@ -421,6 +451,7 @@ def run(cwd: str) -> None:
         f"pages={len(pages)} scanned_ok={scanned_ok} scanned_failed={scanned_failed} "
         f"queued={queued_this_scan} suppressed={suppressed_this_scan} "
         f"judged={judged_this_scan} judged_distinct={judged_distinct}"
+        + (" judge=off:skipped_ledger_unwritable" if ledger_blocked else "")
     )
 
 

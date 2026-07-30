@@ -61,6 +61,11 @@ def record_skip(root: Path, wiki_root: Path, compile_dir: Path, entry: dict) -> 
 
     The hashes are computed HERE, by the CLI, at skip time -- never supplied
     by the resolver agent (an agent-supplied hash would be nondeterministic).
+
+    An unwritable ledger returns False instead of propagating OSError. Same class as
+    the verify workers' ledgers: without the row the scanner re-queues this pair and
+    the judge re-bills it, so the failure must be visible (`recorded: false` in the
+    CLI's JSON) rather than a traceback that loses the rest of the resolve.
     """
     page_a = entry.get("pageA")
     page_b = entry.get("pageB")
@@ -83,13 +88,16 @@ def record_skip(root: Path, wiki_root: Path, compile_dir: Path, entry: dict) -> 
     if skipped_path is None:
         return False
     first, second = sorted((page_a, page_b))  # order-independent pair key
-    wc.append_jsonl(skipped_path, {
-        "pageA": first,
-        "pageB": second,
-        "pageAHash": dedup_scan.body_hash(texts[first]),
-        "pageBHash": dedup_scan.body_hash(texts[second]),
-        "skippedAt": now_iso(),
-    })
+    try:
+        wc.append_jsonl(skipped_path, {
+            "pageA": first,
+            "pageB": second,
+            "pageAHash": dedup_scan.body_hash(texts[first]),
+            "pageBHash": dedup_scan.body_hash(texts[second]),
+            "skippedAt": now_iso(),
+        })
+    except OSError:
+        return False
     return True
 
 

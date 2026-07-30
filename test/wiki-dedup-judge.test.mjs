@@ -625,3 +625,32 @@ test('QMD_DEDUP_JUDGE=off disables judging entirely (legacy threshold behavior)'
     rmSync(work, { recursive: true, force: true });
   }
 });
+
+// verify 원장과 같은 클래스: `distinct` 판정(유료)을 기록할 곳이 없으면 다음 scan 이 같은 쌍을
+// 다시 판정하고 매 scan 이 과금이다. 종점은 유료 호출을 아예 하지 않는 것이므로 판정 전에
+// 억제 원장 쓰기 가능성을 확인한다(`wiki_compile.ledger_writable` — verify 와 같은 함수).
+test('retroactive scan: 억제 원장에 쓸 수 없으면 judge 를 부르지 않는다 (유료 호출 0회)', () => {
+  const work = repoTemp('judge-scan-ledger-blocked');
+  try {
+    const log = join(work, 'calls.jsonl');
+    writeScanSettings(work, { candidateMinScore: 0.3 }, {
+      extractor: { argv: judgeStub('distinct', { callLog: log }), timeout: 30 },
+    });
+    writePage(work, 'entities/page-a.md', 'Content about the front desk.');
+    writePage(work, 'entities/page-b.md', 'Content about a different corridor entirely.');
+    // 억제 원장 경로를 **디렉터리**로 만들어 append 불가 상태를 만든다(실측된 실패 모드).
+    mkdirSync(join(work, '.auto-context', 'compile', 'dedup-skipped.jsonl'), { recursive: true });
+    const fixture = join(work, 'fixture.json');
+    writeFileSync(fixture, JSON.stringify({ results: [{ file: 'proj-wiki/entities/page-b.md', score: 0.56 }] }));
+
+    const dirs = runScan(work, { QMD_QUERY_FIXTURE: fixture });
+    assert.equal(callCount(log), 0, 'judge(유료)를 한 번도 부르지 않는다');
+    // judge 없이는 레거시 score 게이트(기본 0.9)가 남고 0.56 은 통과하지 못한다 →
+    // 이번 scan 은 아무것도 큐하지 않는다. 유료 루프보다 낮은 등급의 대가다.
+    assert.deepEqual(scanQueue(work), []);
+    assert.match(readFileSync(dirs.logFile, 'utf8'), /judge=off:skipped_ledger_unwritable/,
+      '무료 게이트로 degrade 한 사실이 로그에 남아야 진단이 가능하다');
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});

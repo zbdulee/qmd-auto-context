@@ -47,7 +47,7 @@
 | `minScore` | `0.0` | recall 결과를 주입하기 위한 score 하한입니다. **유사도 임계가 아니라 사실상 순위 컷입니다** — 아래 "minScore는 유사도가 아니라 순위입니다" 참고. |
 | `rawFallbackMinScore` | `minScore` | `hierarchical`에서 wiki 결과가 없을 때 raw fallback 결과에 적용할 하한입니다. `minScore`와 동일하게 순위 컷으로 동작합니다. |
 | `topN` | `3` | 최종 컨텍스트에 넣을 최대 문서 수입니다. `minScore`가 이보다 강하게 자를 수 있습니다(아래 참고). |
-| `queryTimeout` | `5` | qmd query 응답 대기 시간(초)입니다. |
+| `queryTimeout` | `5` | qmd query **1건**의 응답 대기 시간(초)입니다. 전체 훅 예산이 아닙니다 — 아래 ["blocking 훅의 시간 예산"](#blocking-훅의-시간-예산) 참고. |
 | `staleQueueThreshold` | `20` | update 시 적체된 dirty queue 안내를 표시할 기준입니다. |
 | `skipPaths` | `[]` | recall 결과에서 제외할 경로 substring 목록입니다. `node_modules`, `.git`, `dist`, `build` 같은 값이 흔합니다. **이름과 달리 인덱싱 대상을 제한하지 않습니다** — `core/recall.py`의 결과 필터에서만 쓰이므로 파일은 그대로 색인됩니다. 아래 ["인덱싱 범위를 줄이는 방법"](#인덱싱-범위를-줄이는-방법) 참고. |
 | `allowRoots` | `[]` | 프로젝트 밖 absolute path collection을 허용해야 할 때 쓰는 root 목록입니다. 일반 프로젝트에서는 비워 둡니다. |
@@ -58,6 +58,40 @@
 | `lexicalPatterns` | `[]` | 특수 lexical pattern 목록입니다. 현재 주 사용값은 `ep`입니다. |
 | `wikiPath` | `".auto-context/wiki"` | wiki collection의 기본 위치입니다. |
 | `compile` | disabled | wiki compile과 verify 관련 설정입니다. |
+
+### blocking 훅의 시간 예산
+
+`UserPromptSubmit` recall은 **blocking hook**입니다 — 이 훅이 끝날 때까지 사용자 프롬프트가
+모델로 가지 않습니다. 그래서 "예산이 얼마인가"가 실제 UX 수치인데, 코드에 있는 값은
+**`queryTimeout` 하나이고 그것은 per-query 값**입니다. 기본값은 `5`초입니다
+(`core/config.py`의 `DEFAULT_CONFIG["queryTimeout"]`, `core/recall.py`의 `QUERY_TIMEOUT`).
+설정을 생략하면 이 5초가 적용됩니다.
+
+**전체 훅 deadline은 없습니다(의도된 부재입니다).** 따라서 최악 소요는 `queryTimeout`보다
+큽니다:
+
+| 항목 | 최악 | 비고 |
+|---|---:|---|
+| 데몬 health 확인 | 2초 | `QMD_HEALTH_TIMEOUT`(기본 2, 잘못된 값은 2로 폴백) |
+| 데몬 query | 5초 × **최대 2회** | `hierarchical`은 wiki 질의 후 부족하면 raw backfill 질의를 **직렬로** 한 번 더 합니다 |
+| 카드 읽기 | 유계 | 카드당 파일 I/O 1회 × `topN`, 읽기 창·`injectSummaryMaxChars`로 상한 |
+| shadow query | 2.5초 | **기본 완전 비활성**. `QMD_SHADOW_QUERY=1`일 때만, per-query 1초 |
+
+즉 기본 설정의 구조적 최악은 약 **12초**이고(`2 + 5 + 5`), `wikiOnly`·`flat`은 질의가
+1회이므로 약 **7초**입니다. 실측은 이보다 훨씬 짧습니다 — 라이브 두 프로젝트에서
+**0.85 ~ 1.19초**(데몬 warm, 카드 3장 주입)입니다. 3.2초 지연을 주입한 stub 데몬에서는
+`elapsed 3.45초`로, 5초 안에서는 timeout 없이 끝까지 기다립니다.
+
+**전체 deadline을 도입하지 않은 이유**는 그것이 만드는 실패 모드가 더 나쁘기 때문입니다.
+deadline에 걸린 recall은 **조용히 주입 0건**이 되는데, 빈 출력은 이 플러그인의 정상 동작
+(결과 없음·데몬 부재·sandbox)과 구분되지 않습니다. 즉 느린 머신에서 컨텍스트가 사라지고
+그 사실이 표면화되지 않습니다 — 이 저장소가 반복해서 닫아 온 "종점 없는 차단" 클래스입니다.
+차단을 도입하려면 종점(사용자 표면화 경로)을 함께 설계해야 하고, 실측이 예산의 1/4 수준인
+현재 상태에서는 `queryTimeout` 하나로 조절하는 편이 낫습니다. 예산을 줄여야 하는 환경은
+`queryTimeout`을 내리십시오(질의 1회 기준이므로 `hierarchical`에서는 실효 상한이 2배입니다).
+
+> 이 문서를 읽는 사람과 도구를 위해 못박습니다: **"queryTimeout 3초 예산"이라는 기준은
+> 존재하지 않습니다.** 코드·기본값·문서 어디에도 그 값은 없고 일관되게 5초입니다.
 
 ## Collection Roles
 
@@ -359,11 +393,24 @@ median 1 / p95 1 / max 4입니다. `3`이면 848/849(99.9%)가 절단 없이 들
 수의 상한이고 UserPromptSubmit은 blocking hook입니다. 항목 조사 자체도 상한의 2배까지만
 합니다(`sources`는 개수 보장이 없는 모델 제공 목록입니다).
 
-**기본값을 켜 둡니다.** 카드에 원문 링크가 없으면 카드는 막다른 길이고, "wiki collection만
-유지하고 raw 인덱스를 제거한다"(`recallStrategy: "wikiOnly"`)가 성립하는 근거 자체가
-"카드에 원문 링크가 있으니 raw 검색이 불필요하다"이기 때문입니다. 비용은 카드당 보통
+**항목 순서는 카드에 적힌 그대로이고, 자동 생성 카드에서는 컴파일 잡이 아는 실제 소스가
+맨 앞입니다.** extractor(모델)가 낸 항목은 그 뒤에 오며 같은 경로를 가리키는 중복은
+제거됩니다. 상한 때문에 잘리는 경우 남는 것이 실제 원문이라는 뜻입니다 — 예전에는 모델
+항목이 앞에 있어 상한 안에서 실제 원문이 밀려날 수 있었습니다(같은 목록이 기계 검수의
+근거이기도 하므로 그것은 검증 자체를 무력화했습니다. 아래 Verify 절 참고).
+
+**기본값을 켜 둡니다.** 카드에 원문 링크가 없으면 카드는 막다른 길이고,
+`recallStrategy: "wikiOnly"`(recall을 wiki에만 한다)가 성립하는 근거 자체가 "카드에 원문
+링크가 있으니 recall이 raw를 보지 않아도 된다"이기 때문입니다. 비용은 카드당 보통
 한 줄(median 55자 ≈ 20토큰)이고, 원문을 여는 위험은 위 우선순위 지시로 억제합니다.
 토큰을 더 줄여야 하는 프로젝트는 `0`으로 끄면 됩니다.
+
+> **`wikiOnly`는 "raw 인덱스를 제거한다"가 아닙니다.** 둘은 별개이고 후자는 하지 않는
+> 것으로 결론이 났습니다 — raw 인덱스 제거의 recall 이득은 lex·vec 양 경로에서 **0으로
+> 증명**됐습니다(qmd는 컬렉션별로 독립 검색하므로 비-wiki 인덱스가 wiki 후보를 밀어낼
+> 경로가 없습니다). raw 컬렉션은 등록된 채로 두고 recall 대상만 `wikiOnly`로 좁히는 것이
+> 현재 권고이며, raw는 수동 검색(escape hatch)과 카드 대조 경로로 계속 쓰입니다. 실측은
+> `docs/plans/2026-07-30-raw-index-crowding-measurement.md` 8단계에 있습니다.
 
 주입·drop 여부는 `QMD_RECALL_LOG`의 `qmd_recall_selection` 줄에서 확인합니다 —
 `inject_source_paths_per_card` / `source_entries`(본 항목 수) / `sources_injected` /
@@ -594,10 +641,19 @@ jq -c 'select(.event=="qmd_recall_shadow" and .verdict.selected_empty_raw_nonemp
 
 > **⚠ 두 값의 곱이 그 run의 카드 수입니다.** 한 run이 쓰는 카드는 최대
 > `batch.maxPerRun × maxCardsPerSource`이고 dedup judge는 **카드당 1회**이므로, 기본값
-> (10 × 10)에서 한 run 최악 유료 호출은 **10 + 100 + 30 = 140회**입니다. 두 값을 각각
-> 클램프 상한까지 올리면(50 × 50 = 카드 2,500장) **2,581회**가 가능합니다. 어떤 클램프도
-> 이 **곱**을 막지 않습니다 — 두 값을 함께 올리는 것은 명시적 선택이므로 허용하되, 올릴
-> 때는 곱을 계산해 보십시오. 실측: `batch.maxPerRun 10` × `maxCardsPerSource 50` → 540회.
+> (10 × 10)에서 한 run 최악 유료 호출은 **10 + 100 + 31 = 141회**입니다. 두 값을 각각
+> 클램프 상한까지 올리면(50 × 50 = 카드 2,500장) **50 + 2,500 + 31 = 2,581회**가
+> 가능합니다. 어떤 클램프도 이 **곱**을 막지 않습니다 — 두 값을 함께 올리는 것은 명시적
+> 선택이므로 허용하되, 올릴 때는 곱을 계산해 보십시오. 실측:
+> `batch.maxPerRun 10` × `maxCardsPerSource 50` → **10 + 500 + 31 = 541회**.
+>
+> **verify 항의 `+1`은 backlog 기아 방지 예약입니다.** verify 예산은
+> `max(verify.maxPerRun, min(그 run이 만든 카드 수, 30))`이고, 그 예산이 이 run의 카드로
+> **전부** 소진되면 backlog에 1건을 **추가로** 처리합니다(아래 `verify.maxPerRun` 참고).
+> 즉 verify 호출 수의 상한은 `예산`이 아니라 `예산 + 1`입니다. 기본값에서 verify 항은
+> `30 + 1 = 31`이고(`max(3, min(100, 30)) = 30`), 위 세 셈은 모두 이 `+1`을 포함합니다.
+> 라이브 실측 최악(프로젝트별 설정 기준): service-engineering **141**, 귀신은 약효가 돌 때
+> 보인다 **161**, 무림 **0**(compile 비활성).
 
 `maxItems`와 `maxPerRun`을 혼동하지 마십시오. 예전에는 상한이 아예 없어 `maxItems`를 넘겨
 처리가 시작되면 **큐에 든 전량**을 한 워커 프로세스가 순차 실행했습니다. 큐가 수백 건이면
@@ -610,6 +666,12 @@ jq -c 'select(.event=="qmd_recall_shadow" and .verdict.selected_empty_raw_nonemp
 ### Verify
 
 `compile.verify`는 생성된 wiki page를 원문과 다시 대조해 승격하거나 제거합니다.
+
+**대조에 쓰는 원문은 컴파일 잡이 아는 실제 소스입니다.** 카드의 `sources`에는 extractor
+(모델)가 낸 항목이 섞여 있고 verifier는 그 목록에서 최대 3개만 읽으므로, 모델 항목이 앞에
+있으면 카드가 **실제 원문 없이** 검증되어 `verified`(= `recallVerifiedOnly` 기본값에서 인용
+가능한 캐논)가 될 수 있었습니다. 지금은 실제 소스가 목록 맨 앞이고, 그 사실이 검수 잡에
+별도 필드로 기록되어 3개 상한과 무관하게 반드시 읽힙니다. 총 읽기 수는 그대로 유계입니다.
 
 ```json
 {
@@ -637,7 +699,7 @@ jq -c 'select(.event=="qmd_recall_shadow" and .verdict.selected_empty_raw_nonemp
 | `compile.verify.crossEngine` | `"prefer"` | 검수 엔진을 카드를 만든 엔진과 분리합니다. `prefer`는 다른 엔진을 먼저 시도하고 없으면 같은 엔진으로 검수합니다(자기검증으로 기록). `require`는 다른 엔진만 허용하고 없으면 검수하지 않습니다(엔진별 `backends`/`builtins`가 필요합니다 — 레거시 `extractor.argv`·`extractor.default`는 엔진 귀속이 불가해 이 요구를 만족시키지 못합니다). `off`는 0.x 동작(카드를 만든 엔진)이며, 그 엔진이 귀속 불가면 풀의 첫 후보로 폴백합니다(폐기하면 그 카드가 영원히 검수되지 않습니다). |
 | `compile.verify.builtins` | `[]` | 검수 후보 엔진 목록(symbolic 이름만). 비면 `compile.extractor`의 `builtins` + 명시 `backends` 키를 물려받습니다. **카드를 만든 엔진은 이 목록에 없어도 `prefer`의 최후 후보로 남습니다** — 목록을 좁혀도(또는 이름을 잘못 적어도) self 폴백이 사라지지 않습니다. adapter argv 해석은 extractor와 같은 한 벌을 씁니다. |
 | `compile.verify.cooldownSeconds` | `600` | verifier 실패/timeout 뒤 재시도 cooldown입니다. |
-| `compile.verify.maxPerRun` | `3` | 한 번에 처리할 verify job 수의 **기본 예산**입니다. 실제 예산은 `max(maxPerRun, min(그 run이 만든 카드 수, 30))`입니다 — 고정값이면 카드를 만드는 속도가 검수하는 속도를 넘어 큐가 자라고, `recallVerifiedOnly` 기본값(`true`) 아래에서 `generated`로 남은 카드는 recall에 나오지 않습니다(문서 10개를 편집해 카드 20장이 생겨도 3장만 검수하면 나머지는 다음 run들을 기다립니다). 생산량을 하한으로 두면 큐는 줄어들 수만 있습니다. **생산량에 씌운 상한 30**은 그 값이 모델 출력(`candidates` 길이)에서 유도되기 때문입니다 — 없으면 카드 40장을 낸 run이 verify 200회를 돌려 모델이 청구액을 정합니다. 사람이 적은 `maxPerRun`은 언제나 존중되며 50으로 클램프됩니다. 처리 순서는 **그 run이 만든 카드 먼저**이고(예산만 키우면 FIFO가 오래된 backlog에 다 쓰고 새 카드는 `generated`로 남습니다) backlog에는 1건이 항상 예약됩니다. |
+| `compile.verify.maxPerRun` | `3` | 한 번에 처리할 verify job 수의 **기본 예산**입니다. 실제 예산은 `max(maxPerRun, min(그 run이 만든 카드 수, 30))`입니다 — 고정값이면 카드를 만드는 속도가 검수하는 속도를 넘어 큐가 자라고, `recallVerifiedOnly` 기본값(`true`) 아래에서 `generated`로 남은 카드는 recall에 나오지 않습니다(문서 10개를 편집해 카드 20장이 생겨도 3장만 검수하면 나머지는 다음 run들을 기다립니다). 생산량을 하한으로 두면 큐는 줄어들 수만 있습니다. **생산량에 씌운 상한 30**은 그 값이 모델 출력(`candidates` 길이)에서 유도되기 때문입니다 — 없으면 카드 40장을 낸 run이 verify 200회를 돌려 모델이 청구액을 정합니다. 사람이 적은 `maxPerRun`은 언제나 존중되며 50으로 클램프됩니다. 처리 순서는 **그 run이 만든 카드 먼저**이고(예산만 키우면 FIFO가 오래된 backlog에 다 쓰고 새 카드는 `generated`로 남습니다) backlog에는 1건이 항상 예약됩니다. **이 예약은 예산 안이 아니라 예산 밖의 +1입니다** — 이 run의 카드가 예산을 전부 소진하면 backlog 1건을 추가로 처리하므로 한 run의 verify 유료 호출 상한은 `예산 + 1`입니다(기본값 `30 + 1 = 31`). 위 Batch 절의 총량 셈이 이 `+1`을 포함합니다. |
 | `compile.verify.skippedPath` | `.auto-context/compile/verify-skipped.jsonl` | inconclusive 삭제 억제 마커 파일입니다. |
 
 #### `onInconclusive` 기본값이 `delete`인 이유
@@ -797,6 +859,17 @@ exit 127(host CLI 부재, 토큰 0)뿐이고 timeout·비127 실패는 그 run �
 기록과 일치하면 **extractor를 띄우기 전에 skip**하고(`candidates.jsonl`에
 `verify_inconclusive_suppressed` 사유로 남김), 소스 본문이 실제로 바뀌면 해시가 달라져
 자동으로 재시도됩니다. 마커 파일을 지우면 즉시 재시도됩니다.
+
+**이 마커를 쓸 수 없으면 카드를 지우지 않습니다(fail-closed).** 삭제 감사 원장과 같은
+처방입니다 — 마커는 삭제 **전에** 쓰고, 실패하면 카드를 보존한 채 검수 잡을 큐에 되돌리며
+`verify-log.jsonl`에 `delete_blocked` / `suppression_ledger_unwritable`을 남깁니다. 그리고
+fail-closed만으로는 "판정(유료) → 기록 실패 → 잡 보존 → 재판정(유료)" 루프가 남으므로,
+`onInconclusive`가 `delete`인 프로젝트에서는 **유료 호출 전에** 이 파일의 쓰기 가능성을
+확인하고 불가하면 그 run의 검수를 아예 시작하지 않습니다(host CLI 호출 0회). 이 상태는
+SessionStart 안내로 표면화됩니다. `skippedPath`가 안전 영역을 벗어나면 `deletedPath`와
+같이 기본 경로로 폴백합니다 — 경로 오타가 과금 루프가 되면 안 되기 때문입니다.
+`dedup-skipped.jsonl`(semantic dedup의 `distinct` 판정 억제)도 같은 preflight를 받습니다:
+쓸 수 없으면 LLM judge를 호출하지 않고 무료 score 게이트로 degrade합니다.
 
 이 파일은 `dedup-skipped.jsonl`과 같은 이유로 **256KB 트림 대상이 아닙니다.** 한 줄
 유실은 (a) 삭제 감사 추적 유실과 (b) 과금 루프 재개를 동시에 뜻하기 때문입니다.
