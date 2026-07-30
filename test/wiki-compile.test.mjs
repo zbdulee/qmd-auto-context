@@ -221,8 +221,10 @@ test('wiki_compile: regenerating a verified page keeps hand-authored content bel
     assert.match(page, /Regenerated summary from the changed source file/);
     assert.doesNotMatch(page, /Original generated summary/);
     // ... status was reset for re-verification, and the machine-verify stamps cleared ...
+    // (the KEYS go, not just their values: `verifiedBy: ""` still reads as "was verified once").
     assert.match(page, /^status: generated$/m);
-    assert.match(page, /^verifiedBy: ""$/m);
+    assert.doesNotMatch(page, /^verifiedBy:/m);
+    assert.doesNotMatch(page, /^verifiedAt:/m);
     // ... while everything outside the block survived byte-for-byte.
     assert.ok(page.includes(mergedSection), 'hand-authored section below auto:end must survive');
     assert.match(page, /^ {2}- "Transplanted alias from the deleted card"$/m);
@@ -1171,7 +1173,8 @@ wc.patch_frontmatter_fields(Path(${JSON.stringify(page)}), {"status": "verified"
     assert.equal(updated.action, 'updated');
     const text = readFileSync(page, 'utf8');
     assert.match(text, /^status: generated$/m, '갱신된 카드는 재검증 대상으로 리셋');
-    assert.match(text, /^verifiedBy: ""?$/m, 'stale verifiedBy 제거');
+    assert.doesNotMatch(text, /^verifiedBy:/m, 'stale verifiedBy는 키째로 제거');
+    assert.doesNotMatch(text, /^verifiedAt:/m, 'stale verifiedAt는 키째로 제거');
     const queue = readFileSync(join(work, '.auto-context', 'compile', 'verify-queue.jsonl'), 'utf8')
       .trim().split('\n').map((l) => JSON.parse(l));
     assert.equal(queue.length, 2, 'created + updated 각각 enqueue');

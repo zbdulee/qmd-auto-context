@@ -67,6 +67,10 @@ def compile_block(root, engines=ENGINES) -> dict:
             # 사람 검수가 없다는 전제에서 inconclusive도 사장이므로 fail과 같이 삭제한다.
             # config.py의 verify 기본값과 반드시 동일해야 한다.
             "onInconclusive": "delete",
+            # 카드를 만든 엔진과 다른 엔진으로 검수한다. `builtins`를 쓰지 않는 이유는
+            # 여기에 목록을 복제하면 사용자가 extractor.builtins를 고친 뒤 검수 후보만
+            # 낡기 때문이다 — 비워 두면 extractor 풀을 그대로 물려받는다.
+            "crossEngine": "prefer",
             "queuePath": ".auto-context/compile/verify-queue.jsonl",
             "logPath": ".auto-context/compile/verify-log.jsonl",
             "skippedPath": ".auto-context/compile/verify-skipped.jsonl",

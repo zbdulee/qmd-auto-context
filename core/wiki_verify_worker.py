@@ -3,8 +3,10 @@
 
 wiki_compile.py enqueues freshly written generated cards to verify-queue.jsonl.
 This worker replays each card against its source documents through the same
-host-CLI adapter pool used for extraction (payload {"task": "verify"}), then:
-  pass         -> patch frontmatter to status: verified (+ verifiedBy/verifiedAt)
+host-CLI adapter pool used for extraction (payload {"task": "verify"}), but
+**prefers an engine other than the one that wrote the card** (see
+plan_verify_attempts / compile.verify.crossEngine), then:
+  pass         -> status: verified (+ verifiedBy/verifiedAt/verifiedMode)
   fail         -> compile.verify.onFail: delete card (default) | contested | none
   inconclusive -> compile.verify.onInconclusive: delete (default) | contested | none
 
@@ -48,6 +50,111 @@ VERIFY_SKIPPED_DEFAULT = ".auto-context/compile/verify-skipped.jsonl"
 VERIFY_DELETED_DEFAULT = ".auto-context/compile/verify-deleted.jsonl"
 VERDICT_VALUES = {"pass", "fail", "inconclusive"}
 MAX_SOURCES = 3
+
+
+def verify_engine_pool(compile_cfg: dict, vcfg: dict) -> list[str]:
+    """Symbolic engines allowed to verify, in preference order.
+
+    `compile.verify.builtins` when set, else inherited from the extractor pool
+    (`compile.extractor.builtins` + explicitly configured `backends` keys — the shape
+    both dogfood projects use). Only engine LABELS live here; argv resolution stays in
+    wiki_compile_worker.resolve_extractor_argv so there is one rule, not two.
+    """
+    picked = [e for e in (vcfg.get("builtins") or []) if isinstance(e, str) and e]
+    if not picked:
+        raw = compile_cfg.get("extractor")
+        extractor = raw if isinstance(raw, dict) else {}
+        picked = [e for e in (extractor.get("builtins") or []) if isinstance(e, str) and e]
+        backends = extractor.get("backends") if isinstance(extractor.get("backends"), dict) else {}
+        picked += sorted(name for name in backends if isinstance(name, str) and name)
+    ordered = []
+    for engine in picked:
+        if engine not in ordered:
+            ordered.append(engine)
+    return ordered
+
+
+def plan_verify_attempts(
+    compile_cfg: dict, vcfg: dict, producing: str
+) -> tuple[list[dict], str, str]:
+    """Ordered verify attempts → ([{engine, argv, mode}], crossEngine mode, empty reason).
+
+    Step 4 of the injection-quality roadmap: prefer an engine OTHER than the one that
+    wrote the card. Self-review measurably degrades LLM judgment (Huang et al. ICLR'24)
+    and the literature's stated mitigation is separating generator from judge; the live
+    corpus was 655/688 verified cards self-reviewed by `claude`.
+
+    Degrade is deliberate and asymmetric to the config:
+      - "prefer" (default) puts the producing engine LAST instead of dropping it, so a
+        single-CLI machine still verifies — marked `mode: self`. Requiring a second CLI
+        would leave every card `generated`, and `recallVerifiedOnly` (default true)
+        would then erase the whole wiki from recall with no human-review path to
+        recover. A weaker-but-labelled check beats no wiki.
+      - "require" drops it. Callers preserve the job instead of dropping it.
+      - "off" is the 0.x path: producing engine only.
+
+    Unattributable argv — legacy `compile.extractor.argv` (one argv serves every engine)
+    and the `extractor.default` fallback — carries no engine label, so it can never back
+    a cross-engine claim and is recorded as mode `unknown`. Under "require" it is not
+    offered at all: that knob promises "never self-verify", and an argv whose engine is
+    unknown cannot keep the promise. `require` therefore needs per-engine `backends`
+    (or `builtins`).
+    """
+    pool = verify_engine_pool(compile_cfg, vcfg)
+    mode = vcfg.get("crossEngine", "prefer")
+    if mode not in qmd_config.VERIFY_CROSS_ENGINE:
+        mode = "prefer"
+    legacy = wcw.legacy_extractor_argv(compile_cfg)
+    if legacy is not None:
+        if mode == "require":
+            return [], mode, "cross_engine_unavailable"
+        return [{"engine": producing, "argv": legacy, "mode": qmd_config.VERIFIED_MODE_UNKNOWN}], "off", ""
+    if mode == "off":
+        order = [producing] if producing else pool[:1]
+    elif not producing:
+        # 카드를 만든 엔진이 불명이면 무엇이 자기검증인지 확정할 수 없다 — 순서를 바꾸지
+        # 않고 풀 순서대로 시도하며 mode는 unknown으로 남긴다(거짓 cross-engine 주장 금지).
+        order = list(pool)
+    else:
+        others = [e for e in pool if e != producing]
+        order = others if mode == "require" else others + [producing]
+
+    attempts: list[dict] = []
+    seen_argv: list[list[str]] = []
+    # extractor.default는 엔진과 무관하므로 후보 순회 밖에서 한 번 구한다 — 후보가 0건인
+    # 설정(builtins/backends 없이 default만)에서도 기존 폴백이 살아 있어야 한다.
+    _, default_argv = wcw.resolve_extractor_argv(compile_cfg, "", builtins=[])
+    for engine in order:
+        primary, _ = wcw.resolve_extractor_argv(compile_cfg, engine, builtins=pool)
+        if primary is None or primary in seen_argv:
+            continue
+        seen_argv.append(primary)
+        if not producing:
+            attempt_mode = qmd_config.VERIFIED_MODE_UNKNOWN
+        elif engine == producing:
+            attempt_mode = qmd_config.VERIFIED_MODE_SELF
+        else:
+            attempt_mode = qmd_config.VERIFIED_MODE_CROSS
+        attempts.append({"engine": engine, "argv": primary, "mode": attempt_mode})
+    if default_argv is not None and default_argv not in seen_argv and mode != "require":
+        # extractor.default는 엔진에 귀속되지 않는다 — 라벨은 기존 동작(카드를 만든 엔진)을
+        # 유지하되 mode는 unknown이다. require에서는 제공하지 않는다(엔진 불명은 "다른
+        # 엔진"을 보장하지 못한다).
+        attempts.append({
+            "engine": producing or (order[0] if order else ""),
+            "argv": default_argv,
+            "mode": qmd_config.VERIFIED_MODE_UNKNOWN,
+        })
+    if attempts:
+        return attempts, mode, ""
+    # 어떤 argv도 안 나온 이유를 구분한다: 설정 자체가 없으면(기존 동작) 잡을 버리고,
+    # crossEngine:"require"가 유일한 후보를 걸러낸 것이면 두 번째 CLI가 설정될 때까지
+    # 잡을 보존한다(카드는 generated로 남는다 — 삭제되지 않는다).
+    if mode == "require" and producing:
+        fallback, default = wcw.resolve_extractor_argv(compile_cfg, producing, builtins=pool + [producing])
+        if fallback is not None or default is not None:
+            return [], mode, "cross_engine_unavailable"
+    return [], mode, "missing_extractor"
 
 
 def verify_cfg_of(compile_cfg: dict) -> dict:
@@ -159,6 +266,10 @@ def record_verify_deletion(
         "targetPath": record.get("targetPath", ""),
         "verdict": verdict,
         "engine": record.get("engine", ""),
+        # 자기검증(self)이 내린 삭제는 교차검증이 내린 삭제보다 약한 근거다 — 삭제된
+        # 카드를 사후에 판단하려면 누가 무엇을 검수했는지가 원장에 함께 있어야 한다.
+        "verifiedMode": record.get("verifiedMode", ""),
+        "producedBy": record.get("producedBy", ""),
         "reasons": record.get("reasons", []),
         "claims": record.get("claims", 0),
         "sourcePaths": [
@@ -321,43 +432,63 @@ def process_verify_job(
         log_verdict(log_path, {**base_record(job), "result": "skipped", "reason": "source_missing"})
         return True, False
 
-    engine = job.get("engine") if isinstance(job.get("engine"), str) else ""
-    if not engine:
-        extractor = compile_cfg.get("extractor") if isinstance(compile_cfg.get("extractor"), dict) else {}
-        builtins = [e for e in (extractor.get("builtins") or []) if isinstance(e, str)]
-        engine = builtins[0] if builtins else ""
-    primary, default = wcw.resolve_extractor_argv(compile_cfg, engine)
-    if primary is None and default is None:
-        log_verdict(log_path, {**base_record(job), "result": "skipped", "reason": "missing_extractor"})
-        return True, False
+    producing = job.get("engine") if isinstance(job.get("engine"), str) else ""
+    attempts, cross_mode, empty_reason = plan_verify_attempts(compile_cfg, vcfg, producing)
+    if not attempts:
+        log_verdict(log_path, {
+            **base_record(job), "result": "skipped", "reason": empty_reason,
+            "crossEngine": cross_mode, "producedBy": producing,
+        })
+        # crossEngine:"require"에서 다른 엔진이 없는 것은 설정/설치 상태이지 영구 판정이
+        # 아니다 — 두 번째 CLI가 생기면 검증되도록 잡을 보존한다(CLI 부재 127과 같은 결).
+        return (False, True) if empty_reason == "cross_engine_unavailable" else (True, False)
     if verify_cooldown_active(root):
         return False, True
 
+    timeout = int(vcfg.get("timeout", 120) or 120)
     payload = {
         "task": "verify",
         "cwd": str(root),
-        "engine": engine,
+        "engine": attempts[0]["engine"],
         "card": {"path": rel, "content": text},
         "sources": sources,
-        "timeout": int(vcfg.get("timeout", 120) or 120),
+        "timeout": timeout,
     }
-    timeout = int(vcfg.get("timeout", 120) or 120)
-    argv = primary if primary is not None else default
-    parsed, reason, returncode = wcw.run_extractor(argv, payload, timeout, root)
-    if returncode == 127 and primary is not None and default is not None:
-        parsed, reason, returncode = wcw.run_extractor(default, payload, timeout, root)
+    # 실패 분류 경계: **127(CLI 부재)만** 다음 후보 엔진으로 넘어간다. 127은 host CLI를
+    # 아예 실행하지 못한 것이라 토큰이 들지 않으므로 재시도가 공짜다. timeout·비127 실패는
+    # 이미 CLI를 호출한 것이므로 다음 엔진으로 넘기면 같은 카드에 대해 사용자 계정이 두 번
+    # 청구된다 — 기존대로 cooldown + 큐 보존이다. 어느 경로도 verdict를 만들지 않으므로
+    # transient가 inconclusive(=삭제)로 흐를 수 없다는 계약이 유지된다.
+    attempted: list[str] = []
+    attempt = attempts[0]
+    parsed = reason = returncode = None
+    for attempt in attempts:
+        payload["engine"] = attempt["engine"]
+        attempted.append(attempt["engine"])
+        parsed, reason, returncode = wcw.run_extractor(attempt["argv"], payload, timeout, root)
+        if returncode != 127:
+            break
     if returncode == 127:
-        return False, True  # CLI absent: preserve for when it's installed
+        return False, True  # 후보 전원 CLI 부재: 설치되면 재시도
+    engine = attempt["engine"]
+    verified_mode = attempt["mode"]
+    provenance = {
+        "engine": engine,
+        "verifiedMode": verified_mode,
+        "producedBy": producing,
+        "crossEngine": cross_mode,
+        "enginesAttempted": attempted,
+    }
     if reason:
         if reason == "invalid_extractor_json":
-            log_verdict(log_path, {**base_record(job), "result": "skipped", "reason": reason})
+            log_verdict(log_path, {**base_record(job), **provenance, "result": "skipped", "reason": reason})
             return True, False  # permanent: drop
         set_verify_cooldown(root, int(vcfg.get("cooldownSeconds", 600) or 600))
         return False, True  # transient: cooldown + preserve
 
     verdict = parsed.get("verdict") if isinstance(parsed, dict) else None
     if verdict not in VERDICT_VALUES:
-        log_verdict(log_path, {**base_record(job), "result": "skipped", "reason": "invalid_verdict"})
+        log_verdict(log_path, {**base_record(job), **provenance, "result": "skipped", "reason": "invalid_verdict"})
         return True, False
     reasons = parsed.get("reasons") if isinstance(parsed.get("reasons"), list) else []
     reasons = [str(item)[:200] for item in reasons[:5]]
@@ -366,16 +497,13 @@ def process_verify_job(
     # 적용 직전 재확인: verifier가 도는 동안 카드가 재컴파일/사람 편집됐으면 이 판정은 무효.
     _, fresh_meta, fresh_status, fresh_hash = card_state(target)
     if fresh_status != "generated" or fresh_meta.get("reviewed") is True or (job_hash and fresh_hash and job_hash != fresh_hash):
-        log_verdict(log_path, {**base_record(job), "result": "skipped", "reason": "changed_during_verify"})
+        log_verdict(log_path, {**base_record(job), **provenance, "result": "skipped", "reason": "changed_during_verify"})
         return True, False
 
-    record = {**base_record(job), "engine": engine, "verdict": verdict, "claims": len(claims), "reasons": reasons}
+    record = {**base_record(job), **provenance, "verdict": verdict, "claims": len(claims), "reasons": reasons}
     if verdict == "pass":
-        wc.patch_frontmatter_fields(target, {
-            "status": "verified",
-            "verifiedBy": engine or "unknown",
-            "verifiedAt": wcw.now_iso(),
-        })
+        # status와 증명 필드는 한 쓰기로 함께 나간다(wc.stamp_verification이 유일한 경로).
+        wc.stamp_verification(target, "verified", engine, verified_mode)
         reindex_wiki(root, config)
         log_verdict(log_path, {**record, "result": "verified"})
         return True, False
@@ -384,14 +512,16 @@ def process_verify_job(
     # timeout/실행 실패는 위에서 이미 큐 보존으로 빠져나갔으므로 transient가 삭제로 흐를 수 없다.
     action = vcfg.get("onFail", "delete") if verdict == "fail" else vcfg.get("onInconclusive", "delete")
     apply_negative_verdict(
-        root, config, compile_cfg, vcfg, target, engine, action, verdict, sources, record, log_path
+        root, config, compile_cfg, vcfg, target, engine, verified_mode, action, verdict,
+        sources, record, log_path
     )
     return True, False
 
 
 def apply_negative_verdict(
     root: Path, config: dict, compile_cfg: dict, vcfg: dict, target: Path, engine: str,
-    action: str, verdict: str, sources: list[dict], record: dict, log_path: Path,
+    verified_mode: str, action: str, verdict: str, sources: list[dict], record: dict,
+    log_path: Path,
 ) -> None:
     """Apply a fail/inconclusive verdict. Only inconclusive leaves a suppression marker."""
     if action == "delete":
@@ -410,11 +540,7 @@ def apply_negative_verdict(
         log_verdict(log_path, {**record, "result": "deleted", "suppressedSources": suppressed})
         return
     if action == "contested":
-        wc.patch_frontmatter_fields(target, {
-            "status": "contested",
-            "verifiedBy": engine or "unknown",
-            "verifiedAt": wcw.now_iso(),
-        })
+        wc.stamp_verification(target, "contested", engine, verified_mode)
         reindex_wiki(root, config)
         log_verdict(log_path, {**record, "result": "contested"})
         return

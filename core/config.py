@@ -92,6 +92,11 @@ DEFAULT_CONFIG = {
             "timeout": 120,
             "onFail": "delete",
             "onInconclusive": "delete",
+            # 검수 엔진 분리(VERIFY_CROSS_ENGINE 참고). builtins가 비면 검수 후보 엔진을
+            # compile.extractor 풀에서 물려받는다 — adapter argv 해석은 여전히 한 벌
+            # (wiki_compile_worker.resolve_extractor_argv)이다.
+            "crossEngine": "prefer",
+            "builtins": [],
             "queuePath": ".auto-context/compile/verify-queue.jsonl",
             "logPath": ".auto-context/compile/verify-log.jsonl",
             "skippedPath": ".auto-context/compile/verify-skipped.jsonl",
@@ -118,6 +123,23 @@ WIKI_STATUSES = {"generated", "verified", "reviewed", "canon", "tentative", "con
 # onFail과 onInconclusive가 공유하는 값 집합. "none"이 유일한 "현행 유지"(카드를
 # generated로 남김) 표현이므로, 기본값을 delete로 올려도 기존 동작을 명시 선택할 수 있다.
 VERIFY_ON_FAIL = {"delete", "contested", "none"}
+# 기계 검수 엔진을 카드를 만든 엔진과 분리하는 정책. LLM 자기 검수는 성능을 떨어뜨리고
+# (Huang et al. ICLR'24) 문헌이 제시한 완화법은 생성 모델과 판정 모델의 분리다.
+#   prefer  — 다른 엔진을 먼저 시도하고, 없으면 같은 엔진으로 검증(자기검증으로 기록)
+#   require — 다른 엔진만 허용. 없으면 검증하지 않고 큐를 보존한다(카드는 generated로
+#             남아 recallVerifiedOnly 기본값 아래 recall에서 빠진다 — 단일 CLI 머신에서는
+#             wiki가 통째로 사라지므로 명시 선택만 허용한다)
+#   off     — 0.x 동작(카드를 만든 엔진으로 검증)
+VERIFY_CROSS_ENGINE = {"prefer", "require", "off"}
+# 카드 frontmatter `verifiedMode` = 검수 엔진과 생성 엔진의 관계. 값 집합은 코드가 정하고
+# 모델 입력이 아니다. 이 필드가 **없는** 카드는 4단계 이전에 검수된 카드로, 자기검증일
+# 가능성이 높다(실측 655/688) — 없음은 cross-engine을 뜻하지 않는다.
+VERIFIED_MODE_CROSS = "cross-engine"
+VERIFIED_MODE_SELF = "self"
+VERIFIED_MODE_UNKNOWN = "unknown"
+VERIFIED_MODES = {VERIFIED_MODE_CROSS, VERIFIED_MODE_SELF, VERIFIED_MODE_UNKNOWN}
+# status: verified/contested와 **함께** 써야 하는 증명 필드. 리셋 시 함께 제거된다.
+VERIFY_PROOF_FIELDS = ("verifiedBy", "verifiedAt", "verifiedMode")
 COMPILE_TRIGGERS = {
     "explicit_user_approval",
     "post_session_summary",
@@ -335,6 +357,9 @@ def compile_config(value):
         "timeout": coerce_int(verify.get("timeout", default_verify["timeout"]), default_verify["timeout"]),
         "onFail": verify.get("onFail") if verify.get("onFail") in VERIFY_ON_FAIL else default_verify["onFail"],
         "onInconclusive": verify.get("onInconclusive") if verify.get("onInconclusive") in VERIFY_ON_FAIL else default_verify["onInconclusive"],
+        "crossEngine": verify.get("crossEngine") if verify.get("crossEngine") in VERIFY_CROSS_ENGINE else default_verify["crossEngine"],
+        # 심볼릭 엔진 이름만 받는다(adapter 경로 금지). 빈 목록 = extractor 풀 상속.
+        "builtins": string_list(verify.get("builtins"), default_verify["builtins"]),
         "queuePath": verify.get("queuePath") if isinstance(verify.get("queuePath"), str) and verify.get("queuePath") else default_verify["queuePath"],
         "logPath": verify.get("logPath") if isinstance(verify.get("logPath"), str) and verify.get("logPath") else default_verify["logPath"],
         "skippedPath": verify.get("skippedPath") if isinstance(verify.get("skippedPath"), str) and verify.get("skippedPath") else default_verify["skippedPath"],

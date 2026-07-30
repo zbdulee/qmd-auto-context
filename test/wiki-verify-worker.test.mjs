@@ -25,7 +25,7 @@ Durable claim: the source documents cite markdown.
 `;
 }
 
-function setupProject({ verify = {}, extractorArgv = [], cardStatus = 'generated', jobOverrides = {}, withSource = true } = {}) {
+function setupProject({ verify = {}, extractorArgv = [], extractor = null, cardStatus = 'generated', jobOverrides = {}, withSource = true } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'qwiki-verify-'));
   mkdirSync(join(dir, '.auto-context', 'compile'), { recursive: true });
   mkdirSync(join(dir, '.auto-context', 'wiki', 'concepts'), { recursive: true });
@@ -46,7 +46,7 @@ function setupProject({ verify = {}, extractorArgv = [], cardStatus = 'generated
       defaultStatus: 'generated',
       triggers: ['post_tool_source', 'manual'],
       maxSourceChars: 12000,
-      extractor: { argv: extractorArgv, timeout: 30 },
+      extractor: extractor || { argv: extractorArgv, timeout: 30 },
       verify: { enabled: true, timeout: 30, ...verify },
     },
   }));
@@ -564,4 +564,254 @@ else:
     assert.match(text, /^verifiedBy: "?claude"?$/m);
     assert.equal(readFileSync(join(dir, '.auto-context', 'compile', 'verify-queue.jsonl'), 'utf8'), '');
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// ---------------------------------------------------------------------------
+// 4단계: verifier engine을 extractor와 분리 (cross-engine 우선 + degrade 기록)
+// ---------------------------------------------------------------------------
+
+// 엔진별 mock adapter. 호출 사실을 tracker 파일에 append하므로 "어느 엔진이 실제로
+// 실행됐는지"와 "실행되지 **않았는지**"(과금 방지)를 둘 다 단정할 수 있다.
+function mockEngine(name, tracker, behavior) {
+  const script = join(mkdtempSync(join(tmpdir(), `verifier-${name}-`)), `${name}.py`);
+  const body = {
+    absent: 'sys.exit(127)',
+    slow: 'import time\ntime.sleep(5)',
+  }[behavior] || `print(json.dumps({"verdict": ${JSON.stringify(behavior)}, "claims": [{"claim": "c", "supported": ${behavior === 'pass' ? 'True' : 'False'}, "quote": "q", "sourcePath": "docs/source.md"}], "reasons": ["by ${name}"]}))`;
+  writeFileSync(script, `#!/usr/bin/env python3
+import json, sys
+sys.stdin.read()
+with open(${JSON.stringify(tracker)}, "a") as fh:
+    fh.write("${name}\\n")
+${body}
+`);
+  return ['python3', script];
+}
+
+function trackerFile(label) {
+  return join(mkdtempSync(join(tmpdir(), `tracker-${label}-`)), 'calls');
+}
+
+function calls(tracker) {
+  return existsSync(tracker) ? readFileSync(tracker, 'utf8').trim().split('\n').filter(Boolean) : [];
+}
+
+test('cross-engine: 카드를 만든 엔진(claude)이 아닌 codex가 검수하고 verifiedMode를 기록한다', () => {
+  const tracker = trackerFile('cross');
+  const project = setupProject({
+    extractor: {
+      dispatch: 'by-engine',
+      timeout: 30,
+      backends: { claude: mockEngine('claude', tracker, 'pass'), codex: mockEngine('codex', tracker, 'pass') },
+    },
+  });
+  try {
+    assert.equal(JSON.parse(runVerifyWorker(project)).processed, 1);
+    const text = readFileSync(join(project, CARD_REL), 'utf8');
+    assert.match(text, /^status: verified$/m);
+    assert.match(text, /^verifiedBy: "?codex"?$/m, '카드를 만든 claude가 아니라 codex가 검수');
+    assert.match(text, /^verifiedMode: "?cross-engine"?$/m);
+    assert.match(text, /^verifiedAt: /m);
+    assert.deepEqual(calls(tracker), ['codex'], 'claude는 아예 호출되지 않는다(중복 과금 없음)');
+    const log = jsonl(join(project, '.auto-context', 'compile', 'verify-log.jsonl'));
+    assert.equal(log[0].result, 'verified');
+    assert.equal(log[0].verifiedMode, 'cross-engine');
+    assert.equal(log[0].producedBy, 'claude');
+    assert.deepEqual(log[0].enginesAttempted, ['codex']);
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});
+
+test('degrade: 다른 엔진 CLI가 없으면(127) 같은 엔진으로 검수하되 self로 기록한다', () => {
+  const tracker = trackerFile('degrade');
+  const project = setupProject({
+    extractor: {
+      dispatch: 'by-engine',
+      timeout: 30,
+      backends: { claude: mockEngine('claude', tracker, 'pass'), codex: mockEngine('codex', tracker, 'absent') },
+    },
+  });
+  try {
+    assert.equal(JSON.parse(runVerifyWorker(project)).processed, 1);
+    const text = readFileSync(join(project, CARD_REL), 'utf8');
+    // 강제하지 않는 이유: 검수를 못 하면 카드는 generated로 남고 recallVerifiedOnly
+    // 기본값 아래에서 wiki 전체가 recall에서 사라진다(사람 검수 복구 경로 없음).
+    assert.match(text, /^status: verified$/m, '다른 엔진이 없어도 검수는 계속된다');
+    assert.match(text, /^verifiedBy: "?claude"?$/m);
+    assert.match(text, /^verifiedMode: "?self"?$/m, '자기검증 사실이 카드에 남는다');
+    assert.deepEqual(calls(tracker), ['codex', 'claude'], '다른 엔진 먼저 시도 후 폴백');
+    const log = jsonl(join(project, '.auto-context', 'compile', 'verify-log.jsonl'));
+    assert.equal(log[0].verifiedMode, 'self');
+    assert.deepEqual(log[0].enginesAttempted, ['codex', 'claude']);
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});
+
+test('crossEngine:require + 다른 엔진 없음 → 검수 안 함, 카드 보존 + 큐 보존', () => {
+  const tracker = trackerFile('require');
+  const project = setupProject({
+    verify: { crossEngine: 'require' },
+    extractor: {
+      dispatch: 'by-engine',
+      timeout: 30,
+      backends: { claude: mockEngine('claude', tracker, 'pass') },
+    },
+  });
+  try {
+    assert.equal(JSON.parse(runVerifyWorker(project)).processed, 0);
+    assert.deepEqual(calls(tracker), [], '자기검증을 금지했으므로 아무 CLI도 호출하지 않는다');
+    assert.match(readFileSync(join(project, CARD_REL), 'utf8'), /^status: generated$/m, '카드는 삭제되지 않는다');
+    assert.match(
+      readFileSync(join(project, '.auto-context', 'compile', 'verify-queue.jsonl'), 'utf8'),
+      /test-card\.md/, '두 번째 CLI가 설정되면 검증되도록 잡 보존');
+    const log = jsonl(join(project, '.auto-context', 'compile', 'verify-log.jsonl'));
+    assert.equal(log[0].reason, 'cross_engine_unavailable');
+    assert.equal(log[0].crossEngine, 'require');
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});
+
+test('crossEngine:off → 0.x 동작(카드를 만든 엔진이 검수, mode self)', () => {
+  const tracker = trackerFile('off');
+  const project = setupProject({
+    verify: { crossEngine: 'off' },
+    extractor: {
+      dispatch: 'by-engine',
+      timeout: 30,
+      backends: { claude: mockEngine('claude', tracker, 'pass'), codex: mockEngine('codex', tracker, 'pass') },
+    },
+  });
+  try {
+    runVerifyWorker(project);
+    assert.deepEqual(calls(tracker), ['claude']);
+    assert.match(readFileSync(join(project, CARD_REL), 'utf8'), /^verifiedMode: "?self"?$/m);
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});
+
+test('실패 분류 경계: 다른 엔진 timeout은 다음 엔진으로 넘기지 않는다(cooldown + 큐 보존)', () => {
+  const tracker = trackerFile('timeout-boundary');
+  const project = setupProject({
+    verify: { timeout: 1 },
+    extractor: {
+      dispatch: 'by-engine',
+      timeout: 30,
+      backends: { claude: mockEngine('claude', tracker, 'pass'), codex: mockEngine('codex', tracker, 'slow') },
+    },
+  });
+  try {
+    assert.equal(JSON.parse(runVerifyWorker(project)).processed, 0);
+    // timeout은 이미 host CLI를 호출한 것이다 — 다음 엔진으로 넘기면 같은 카드에 대해
+    // 사용자 계정이 두 번 청구된다. 127(실행 자체 실패, 과금 0)만 다음 후보로 넘어간다.
+    assert.deepEqual(calls(tracker), ['codex'], 'timeout 후 claude로 재시도하지 않는다');
+    assert.equal(existsSync(join(project, '.auto-context', 'compile', 'verify-cooldown')), true);
+    assert.match(readFileSync(join(project, CARD_REL), 'utf8'), /^status: generated$/m);
+    // transient가 inconclusive(=삭제)로 흐르지 않았음을 확인
+    assert.equal(jsonl(join(project, '.auto-context', 'compile', 'verify-skipped.jsonl')).length, 0);
+    assert.equal(jsonl(join(project, '.auto-context', 'compile', 'verify-deleted.jsonl')).length, 0);
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});
+
+test('전 후보 CLI 부재(127) → 카드·큐 보존, transient로 처리(삭제 없음)', () => {
+  const tracker = trackerFile('all-absent');
+  const project = setupProject({
+    extractor: {
+      dispatch: 'by-engine',
+      timeout: 30,
+      backends: { claude: mockEngine('claude', tracker, 'absent'), codex: mockEngine('codex', tracker, 'absent') },
+    },
+  });
+  try {
+    assert.equal(JSON.parse(runVerifyWorker(project)).processed, 0);
+    assert.deepEqual(calls(tracker), ['codex', 'claude'], '후보 전원 시도');
+    assert.equal(existsSync(join(project, CARD_REL)), true);
+    assert.match(
+      readFileSync(join(project, '.auto-context', 'compile', 'verify-queue.jsonl'), 'utf8'),
+      /test-card\.md/);
+    assert.equal(jsonl(join(project, '.auto-context', 'compile', 'verify-deleted.jsonl')).length, 0);
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});
+
+test('cross-engine fail 삭제 → 원장에 verifiedMode/producedBy가 함께 남는다', () => {
+  const tracker = trackerFile('cross-fail');
+  const project = setupProject({
+    extractor: {
+      dispatch: 'by-engine',
+      timeout: 30,
+      backends: { claude: mockEngine('claude', tracker, 'pass'), codex: mockEngine('codex', tracker, 'fail') },
+    },
+  });
+  try {
+    runVerifyWorker(project);
+    assert.equal(existsSync(join(project, CARD_REL)), false);
+    const deleted = jsonl(join(project, '.auto-context', 'compile', 'verify-deleted.jsonl'));
+    assert.equal(deleted[0].engine, 'codex');
+    assert.equal(deleted[0].verifiedMode, 'cross-engine');
+    assert.equal(deleted[0].producedBy, 'claude');
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});
+
+test('legacy extractor.argv는 엔진 귀속이 불가하므로 mode unknown (교차 주장 금지)', () => {
+  const verifier = mockVerifier({ verdict: 'pass', claims: [], reasons: [] });
+  const project = setupProject({ extractorArgv: ['python3', verifier] });
+  try {
+    runVerifyWorker(project);
+    const text = readFileSync(join(project, CARD_REL), 'utf8');
+    assert.match(text, /^verifiedMode: "?unknown"?$/m);
+    assert.match(text, /^verifiedBy: "?claude"?$/m, 'verifiedBy는 기존 동작(job engine) 유지');
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});
+
+test('증명 필드 위생: pass 스탬프는 verifiedBy/verifiedAt/verifiedMode를 항상 함께 쓴다', () => {
+  const tracker = trackerFile('proof');
+  const project = setupProject({
+    extractor: { dispatch: 'by-engine', timeout: 30, backends: { codex: mockEngine('codex', tracker, 'pass') } },
+  });
+  try {
+    runVerifyWorker(project);
+    const fm = readFileSync(join(project, CARD_REL), 'utf8').split('---')[1];
+    for (const key of ['verifiedBy', 'verifiedAt', 'verifiedMode']) {
+      assert.match(fm, new RegExp(`^${key}: .+$`, 'm'), `${key} 결측 금지`);
+    }
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});
+
+test('기존 verified 카드는 자동 재검증되지 않는다 (655장 재검증 = 사용자 계정 청구)', () => {
+  const tracker = trackerFile('no-reverify');
+  const project = setupProject({
+    cardStatus: 'verified',
+    extractor: { dispatch: 'by-engine', timeout: 30, backends: { codex: mockEngine('codex', tracker, 'fail') } },
+  });
+  try {
+    assert.equal(JSON.parse(runVerifyWorker(project)).processed, 1);
+    assert.deepEqual(calls(tracker), [], '검수된 카드에는 host CLI를 호출하지 않는다');
+    assert.equal(existsSync(join(project, CARD_REL)), true);
+    assert.equal(jsonl(join(project, '.auto-context', 'compile', 'verify-log.jsonl'))[0].reason, 'not_generated');
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});
+
+test('crossEngine:require는 엔진 귀속 불가 argv(legacy/default)로 만족되지 않는다', () => {
+  const verifier = mockVerifier({ verdict: 'pass', claims: [], reasons: [] });
+  for (const extractorCfg of [
+    { argv: ['python3', verifier], timeout: 30 },                                  // legacy 단일 argv
+    { dispatch: 'by-engine', timeout: 30, backends: {}, default: ['python3', verifier] },
+  ]) {
+    const project = setupProject({ verify: { crossEngine: 'require' }, extractor: extractorCfg });
+    try {
+      assert.equal(JSON.parse(runVerifyWorker(project)).processed, 0);
+      // "never self-verify" 약속은 엔진을 알 수 없는 argv로는 지킬 수 없다.
+      assert.match(readFileSync(join(project, CARD_REL), 'utf8'), /^status: generated$/m);
+      assert.equal(jsonl(join(project, '.auto-context', 'compile', 'verify-log.jsonl'))[0].reason,
+        'cross_engine_unavailable');
+    } finally { rmSync(project, { recursive: true, force: true }); }
+  }
+});
+
+test('후보 엔진이 0건이어도 extractor.default 폴백은 유지된다(prefer)', () => {
+  const verifier = mockVerifier({ verdict: 'pass', claims: [], reasons: [] });
+  const project = setupProject({
+    extractor: { dispatch: 'by-engine', timeout: 30, backends: {}, default: ['python3', verifier] },
+  });
+  try {
+    assert.equal(JSON.parse(runVerifyWorker(project)).processed, 1);
+    const text = readFileSync(join(project, CARD_REL), 'utf8');
+    assert.match(text, /^status: verified$/m);
+    assert.match(text, /^verifiedMode: "?unknown"?$/m);
+  } finally { rmSync(project, { recursive: true, force: true }); }
 });

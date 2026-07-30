@@ -108,7 +108,7 @@ title: "claude-runner — 구독 기반 Claude Code headless AI 실행 계층"
 | 1 | ✅ **완료** — 주입에 카드 본문 포함 + 경로를 Read 가능하게 | 토큰 상한 필수. `resolve_wiki_result_path` 가 실경로를 이미 계산하므로 재사용. frontmatter title 사용 |
 | 2 | ✅ **완료** — `sources.path` 주입 | 경로 안전성·존재성 검증, 중복 제거, 개수 제한. "카드 먼저, 원문은 대조 필요시" 지시 동반 |
 | 3 | ✅ **완료** — `source_missing` 정책 | 삭제·downgrade 없이 감지·기록·표면화 + 사람 확인 복구(재지정). 원인이 개명이라 파괴적 조치 불가 |
-| 4 | verifier engine 을 extractor 와 분리 | 문헌의 명시적 완화법. CLI 부재 시 degrade 경로 유지 |
+| 4 | ✅ **완료** — verifier engine 을 extractor 와 분리 | 문헌의 명시적 완화법. CLI 부재 시 degrade 경로 유지 |
 | 5 | raw 있는 상태에서 shadow baseline 수집 | 측정을 **앞으로 당김**. 8번의 판정 근거 |
 | 6 | 커버리지 백필 | **비용 동의 필요**(969건 ≈ 16~20M 토큰). 소량 파일럿 → 중복률·verify 적체 확인 → 확대. 선행 4건은 `bulk-wiki-backfill-spec.md` |
 | 7 | role `source` 도입 | qmd 등록과 compile 입력 분리. 8번 없이는 불필요 |
@@ -197,6 +197,45 @@ title: "claude-runner — 구독 기반 Claude Code headless AI 실행 계층"
   동일(주입 842 / drop 34 = `missing` 32 + `kind_not_file` 2), 감지 `verified` 7 /
   `generated` 18, E2E recall stdout이 `{injectSourcePathsPerCard 0, 3} × {진단 로그 on, off}`
   4조합 전부 sha 동일
+
+**4단계 — verifier engine 을 extractor 와 분리** (`HEAD`. 최종 상태는 `docs/settings.md`
+"검수 엔진 분리(`crossEngine`)"). 결론:
+
+- **노출은 실측이다**: verified 688장 중 655장(95%)이 `verifiedBy: "claude"` 자기검증
+  (나머지는 수동 백필 `agent-full-source` 27장 + 엔진 불명 5장). `recallVerifiedOnly`
+  기본값이 그 카드들을 인용 가능한 캐논으로 만들므로 캐논 판정이 self-preference bias 에
+  그대로 노출돼 있었다. `compile.verify.crossEngine`(기본 `prefer`)이 카드를 만든 엔진을
+  후보 **마지막**으로 밀고, 후보 풀은 `compile.verify.builtins`(비면 extractor 풀 상속)다
+- **degrade 는 강제하지 않는다.** 다른 엔진이 없을 때 검수를 포기하면 카드가 `generated`로
+  남고 `recallVerifiedOnly` 기본값 아래에서 wiki 전체가 recall 에서 사라진다(사람 검수 없음
+  = 복구 경로 없음). 같은 엔진으로 검수하되 `verifiedMode: self`를 남긴다. `require`는
+  명시 선택으로만 제공하고, 그때도 삭제가 아니라 **큐 보존**이다
+- **자기검증 카드의 recall 대우는 (a) 동일 + 기록만**이다. (b) 별도 status 는
+  `recallVerifiedOnly`가 그것을 지워 단일 CLI 머신의 wiki 를 통째로 죽인다 — 피하려던 바로
+  그 degrade 다. (c) 주입 표식은 3단계의 `source_missing` 선례가 그대로 적용된다(내리지
+  않기로 한 카드에 하향 배지는 자기모순 + 배지가 주입마다 토큰을 먹어 목표와 반대). 노출
+  측정은 주입이 아니라 frontmatter `verifiedMode` 와 로그의
+  `verifiedMode`/`producedBy`/`enginesAttempted` 로 한다(삭제는 `verify-deleted.jsonl`에도)
+- **실패 분류 경계는 "127 만 다음 엔진"** 이다. 127 은 CLI 를 실행하지도 못한 상태라 토큰이
+  0 이므로 재시도가 공짜고, timeout·비127 실패는 이미 호출한 것이라 다음 엔진으로 넘기면
+  같은 카드에 이중 과금이 된다(기존대로 cooldown + 보존). 어느 경로도 verdict 를 만들지
+  않으므로 transient → inconclusive(=삭제) 오분류가 구조적으로 불가능하다
+- **레거시 `extractor.argv` 는 교차 주장을 하지 않는다** — argv 하나가 모든 엔진을 담당하므로
+  엔진 귀속이 불가하고 `verifiedMode: unknown` 이다(`extractor.default` 폴백도 같다).
+  argv 해석은 `wiki_compile_worker.resolve_extractor_argv` **한 벌**을 유지하고(옵션
+  `builtins` 인자만 추가) 새로 만든 것은 엔진 **순서** 규칙뿐이다
+- **기존 655장은 자동 재검증하지 않는다.** 655 회 host CLI 호출 ≈ 입력 6M 토큰이 사용자 계정
+  청구다(6단계 백필과 같은 성격의 비용 게이트). 새 카드부터 적용되고, 전량 재검증 절차는
+  docs 에 opt-in 으로만 기술했다
+- **증명 필드는 한 쓰기로 함께 나간다**(`wiki_compile.stamp_verification`). `verifiedAt` 결측
+  27장은 코드가 쓰지 않는 `agent-full-source` 백필 잔재라 **소급 수정하지 않는다**(결측은
+  거짓이 아니고, 지금 채우면 없던 사실을 만든다). 반대로 리셋 시에는 값만 비우지 않고
+  **키째로 제거**한다 — `verifiedBy: ""` 는 "한 번 검수를 통과한 카드"로 읽히는 잔재다
+  (라이브 5장)
+- **교차 검증 e2e 실측**: 임시 프로젝트에서 claude extractor(17s) → codex verifier(15s),
+  verdict `pass`(claims 8), 카드에 `verifiedBy: "codex"` + `verifiedMode: cross-engine`.
+  1·2·3단계 라이브 불변식 유지(876항목 / 주입 842 / drop 34 = missing 32 + kind_not_file 2,
+  감지 verified 7 / generated 18)
 
 ### 단계별 주의
 

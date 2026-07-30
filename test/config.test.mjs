@@ -135,6 +135,8 @@ test('wiki recall 신규 필드는 additive로 normalize 된다', () => {
       timeout: 120,
       onFail: 'delete',
       onInconclusive: 'delete',
+      crossEngine: 'prefer',
+      builtins: [],
       queuePath: '.auto-context/compile/verify-queue.jsonl',
       logPath: '.auto-context/compile/verify-log.jsonl',
       skippedPath: '.auto-context/compile/verify-skipped.jsonl',

@@ -761,12 +761,17 @@ def markdown_page(candidate: dict, summary: str, status: str, redactions: list[s
     return "\n".join(lines)
 
 
-def patch_frontmatter_fields(path: Path, updates: dict[str, str]) -> bool:
+def patch_frontmatter_fields(path: Path, updates: dict) -> bool:
     """Rewrite only the named top-level scalar frontmatter keys in place.
 
     Leaves every other frontmatter line and the managed body untouched. Used by
     wiki_review.py's supersede action to flip an old page's status without
     touching its generated summary block.
+
+    A value of **None removes the key** instead of writing it. Blanking a proof
+    field (`verifiedBy: ""`) leaves a residue that still reads as "this card was
+    machine-verified once" — measured on 5 live cards that had been reset to
+    `generated`. Removal is the honest state for "no verification on record".
     """
     try:
         text = path.read_text(encoding="utf-8")
@@ -783,17 +788,51 @@ def patch_frontmatter_fields(path: Path, updates: dict[str, str]) -> bool:
         if line and not line.startswith(" ") and ":" in line:
             key = line.split(":", 1)[0].strip()
         if key in updates:
-            new_lines.append(f"{key}: {frontmatter_patch_scalar(key, updates[key])}")
             seen.add(key)
+            if updates[key] is None:
+                continue
+            new_lines.append(f"{key}: {frontmatter_patch_scalar(key, updates[key])}")
         else:
             new_lines.append(line)
     for key, value in updates.items():
-        if key not in seen:
+        if key not in seen and value is not None:
             new_lines.append(f"{key}: {frontmatter_patch_scalar(key, value)}")
     new_frontmatter = "\n".join(new_lines)
     patched = text[: match.start(1)] + new_frontmatter + text[match.end(1) :]
     # 원자적 쓰기 — 실패해도 카드는 원본 그대로다(자동 경로라 절단되면 아무도 모른다).
     return write_text_atomic(path, patched)
+
+
+def stamp_verification(path: Path, status: str, engine: str, mode: str) -> bool:
+    """Write a machine-review outcome — status AND all three proof fields together.
+
+    Single writer so a status can never land without its proof. The live corpus shows
+    what the split costs: 27 `status: verified` cards carry no `verifiedAt` at all
+    (all of them `verifiedBy: agent-full-source`, a string this codebase never
+    writes — a hand/agent backfill that stamped the status and skipped the proof).
+
+    `verifiedMode` records WHO checked relative to who wrote (see
+    wiki_verify_worker.VERIFIED_MODE_*): a card verified by the same engine that
+    produced it is a self-review, and self-preference bias makes that a weaker
+    claim than a cross-engine pass. The field is absent on every card verified
+    before this existed — absence therefore means "unknown, most likely self"
+    (measured 655/688), never "cross-engine".
+    """
+    return patch_frontmatter_fields(path, {
+        "status": status,
+        "verifiedBy": str(engine or "unknown"),
+        "verifiedAt": now_iso(),
+        "verifiedMode": mode if mode in qmd_config.VERIFIED_MODES else qmd_config.VERIFIED_MODE_UNKNOWN,
+    })
+
+
+def clear_verification_updates(meta: dict) -> dict:
+    """Proof fields to REMOVE when a card is reset out of a verified/contested state.
+
+    Keys present in `meta` map to None (patch_frontmatter_fields deletes those); keys
+    that were never there are left alone so the patch stays minimal.
+    """
+    return {key: None for key in qmd_config.VERIFY_PROOF_FIELDS if key in meta}
 
 
 def update_index(wiki_root: Path, target: Path, title: str) -> bool:
@@ -1264,11 +1303,10 @@ def main() -> int:
         old_meta, _ = parse_frontmatter(old)
         old_status = str(old_meta.get("status") or "").strip()
         if old_status and old_status != status:
-            updates = {"status": status}
-            if "verifiedBy" in old_meta or "verifiedAt" in old_meta:
-                updates["verifiedBy"] = ""
-                updates["verifiedAt"] = ""
-            patch_frontmatter_fields(target, updates)
+            # 증명 필드는 빈 값으로 남기지 않고 **키째로 지운다** — `verifiedBy: ""`는
+            # "한 번 기계 검수를 통과한 카드"로 읽히는 잔재고, 리셋된 카드에 그 흔적이
+            # 남으면 안 된다(라이브 5장이 그 형태였다).
+            patch_frontmatter_fields(target, {"status": status, **clear_verification_updates(old_meta)})
 
     record["action"] = action
     append_jsonl(candidate_path, record)

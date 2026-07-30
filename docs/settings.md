@@ -517,6 +517,8 @@ jq -c 'select(.event=="qmd_recall_shadow" and .verdict.selected_empty_raw_nonemp
       "timeout": 120,
       "onFail": "delete",
       "onInconclusive": "delete",
+      "crossEngine": "prefer",
+      "builtins": [],
       "cooldownSeconds": 600,
       "maxPerRun": 3
     }
@@ -530,6 +532,8 @@ jq -c 'select(.event=="qmd_recall_shadow" and .verdict.selected_empty_raw_nonemp
 | `compile.verify.timeout` | `120` | 검증 실행 timeout(초)입니다. |
 | `compile.verify.onFail` | `"delete"` | 검증 실패(카드가 원문과 모순) 시 동작입니다. 허용값은 `delete`, `contested`, `none`입니다. |
 | `compile.verify.onInconclusive` | `"delete"` | 검증 판정 불가(verifier가 대조하지 못함) 시 동작입니다. 값 집합은 `onFail`과 같습니다. `none`이 "현행 유지"(카드를 `generated`로 남김)입니다. |
+| `compile.verify.crossEngine` | `"prefer"` | 검수 엔진을 카드를 만든 엔진과 분리합니다. `prefer`는 다른 엔진을 먼저 시도하고 없으면 같은 엔진으로 검수합니다(자기검증으로 기록). `require`는 다른 엔진만 허용하고 없으면 검수하지 않습니다(엔진별 `backends`/`builtins`가 필요합니다 — 레거시 `extractor.argv`·`extractor.default`는 엔진 귀속이 불가해 이 요구를 만족시키지 못합니다). `off`는 0.x 동작(카드를 만든 엔진)입니다. |
+| `compile.verify.builtins` | `[]` | 검수 후보 엔진 목록(symbolic 이름만). 비면 `compile.extractor`의 `builtins` + 명시 `backends` 키를 물려받습니다. adapter argv 해석은 extractor와 같은 한 벌을 씁니다. |
 | `compile.verify.cooldownSeconds` | `600` | verifier 실패/timeout 뒤 재시도 cooldown입니다. |
 | `compile.verify.maxPerRun` | `3` | 한 번에 처리할 verify job 수입니다. |
 | `compile.verify.skippedPath` | `.auto-context/compile/verify-skipped.jsonl` | inconclusive 삭제 억제 마커 파일입니다. |
@@ -544,6 +548,66 @@ jq -c 'select(.event=="qmd_recall_shadow" and .verdict.selected_empty_raw_nonemp
 
 **이 기본값은 기존 사용자에게 파괴적 변경입니다** — 0.x에서 `generated`로 남던 카드가
 업그레이드 후 삭제됩니다. 기존 동작을 유지하려면 `"onInconclusive": "none"`을 명시하십시오.
+
+#### 검수 엔진 분리 (`crossEngine`)
+
+LLM 자기 검수는 성능을 떨어뜨립니다(Huang et al. ICLR'24: GPT-4 GSM8K 95.5% → 91.5% →
+89.0%, self-preference bias −38%~+90%). 문헌이 제시한 완화법은 **생성 모델과 판정 모델의
+분리**입니다. 0.x에서는 verifier가 카드를 만든 엔진을 그대로 재사용했고, 라이브 실측에서
+verified 카드 688장 중 **655장(95%)이 `verifiedBy: "claude"`** — 같은 엔진의 자기검증이었습니다.
+`recallVerifiedOnly` 기본값이 `true`이므로 이 카드들이 "인용 가능한 캐논"이고, 캐논 판정의
+근거가 self-preference bias에 그대로 노출돼 있었습니다.
+
+기본값 `prefer`는 카드를 만든 엔진을 후보 목록의 **마지막**으로 밉니다. 제외하지 않는
+이유는 degrade가 파괴적이기 때문입니다 — 다른 엔진 CLI가 없는 머신에서 "반드시 다른 엔진"을
+강제하면 아무 카드도 검수되지 않고, `recallVerifiedOnly` 기본값 아래에서 **wiki 전체가
+recall에서 사라집니다.** 사람 검수를 전제하지 않으므로 복구 경로도 없습니다. 그래서 기능을
+지키고 약점을 드러내는 쪽을 택했습니다: 같은 엔진으로 검수하되 카드에
+`verifiedMode: self`를 남깁니다.
+
+| 카드 frontmatter | 뜻 |
+|---|---|
+| `verifiedMode: cross-engine` | 카드를 만든 엔진과 **다른** 엔진이 검수했습니다. |
+| `verifiedMode: self` | 다른 엔진 CLI가 없어 같은 엔진이 검수했습니다(약한 근거). |
+| `verifiedMode: unknown` | 엔진 귀속이 불가합니다 — 레거시 `extractor.argv`(하나의 argv가 모든 엔진을 담당), `extractor.default` 폴백, 또는 카드를 만든 엔진이 기록되지 않은 잡입니다. |
+| 필드 없음 | 이 기능 이전에 검수된 카드입니다. **자기검증일 가능성이 높습니다**(실측 655/688). 없음은 `cross-engine`을 뜻하지 않습니다. |
+
+**recall은 `verifiedMode`를 읽지 않습니다.** `self`도 `cross-engine`과 동일하게 캐논급으로
+주입됩니다. 주입에 신뢰 하향 배지를 붙이지 않는 이유는 `source_missing`에서와 같습니다 —
+recall에서 내리지 않기로 한 카드에 하향 표식을 붙이는 것은 자기모순이고, 배지는 주입마다
+토큰을 먹어 이 플러그인의 목표(토큰 절감)와 반대로 갑니다. 노출을 재는 수단은 주입이
+아니라 frontmatter 그리고 `verify-log.jsonl`의 `verifiedMode`/`producedBy`/`enginesAttempted`
+입니다(삭제는 `verify-deleted.jsonl`에도 같은 두 필드가 남습니다 — 자기검증이 내린 삭제는
+교차검증이 내린 삭제보다 약한 근거입니다).
+
+**실패 분류 경계**: 후보 엔진 사이를 넘어가는 조건은 **exit 127(host CLI 부재)뿐**입니다.
+127은 CLI를 실행하지도 못한 상태라 토큰이 들지 않으므로 다음 후보 시도가 공짜입니다.
+timeout·비127 실패는 이미 CLI를 호출한 것이므로 다음 엔진으로 넘기지 않습니다(같은 카드에
+대한 이중 과금) — 기존대로 cooldown + 큐 보존입니다. 어느 경로도 verdict를 만들지 않으므로
+**transient가 `inconclusive`(=삭제)로 흐를 수 없다**는 계약이 유지됩니다.
+`crossEngine: "require"`에서 다른 엔진이 없으면 잡을 **보존**합니다(카드는 `generated`로
+남고 삭제되지 않으며, 두 번째 CLI가 설치되면 검수됩니다).
+
+**기존 카드는 자동으로 재검증되지 않습니다.** 655장 재검증은 host CLI 호출 655회 =
+사용자 계정 청구입니다(카드 1장당 카드 본문 + 소스 최대 3개 × `maxSourceChars` 12,000자
+≈ 입력 9K 토큰 → 합계 대략 6M 입력 토큰). 새로 컴파일되는 카드부터 교차 검증됩니다.
+전량 재검증을 원하면 명시적 opt-in으로만 하십시오 — `verify-queue.jsonl`에 대상 카드의
+`{targetPath, sources, sourceHash, engine}` 행을 직접 append하고 `status`를 `generated`로
+되돌린 뒤 worker가 `maxPerRun`씩 드레인하게 하는 방식이며, 로드맵 6단계(백필)와 같은
+비용 게이트입니다.
+
+#### 증명 필드 위생
+
+`status: verified`/`contested`는 `verifiedBy`·`verifiedAt`·`verifiedMode`와 **한 쓰기로
+함께** 나갑니다(`wiki_compile.stamp_verification`이 유일한 경로). 라이브에는 `verified`인데
+`verifiedAt`이 없는 카드가 27장 있는데 전부 `verifiedBy: agent-full-source` — 이 코드베이스가
+쓰지 않는 값이고 과거 수동/에이전트 백필의 잔재입니다. **이 27장은 소급 수정하지 않습니다**:
+결측은 거짓이 아니고, 지금 타임스탬프를 채우면 없던 사실을 만들어 내는 것입니다(3단계의
+"기존 데이터를 건드리지 않는다" 기조와 같습니다).
+
+반대로 카드가 갱신돼 `generated`로 리셋될 때는 증명 필드를 **키째로 제거**합니다. 값만
+비우면(`verifiedBy: ""`) "한 번 기계 검수를 통과한 카드"로 읽히는 잔재가 남습니다
+(라이브 5장이 그 형태였습니다).
 
 #### 억제 마커 (`verify-skipped.jsonl`)
 

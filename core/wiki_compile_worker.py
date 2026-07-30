@@ -260,7 +260,27 @@ def _builtin_adapter_argv(engine: str) -> list[str] | None:
     return [sys.executable, str(adapter)]
 
 
-def resolve_extractor_argv(compile_cfg: dict, engine: str) -> tuple[list[str] | None, list[str] | None]:
+def legacy_extractor_argv(compile_cfg: dict) -> list[str] | None:
+    """compile.extractor.argv (0.x single-argv form) if configured, else None.
+
+    Callers that dispatch by engine need to know when this is set: one argv serves
+    every engine, so the engine label carries no information about which CLI ran
+    (wiki_verify_worker uses this to refuse a cross-engine claim it cannot back).
+    """
+    raw = compile_cfg.get("extractor")
+    extractor = raw if isinstance(raw, dict) else {}
+    return _argv_list(extractor.get("argv"))
+
+
+def resolve_extractor_argv(
+    compile_cfg: dict, engine: str, builtins: list[str] | None = None
+) -> tuple[list[str] | None, list[str] | None]:
+    """engine → (primary argv, default argv). Single rule for every adapter caller.
+
+    `builtins` overrides which symbolic engines may resolve to a bundled adapter, so
+    the verifier can consider an engine its own pool allows (compile.verify.builtins)
+    without a second copy of this resolution living in wiki_verify_worker.
+    """
     raw = compile_cfg.get("extractor")
     extractor = raw if isinstance(raw, dict) else {}
     legacy = _argv_list(extractor.get("argv"))
@@ -270,7 +290,8 @@ def resolve_extractor_argv(compile_cfg: dict, engine: str) -> tuple[list[str] | 
         return None, None
     backends = extractor.get("backends") if isinstance(extractor.get("backends"), dict) else {}
     primary = _argv_list(backends.get(engine))
-    builtins = extractor.get("builtins") if isinstance(extractor.get("builtins"), list) else []
+    if builtins is None:
+        builtins = extractor.get("builtins") if isinstance(extractor.get("builtins"), list) else []
     if primary is None and engine in {item for item in builtins if isinstance(item, str)}:
         primary = _builtin_adapter_argv(engine)
     default = _argv_list(extractor.get("default"))
