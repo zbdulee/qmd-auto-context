@@ -532,7 +532,7 @@ jq -c 'select(.event=="qmd_recall_shadow" and .verdict.selected_empty_raw_nonemp
 | `compile.verify.timeout` | `120` | 검증 실행 timeout(초)입니다. |
 | `compile.verify.onFail` | `"delete"` | 검증 실패(카드가 원문과 모순) 시 동작입니다. 허용값은 `delete`, `contested`, `none`입니다. |
 | `compile.verify.onInconclusive` | `"delete"` | 검증 판정 불가(verifier가 대조하지 못함) 시 동작입니다. 값 집합은 `onFail`과 같습니다. `none`이 "현행 유지"(카드를 `generated`로 남김)입니다. |
-| `compile.verify.crossEngine` | `"prefer"` | 검수 엔진을 카드를 만든 엔진과 분리합니다. `prefer`는 다른 엔진을 먼저 시도하고 없으면 같은 엔진으로 검수합니다(자기검증으로 기록). `require`는 다른 엔진만 허용하고 없으면 검수하지 않습니다(엔진별 `backends`/`builtins`가 필요합니다 — 레거시 `extractor.argv`·`extractor.default`는 엔진 귀속이 불가해 이 요구를 만족시키지 못합니다). `off`는 0.x 동작(카드를 만든 엔진)입니다. |
+| `compile.verify.crossEngine` | `"prefer"` | 검수 엔진을 카드를 만든 엔진과 분리합니다. `prefer`는 다른 엔진을 먼저 시도하고 없으면 같은 엔진으로 검수합니다(자기검증으로 기록). `require`는 다른 엔진만 허용하고 없으면 검수하지 않습니다(엔진별 `backends`/`builtins`가 필요합니다 — 레거시 `extractor.argv`·`extractor.default`는 엔진 귀속이 불가해 이 요구를 만족시키지 못합니다). `off`는 0.x 동작(카드를 만든 엔진)이며, 그 엔진이 귀속 불가면 풀의 첫 후보로 폴백합니다(폐기하면 그 카드가 영원히 검수되지 않습니다). |
 | `compile.verify.builtins` | `[]` | 검수 후보 엔진 목록(symbolic 이름만). 비면 `compile.extractor`의 `builtins` + 명시 `backends` 키를 물려받습니다. **카드를 만든 엔진은 이 목록에 없어도 `prefer`의 최후 후보로 남습니다** — 목록을 좁혀도(또는 이름을 잘못 적어도) self 폴백이 사라지지 않습니다. adapter argv 해석은 extractor와 같은 한 벌을 씁니다. |
 | `compile.verify.cooldownSeconds` | `600` | verifier 실패/timeout 뒤 재시도 cooldown입니다. |
 | `compile.verify.maxPerRun` | `3` | 한 번에 처리할 verify job 수입니다. |
@@ -577,6 +577,11 @@ recall에서 사라집니다.** 사람 검수를 전제하지 않으므로 복�
 카드 **두 장**을 비교하고 그 둘의 생산자가 다르거나 불명일 수 있어 무엇이 자기검증인지
 확정되지 않습니다. 생산자가 확실한 write-time gate 만 교차 엔진으로 확장하는 것이 타당하고,
 이는 **후속 작업**입니다.
+
+로그 키의 의미는 고정입니다: `producedBy`는 **생성** 엔진, `engine`은 **검수** 엔진(시도가
+있는 행에만), `verifiedMode`는 **달성된** 관계(판정이 실제로 나온 행에만), `attemptedMode`는
+시도했던 관계(실패 행 포함)입니다. 실패 행에 `verifiedMode`를 쓰지 않는 이유는 노출 집계가
+"교차검증됨"으로 오독되기 때문입니다.
 
 **recall은 `verifiedMode`를 읽지 않습니다.** `self`도 `cross-engine`과 동일하게 캐논급으로
 주입됩니다. 주입에 신뢰 하향 배지를 붙이지 않는 이유는 `source_missing`에서와 같습니다 —
@@ -631,6 +636,19 @@ exit 127(host CLI 부재, 토큰 0)뿐이고 timeout·비127 실패는 그 run �
 `extractor.default`)는 `(unattributed)` 키로 따로 식히므로 그 엔진의 adapter가 함께 막히지
 않습니다. 만료 항목은 쓰기 시 정리되어 파일이 무계로 커지지 않습니다.
 
+이 파일은 **이 degrade의 복구 메커니즘**이므로 쓰기 실패를 삼키지 않습니다. 기록이 남지
+않으면 다음 run이 같은 후보를 다시 불러 영구 정지가 그대로 재발하므로, 실패는 로그 행의
+`cooldownWriteFailed: true`로 표면화됩니다. 쓰기는 원자적이고(`write_text_atomic`) 같은
+이유로 read-modify-write를 sidecar `flock`으로 직렬화합니다 — 정상 경로는 `claim_queue`가
+프로젝트 단위로 직렬화하므로 경합이 드물고 손실 등급도 원장(줄 유실 = 감사 유실)보다 낮지만,
+잃는 것이 하필 이 복구 메커니즘이라 기존 헬퍼를 재사용하는 값싼 방어를 생략할 이유가 없습니다.
+만료값은 24시간으로 클램프합니다(손상·주입된 값이 후보를 영구 배제하지 못하게 — 상한을 넘는
+항목은 식힘으로 보지 않습니다).
+
+읽기 실패·손상은 fail-open(식힘 없음)입니다: 식힘 기록을 못 읽는 것이 검수를 막는 이유가 되면
+안 되고, 최악은 한 번 더 시도하는 것입니다. 0.x의 전역 `verify-cooldown` 파일은 이제 쓰이지
+않으므로 worker가 발견 시 정리합니다.
+
 #### 실패 유형과 결과
 
 | 실패 유형 | host CLI 호출 | 카드 | 큐 | cooldown | 로그 |
@@ -640,8 +658,8 @@ exit 127(host CLI 부재, 토큰 0)뿐이고 timeout·비127 실패는 그 run �
 | `inconclusive` verdict | 1(유료) | `onInconclusive`(기본 삭제) | 소비 | — | 같음 + `verify-skipped.jsonl` |
 | exit 127 (후보 전원 부재) | 0(무료) | 불변(`generated`) | **보존** | 없음(설치 즉시 재시도) | `deferred`/`extractor_unavailable` |
 | timeout·비127 실패 | 1(유료) | 불변(`generated`) | **보존** | **그 후보만** | `deferred` + `cooledKey` |
-| 잘못된 JSON(`invalid_extractor_json`) | 1(유료) | 불변(`generated`) | 폐기 | 없음 | `skipped` |
-| verdict 값 불량(`invalid_verdict`) | 1(유료) | 불변(`generated`) | 폐기 | 없음 | `skipped` |
+| 출력이 판정 불가(`invalid_extractor_json`·`invalid_verdict`) — 남은 후보 있음 | 1(유료) | 불변(`generated`) | **보존** | 그 후보만 | `deferred` |
+| 같은 사유 — 후보 소진 | 1(유료) | 불변(`generated`) | 폐기(종점) | 그 후보만 | `skipped` |
 | 후보 전원 식힘 중 | 0 | 불변(`generated`) | **보존** | 유지 | `deferred`/`engines_cooling` |
 | `require` + 귀속 불가/후보 없음 | 0 | 불변(`generated`) | **보존** | — | `deferred`/`cross_engine_unavailable` |
 | extractor 설정 없음 | 0 | 불변(`generated`) | 폐기 | — | `skipped`/`missing_extractor` |

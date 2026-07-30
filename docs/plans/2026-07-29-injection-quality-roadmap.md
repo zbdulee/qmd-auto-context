@@ -114,7 +114,7 @@ title: "claude-runner — 구독 기반 Claude Code headless AI 실행 계층"
 | 7 | role `source` 도입 | qmd 등록과 compile 입력 분리. 8번 없이는 불필요 |
 | 8 | **raw on/off A/B → 프로젝트별 가역적 제거** | 게이트: 링크 무결성 · query coverage · source-read 성공률 · 재생성 가능성 · raw-search escape hatch |
 
-### 완료 기록 (1·2·3단계)
+### 완료 기록 (1·2·3·4단계)
 
 **1단계 — 주입에 정보를 담는다** (`677fe0d` 외 리뷰 라운드 3회, 최종 상태는
 `docs/settings.md` "카드 본문 주입"). 결론:
@@ -198,7 +198,8 @@ title: "claude-runner — 구독 기반 Claude Code headless AI 실행 계층"
   `generated` 18, E2E recall stdout이 `{injectSourcePathsPerCard 0, 3} × {진단 로그 on, off}`
   4조합 전부 sha 동일
 
-**4단계 — verifier engine 을 extractor 와 분리** (`HEAD`. 최종 상태는 `docs/settings.md`
+**4단계 — verifier engine 을 extractor 와 분리** (`fe68c24` → 리뷰 반영 `cd7e259` → 마무리
+`HEAD`. 리뷰 3라운드에서 major 0 확인. 최종 상태는 `docs/settings.md`
 "검수 엔진 분리(`crossEngine`)"). 결론:
 
 - **노출은 실측이다**: verified 688장 중 655장(95%)이 `verifiedBy: "claude"` 자기검증
@@ -246,6 +247,18 @@ title: "claude-runner — 구독 기반 Claude Code headless AI 실행 계층"
   거짓이 아니고, 지금 채우면 없던 사실을 만든다). 반대로 리셋 시에는 값만 비우지 않고
   **키째로 제거**한다 — `verifiedBy: ""` 는 "한 번 검수를 통과한 카드"로 읽히는 잔재다
   (라이브 5장)
+- **3라운드 마무리 5건**: (a) MAJOR 1 수정 자체에 구멍 — `set_engine_cooldown` 이
+  `write_text_atomic` 의 False 를 삼켜, 식힘 기록이 실패하면 다음 run 이 같은 후보를 다시 불러
+  **영구 정지가 그대로 재발**했다(로그도 0줄). 이제 반환값을 확인해 `cooldownWriteFailed` 로
+  표면화하고, 같은 이유로 read-modify-write 에 sidecar `flock`(3단계 헬퍼 재사용)과 만료값 24h
+  클램프를 붙였다 — 등급은 원장보다 낮지만 잃는 것이 하필 이 수정의 복구 메커니즘이다.
+  (b) `invalid_extractor_json`/`invalid_verdict` 가 **첫 후보에서 즉시 영구 drop** 이었다 →
+  남은 후보가 있으면 degrade 하고 후보가 소진되면 폐기한다(종점이 필요한 이유: 같은 입력에서
+  재현되는 설정 오류라 보존하면 cooldown 만료마다 전 후보 재호출 = 영구 과금 루프. transient
+  (timeout·실행 실패)는 종점 없이 기존대로 항상 보존). (c) `off` + 귀속 불가 라벨이 잡을
+  폐기했다 → 풀의 첫 후보로 폴백(0.x 의 `builtins[0]` 폴백과 같은 의도, mode 는 `unknown`).
+  (d) 실패 행이 `verifiedMode` 를 남겨 노출 집계를 오독시켰다 → `attemptedMode` 로 분리.
+  (e) 0.x 전역 `verify-cooldown` 고아 파일을 worker 가 정리한다
 - **남은 자기검증은 dedup judge** 이고 후속 작업이다 — `plan_verify_attempts` 재사용은 안 된다
   (카드 두 장의 생산자가 다르거나 불명이라 무엇이 자기검증인지 확정되지 않는다). 생산자가
   확실한 write-time gate 만 확장하는 것이 타당하다

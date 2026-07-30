@@ -985,3 +985,127 @@ test('로그 키 의미 고정: attempt 이전 줄은 producedBy만, 이후 줄�
     assert.equal('engine' in row, false, '검수 엔진이 없는 줄에 engine 키를 쓰지 않는다');
   } finally { rmSync(project, { recursive: true, force: true }); }
 });
+
+// ---------------------------------------------------------------------------
+// 확인 라운드 마무리: cooldown 쓰기 실패 표면화 / invalid_* degrade / off 폴백 / mode 표기
+// ---------------------------------------------------------------------------
+
+test('cooldown 쓰기 실패는 로그에 표면화된다 (MAJOR 1 복구 메커니즘의 조용한 실패 금지)', () => {
+  const tracker = trackerFile('cooldown-fail');
+  const project = setupProject({
+    verify: { timeout: 1 },
+    extractor: {
+      dispatch: 'by-engine',
+      timeout: 30,
+      backends: { claude: mockEngine('claude', tracker, 'pass'), codex: mockEngine('codex', tracker, 'slow') },
+    },
+  });
+  const compileDir = join(project, '.auto-context', 'compile');
+  try {
+    // cooldown 파일 위치를 디렉터리로 점거 → write_text_atomic이 False를 반환한다.
+    mkdirSync(join(compileDir, 'verify-engine-cooldown.json'), { recursive: true });
+    runVerifyWorker(project);
+    const row = jsonl(join(compileDir, 'verify-log.jsonl'))[0];
+    assert.equal(row.result, 'deferred');
+    assert.equal(row.cooldownWriteFailed, true, '식힘 기록 실패 = 다음 run이 같은 후보 재호출');
+    assert.equal(existsSync(join(project, CARD_REL)), true);
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});
+
+test('invalid_verdict: 남은 후보가 있으면 degrade, 후보가 다 떨어지면 폐기(과금 루프 방지)', () => {
+  const tracker = trackerFile('invalid-degrade');
+  // exit 0 + 쓰레기 stdout — builtin adapter로는 불가능한, 커스텀 argv 설정 오류.
+  const garbage = join(mkdtempSync(join(tmpdir(), 'garbage-')), 'g.py');
+  writeFileSync(garbage, `#!/usr/bin/env python3
+import sys
+sys.stdin.read()
+with open(${JSON.stringify(tracker)}, "a") as fh:
+    fh.write("garbage\\n")
+print("{}")
+`);
+  const project = setupProject({
+    extractor: {
+      dispatch: 'by-engine',
+      timeout: 30,
+      backends: { claude: ['python3', garbage], codex: ['python3', garbage].concat(['--codex']) },
+    },
+  });
+  const queuePath = join(project, '.auto-context', 'compile', 'verify-queue.jsonl');
+  try {
+    // run1: codex(선호)가 쓰레기 출력 → 남은 후보(claude)가 있으므로 degrade + 잡 보존
+    assert.equal(JSON.parse(runVerifyWorker(project)).processed, 0);
+    let log = jsonl(join(project, '.auto-context', 'compile', 'verify-log.jsonl'));
+    assert.equal(log[0].reason, 'invalid_verdict');
+    assert.equal(log[0].result, 'deferred');
+    assert.match(readFileSync(queuePath, 'utf8'), /test-card\.md/);
+    // run2: 마지막 후보도 실패 → 종점(폐기). 보존하면 cooldown 만료마다 전 후보 재호출.
+    assert.equal(JSON.parse(runVerifyWorker(project)).processed, 1);
+    log = jsonl(join(project, '.auto-context', 'compile', 'verify-log.jsonl'));
+    assert.equal(log[1].result, 'skipped');
+    assert.equal(readFileSync(queuePath, 'utf8'), '');
+    assert.equal(existsSync(join(project, CARD_REL)), true, '폐기해도 카드는 삭제되지 않는다');
+    assert.equal(calls(tracker).length, 2, 'run당 유료 호출 1회');
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});
+
+test('crossEngine:off + 귀속 불가 라벨 → 폐기 대신 풀 첫 후보로 폴백(mode unknown)', () => {
+  const tracker = trackerFile('off-unattributed');
+  const project = setupProject({
+    jobOverrides: { engine: 'unknown' },
+    verify: { crossEngine: 'off' },
+    extractor: { dispatch: 'by-engine', timeout: 30, backends: { codex: mockEngine('codex', tracker, 'pass') } },
+  });
+  try {
+    assert.equal(JSON.parse(runVerifyWorker(project)).processed, 1);
+    assert.deepEqual(calls(tracker), ['codex']);
+    const text = readFileSync(join(project, CARD_REL), 'utf8');
+    assert.match(text, /^status: verified$/m, '폐기하면 그 카드는 영원히 검수되지 않는다');
+    assert.match(text, /^verifiedMode: "?unknown"?$/m, '거짓 교차검증 주장 금지');
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});
+
+test('실패 행은 verifiedMode를 쓰지 않는다 (attemptedMode로 분리 — 노출 집계 오독 방지)', () => {
+  const tracker = trackerFile('mode-keys');
+  const project = setupProject({
+    verify: { timeout: 1 },
+    extractor: {
+      dispatch: 'by-engine',
+      timeout: 30,
+      backends: { claude: mockEngine('claude', tracker, 'pass'), codex: mockEngine('codex', tracker, 'slow') },
+    },
+  });
+  try {
+    runVerifyWorker(project);            // run1: codex timeout → deferred 행
+    runVerifyWorker(project);            // run2: claude로 degrade → verified 행
+    const [failed, passed] = jsonl(join(project, '.auto-context', 'compile', 'verify-log.jsonl'));
+    assert.equal(failed.result, 'deferred');
+    assert.equal(failed.attemptedMode, 'cross-engine');
+    assert.equal('verifiedMode' in failed, false, '달성하지 않은 mode를 verifiedMode로 쓰지 않는다');
+    assert.equal(passed.verifiedMode, 'self');
+    assert.equal(passed.attemptedMode, 'self');
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});
+
+test('0.x 전역 verify-cooldown 파일은 고아로 남지 않고 정리된다', () => {
+  const project = setupProject({ extractorArgv: ['/nonexistent/verify-cli-xyz'] });
+  const stale = join(project, '.auto-context', 'compile', 'verify-cooldown');
+  try {
+    writeFileSync(stale, '99999999999\n');
+    runVerifyWorker(project);
+    assert.equal(existsSync(stale), false);
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});
+
+test('만료값 상한 클램프: 오염된 만료값은 후보를 영구 배제하지 못한다', () => {
+  const tracker = trackerFile('clamp');
+  const project = setupProject({
+    extractor: { dispatch: 'by-engine', timeout: 30, backends: { codex: mockEngine('codex', tracker, 'pass') } },
+  });
+  const cooldown = join(project, '.auto-context', 'compile', 'verify-engine-cooldown.json');
+  try {
+    writeFileSync(cooldown, JSON.stringify({ codex: 9e18 }));
+    assert.equal(JSON.parse(runVerifyWorker(project)).processed, 1);
+    assert.deepEqual(calls(tracker), ['codex'], '상한 초과 만료값은 식힘으로 보지 않는다');
+    assert.match(readFileSync(join(project, CARD_REL), 'utf8'), /^status: verified$/m);
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});

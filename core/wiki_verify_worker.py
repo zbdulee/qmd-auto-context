@@ -30,6 +30,7 @@ path); queue/log records never store source bodies.
 
 from __future__ import annotations
 import argparse
+import fcntl
 import json
 import os
 import sys
@@ -42,7 +43,7 @@ import wiki_compile as wc
 import wiki_compile_worker as wcw
 import wiki_source_missing as wsm
 from dirty_queue import enqueue_collections
-from wiki_compile_enqueue import _safe_queue_path
+from wiki_compile_enqueue import _queue_lock_path, _safe_queue_path
 
 VERIFY_QUEUE_DEFAULT = ".auto-context/compile/verify-queue.jsonl"
 VERIFY_LOG_DEFAULT = ".auto-context/compile/verify-log.jsonl"
@@ -50,6 +51,11 @@ VERIFY_SKIPPED_DEFAULT = ".auto-context/compile/verify-skipped.jsonl"
 VERIFY_DELETED_DEFAULT = ".auto-context/compile/verify-deleted.jsonl"
 VERDICT_VALUES = {"pass", "fail", "inconclusive"}
 MAX_SOURCES = 3
+# 후보 식힘 만료의 상한(24h). 손상·주입된 만료값이 후보를 영구히 배제하지 못하게 한다.
+MAX_ENGINE_COOLDOWN_SECS = 86400
+# "호출은 됐지만 출력이 판정으로 쓸 수 없다" — 같은 입력에서 재현되는 설정 오류이므로
+# 후보가 다 떨어지면 종점이 있다(defer_or_drop). transient(timeout·실행 실패)와 구분된다.
+UNUSABLE_OUTPUT_REASONS = {"invalid_extractor_json", "invalid_verdict"}
 # 엔진에 귀속되지 않는 argv(레거시 `extractor.argv`, `extractor.default`)의 cooldown 키.
 # 엔진 라벨로 식히면 실제로 실패한 것은 default argv인데 그 엔진의 adapter까지 막힌다.
 UNATTRIBUTED_KEY = "(unattributed)"
@@ -153,7 +159,11 @@ def plan_verify_attempts(
         return [], mode, "cross_engine_unavailable"
 
     if mode == "off":
-        order = [producing] if producing else pool[:1]
+        # 0.x 동작. 생성 엔진이 귀속 불가(sentinel·풀 밖 라벨)면 그 라벨로는 argv가 안 나오므로
+        # 풀의 첫 후보로 폴백한다 — 0.x가 빈 엔진 라벨에서 `builtins[0]`으로 폴백했던 것과 같은
+        # 의도이고, 폐기하면 그 카드는 **영원히 검수되지 않는다**(generated로 남아 recall에서
+        # 빠진 채 아무도 그 사실을 모른다). mode는 unknown이라 거짓 주장도 하지 않는다.
+        order = [producing] if producing_attributable else pool[:1]
     elif not producing_attributable:
         order = list(pool)
     else:
@@ -221,16 +231,24 @@ def engine_cooldown_path(root: Path) -> Path:
 
 def load_engine_cooldowns(root: Path) -> dict:
     """{cooldown key: expiry epoch}. 읽기 실패는 fail-open(빈 dict) — 식힘 기록을 못 읽는
-    것이 검수를 막는 이유가 되면 안 된다(최악은 한 번 더 시도하는 것이다)."""
+    것이 검수를 막는 이유가 되면 안 된다(최악은 한 번 더 시도하는 것이다).
+
+    **만료값은 상한으로 클램프한다.** 손상되거나 주입된 값(`{"claude": 9e18}`)이 있으면 그
+    후보가 영구히 후보에서 빠져 검수가 무한 연기된다 — 파일 쓰기 권한이 전제인 시나리오지만,
+    상한 검사는 공짜이고 "오염된 상태로부터의 자동 복구"를 준다. 상한을 넘는 항목은 식힘으로
+    보지 않는다(다음 쓰기에서 정리된다).
+    """
     try:
         raw = json.loads(engine_cooldown_path(root).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
     if not isinstance(raw, dict):
         return {}
+    ceiling = datetime.now(timezone.utc).timestamp() + MAX_ENGINE_COOLDOWN_SECS
     return {
         key: float(value) for key, value in raw.items()
-        if isinstance(key, str) and isinstance(value, (int, float)) and not isinstance(value, bool)
+        if isinstance(key, str) and isinstance(value, (int, float))
+        and not isinstance(value, bool) and float(value) <= ceiling
     }
 
 
@@ -239,15 +257,34 @@ def cooling_engines(root: Path) -> set:
     return {key for key, expiry in load_engine_cooldowns(root).items() if now < expiry}
 
 
-def set_engine_cooldown(root: Path, key: str, seconds: int) -> None:
-    """이 후보를 seconds 동안 후보에서 제외한다(만료 항목은 쓰기 때 정리해 파일을 유계로 둔다)."""
-    now = datetime.now(timezone.utc).timestamp()
-    entries = {k: v for k, v in load_engine_cooldowns(root).items() if v > now}
-    entries[key or UNATTRIBUTED_KEY] = now + max(0, seconds)
+def set_engine_cooldown(root: Path, key: str, seconds: int) -> bool:
+    """이 후보를 seconds 동안 후보에서 제외한다. 반환값은 "기록이 남았는가"다.
+
+    **호출자는 False를 반드시 표면화해야 한다.** 이 파일이 MAJOR 1(영구 정지) 수정의 복구
+    메커니즘이다 — 기록이 없으면 다음 run이 같은 엔진을 다시 부르고 degrade가 일어나지 않아
+    정지가 그대로 돌아온다. 조용히 실패하면 그 사실을 알 방법이 없다.
+
+    read-modify-write이므로 **sidecar flock으로 직렬화한다**(3단계 원장과 같은 패턴·같은
+    헬퍼). 정상 경로는 `claim_queue`가 프로젝트 단위로 직렬화하므로 경합 자체가 드물고 손실의
+    등급도 감사 추적 유실보다 낮지만(최악: 유료 호출 1회 추가 + 다음 실패에 자기치유),
+    **잃는 것이 하필 이 수정의 복구 메커니즘**이라 공짜에 가까운 방어를 생략할 이유가 없다.
+    만료 항목은 쓰기 때 정리해 파일을 유계로 둔다. seconds는 상한으로 클램프한다.
+    """
     path = engine_cooldown_path(root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # 원자적 쓰기(wiki_compile SSOT) — 실패해도 기존 식힘 기록이 잘리지 않는다.
-    wc.write_text_atomic(path, json.dumps(entries, ensure_ascii=False, sort_keys=True) + "\n")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(_queue_lock_path(path), "a", encoding="utf-8") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                now = datetime.now(timezone.utc).timestamp()
+                entries = {k: v for k, v in load_engine_cooldowns(root).items() if v > now}
+                entries[key or UNATTRIBUTED_KEY] = now + min(max(0, seconds), MAX_ENGINE_COOLDOWN_SECS)
+                # 원자적 쓰기(wiki_compile SSOT) — 실패해도 기존 식힘 기록이 잘리지 않는다.
+                return wc.write_text_atomic(path, json.dumps(entries, ensure_ascii=False, sort_keys=True) + "\n")
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+    except OSError:
+        return False
 
 
 def log_verdict(log_path: Path, payload: dict) -> None:
@@ -543,12 +580,15 @@ def process_verify_job(
     # 없다는 계약은 그대로다.
     attempted: list[str] = []
     attempt = attempts[0]
+    has_more = False
     parsed = reason = returncode = None
-    for attempt in attempts:
+    for index, attempt in enumerate(attempts):
         payload["engine"] = attempt["engine"]
         attempted.append(attempt["engine"])
         parsed, reason, returncode = wcw.run_extractor(attempt["argv"], payload, timeout, root)
         if returncode != 127:
+            # 이 계획에 아직 시도하지 않은 후보가 남았는가 — 실패 처리의 degrade 판단에 쓴다.
+            has_more = index + 1 < len(attempts)
             break
     if returncode == 127:
         # 과금 0인 경로지만 조용히 끝내지 않는다 — 어느 후보를 시도했는지 남지 않으면
@@ -561,9 +601,11 @@ def process_verify_job(
         return False, True  # 후보 전원 CLI 부재: 설치되면 재시도
     engine = attempt["engine"]
     verified_mode = attempt["mode"]
+    # 실패 행에는 `attemptedMode`만 쓴다 — 실패한 시도의 mode는 "시도했던 것"이지
+    # "달성한 것"이 아니고, `verifiedMode`가 실패 행에 남으면 노출 집계가 오독된다.
     provenance = {
         "engine": engine,
-        "verifiedMode": verified_mode,
+        "attemptedMode": verified_mode,
         "crossEngine": cross_mode,
         "enginesAttempted": attempted,
         # 식힘 중인 후보를 판정 줄에도 남긴다 — `self` 통과가 "다른 엔진이 없어서"인지
@@ -571,21 +613,11 @@ def process_verify_job(
         "enginesCooling": sorted(cooled),
     }
     if reason:
-        if reason == "invalid_extractor_json":
-            log_verdict(log_path, {**base_record(job), **provenance, "result": "skipped", "reason": reason})
-            return True, False  # permanent: drop
-        # 이 후보는 이번 run 의 유료 호출을 소진했다 — 식혀 두고 다음 run 이 다음 후보로.
-        set_engine_cooldown(root, attempt["key"], int(vcfg.get("cooldownSeconds", 600) or 600))
-        log_verdict(log_path, {
-            **base_record(job), **provenance, "result": "deferred", "reason": reason,
-            "cooledKey": attempt["key"],
-        })
-        return False, True  # transient: per-engine cooldown + preserve
+        return defer_or_drop(root, vcfg, job, attempt, has_more, provenance, reason, log_path)
 
     verdict = parsed.get("verdict") if isinstance(parsed, dict) else None
     if verdict not in VERDICT_VALUES:
-        log_verdict(log_path, {**base_record(job), **provenance, "result": "skipped", "reason": "invalid_verdict"})
-        return True, False
+        return defer_or_drop(root, vcfg, job, attempt, has_more, provenance, "invalid_verdict", log_path)
     reasons = parsed.get("reasons") if isinstance(parsed.get("reasons"), list) else []
     reasons = [str(item)[:200] for item in reasons[:5]]
     claims = parsed.get("claims") if isinstance(parsed.get("claims"), list) else []
@@ -596,7 +628,11 @@ def process_verify_job(
         log_verdict(log_path, {**base_record(job), **provenance, "result": "skipped", "reason": "changed_during_verify"})
         return True, False
 
-    record = {**base_record(job), **provenance, "verdict": verdict, "claims": len(claims), "reasons": reasons}
+    # 판정이 실제로 나온 행에서만 `verifiedMode`가 달성값이 된다.
+    record = {
+        **base_record(job), **provenance, "verifiedMode": verified_mode,
+        "verdict": verdict, "claims": len(claims), "reasons": reasons,
+    }
     if verdict == "pass":
         # status와 증명 필드는 한 쓰기로 함께 나간다(wc.stamp_verification이 유일한 경로).
         wc.stamp_verification(target, "verified", engine, verified_mode)
@@ -612,6 +648,41 @@ def process_verify_job(
         sources, record, log_path
     )
     return True, False
+
+
+def defer_or_drop(
+    root: Path, vcfg: dict, job: dict, attempt: dict, has_more: bool,
+    provenance: dict, reason: str, log_path: Path,
+) -> tuple[bool, bool]:
+    """유료 호출을 소진했지만 판정을 얻지 못한 경우의 유일한 처리 경로.
+
+    어느 사유든 이 후보를 식히고(다음 run이 다음 후보로 degrade) 잡을 보존한다. 갈리는 것은
+    **종점의 유무**다:
+      - timeout·실행 실패는 진짜 transient(부하·네트워크·일시적 CLI 상태)라 기존대로 **항상
+        보존**한다. 여기서 폐기하면 그 카드는 영원히 검수되지 않는다.
+      - `invalid_extractor_json`/`invalid_verdict`(exit 0 + 쓰레기 stdout)는 같은 입력에서
+        재현되는 **설정 오류**다. 남은 후보가 있으면 degrade하고, 후보가 다 떨어지면 폐기한다 —
+        보존하면 cooldown 만료마다 전 후보를 다시 호출하는 **영구 과금 루프**가 되고, 그것은
+        이 저장소가 억제 마커로 반복해서 닫아 온 클래스다. 폐기의 대가는 카드가 `generated`로
+        남는 것뿐이다(삭제되지 않으며 소스를 고치면 재컴파일→재검증이 다시 열린다).
+        0.x는 이 사유를 **첫 후보에서 즉시 폐기**했으므로 degrade가 순증이다.
+        builtin adapter로는 도달할 수 없다(`lib.emit_verdict`가 exit 1 → 비127 경로).
+
+    cooldown 쓰기 실패는 **반드시 표면화한다**: 그 기록이 없으면 다음 run이 같은 후보를 다시
+    부르고 degrade가 일어나지 않는다(= MAJOR 1 영구 정지의 재발). 조용히 넘기면 진단 불가다.
+    """
+    cooled_ok = set_engine_cooldown(root, attempt["key"], int(vcfg.get("cooldownSeconds", 600) or 600))
+    terminal = reason in UNUSABLE_OUTPUT_REASONS and not has_more
+    row = {
+        **base_record(job), **provenance,
+        "result": "skipped" if terminal else "deferred",
+        "reason": reason, "cooledKey": attempt["key"],
+    }
+    if not cooled_ok:
+        # 식힘 기록이 남지 않았다 → 다음 run이 같은 후보를 다시 부른다(정지 재발 가능).
+        row["cooldownWriteFailed"] = True
+    log_verdict(log_path, row)
+    return (True, False) if terminal else (False, True)
 
 
 def apply_negative_verdict(
@@ -674,6 +745,10 @@ def run(root: Path, config: dict, compile_cfg: dict) -> dict:
     log_path = wcw.safe_compile_file(root, vcfg.get("logPath", VERIFY_LOG_DEFAULT))
     if log_path is None:
         log_path = root / ".auto-context" / "compile" / "verify-log.jsonl"
+
+    # 0.x 전역 cooldown 파일의 고아 정리 — 이제 읽지도 쓰지도 않으므로 남아 있으면 "검수가
+    # 식힘 중"이라는 잘못된 인상만 준다. 후보 단위 파일로 대체됐다(engine_cooldown_path).
+    (root / ".auto-context" / "compile" / "verify-cooldown").unlink(missing_ok=True)
 
     claimed = wcw.claim_queue(queue)
     if claimed is None:
