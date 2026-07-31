@@ -20,18 +20,6 @@ function repoTemp(prefix) {
 
 // 임시 디렉터리 정리 재시도(update.test.mjs의 removeTemp와 같은 이유·같은 형태):
 // 병렬 실행에서 ENOTEMPTY/EBUSY가 flaky 실패를 만든다.
-function removeTemp(dir) {
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    try {
-      rmSync(dir, { recursive: true, force: true });
-      return;
-    } catch (err) {
-      if (err.code !== 'ENOTEMPTY' && err.code !== 'EBUSY') throw err;
-      execFileSync('sleep', ['0.05']);
-    }
-  }
-  rmSync(dir, { recursive: true, force: true, maxRetries: 5 });
-}
 
 /** Per-engine judge stub. `label` lands in the shared call log so a test can prove
  *  WHICH adapter argv ran, not merely which engine label the plan passed down. */
