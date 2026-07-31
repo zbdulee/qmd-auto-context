@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { removeTemp } from './helpers/temp.mjs';
 
 const ROOT = process.cwd();
 
@@ -23,5 +24,5 @@ test('enable-compile skill wrapper wires compile for the project', () => {
     assert.deepEqual(cfg.compile.extractor.backends, {});
     assert.deepEqual(cfg.compile.extractor.builtins, ['claude', 'codex', 'hermes']);
     assert.doesNotMatch(JSON.stringify(cfg.compile), /core\/extractors|_adapter\.py/);
-  } finally { rmSync(d, { recursive: true, force: true }); }
+  } finally { removeTemp(d); }
 });

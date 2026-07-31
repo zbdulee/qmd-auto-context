@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { removeTemp } from './helpers/temp.mjs';
 
 // hook_main.run is the single fail-open boundary for every Python hook
 // entrypoint: hooks MUST exit 0 (a deny is JSON-on-stdout, never a non-zero
@@ -45,7 +46,7 @@ print("rc=%d" % rc)
     // 로그 내용이 stdout(모델 컨텍스트)엔 절대 안 나가야 한다.
     assert.doesNotMatch(out, /distinct-marker-42/);
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTemp(dir);
   }
 });
 

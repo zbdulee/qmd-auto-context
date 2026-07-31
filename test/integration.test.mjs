@@ -2,8 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { createServer } from 'node:http';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { removeTemp } from './helpers/temp.mjs';
 
 function runRecallAsync(input, env) {
   return new Promise((resolve, reject) => {
@@ -85,7 +86,7 @@ test('mock HTTP daemon recall integration validates query payload and context ou
     assert.match(parsed.hookSpecificOutput.additionalContext, /Oneobil sorting/);
   } finally {
     await new Promise(resolve => server.close(resolve));
-    rmSync(tempDir, { recursive: true, force: true });
+    removeTemp(tempDir);
   }
 });
 
@@ -144,7 +145,7 @@ test('hierarchical recall queries wiki collections before raw backfill', async (
     assert.match(parsed.hookSpecificOutput.additionalContext, /Config layout/);
   } finally {
     await new Promise(resolve => server.close(resolve));
-    rmSync(tempDir, { recursive: true, force: true });
+    removeTemp(tempDir);
   }
 });
 
@@ -202,7 +203,7 @@ test('hierarchical recall backfills raw collections when wiki has no results', a
     assert.match(parsed.hookSpecificOutput.additionalContext, /Raw source/);
   } finally {
     await new Promise(resolve => server.close(resolve));
-    rmSync(tempDir, { recursive: true, force: true });
+    removeTemp(tempDir);
   }
 });
 
@@ -265,7 +266,7 @@ test('recallVerifiedOnly 기본(true): wiki가 미검수 generated뿐이면 live
     assert.doesNotMatch(parsed.hookSpecificOutput.additionalContext, /config-layout/, '미검수 generated 카드는 제외');
   } finally {
     await new Promise(resolve => server.close(resolve));
-    rmSync(tempDir, { recursive: true, force: true });
+    removeTemp(tempDir);
   }
 });
 
@@ -316,7 +317,7 @@ test('hierarchical recall does not duplicate raw backfill when raw also has no r
     assert.deepEqual(requests[1].collections, ['proj-docs']);
   } finally {
     await new Promise(resolve => server.close(resolve));
-    rmSync(tempDir, { recursive: true, force: true });
+    removeTemp(tempDir);
   }
 });
 
@@ -382,7 +383,7 @@ test('hierarchical recall backfills raw when the only wiki hit is a contested ca
     assert.doesNotMatch(parsed.hookSpecificOutput.additionalContext, /Contested card/);
   } finally {
     await new Promise(resolve => server.close(resolve));
-    rmSync(tempDir, { recursive: true, force: true });
+    removeTemp(tempDir);
   }
 });
 
@@ -443,7 +444,7 @@ test('hierarchical drops a wiki hit with unresolvable _collection and backfills 
     assert.doesNotMatch(parsed.hookSpecificOutput.additionalContext, /Orphan wiki/);
   } finally {
     await new Promise(resolve => server.close(resolve));
-    rmSync(tempDir, { recursive: true, force: true });
+    removeTemp(tempDir);
   }
 });
 
@@ -499,7 +500,7 @@ test('wikiOnly recall queries only wiki collections and emits the wiki result', 
     assert.match(parsed.hookSpecificOutput.additionalContext, /Config layout/);
   } finally {
     await new Promise(resolve => server.close(resolve));
-    rmSync(tempDir, { recursive: true, force: true });
+    removeTemp(tempDir);
   }
 });
 
@@ -550,7 +551,7 @@ test('wikiOnly recall does NOT backfill raw when wiki has no results (differs fr
     assert.equal(out, '');
   } finally {
     await new Promise(resolve => server.close(resolve));
-    rmSync(tempDir, { recursive: true, force: true });
+    removeTemp(tempDir);
   }
 });
 
@@ -602,7 +603,7 @@ test('wikiOnly recall makes no query and emits nothing when no wiki role is conf
     assert.equal(out, '');
   } finally {
     await new Promise(resolve => server.close(resolve));
-    rmSync(tempDir, { recursive: true, force: true });
+    removeTemp(tempDir);
   }
 });
 
@@ -663,7 +664,7 @@ test('hierarchical recall backfills raw when wiki results are below minScore', a
     assert.doesNotMatch(parsed.hookSpecificOutput.additionalContext, /Weak wiki result/);
   } finally {
     await new Promise(resolve => server.close(resolve));
-    rmSync(tempDir, { recursive: true, force: true });
+    removeTemp(tempDir);
   }
 });
 
@@ -730,7 +731,7 @@ test('hierarchical recall applies rawFallbackMinScore to raw backfill results', 
     assert.equal(selection.min_score, 0.7, 'active min_score는 rawFallbackMinScore');
   } finally {
     await new Promise(resolve => server.close(resolve));
-    rmSync(tempDir, { recursive: true, force: true });
+    removeTemp(tempDir);
   }
 });
 
@@ -787,7 +788,7 @@ test('hierarchical recall can relax raw fallback below the wiki minScore', async
     assert.match(parsed.hookSpecificOutput.additionalContext, /Relaxed raw source/);
   } finally {
     await new Promise(resolve => server.close(resolve));
-    rmSync(tempDir, { recursive: true, force: true });
+    removeTemp(tempDir);
   }
 });
 

@@ -4,6 +4,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { removeTemp } from './helpers/temp.mjs';
 
 const BUILTINS = ["claude", "codex", "hermes"];
 
@@ -86,8 +87,8 @@ function dirtyQueueLines(envInfo) {
 }
 
 function cleanup(envInfo, dir) {
-  rmSync(envInfo.base, { recursive: true, force: true });
-  rmSync(dir, { recursive: true, force: true });
+  removeTemp(envInfo.base);
+  removeTemp(dir);
 }
 
 test("changed markdown is enqueued to the compile source queue with the sync trigger", () => {

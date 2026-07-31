@@ -1,137 +1,137 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, utimesSync, readdirSync, rmSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, writeFileSync, existsSync, utimesSync } from 'node:fs';
 import { join } from 'node:path';
-import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
+import { isolatedHomeProject, removeTemp } from './helpers/temp.mjs';
 
-// macOS /tmp → /private/tmp is a risky path in resolve_paths.
-// Use HOME/.cache as base to get non-risky tmpdir.
+// gate 는 `$HOME/.config/qmd/{optout,skip}` 의 마커를 읽고, 이 파일은 update.sh --optout/--skip
+// 으로 그 마커를 실제로 쓴다. HOME 을 실제 값으로 두면 사용자 홈에 optout 마커가 영구
+// 누적됐다(실측: 전체 테스트 실행마다 +1, 누적 489개). 그래서 모든 케이스가 가짜 HOME 하위
+// 프로젝트에서 돌고 자식 프로세스 env 에 그 HOME 을 넘긴다 — 격리를 지우지 말 것.
+// (부수 효과로 skip 마커도 가짜 HOME 안에 떨어져 removeTemp(home) 한 번에 함께 사라진다.)
 function makeTmpDir() {
-  const base = join(homedir(), '.cache');
-  try { mkdirSync(base, { recursive: true }); } catch {}
-  return mkdtempSync(join(base, 'qmd-gate-'));
+  return isolatedHomeProject('gate');
 }
 
-function gate(payload, env = {}) {
+function gate(payload, env) {
   return execFileSync('python3', ['core/preflight_gate.py'], {
     input: JSON.stringify(payload), encoding: 'utf8',
-    env: { ...process.env, ...env },
+    env,
     cwd: process.cwd(),
   });
 }
 
 test('pending(config 없음) + Edit → deny', () => {
-  const dir = makeTmpDir();
+  const { home, dir, env } = makeTmpDir();
   try {
-    const out = gate({ tool_name: 'Edit', tool_input: { file_path: join(dir, 'a.md') }, cwd: dir, session_id: 's1' });
+    const out = gate({ tool_name: 'Edit', tool_input: { file_path: join(dir, 'a.md') }, cwd: dir, session_id: 's1' }, env());
     const j = JSON.parse(out);
     assert.equal(j.hookSpecificOutput.permissionDecision, 'deny');
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(home); }
 });
 
 test('동의(indexing:true+collections) → allow(무출력)', () => {
-  const dir = makeTmpDir();
+  const { home, dir, env } = makeTmpDir();
   writeFileSync(join(dir, '.auto-context.json'), JSON.stringify({ indexing: true, collections: ['x'] }));
   try {
-    const out = gate({ tool_name: 'Edit', tool_input: { file_path: join(dir, 'a.md') }, cwd: dir, session_id: 's1' });
+    const out = gate({ tool_name: 'Edit', tool_input: { file_path: join(dir, 'a.md') }, cwd: dir, session_id: 's1' }, env());
     assert.equal(out.trim(), '');
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(home); }
 });
 
 test('거절(indexing:false) → allow', () => {
-  const dir = makeTmpDir();
+  const { home, dir, env } = makeTmpDir();
   writeFileSync(join(dir, '.auto-context.json'), JSON.stringify({ indexing: false }));
   try {
-    assert.equal(gate({ tool_name: 'Edit', tool_input: { file_path: join(dir,'a.md') }, cwd: dir, session_id: 's1' }).trim(), '');
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+    assert.equal(gate({ tool_name: 'Edit', tool_input: { file_path: join(dir,'a.md') }, cwd: dir, session_id: 's1' }, env()).trim(), '');
+  } finally { removeTemp(home); }
 });
 
 test('로컬 optout marker → allow', () => {
-  const dir = makeTmpDir();
+  const { home, dir, env } = makeTmpDir();
   try {
-    execFileSync('bash', [join(process.cwd(), 'core', 'update.sh'), '--optout', dir], { encoding: 'utf8' });
-    assert.equal(gate({ tool_name: 'Edit', tool_input: { file_path: join(dir,'a.md') }, cwd: dir, session_id: 's1' }).trim(), '');
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+    execFileSync('bash', [join(process.cwd(), 'core', 'update.sh'), '--optout', dir], { encoding: 'utf8', env: env() });
+    assert.equal(gate({ tool_name: 'Edit', tool_input: { file_path: join(dir,'a.md') }, cwd: dir, session_id: 's1' }, env()).trim(), '');
+  } finally { removeTemp(home); }
 });
 
 test('sandbox → allow', () => {
-  const dir = makeTmpDir();
+  const { home, dir, env } = makeTmpDir();
   try {
-    assert.equal(gate({ tool_name: 'Edit', tool_input: { file_path: join(dir,'a.md') }, cwd: dir, session_id: 's1' }, { QMD_SANDBOX: '1' }).trim(), '');
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+    assert.equal(gate({ tool_name: 'Edit', tool_input: { file_path: join(dir,'a.md') }, cwd: dir, session_id: 's1' }, env({ QMD_SANDBOX: '1' })).trim(), '');
+  } finally { removeTemp(home); }
 });
 
 test('잘못된 tool_name(Read) → allow', () => {
-  const dir = makeTmpDir();
+  const { home, dir, env } = makeTmpDir();
   try {
-    assert.equal(gate({ tool_name: 'Read', tool_input: { file_path: join(dir,'a.md') }, cwd: dir, session_id: 's1' }).trim(), '');
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+    assert.equal(gate({ tool_name: 'Read', tool_input: { file_path: join(dir,'a.md') }, cwd: dir, session_id: 's1' }, env()).trim(), '');
+  } finally { removeTemp(home); }
 });
 
 test('Codex apply_patch(patch, file_path 없음) + pending → deny (경로 무관)', () => {
-  const dir = makeTmpDir();
+  const { home, dir, env } = makeTmpDir();
   try {
-    const out = gate({ tool_name: 'apply_patch', tool_input: { patch: '*** Begin Patch\n*** End Patch' }, cwd: dir, session_id: 's1' });
+    const out = gate({ tool_name: 'apply_patch', tool_input: { patch: '*** Begin Patch\n*** End Patch' }, cwd: dir, session_id: 's1' }, env());
     assert.equal(JSON.parse(out).hookSpecificOutput.permissionDecision, 'deny');
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(home); }
 });
 
 // --- Task 7: --skip 마커 테스트 ---
 
-// skip 마커 파일 경로를 JS에서 계산 (core/preflight_gate.py와 동일 알고리즘: sha256(realpath(cwd)))
-function skipMarkerPath(cwd) {
-  // realpath on macOS: /Users/... (no /private prefix for ~/.cache paths)
+// skip 마커 파일 경로를 JS에서 계산 (core/preflight_gate.py와 동일 알고리즘: sha256(realpath(cwd))).
+// HOME 은 격리된 가짜 HOME 이므로 `homedir()`가 아니라 그 값을 받아 쓴다.
+function skipMarkerPath(home, cwd) {
   const realcwd = execFileSync('python3', ['-c', `import os; print(os.path.realpath(${JSON.stringify(cwd)}))`], { encoding: 'utf8' }).trim();
   const hash = createHash('sha256').update(realcwd).digest('hex');
-  return join(homedir(), '.config', 'qmd', 'skip', hash);
+  return join(home, '.config', 'qmd', 'skip', hash);
 }
 
 test('--skip <dir> 실행 후 gate(cwd=dir) → allow(무출력)', () => {
-  const dir = makeTmpDir();
+  const { home, dir, env } = makeTmpDir();
   try {
     // Step 1: --skip 실행
     const skipOut = execFileSync('bash', [join(process.cwd(), 'core', 'update.sh'), '--skip', dir], {
       encoding: 'utf8',
+      env: env(),
     });
     // 안내 메시지가 있어야 함
     assert.ok(skipOut.length > 0, `--skip should print a message, got: ${JSON.stringify(skipOut)}`);
 
     // Step 2: gate 호출 → allow (무출력)
-    const out = gate({ tool_name: 'Edit', tool_input: { file_path: join(dir, 'a.md') }, cwd: dir, session_id: 's1' });
+    const out = gate({ tool_name: 'Edit', tool_input: { file_path: join(dir, 'a.md') }, cwd: dir, session_id: 's1' }, env());
     assert.equal(out.trim(), '', `skip 마커 후 gate가 allow(무출력)이어야 함, got: ${out}`);
   } finally {
-    // 마커 정리
-    try { rmSync(skipMarkerPath(dir), { force: true }); } catch (_) {}
-    rmSync(dir, { recursive: true, force: true });
+    removeTemp(home);   // 마커도 가짜 HOME 안에 있어 함께 사라진다
   }
 });
 
 test('skip 안 한 다른 pending dir → deny', () => {
-  const dir1 = makeTmpDir();
-  const dir2 = makeTmpDir();
+  // 두 프로젝트가 같은 가짜 HOME 을 공유해야 skip 마커 스코프 비교가 성립한다.
+  const { home, dir: dir1, env } = makeTmpDir();
+  const dir2 = join(home, 'project2');
   try {
+    mkdirSync(dir2, { recursive: true });
     // dir1만 skip
-    execFileSync('bash', [join(process.cwd(), 'core', 'update.sh'), '--skip', dir1], { encoding: 'utf8' });
+    execFileSync('bash', [join(process.cwd(), 'core', 'update.sh'), '--skip', dir1], { encoding: 'utf8', env: env() });
 
     // dir2는 skip 안 했으므로 deny
-    const out = gate({ tool_name: 'Edit', tool_input: { file_path: join(dir2, 'a.md') }, cwd: dir2, session_id: 's1' });
+    const out = gate({ tool_name: 'Edit', tool_input: { file_path: join(dir2, 'a.md') }, cwd: dir2, session_id: 's1' }, env());
     const j = JSON.parse(out);
     assert.equal(j.hookSpecificOutput.permissionDecision, 'deny', `skip 안 한 dir2는 deny여야 함`);
   } finally {
-    try { rmSync(skipMarkerPath(dir1), { force: true }); } catch (_) {}
-    rmSync(dir1, { recursive: true, force: true });
-    rmSync(dir2, { recursive: true, force: true });
+    removeTemp(home);
   }
 });
 
 test('TTL 만료된 마커 → deny + 마커 unlink', () => {
-  const dir = makeTmpDir();
-  const markerPath = skipMarkerPath(dir);
+  const { home, dir, env } = makeTmpDir();
+  const markerPath = skipMarkerPath(home, dir);
   try {
     // --skip으로 마커 생성
-    execFileSync('bash', [join(process.cwd(), 'core', 'update.sh'), '--skip', dir], { encoding: 'utf8' });
+    execFileSync('bash', [join(process.cwd(), 'core', 'update.sh'), '--skip', dir], { encoding: 'utf8', env: env() });
 
     // 마커가 생성됐는지 확인
     assert.ok(existsSync(markerPath), `마커 파일이 생성돼야 함: ${markerPath}`);
@@ -141,15 +141,14 @@ test('TTL 만료된 마커 → deny + 마커 unlink', () => {
     utimesSync(markerPath, pastTime, pastTime);
 
     // gate 호출 → TTL 만료로 deny
-    const out = gate({ tool_name: 'Edit', tool_input: { file_path: join(dir, 'a.md') }, cwd: dir, session_id: 's1' });
+    const out = gate({ tool_name: 'Edit', tool_input: { file_path: join(dir, 'a.md') }, cwd: dir, session_id: 's1' }, env());
     const j = JSON.parse(out);
     assert.equal(j.hookSpecificOutput.permissionDecision, 'deny', `TTL 만료 마커는 deny여야 함`);
 
     // lazy expire: 마커가 unlink 됐어야 함
     assert.ok(!existsSync(markerPath), `TTL 만료 마커는 unlink 돼야 함: ${markerPath}`);
   } finally {
-    try { rmSync(markerPath, { force: true }); } catch (_) {}
-    rmSync(dir, { recursive: true, force: true });
+    removeTemp(home);
   }
 });
 

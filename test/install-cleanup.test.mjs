@@ -2,9 +2,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { removeTemp } from './helpers/temp.mjs';
 
 const CLEANUP = 'scripts/cleanup-legacy.sh';
 
@@ -32,7 +33,7 @@ test('cleanup-legacy: codex 글로벌 adapters hook 제거, 비-qmd 보존', () 
     assert.ok(cmds.includes('keep.py'), '비-qmd hook 보존');
     assert.ok(!cmds.includes('adapters/codex/wrapper.py'), 'adapters hook 제거됨');
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    removeTemp(home);
   }
 });
 
@@ -55,7 +56,7 @@ test('cleanup-legacy: codex hooks.json이 깨진 JSON이면 덮지 않고 backen
     assert.equal(readFileSync(join(codexDir, 'hooks.json'), 'utf8'), broken, '깨진 파일 원본 보존');
     assert.equal(existsSync(join(launchAgents, 'com.qmd-mcp-daemon.plist')), false, 'backend cleanup은 계속 수행');
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    removeTemp(home);
   }
 });
 
@@ -82,7 +83,7 @@ test('cleanup-legacy: 사용자 커스텀 qmd hook은 보존한다', () => {
     assert.ok(cmds.includes('qmd collection update my-notes'), 'custom qmd hook should remain');
     assert.ok(!cmds.some(c => c.includes('qmd-recall-on-prompt.py')), 'known legacy qmd hook should be removed');
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    removeTemp(home);
   }
 });
 
@@ -109,7 +110,7 @@ test('cleanup-legacy: 레거시 qmd 훅 제거 + 비-qmd 훅 보존', () => {
     assert.ok(!cmds.some(c => c.includes('qmd-recall-on-prompt')), '기존 qmd 훅이 제거되지 않음');
     assert.ok(cmds.some(c => c.includes('keep-me')), '무관한 기존 훅이 보존되지 않음');
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    removeTemp(home);
   }
 });
 
@@ -137,6 +138,6 @@ test('cleanup-legacy: nested hooks[].command 에 등록된 어댑터도 제거�
     const cmds = d.hooks.UserPromptSubmit.flatMap(e => (e.hooks || []).map(h => h.command));
     assert.deepEqual(cmds, ['echo keep-me']);
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    removeTemp(home);
   }
 });

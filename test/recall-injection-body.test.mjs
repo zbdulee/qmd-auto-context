@@ -8,9 +8,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join, isAbsolute } from 'node:path';
+import { removeTemp } from './helpers/temp.mjs';
 
 function runRecall(payload, env = {}) {
   return execFileSync('python3', ['core/recall.py'], {
@@ -88,7 +89,7 @@ function withProject(opts, fn) {
   try {
     return fn({ dir, fixture, write });
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTemp(dir);
   }
 }
 
@@ -580,7 +581,7 @@ test('공백·한글이 든 하위 cwd 에서도 카드 경로가 실제로 열�
       assert.match(ctx, /한글 경로에서도 열려야 한다\./);
     }
   } finally {
-    rmSync(base, { recursive: true, force: true });
+    removeTemp(base);
   }
 });
 

@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { writeFileSync, mkdtempSync, existsSync, readFileSync, rmSync } from 'node:fs';
+import { writeFileSync, mkdtempSync, existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { removeTemp } from './helpers/temp.mjs';
 
 function runLib(pyBody, input) {
   return execFileSync('python3', ['-c', pyBody], { cwd: process.cwd(), input, encoding: 'utf8' });
@@ -144,7 +145,7 @@ test('claude adapter: task=verify payload → verify prompt 사용 + verdict JSO
   assert.match(prompt, /REFUTE/);
   assert.match(prompt, /CARD_BODY/);
   assert.doesNotMatch(prompt, /wiki candidates/, 'extraction 프롬프트가 아님');
-  rmSync(d, { recursive: true, force: true });
+  removeTemp(d);
 });
 
 test('run_isolated injects QMD_SANDBOX=1 into the child env', () => {
@@ -177,7 +178,7 @@ test('claude adapter calls its CLI in a temp cwd and emits candidates', () => {
   assert.match(readFileSync(argsLog, 'utf8'), /--safe-mode/);
   // nested qmd hooks neutered: child inherits QMD_SANDBOX=1
   assert.equal(readFileSync(sandboxLog, 'utf8'), '1');
-  rmSync(d, { recursive: true, force: true });
+  removeTemp(d);
 });
 
 test('claude adapter exits 127 when its CLI is absent', () => {
@@ -207,7 +208,7 @@ test('codex adapter passes read-only sandbox and emits candidates', () => {
   assert.match(args, /--ephemeral/);
   assert.match(args, /--ignore-user-config/);
   assert.match(args, /--ignore-rules/);
-  rmSync(d, { recursive: true, force: true });
+  removeTemp(d);
 });
 
 test('hermes adapter passes safe-mode/no-tools and emits candidates', () => {
@@ -223,5 +224,5 @@ test('hermes adapter passes safe-mode/no-tools and emits candidates', () => {
   const args = readFileSync(argsLog, 'utf8');
   assert.match(args, /-z/);
   assert.match(args, /--safe-mode/);
-  rmSync(d, { recursive: true, force: true });
+  removeTemp(d);
 });

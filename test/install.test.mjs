@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, rmSync, mkdtempSync, mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { removeTemp } from './helpers/temp.mjs';
 
 test('plugin package no longer exposes install.sh or uninstall.sh', () => {
   assert.equal(existsSync('install.sh'), false);
@@ -21,7 +22,7 @@ test('cleanup-legacy dry-run is explicit and creates no files', () => {
     assert.equal(existsSync(join(home, '.claude', 'settings.json')), false);
     assert.equal(existsSync(join(home, 'Library', 'LaunchAgents')), false);
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    removeTemp(home);
   }
 });
 
@@ -33,6 +34,6 @@ test('agy local hook script cleans stale qmd hooks without registering broken Po
     const hooks = JSON.parse(readFileSync(join(project, '.agents', 'hooks.json'), 'utf8'));
     assert.deepEqual(hooks, { hooks: {} });
   } finally {
-    rmSync(project, { recursive: true, force: true });
+    removeTemp(project);
   }
 });

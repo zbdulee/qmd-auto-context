@@ -8,9 +8,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { removeTemp } from './helpers/temp.mjs';
 
 // One mock host CLI adapter serving both tasks: the verifier reuses the extractor pool,
 // dispatching on payload.task (see extractors/lib.py).
@@ -129,7 +130,7 @@ test('compile worker per-run cap bounds host CLI spawns and defers the rest with
     assert.equal(queueLines(dir).length, 0);
     assert.deepEqual(calls(logPath, 'extract').sort(), [...sources].sort());
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTemp(dir);
   }
 });
 
@@ -157,7 +158,7 @@ test('verify budget rises to the cards the same run produced (no generated backl
       assert.match(readFileSync(card, 'utf8'), /^status: verified$/m, rel);
     }
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTemp(dir);
   }
 });
 
@@ -209,7 +210,7 @@ test('verify keeps its standing per-run cap when nothing was produced this run',
     assert.equal(out.remaining, 2);
     assert.equal(calls(logPath, 'verify').length, 3);
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTemp(dir);
   }
 });
 
@@ -248,7 +249,7 @@ test('model output cannot decide how many paid calls a run makes', () => {
     // Nothing is lost: the uncapped 20 cards stay queued for the next run.
     assert.equal(jsonl(join(dir, '.auto-context', 'compile', 'verify-queue.jsonl')).length, 20);
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTemp(dir);
   }
 });
 
@@ -273,7 +274,7 @@ test('cards beyond maxCardsPerSource are recorded, not silently dropped', () => 
     assert.equal(capped.skippedTitles.length, 10);
     assert.equal(capped.source.path, 'docs/a.md');
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTemp(dir);
   }
 });
 
@@ -298,7 +299,7 @@ print(json.dumps(config.compile_config({'batch': {'maxPerRun': 99999999}})['batc
     }).trim());
     assert.equal(clamped, 50);
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTemp(dir);
   }
 });
 
@@ -354,6 +355,6 @@ test("this run's cards are verified before older backlog, and backlog still adva
     // The other three backlog jobs are still queued (nothing lost).
     assert.equal(jsonl(join(dir, '.auto-context', 'compile', 'verify-queue.jsonl')).length, 3);
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTemp(dir);
   }
 });

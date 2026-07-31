@@ -2,10 +2,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { resolve } from 'node:path';
+import { removeTemp } from './helpers/temp.mjs';
 
 const PROJ = resolve('test/fixtures/story-proj');
 
@@ -116,7 +117,7 @@ test('events 에 postToolUse 없으면 posttool core skip', () => {
     });
     assert.equal(out.trim(), '');
   } finally {
-    rmSync(tempDir, { recursive: true, force: true });
+    removeTemp(tempDir);
   }
 });
 
@@ -166,7 +167,7 @@ test('posttool: .auto-context.json indexing:false → 빈 출력(skip)', () => {
     });
     assert.equal(out.trim(), '');
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTemp(dir);
   }
 });
 
@@ -188,6 +189,6 @@ test('posttool: .auto-context.json indexing:true + collectionPaths → PostToolU
     assert.ok(r, '.auto-context.json collectionPaths 기반 story path 인식 실패');
     assert.equal(r.hookSpecificOutput.hookEventName, 'PostToolUse');
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTemp(dir);
   }
 });

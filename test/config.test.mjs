@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, realpathSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { removeTemp } from './helpers/temp.mjs';
 
 // compile.semanticDedup.judge — LLM dedup judge defaults (core/config.py DEFAULTS)
 const JUDGE_DEFAULTS = {
@@ -311,7 +312,7 @@ test('find_project_config: cwd .auto-context.json root/path 반환', () => {
     assert.equal(result.configFormat, 'auto-context-json');
     assert.deepEqual(result.config.collections, ['story']);
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    removeTemp(home);
   }
 });
 
@@ -330,7 +331,7 @@ test('find_project_config: .auto-context/settings.json preferred', () => {
     assert.equal(result.configFormat, 'auto-context-dir');
     assert.deepEqual(result.config.collections, ['settings']);
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    removeTemp(home);
   }
 });
 
@@ -352,7 +353,7 @@ test('find_project_config: settings.json beats legacy .auto-context.json when bo
     assert.equal(result.configFormat, 'auto-context-dir');
     assert.deepEqual(result.config.collections, ['settings']);
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    removeTemp(home);
   }
 });
 
@@ -372,7 +373,7 @@ test('find_project_config: parent .auto-context.json found from child cwd', () =
     assert.equal(result.configFormat, 'auto-context-json');
     assert.deepEqual(result.config.collections, ['parent']);
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    removeTemp(home);
   }
 });
 
@@ -390,7 +391,7 @@ test('find_project_config: legacy .agents/qmd-recall.json still works', () => {
     assert.equal(result.configFormat, 'agents-legacy');
     assert.deepEqual(result.config.collections, ['legacy']);
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    removeTemp(home);
   }
 });
 
@@ -405,7 +406,7 @@ test('find_project_config: no config returns null path and cwd root', () => {
     assert.equal(result.configFormat, 'none');
     assert.deepEqual(result.config.collections, []);
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    removeTemp(home);
   }
 });
 
@@ -439,7 +440,7 @@ print(json.dumps(result, ensure_ascii=False))
     assert.equal(result.configFormat, 'none');
     assert.deepEqual(result.config.collections, []);
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    removeTemp(home);
   }
 });
 
@@ -462,7 +463,7 @@ test('migrate_legacy_config moves .auto-context.json to .auto-context/settings.j
     assert.deepEqual(cfg.collections, ['legacy']);
     assert.equal(cfg.minScore, 0.7);
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    removeTemp(home);
   }
 });
 
@@ -479,7 +480,7 @@ test('migrate_legacy_config is no-op when settings.json already exists', () => {
     assert.equal(existsSync(join(dir, '.auto-context.json')), true);
     assert.deepEqual(JSON.parse(readFileSync(join(dir, '.auto-context', 'settings.json'), 'utf8')).collections, ['settings']);
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    removeTemp(home);
   }
 });
 
@@ -495,7 +496,7 @@ test('migrate_legacy_config leaves legacy file on invalid JSON', () => {
     assert.equal(existsSync(join(dir, '.auto-context.json')), true);
     assert.equal(existsSync(join(dir, '.auto-context', 'settings.json')), false);
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    removeTemp(home);
   }
 });
 
@@ -511,7 +512,7 @@ test('migrate_legacy_config does not migrate .agents/qmd-recall.json', () => {
     assert.equal(existsSync(join(dir, '.auto-context', 'settings.json')), false);
     assert.equal(existsSync(join(dir, '.agents', 'qmd-recall.json')), true);
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    removeTemp(home);
   }
 });
 

@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { readFileSync, existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { readFileSync, existsSync, mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { removeTemp } from './helpers/temp.mjs';
 
 // hooks/run-hook <action> <engine> 를 fixture 모드로 실행하고 stdout 반환
 function dispatch(args, payload, env = {}) {
@@ -29,7 +30,7 @@ test('recall claude → additionalContext 생성', () => {
   try {
     const out = dispatch(['recall', 'claude'], { prompt: PROMPT, cwd: dir });
     assert.match(JSON.parse(out).hookSpecificOutput.additionalContext, /\[sample\]/);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('engine 라벨이 selection 로그에 기록 (claude/codex/gemini)', () => {
@@ -43,7 +44,7 @@ test('engine 라벨이 selection 로그에 기록 (claude/codex/gemini)', () => 
       const ev = selectionEvents(logPath);
       assert.ok(ev.length > 0, 'no selection events');
       assert.equal(ev[0].engine, engine, `engine=${engine}`);
-    } finally { rmSync(dir, { recursive: true, force: true }); }
+    } finally { removeTemp(dir); }
   }
 });
 
@@ -65,7 +66,7 @@ test('BUG-D: QMD_RECALL_LOG 미지정 시 기본 로그는 /tmp가 아닌 캐시
     // recall이 selection을 기본 로그(캐시 경로)에 기록했어야 한다.
     assert.equal(existsSync(join(cacheDir, 'qmd-claude-hook.log')), true,
       '기본 recall 로그가 캐시 경로에 생성돼야 함(/tmp 아님)');
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 // BUG-D regression: QMD_RECALL_LOG override는 반드시 존중돼야 한다(기존 동작 보존).
@@ -77,7 +78,7 @@ test('BUG-D: QMD_RECALL_LOG override가 존중된다', () => {
   try {
     dispatch(['recall', 'claude'], { prompt: PROMPT, cwd: dir }, { QMD_CACHE_DIR: join(dir, 'cache'), QMD_RECALL_LOG: logPath });
     assert.equal(existsSync(logPath), true, 'override 경로에 로그가 기록돼야 함');
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('CLAUDE_HEADLESS=1 → 무출력', () => {
@@ -112,7 +113,7 @@ test('posttool action → 비-스토리 입력에서 graceful 종료', () => {
         tool_input: { file_path: '/tmp/unrelated.txt', content: 'some unrelated content for testing' },
       })
     );
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('알 수 없는 action → 비정상 종료', () => {
@@ -149,7 +150,7 @@ printf '%s\n' "$*" >> ${JSON.stringify(managerLog)}
     assert.equal(out, '');
     assert.deepEqual(JSON.parse(readFileSync(enqueueLog, 'utf8')), payload);
     assert.equal(readFileSync(managerLog, 'utf8').trim(), `kick-wiki-compile ${dir}`);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 
@@ -171,7 +172,7 @@ open(${JSON.stringify(engineLog)}, 'w').write(os.environ.get('QMD_ENGINE', ''))
       env: { ...process.env, QMD_CORE_COMPILE_ENQUEUE_SCRIPT: enqueue, QMD_BACKEND_MANAGER: manager },
     });
     assert.equal(readFileSync(engineLog, 'utf8'), 'codex');
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('run-hook compile --sandbox → 무출력', () => {
@@ -205,7 +206,7 @@ test('run-hook gate claude → pending 프로젝트에서 gated tool 차단', ()
     assert.ok(out, 'pending 프로젝트는 gate 응답을 출력해야 함');
     const resp = JSON.parse(out);
     assert.equal(resp.hookSpecificOutput.permissionDecision, 'deny');
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('run-hook gate --sandbox → 무출력', () => {

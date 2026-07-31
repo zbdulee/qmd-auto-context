@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, realpathSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { removeTemp } from './helpers/temp.mjs';
 
 function setupProject(config = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'qwiki-enqueue-'));
@@ -65,7 +66,7 @@ test('raw markdown edit enqueues bounded source job silently', () => {
     assert.deepEqual(jobs[0].source, { kind: 'file', path: 'docs/source.md', collection: 'proj-docs' });
     assert.equal('content' in jobs[0].source, false);
   } finally {
-    rmSync(project, { recursive: true, force: true });
+    removeTemp(project);
   }
 });
 
@@ -81,14 +82,14 @@ test('non-markdown, outside collection, wiki role, disabled trigger, and sandbox
       runEnqueue(optout, { tool_input: { file_path: join(optout, 'docs', 'source.md') } });
       assert.deepEqual(queueLines(optout), []);
     } finally {
-      rmSync(optout, { recursive: true, force: true });
+      removeTemp(optout);
     }
     const pending = setupProject({ indexing: null });
     try {
       runEnqueue(pending, { tool_input: { file_path: join(pending, 'docs', 'source.md') } });
       assert.deepEqual(queueLines(pending), []);
     } finally {
-      rmSync(pending, { recursive: true, force: true });
+      removeTemp(pending);
     }
     assert.deepEqual(queueLines(project), []);
 
@@ -97,17 +98,17 @@ test('non-markdown, outside collection, wiki role, disabled trigger, and sandbox
       runEnqueue(disabled, { tool_input: { file_path: join(disabled, 'docs', 'source.md') } });
       assert.deepEqual(queueLines(disabled), []);
     } finally {
-      rmSync(disabled, { recursive: true, force: true });
+      removeTemp(disabled);
     }
     const modeOff = setupProject({ compile: { mode: 'off' } });
     try {
       runEnqueue(modeOff, { tool_input: { file_path: join(modeOff, 'docs', 'source.md') } });
       assert.deepEqual(queueLines(modeOff), []);
     } finally {
-      rmSync(modeOff, { recursive: true, force: true });
+      removeTemp(modeOff);
     }
   } finally {
-    rmSync(project, { recursive: true, force: true });
+    removeTemp(project);
   }
 });
 
@@ -130,7 +131,7 @@ test('dot-directory and hidden markdown sources do not enqueue for automatic com
 
     assert.deepEqual(queueLines(project), []);
   } finally {
-    rmSync(project, { recursive: true, force: true });
+    removeTemp(project);
   }
 });
 
@@ -193,7 +194,7 @@ test('registered dot collection root enqueues, dot paths below it still do not',
     runEnqueue(project, { tool_input: { file_path: join(project, '.github', 'workflow.md') } });
     assert.equal(queueLines(project).length, 2);
   } finally {
-    rmSync(project, { recursive: true, force: true });
+    removeTemp(project);
   }
 });
 
@@ -215,7 +216,7 @@ test('.auto-context stays out of compile sources even when registered as a raw c
     runEnqueue(project, { tool_input: { file_path: join(project, '.auto-context', 'compile', 'notes.md') } });
     assert.deepEqual(queueLines(project), []);
   } finally {
-    rmSync(project, { recursive: true, force: true });
+    removeTemp(project);
   }
 });
 
@@ -245,6 +246,6 @@ test('collectionPaths "." does not open dot directories via the registered-root 
     runEnqueue(project, { tool_input: { file_path: join(project, 'docs', 'plain.md') } });
     assert.deepEqual(queueLines(project).map((j) => j.source.path), ['docs/plain.md']);
   } finally {
-    rmSync(project, { recursive: true, force: true });
+    removeTemp(project);
   }
 });

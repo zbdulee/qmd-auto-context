@@ -2,12 +2,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
+import { removeTemp } from './helpers/temp.mjs';
 import {
   existsSync,
   mkdtempSync,
   mkdirSync,
   realpathSync,
-  rmSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -121,7 +121,7 @@ test('config 없는 신규 디렉터리는 notice나 프로젝트 파일을 만�
     assert.equal(existsSync(join(project, '.auto-context')), false);
     assert.equal(existsSync(f.stateDir), false);
   } finally {
-    rmSync(f.base, { recursive: true, force: true });
+    removeTemp(f.base);
   }
 });
 
@@ -133,7 +133,7 @@ test('indexing만 활성화된 프로젝트는 compile notice를 만들지 않�
     assert.equal(existsSync(f.stateDir), false);
     assert.equal(existsSync(projectMarker(project)), false);
   } finally {
-    rmSync(f.base, { recursive: true, force: true });
+    removeTemp(f.base);
   }
 });
 
@@ -145,7 +145,7 @@ test('compile extractor가 없으면 notice를 만들지 않는다', () => {
     assert.equal(existsSync(f.stateDir), false);
     assert.equal(existsSync(projectMarker(project)), false);
   } finally {
-    rmSync(f.base, { recursive: true, force: true });
+    removeTemp(f.base);
   }
 });
 
@@ -160,7 +160,7 @@ test('root cwd에서 user-local marker만 생성되고 프로젝트 내부 marke
     assert.equal(existsSync(localMarker(f, project, defaultStateDir)), true);
     assert.equal(existsSync(projectMarker(project)), false);
   } finally {
-    rmSync(f.base, { recursive: true, force: true });
+    removeTemp(f.base);
   }
 });
 
@@ -178,7 +178,7 @@ test('nested cwd 실행 후 root cwd를 실행해도 projectRoot marker를 공�
     const second = runMain(f, project);
     assert.doesNotMatch(second, /auto-compile/i);
   } finally {
-    rmSync(f.base, { recursive: true, force: true });
+    removeTemp(f.base);
   }
 });
 
@@ -193,7 +193,7 @@ test('서로 다른 projectRoot는 같은 이름이어도 독립적으로 최초
     assert.equal(existsSync(localMarker(f, firstProject)), true);
     assert.equal(existsSync(localMarker(f, secondProject)), true);
   } finally {
-    rmSync(f.base, { recursive: true, force: true });
+    removeTemp(f.base);
   }
 });
 
@@ -208,7 +208,7 @@ test('canonical projectRoot의 기존 legacy marker가 있으면 재안내하지
     assert.equal(existsSync(localMarker(f, project)), true);
     assert.equal(existsSync(projectMarker(project)), true);
   } finally {
-    rmSync(f.base, { recursive: true, force: true });
+    removeTemp(f.base);
   }
 });
 
@@ -225,7 +225,7 @@ test('nested cwd 아래에만 있는 legacy marker는 신뢰하지 않고 최초
     assert.equal(existsSync(projectMarker(project)), false);
     assert.equal(existsSync(join(nested, '.auto-context', 'compile', '.notice-shown')), true);
   } finally {
-    rmSync(f.base, { recursive: true, force: true });
+    removeTemp(f.base);
   }
 });
 
@@ -240,7 +240,7 @@ test('symlink cwd는 realpath projectRoot의 local marker를 공유한다', () =
     assert.equal(localMarker(f, project), localMarker(f, link));
     assert.equal(existsSync(localMarker(f, link)), true);
   } finally {
-    rmSync(f.base, { recursive: true, force: true });
+    removeTemp(f.base);
   }
 });
 
@@ -257,7 +257,7 @@ test('QMD_SUPPRESS_NOTICE=1이면 wiki notice와 local marker를 선점하지 �
     assert.match(normal, /auto-compile/i);
     assert.equal(existsSync(localMarker(f, project)), true);
   } finally {
-    rmSync(f.base, { recursive: true, force: true });
+    removeTemp(f.base);
   }
 });
 
@@ -270,6 +270,6 @@ test('쓰기 불가능한 QMD_NOTICE_STATE_DIR도 hook 전체 실패로 전파�
     assert.doesNotThrow(() => runMain(f, project));
     assert.equal(existsSync(projectMarker(project)), false);
   } finally {
-    rmSync(f.base, { recursive: true, force: true });
+    removeTemp(f.base);
   }
 });

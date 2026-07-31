@@ -1,11 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { removeTemp } from './helpers/temp.mjs';
 
 const REPO_ROOT = resolve(fileURLToPath(import.meta.url), '..', '..');
 
@@ -31,7 +32,7 @@ test('좁은 high-signal 경로를 후보로 선택', () => {
     assert.equal(r.config.indexing, true);
     assert.equal(r.config.minScore, 0.5);
     assert.equal(r.config.prefixStyle, 'tag');
-  } finally { rmSync(parent, { recursive: true, force: true }); }
+  } finally { removeTemp(parent); }
 });
 
 test('후보 없으면 available:false (wiki 컬렉션은 항상 포함)', () => {
@@ -44,7 +45,7 @@ test('후보 없으면 available:false (wiki 컬렉션은 항상 포함)', () =>
     // wiki collection is always present even when no raw docs are found
     assert.ok(r.config.collections.some((c) => c.endsWith('-wiki')));
     assert.equal(r.config.collections.length, 1);
-  } finally { rmSync(parent, { recursive: true, force: true }); }
+  } finally { removeTemp(parent); }
 });
 
 test('넓은 후보(docs)는 상한 초과 시 제외', () => {
@@ -56,7 +57,7 @@ test('넓은 후보(docs)는 상한 초과 시 제외', () => {
     const r = rec(root);
     // docs만 있고 파일수>200 → 제외 → 후보 없음
     assert.equal(r.available, false);
-  } finally { rmSync(parent, { recursive: true, force: true }); }
+  } finally { removeTemp(parent); }
 });
 
 test('recommended config wires wiki + compile by default', () => {
@@ -74,5 +75,5 @@ test('recommended config wires wiki + compile by default', () => {
     assert.deepEqual(cfg.compile.extractor.builtins, ['claude', 'codex', 'hermes']);
     assert.doesNotMatch(JSON.stringify(cfg.compile), /core\/extractors|_adapter\.py/);
     assert.ok(cfg.compile.triggers.includes('post_tool_source'));
-  } finally { rmSync(d, { recursive: true, force: true }); }
+  } finally { removeTemp(d); }
 });

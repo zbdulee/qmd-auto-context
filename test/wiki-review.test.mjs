@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import { removeTemp } from './helpers/temp.mjs';
 
 function repoTemp(prefix) {
   const base = join(homedir(), '.cache');
@@ -58,7 +59,7 @@ test('wiki_review: discard removes the entry, writes no page', () => {
     assert.equal(out.action, 'discarded');
     assert.deepEqual(readMergeNeeded(work), []);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -80,7 +81,7 @@ test('wiki_review: separate writes the candidate as an independent new page and 
     assert.equal(existsSync(join(work, '.auto-context', 'wiki', 'entities', 'independent-fact.md')), true);
     assert.deepEqual(readMergeNeeded(work), []);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -111,7 +112,7 @@ test('wiki_review: merge updates the matched existing page managed section in pl
     assert.match(text, /Merged, richer summary\./);
     assert.deepEqual(readMergeNeeded(work), []);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -148,7 +149,7 @@ test('wiki_review: supersede creates a new page and marks the old page supersede
     assert.match(oldText, /The old rule text\./); // managed body untouched
     assert.deepEqual(readMergeNeeded(work), []);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -167,7 +168,7 @@ test('wiki_review: unresolved entries before and after the resolved index are pr
     const remaining = readMergeNeeded(work);
     assert.deepEqual(remaining.map((e) => e.candidate.title), ['A', 'C']);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -212,7 +213,7 @@ test('wiki_review: merge falls back to a new page when the matched target is not
     // (d) queue entry is still removed
     assert.deepEqual(readMergeNeeded(work), []);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -248,7 +249,7 @@ test('wiki_review: merge falls back to a new page when the matched target has a 
     assert.equal(out.fallback, 'target_not_writable');
     assert.deepEqual(readMergeNeeded(work), []);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -268,7 +269,7 @@ test('wiki_review: stale matchedPath (deleted since queued) falls back to separa
     assert.equal(out.fallback, 'stale_match');
     assert.equal(existsSync(join(work, '.auto-context', 'wiki', 'entities', 'orphaned-candidate.md')), true);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -310,7 +311,7 @@ test('wiki_review: separate never clobbers an unrelated existing page at the sam
     const newText = readFileSync(newPagePath, 'utf8');
     assert.match(newText, /A different topic entirely\./);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -344,10 +345,10 @@ test('wiki_review: matchedPath escaping wiki_root is rejected and falls back lik
       assert.equal(out.fallback, 'stale_match');
       assert.equal(existsSync(join(work, '.auto-context', 'wiki', 'entities', 'escaping-candidate.md')), true);
     } finally {
-      rmSync(outsideDir, { recursive: true, force: true });
+      removeTemp(outsideDir);
     }
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -385,7 +386,7 @@ test('wiki_review: a crash mid-resolve_entry leaves the queue exactly as it was 
     const after = readMergeNeeded(work);
     assert.deepEqual(after, before);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -408,7 +409,7 @@ test('wiki_review: separate enqueues the wiki collection for reindex after writi
     assert.equal(existsSync(dirtyQueue), true);
     assert.match(readFileSync(dirtyQueue, 'utf8'), /proj-wiki\t.*\.auto-context\/wiki/);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -428,7 +429,7 @@ test('wiki_review: discard does NOT enqueue anything (nothing was written)', () 
     assert.equal(out.action, 'discarded');
     assert.equal(existsSync(dirtyQueue), false);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -454,7 +455,7 @@ test('wiki_review: stale matchedPath no-op path still enqueues since it falls ba
     assert.equal(existsSync(dirtyQueue), true);
     assert.match(readFileSync(dirtyQueue, 'utf8'), /proj-wiki\t.*\.auto-context\/wiki/);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -477,6 +478,6 @@ test('wiki_review: a truly stale-match no-op (malformed entry / index_out_of_ran
     assert.equal(threw, true);
     assert.equal(existsSync(dirtyQueue), false);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });

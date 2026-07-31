@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { readFileSync, mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { removeTemp } from './helpers/temp.mjs';
 
 function recall(payload, env = {}) {
   try {
@@ -28,7 +29,7 @@ test('fixture 응답 → additionalContext 생성', () => {
     assert.ok(r);
     assert.match(r.hookSpecificOutput.additionalContext, /\[sample\]/);   // collection prefix 포맷 유지
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTemp(dir);
   }
 });
 
@@ -40,7 +41,7 @@ test('명시 설정 없는(미동의) 폴더는 fallback collection 없이 빈 �
     const r = recall({ prompt: '검색 결과 정렬은 어떻게 동작해?', cwd: dir });
     assert.equal(r, null, '미동의 폴더에서 fallback collection 으로 검색하면 안 됨');
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTemp(dir);
   }
 });
 
@@ -77,7 +78,7 @@ test('skipPaths 필터 동작', async () => {
     assert.equal(r, null);
   } finally {
     // Clean up
-    fs.rmSync(tempDir, { recursive: true, force: true });
+    removeTemp(tempDir);
   }
 });
 
@@ -101,7 +102,7 @@ test('events 에 userPromptSubmit 없으면 recall core skip', () => {
     });
     assert.equal(r, null);
   } finally {
-    rmSync(tempDir, { recursive: true, force: true });
+    removeTemp(tempDir);
   }
 });
 
@@ -120,7 +121,7 @@ test('legacy novel manuscript collection은 lexicalPatterns 없이도 EP exact �
     assert.ok(r);
     assert.match(r.hookSpecificOutput.additionalContext, /EP004/i);
   } finally {
-    rmSync(tempDir, { recursive: true, force: true });
+    removeTemp(tempDir);
   }
 });
 
@@ -175,7 +176,7 @@ test('.auto-context.json indexing:true → recall 동작', () => {
   try {
     const r = recall({ prompt: '검색 결과 정렬은 어떻게 동작해?', cwd: dir });
     assert.match(r.hookSpecificOutput.additionalContext, /\[sample\]/);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('.auto-context.json indexing:false → recall 빈 출력', () => {
@@ -183,7 +184,7 @@ test('.auto-context.json indexing:false → recall 빈 출력', () => {
   writeFileSync(join(dir, '.auto-context.json'), JSON.stringify({ indexing: false, collections: ['sample'] }));
   try {
     assert.equal(recall({ prompt: '검색 결과 정렬은 어떻게 동작해?', cwd: dir }), null);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('레거시 .agents/qmd-recall.json → recall 동작(하위호환)', () => {
@@ -193,7 +194,7 @@ test('레거시 .agents/qmd-recall.json → recall 동작(하위호환)', () => 
   try {
     const r = recall({ prompt: '검색 결과 정렬은 어떻게 동작해?', cwd: dir });
     assert.match(r.hookSpecificOutput.additionalContext, /\[sample\]/);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('hierarchical recall: wiki 결과가 있으면 raw가 더 높아도 wiki만 우선 주입', () => {
@@ -218,7 +219,7 @@ test('hierarchical recall: wiki 결과가 있으면 raw가 더 높아도 wiki만
     assert.match(r.hookSpecificOutput.additionalContext, /\[wiki(?::generated)?\]/);
     assert.match(r.hookSpecificOutput.additionalContext, /config-layout\.md/);
     assert.doesNotMatch(r.hookSpecificOutput.additionalContext, /raw-source\.md/);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('hierarchical recall: wiki 메타파일(index.md/log.md)은 노이즈라 제외하고 실제 카드만 주입', () => {
@@ -247,7 +248,7 @@ test('hierarchical recall: wiki 메타파일(index.md/log.md)은 노이즈라 �
     assert.match(ctx, /real-card\.md/);
     assert.doesNotMatch(ctx, /log\.md/);
     assert.doesNotMatch(ctx, /index\.md/);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('recall: is_wiki_meta_noise는 wiki role에서만 index.md/log.md를 노이즈로 판정 (non-wiki·실제카드는 유지)', () => {
@@ -294,7 +295,7 @@ test('hierarchical recall: wiki frontmatter status를 prefix에 표시하고 dis
     assert.match(r.hookSpecificOutput.additionalContext, /\[wiki:generated\]/);
     assert.match(r.hookSpecificOutput.additionalContext, /generated\.md/);
     assert.doesNotMatch(r.hookSpecificOutput.additionalContext, /discarded\.md/);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 // 미검수 배지: RC3(오요약 카드를 캐논 근거로 오신뢰) 재발 방지.
@@ -333,7 +334,7 @@ test('plain-path(스킴 없는) 데몬 응답에도 wiki 메타·(미검수) 배
     assert.match(r.hookSpecificOutput.additionalContext, /\[wiki:generated\]/);
     assert.match(r.hookSpecificOutput.additionalContext, /\(미검수\)/);
     assert.match(r.hookSpecificOutput.additionalContext, /단독 캐논 근거로 인용 금지/);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('미검수 wiki 카드에 (미검수) 배지 + 안내 문구, reviewed:true 카드는 배지 없음', () => {
@@ -355,7 +356,7 @@ test('미검수 wiki 카드에 (미검수) 배지 + 안내 문구, reviewed:true
     assert.match(ctx, /auto\.md - Auto wiki \(미검수\)/);
     assert.doesNotMatch(ctx, /checked\.md - Checked wiki \(미검수\)/);
     assert.match(ctx, /단독 캐논 근거로 인용 금지/);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('검수 카드만 있으면 미검수 안내 문구가 붙지 않음', () => {
@@ -373,7 +374,7 @@ test('검수 카드만 있으면 미검수 안내 문구가 붙지 않음', () =
     const ctx = r.hookSpecificOutput.additionalContext;
     assert.doesNotMatch(ctx, /미검수/);
     assert.match(ctx, /\[wiki:canon\]/);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('lowPriorityStatuses 강등: 미검수 generated 카드는 topN 절단 전에 검수 카드에 밀림', () => {
@@ -394,7 +395,7 @@ test('lowPriorityStatuses 강등: 미검수 generated 카드는 topN 절단 전�
     const ctx = r.hookSpecificOutput.additionalContext;
     assert.match(ctx, /canon\.md/, '검수 카드가 저점수여도 topN 슬롯을 우선 확보');
     assert.doesNotMatch(ctx, /auto\.md/, '미검수 generated 카드는 topN=1에서 탈락');
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('flat 전략에서도 wiki role 컬렉션이면 미검수 배지 적용', () => {
@@ -412,7 +413,7 @@ test('flat 전략에서도 wiki role 컬렉션이면 미검수 배지 적용', (
     const ctx = r.hookSpecificOutput.additionalContext;
     assert.match(ctx, /auto\.md - Auto wiki \(미검수\)/);
     assert.match(ctx, /단독 캐논 근거로 인용 금지/);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('verified 카드는 검수급 대우: 배지 없음 + lowPriority 강등 면제 + [wiki:verified] 태그', () => {
@@ -434,7 +435,7 @@ test('verified 카드는 검수급 대우: 배지 없음 + lowPriority 강등 �
     assert.match(ctx, /\[wiki:verified\] .*machine\.md/, 'verified 카드가 저점수여도 topN 우선(강등 면제)');
     assert.doesNotMatch(ctx, /미검수/, 'verified 카드에 미검수 배지 없음');
     assert.doesNotMatch(ctx, /auto\.md/, '미검수 generated 카드는 topN=1에서 탈락');
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 // recallVerifiedOnly 기본값(true): 미검수 generated/tentative wiki 카드는 아예 surface하지 않는다.
@@ -465,7 +466,7 @@ test('recallVerifiedOnly 기본(true): 미검수 generated wiki만 있으면 빈
   try {
     const r = recall({ prompt: 'config layout decision 내용을 알려줘', cwd: dir }, { QMD_QUERY_FIXTURE: fixture });
     assert.strictEqual(r, null, '미검수 generated/tentative만 있으면 기본값에서 빈 출력');
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('recallVerifiedOnly 기본(true): verified/reviewed 카드는 정상 surface', () => {
@@ -498,7 +499,7 @@ test('recallVerifiedOnly 기본(true): verified/reviewed 카드는 정상 surfac
     assert.match(ctx, /machine\.md/, 'verified 카드는 기본값에서도 surface');
     assert.doesNotMatch(ctx, /auto\.md/, '미검수 generated 카드는 기본값에서 제외');
     assert.doesNotMatch(ctx, /미검수/, 'verified만 남으므로 미검수 안내 없음');
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('flat 전략에서도 contested/discarded 카드는 recall에서 제외 (누출 수정)', () => {
@@ -519,5 +520,5 @@ test('flat 전략에서도 contested/discarded 카드는 recall에서 제외 (�
     const ctx = r.hookSpecificOutput.additionalContext;
     assert.doesNotMatch(ctx, /contested\.md/, 'flat에서도 contested 제외');
     assert.match(ctx, /ok\.md/);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });

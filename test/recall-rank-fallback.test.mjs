@@ -13,9 +13,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { removeTemp } from './helpers/temp.mjs';
 
 const PROMPT = 'recall minScore 필터가 RRF rank 로 동작하는 이유를 설명해줘';
 
@@ -214,7 +215,7 @@ test('wikiOnly + 혼합 fixture: raw가 1위여도 절대 surface하지 않고 w
     assert.doesNotMatch(r.stdout, /\[raw\]/);
     assert.equal(r.selection.rank_fallback_used, true);
     assert.equal(r.selection.fallback_phase, 'wiki');
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('wikiOnly + 혼합 fixture: wiki가 전부 미검수면 raw를 구제하지 않고 0건', () => {
@@ -228,7 +229,7 @@ test('wikiOnly + 혼합 fixture: wiki가 전부 미검수면 raw를 구제하지
     assert.equal(r.stdout, '', 'raw로 degrade하면 wikiOnly 계약 위반');
     assert.equal(r.selection.reason, 'no_results_after_filter');
     assert.equal(r.selection.rank_fallback_used, false);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('excludeStatusesFromRecall 카드는 rescue 대상이 아니다', () => {
