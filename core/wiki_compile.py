@@ -1374,6 +1374,14 @@ def main() -> int:
             root, wiki_root, config, compile_cfg, candidate, summary, target
         )
         judge_outcome = judge_info.get("outcome")
+        # **유료 judge 실패·degrade·식힘의 종점.** `_back_off`의 `engineCooldown`/
+        # `cooldownWriteFailed`를 읽는 소비자가 없던 동안, 선호 엔진이 유료로 실패하는 상태에서
+        # 두 식힘 쓰기가 모두 실패하면 compile 마다 같은 쌍을 재과금하는데 흔적이 0이었다.
+        # 무엇을 남길지는 `judge.diagnostics()`가 정한다(scan 로그와 같은 규칙 — 복제 금지).
+        # 정상 판정이거나 이 머신에 judge 설정이 아예 없으면 빈 dict 라 기존 행 모양이 그대로다.
+        judge_diag = wiki_dedup_judge.diagnostics(judge_info)
+        if judge_diag:
+            record["judge"] = judge_diag
         if matched_path is None and judge_outcome != wiki_dedup_judge.OUTCOME_OK and target_reason == "slug":
             # No judge on this machine (or it is cooling down) — fall back to the
             # legacy score-threshold gate so this path never gets weaker than before.

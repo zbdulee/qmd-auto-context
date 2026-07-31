@@ -215,21 +215,57 @@ def judge_fields(rel: str, key: tuple[str, str], info: dict | None) -> dict:
     }
 
 
-def record_judged_distinct(
+def log_judge_outcome(key: tuple[str, str], verdict: str | None, info: dict) -> None:
+    """유료 judge 호출 1회의 결과를 dedup.log 에 한 줄로 남긴다 — **transient·식힘의 종점**.
+
+    `wiki_dedup_judge._back_off`가 돌려주는 `engineCooldown`/`cooldownWriteFailed`를 읽는
+    소비자가 저장소에 하나도 없던 동안, "judge 가 유료로 실패했다"와 "judge 가 unclear 로
+    판정했다"가 로그에서 구분되지 않았다(요약 줄의 `judged=1 queued=0`은 둘 다 같다). 두 식힘
+    쓰기가 모두 실패하면 다음 run 이 같은 후보를 다시 유료로 부르는데 그 흔적도 0이었다.
+    verify 는 같은 사실을 `verify-log.jsonl`의 `deferred` 행 + `cooldownWriteFailed`로 남긴다 —
+    같은 처방이고, 무엇을 남길지는 `judge.diagnostics()` 한 곳이 정한다(규칙을 복제하지 않는다).
+
+    정상 판정이고 degrade 도 없었으면 `diagnostics()`가 빈 dict 라 아무 줄도 남지 않는다
+    (scan 당 최대 `maxPairsPerScan` 줄로 유계).
+    """
+    diag = judge.diagnostics(info)
+    if not diag:
+        return
+    fields = " ".join(
+        f"{name}={','.join(str(v) for v in value) if isinstance(value, list) else value}"
+        for name, value in diag.items()
+    )
+    log(f"JUDGE pair={key[0]}|{key[1]} verdict={verdict or '-'} {fields}")
+
+
+def record_judged_non_duplicate(
     wiki_root: Path,
     skipped_path: Path | None,
     key: tuple[str, str],
     cache: dict[str, str | None],
     info: dict,
+    verdict: str,
     suppressions: dict[tuple[str, str], tuple[str, str]] | None = None,
 ) -> bool:
-    """Record a machine "distinct" verdict in dedup-skipped.jsonl.
+    """Record a machine non-duplicate verdict (`distinct` or `unclear`) in dedup-skipped.jsonl.
 
     Same schema and body-hash keying as wiki_dedup_resolve.record_skip, so the
     existing suppression path applies unchanged: this pair is not re-judged (and
     not re-billed to the user) until one of the two bodies changes. `judgedBy`
     keeps machine verdicts distinguishable from resolver skips in the audit trail.
     Unreadable pages record nothing -- a missing hash would suppress forever.
+
+    **`unclear` is suppressed for the same reason `distinct` is.** Both consumed one paid
+    call and produced no actionable verdict, and re-asking about the SAME two bodies
+    reproduces the same non-answer -- so without a marker the pair is re-judged (re-billed)
+    on every scan. This covers both flavors: a model that genuinely could not decide, and a
+    judge whose output was unusable after its candidates ran out (`invalid_verdict` /
+    `invalid_extractor_json`, see `wiki_dedup_judge._unusable_output`). What is NOT
+    suppressed: `duplicate` (the queue row IS its record), and every non-`ok` outcome
+    (transient failure, cooldown, CLI absent) -- no judgment happened there, so suppressing
+    would hide a pair that was never actually judged. The cost of suppressing is that a real
+    duplicate behind an `unclear` waits until one of the bodies changes; the cost of not
+    suppressing is an unbounded paid loop, and that is the worse grade.
 
     Returns whether the durable row was written. `False` means the suppression
     ledger itself failed, which is the same class as the verify workers' ledgers:
@@ -255,7 +291,7 @@ def record_judged_distinct(
             "pageAHash": hash_a,
             "pageBHash": hash_b,
             "skippedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-            "judgeVerdict": "distinct",
+            "judgeVerdict": verdict,
             "judgeReason": info.get("reason", ""),
             "judgedBy": info.get("engine", ""),
             "judgedMode": info.get("mode", ""),
@@ -337,7 +373,11 @@ def run(cwd: str) -> None:
     # and the verdict comes from comparing bodies. Without one we keep the legacy
     # score-threshold behavior verbatim -- see wiki_dedup_judge for why the score
     # cannot express duplication on its own.
-    judging = judge.is_available(compile_cfg)
+    # `ATTRIBUTION_NONE`: 이 경로에는 "생성 엔진"이라는 사실이 존재하지 않는다(카드 두 장,
+    # 둘째 생산자 미기록). `judge.is_available`과 `judge.judge_pair`에 **같은 값**을 넘겨야
+    # 한다 — 갈리면 "judge 없음"으로 선판정해 놓고 실제로는 판정 가능한 상태가 된다.
+    judging = judge.is_available(compile_cfg, attribution=judge.ATTRIBUTION_NONE)
+    cross_waived = judge.require_waived(compile_cfg, judge.ATTRIBUTION_NONE)
     ledger_blocked = judging and not (
         skipped_path is not None and wc.ledger_writable(skipped_path)
     )
@@ -358,6 +398,7 @@ def run(cwd: str) -> None:
     suppressed_this_scan = 0
     judged_this_scan = 0
     judged_distinct = 0
+    judged_unclear = 0
     judge_stalled = False
     for rel, page, stat in to_scan:
         if queued_this_scan >= max_pairs:
@@ -421,7 +462,10 @@ def run(cwd: str) -> None:
                     root, compile_cfg,
                     {"path": rel, "content": text},
                     {"path": matched_rel, "content": matched_text},
+                    attribution=judge.ATTRIBUTION_NONE,
                 )
+                # degrade·유료 실패·식힘 쓰기 실패의 종점(정상 판정이면 무기록).
+                log_judge_outcome(key, verdict, info)
                 outcome = info.get("outcome")
                 if outcome == judge.OUTCOME_TRANSIENT:
                     # No judgment happened. Preserve the work rather than deciding
@@ -437,11 +481,19 @@ def run(cwd: str) -> None:
                     if verdict != "duplicate":
                         # A judged non-duplicate is recorded like a resolver skip, so the
                         # body-hash suppression keeps it from being re-judged (and re-billed)
-                        # until one of the two bodies actually changes.
-                        if verdict == "distinct":
-                            judged_distinct += 1
-                            if not record_judged_distinct(
-                                wiki_root, skipped_path, key, hash_cache, info, suppressions
+                        # until one of the two bodies actually changes. `unclear` gets the
+                        # SAME treatment as `distinct` -- both burned a paid call and yielded
+                        # no actionable verdict, and re-asking the identical bodies reproduces
+                        # it (see record_judged_non_duplicate for the full rationale). This is
+                        # also the endpoint for a judge whose output was unusable after its
+                        # candidates ran out (invalid_verdict / invalid_extractor_json).
+                        if verdict in ("distinct", "unclear"):
+                            if verdict == "distinct":
+                                judged_distinct += 1
+                            else:
+                                judged_unclear += 1
+                            if not record_judged_non_duplicate(
+                                wiki_root, skipped_path, key, hash_cache, info, verdict, suppressions
                             ):
                                 # 억제 원장 쓰기 실패 → 이 판정은 다음 scan에 재과금된다.
                                 # 그 이상 유료 호출을 하지 않고 이번 scan을 멈춘다(잡·스냅샷
@@ -471,8 +523,13 @@ def run(cwd: str) -> None:
     log(
         f"pages={len(pages)} scanned_ok={scanned_ok} scanned_failed={scanned_failed} "
         f"queued={queued_this_scan} suppressed={suppressed_this_scan} "
-        f"judged={judged_this_scan} judged_distinct={judged_distinct}"
+        f"judged={judged_this_scan} judged_distinct={judged_distinct} "
+        f"judged_unclear={judged_unclear}"
         + (" judge=off:skipped_ledger_unwritable" if ledger_blocked else "")
+        # `crossEngine:"require"`가 이 경로에 적용되지 않았다는 사실의 **종점**. 쌍이 하나도
+        # 판정되지 않은 scan(판정 줄 0개)에서도 남아야 하므로 요약 줄에 둔다 — 설정을 적어 둔
+        # 사용자가 "왜 require 가 안 걸리나"를 여기서 확인한다(docs/settings.md 와 같은 말).
+        + (" crossEngine=require:waived_unattributable_path" if cross_waived else "")
     )
 
 
