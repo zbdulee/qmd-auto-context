@@ -2,9 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { createServer } from 'node:http';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import { removeTemp } from './helpers/temp.mjs';
 
 function repoTemp(prefix) {
   const base = join(homedir(), '.cache');
@@ -140,7 +141,7 @@ test('wiki_dedup_scan: first run backfills every existing page (no snapshot yet)
       `expected page-a/page-b pair, got: ${JSON.stringify(entries)}`,
     );
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -156,7 +157,7 @@ test('wiki_dedup_scan: self-match is filtered (queried page never matches itself
     runScan(work, { QMD_QUERY_FIXTURE: fixture });
     assert.deepEqual(readDedupNeeded(work), []);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -173,7 +174,7 @@ test('wiki_dedup_scan: below autoMergeThreshold (0.9 default) is not queued', ()
     runScan(work, { QMD_QUERY_FIXTURE: fixture });
     assert.deepEqual(readDedupNeeded(work), []);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -190,7 +191,7 @@ test('wiki_dedup_scan: superseded and discarded pages are excluded from the scan
     runScan(work, { QMD_QUERY_FIXTURE: fixture });
     assert.deepEqual(readDedupNeeded(work), []);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -206,7 +207,7 @@ test('wiki_dedup_scan: index.md is never scanned nor matched', () => {
     runScan(work, { QMD_QUERY_FIXTURE: fixture });
     assert.deepEqual(readDedupNeeded(work), []);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -222,7 +223,7 @@ test('wiki_dedup_scan: log.md is never scanned nor matched', () => {
     runScan(work, { QMD_QUERY_FIXTURE: fixture });
     assert.deepEqual(readDedupNeeded(work), []);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -242,7 +243,7 @@ test('wiki_dedup_scan: already-queued pair (either field order) is not re-queued
     runScan(work, { QMD_QUERY_FIXTURE: fixture });
     assert.equal(readDedupNeeded(work).length, 1, 'must not add a second entry for the same pair');
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -267,7 +268,7 @@ test('wiki_dedup_scan: cooldown skip when lock is younger than 24h; runs when lo
     assert.equal(readDedupNeeded(work).length, 1, 'second run within cooldown must not scan again');
     assert.equal(existsSync(cooldownDir), true);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -298,7 +299,7 @@ test('wiki_dedup_scan: 미래 mtime cooldown 디렉터리는 scan을 영구 skip
     });
     assert.equal(readDedupNeeded(work).length, 1, '미래 mtime이 cooldown을 영구화해 scan이 돌지 않았다');
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -331,7 +332,7 @@ test('wiki_dedup_scan: cooldown 경로가 파일이어도 scan은 죽지 않는�
     assert.equal(readDedupNeeded(work).length, 1, 'cooldown 경로가 파일이면 scan이 죽어 큐가 비었다');
     assert.equal(statSync(lockPath).isDirectory(), true, '가드가 파일을 치우고 cooldown을 정상 기록해야 한다');
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -368,7 +369,7 @@ test('wiki_dedup_scan: incremental run only re-examines changed/new pages', () =
       `expected only the changed/new page (page-b) to be re-scanned on scan 2, got log line: ${secondScanLog}`,
     );
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -408,7 +409,7 @@ test('wiki_dedup_scan: maxPairsPerScan caps queuing per scan; overflow retried n
       `expected page-c (never examined in scan 1 due to the cap) to be re-examined and queued on scan 2, got: ${JSON.stringify(afterScan2)}`,
     );
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -450,7 +451,7 @@ test('wiki_dedup_scan: daemon query failure leaves that page unadvanced for retr
       `expected page-a to be retried and advanced after a successful scan, got: ${JSON.stringify(snapshotAfterRetry)}`,
     );
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -465,7 +466,7 @@ test('wiki_dedup_scan: compile.enabled=false or semanticDedup.enabled=false is a
     runScan(work, { QMD_QUERY_FIXTURE: fixture });
     assert.deepEqual(readDedupNeeded(work), []);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -504,7 +505,7 @@ test('wiki_dedup_scan: queries the daemon with rerank=true', async () => {
     assert.equal(requests[0].rerank, true, 'query_wiki_similar must always request rerank=true');
   } finally {
     await new Promise((resolve) => server.close(resolve));
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -547,7 +548,7 @@ test('wiki_dedup_scan: skip-recorded pair with unchanged bodies is suppressed; s
     assert.ok('entities/page-a.md' in files, `snapshot must advance despite suppression, got: ${JSON.stringify(snapshot)}`);
     assert.ok('entities/page-b.md' in files, `snapshot must advance despite suppression, got: ${JSON.stringify(snapshot)}`);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -572,7 +573,7 @@ test('wiki_dedup_scan: a changed body on either side re-enables queueing', () =>
     runScan(work, { QMD_QUERY_FIXTURE: fixture });
     assert.equal(readDedupNeeded(work).length, 1, 'a hash mismatch must allow normal re-queueing');
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -616,7 +617,7 @@ test('wiki_dedup_scan: suppressed top result falls through to the next-ranked re
       `expected the (page-a, page-c) pair, got: ${JSON.stringify(entries)}`,
     );
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -655,7 +656,7 @@ test('wiki_dedup_scan: suppressed candidates consume no maxPairsPerScan budget',
       `expected the (page-b, page-c) pair, got: ${JSON.stringify(entries)}`,
     );
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -674,7 +675,7 @@ test('wiki_dedup_scan: only the most recent skip record per pair counts (stale-t
     runScan(work, { QMD_QUERY_FIXTURE: fixture });
     assert.deepEqual(readDedupNeeded(work), [], 'the LAST record matches -> suppressed');
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -693,7 +694,7 @@ test('wiki_dedup_scan: only the most recent skip record per pair counts (current
     runScan(work, { QMD_QUERY_FIXTURE: fixture });
     assert.equal(readDedupNeeded(work).length, 1, 'the LAST record mismatches -> re-queued (an older matching record must not suppress)');
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -716,6 +717,6 @@ test('wiki_dedup_scan: a pair skipped through the real CLI is suppressed on the 
     runScan(work, { QMD_QUERY_FIXTURE: fixture });
     assert.deepEqual(readDedupNeeded(work), [], 'CLI-recorded skip must suppress the scanner (shared body_hash contract)');
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });

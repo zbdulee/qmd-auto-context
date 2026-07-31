@@ -41,7 +41,8 @@ function readMergeNeeded(work) {
 function runReview(work, index, action, extra = [], env = {}) {
   return execFileSync('python3', [
     'core/wiki_review.py', '--cwd', work, '--index', String(index), '--action', action, ...extra,
-  ], { encoding: 'utf8', env: { ...process.env, ...env } });
+    // QMD_DIRTY_QUEUE를 임시 경로로 격리하지 않으면 dirty queue 유출 시 사용자 실제 qmd 인덱스에 고아 컬렉션이 등록되며(복구 불가 고아 등록), 자동으로 정리할 수 있는 경로가 없다.
+  ], { encoding: 'utf8', env: { ...process.env, QMD_DIRTY_QUEUE: join(work, 'dirty-queue'), ...env } });
 }
 
 test('wiki_review: discard removes the entry, writes no page', () => {

@@ -32,7 +32,7 @@ test('update.sh: QMD_AUTO_KICKSTART가 설정되어도 launchd를 직접 제어�
 // 1줄로 알리고, TTL marker로 반복 세션 잡음을 억제한다.
 // 주의: 프로젝트는 tmpdir가 아닌 홈 아래에 만든다 — tmp 경로는 risky 게이트로 조기 종료됨
 // (wiki-compile-notice.test.mjs와 동일 이유).
-const NOTICE_BASE = join(homedir(), '.tmp-qmd-health-notice-test');
+const NOTICE_BASE = join(homedir(), '.cache');
 mkdirSync(NOTICE_BASE, { recursive: true });
 
 function noticeProject(base) {

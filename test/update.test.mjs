@@ -866,6 +866,7 @@ test('update core: notice_once는 미래 mtime marker에 영구 침묵하지 않
   // 그 키의 알림이 영구 억제된다(그리고 억제 분기는 marker를 다시 쓰지 않아 스스로
   // 풀리지도 않는다).
   const work = repoTemp('qmd-notice-future-mtime');
+  const cacheDir = tempCacheDir('notice-future-mtime');
   const bin = join(work, 'bin');
   const fakeHome = join(work, 'home');
   try {
@@ -882,7 +883,7 @@ test('update core: notice_once는 미래 mtime marker에 영구 침묵하지 않
     writeFileSync(join(bin, 'curl'), '#!/usr/bin/env sh\nexit 1\n', { mode: 0o755 });
     writeFileSync(join(bin, 'qmd'), '#!/usr/bin/env sh\nexit 0\n', { mode: 0o755 });
 
-    const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, HOME: fakeHome, QMD_CACHE_DIR: fakeHome };
+    const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, HOME: fakeHome, QMD_CACHE_DIR: cacheDir };
     const run = () => execFileSync('bash', [join(process.cwd(), 'core', 'update.sh')], {
       encoding: 'utf8', input: JSON.stringify({ cwd: work }), env,
     });
@@ -890,10 +891,10 @@ test('update core: notice_once는 미래 mtime marker에 영구 침묵하지 않
     assert.doesNotMatch(run(), /wiki 중복 후보/, 'TTL 억제 자체는 유지되어야 한다');
 
     // marker의 mtime을 미래로 밀면 (가드가 없을 때) 그 키는 영구 침묵한다.
-    const marker = readdirSync(fakeHome).find((name) => name.startsWith('notice-wiki-dedup-'));
+    const marker = readdirSync(cacheDir).find((name) => name.startsWith('notice-wiki-dedup-'));
     assert.ok(marker, 'notice marker가 생성되지 않았다');
     const future = Math.floor(Date.now() / 1000) + 365 * 24 * 3600;
-    utimesSync(join(fakeHome, marker), future, future);
+    utimesSync(join(cacheDir, marker), future, future);
     assert.match(run(), /wiki 중복 후보 1건 대기/, '미래 mtime marker가 알림을 영구 억제했다');
   } finally {
     removeTemp(work);

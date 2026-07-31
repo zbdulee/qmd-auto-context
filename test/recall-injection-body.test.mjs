@@ -560,7 +560,9 @@ test('설정 상한을 넘겨도 카드 읽기 창이 유계다', () => {
 
 test('공백·한글이 든 하위 cwd 에서도 카드 경로가 실제로 열린다 (end-to-end)', () => {
   // HOME 하위에 만들어야 config 부모 탐색(HOME 경계)이 하위 cwd 에서도 동작한다.
-  const base = mkdtempSync(join(homedir(), '.qmd-inject-e2e-'));
+  const cacheBase = join(homedir(), '.cache');
+  mkdirSync(cacheBase, { recursive: true });
+  const base = mkdtempSync(join(cacheBase, 'qmd-test-inject-e2e-'));
   const dir = join(base, '한글 프로젝트');
   mkdirSync(dir, { recursive: true });
   project(dir, { cards: { 'card.md': card(VERIFIED_FM, '한글 경로에서도 열려야 한다.') } });

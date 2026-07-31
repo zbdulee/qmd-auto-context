@@ -239,7 +239,9 @@ test('cwd 가 프로젝트 하위 디렉터리여도 원문 경로가 열린다 
   // sources[].path 는 project root 상대 POSIX 다(wiki_compile_enqueue._source_record).
   // cwd 를 base 로 쓰면 하위 디렉터리 세션에서 정상 소스가 미존재/traversal 로 오판된다.
   // HOME 하위에 만들어야 config 부모 탐색(HOME 경계)이 하위 cwd 에서도 동작한다.
-  const base = mkdtempSync(join(homedir(), '.qmd-src-e2e-'));
+  const cacheBase = join(homedir(), '.cache');
+  mkdirSync(cacheBase, { recursive: true });
+  const base = mkdtempSync(join(cacheBase, 'qmd-test-src-e2e-'));
   const dir = join(base, '한글 프로젝트');
   mkdirSync(dir, { recursive: true });
   project(dir, {
@@ -419,7 +421,9 @@ test('상한을 넘는 경로는 존재하더라도 버린다 (자르면 못 여
 test('상한은 실제 주입되는 표시 문자열 기준이다 (절대 표시로 넘으면 drop)', () => {
   // 같은 카드가 cwd=project 에서는 상대경로로 통과하고, 하위 cwd 에서는 절대 표시가
   // 상한을 넘어 drop 된다 — 토큰 예산은 주입 문자열의 함수이므로 의도된 비대칭이다.
-  const base = mkdtempSync(join(homedir(), '.qmd-src-cap-'));
+  const cacheBase2 = join(homedir(), '.cache');
+  mkdirSync(cacheBase2, { recursive: true });
+  const base = mkdtempSync(join(cacheBase2, 'qmd-test-src-cap-'));
   try {
     // 절대 표시가 딱 상한을 넘도록 상대 경로 길이를 base 길이에서 역산한다.
     const relLen = Math.min(190, 201 - base.length - 1);

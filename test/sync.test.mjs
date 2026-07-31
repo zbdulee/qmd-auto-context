@@ -30,9 +30,9 @@ function makeEnv() {
 }
 
 function makeProject() {
-  const base = join(homedir(), ".tmp-qmd-sync-test");
+  const base = join(homedir(), ".cache");
   mkdirSync(base, { recursive: true });
-  return mkdtempSync(join(base, "proj-"));
+  return mkdtempSync(join(base, "qmd-test-sync-proj-"));
 }
 
 function writeConfig(dir, collections, collectionPaths = {}) {

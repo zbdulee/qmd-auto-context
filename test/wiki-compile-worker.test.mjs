@@ -2,9 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { createServer } from 'node:http';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { removeTemp } from './helpers/temp.mjs';
 
 function setupProject(extraCompile = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'qwiki-worker-'));
@@ -89,7 +90,7 @@ print(json.dumps({'candidates': [{
     assert.equal(readFileSync(join(project, '.auto-context', 'compile', 'source-queue.jsonl'), 'utf8'), '');
     assert.match(readFileSync(dirtyQueue, 'utf8'), /^proj-wiki\t/);
   } finally {
-    rmSync(project, { recursive: true, force: true });
+    removeTemp(project);
   }
 });
 
@@ -127,7 +128,7 @@ print(json.dumps({'candidates': [{
     assert.match(text, /Builtin Adapter Decision/);
     assert.match(readFileSync(dirtyQueue, 'utf8'), /^proj-wiki\t/);
   } finally {
-    rmSync(project, { recursive: true, force: true });
+    removeTemp(project);
   }
 });
 
@@ -146,7 +147,7 @@ print('{"candidates": []}')
     assert.equal(existsSync(join(project, '.auto-context', 'compile', 'candidates.jsonl')), false);
     assert.match(readFileSync(join(project, '.auto-context', 'compile', 'source-queue.jsonl'), 'utf8'), /docs\/source.md/);
   } finally {
-    rmSync(project, { recursive: true, force: true });
+    removeTemp(project);
   }
 });
 
@@ -162,7 +163,7 @@ test('missing extractor writes bounded needs_extractor record without source con
     assert.equal(candidates[0].source.path, 'docs/source.md');
     assert.equal(JSON.stringify(candidates[0]).includes('Durable decision'), false);
   } finally {
-    rmSync(project, { recursive: true, force: true });
+    removeTemp(project);
   }
 });
 
@@ -179,7 +180,7 @@ test('invalid extractor JSON permanently drops source queue job', () => {
     assert.equal(failures[0].reason, 'invalid_extractor_json');
     assert.equal(JSON.stringify(failures[0]).includes('Durable decision'), false);
   } finally {
-    rmSync(project, { recursive: true, force: true });
+    removeTemp(project);
   }
 });
 
@@ -195,7 +196,7 @@ test('worker drops job and audits when extractor returns invalid JSON (permanent
     // permanent failure: queue drained (not preserved)
     assert.equal(readFileSync(join(project, '.auto-context', 'compile', 'source-queue.jsonl'), 'utf8'), '');
   } finally {
-    rmSync(project, { recursive: true, force: true });
+    removeTemp(project);
   }
 });
 
@@ -211,7 +212,7 @@ print('{"candidates": []}')
     runWorker(project); // NOTE: no QMD_COMPILE_TRUST_EXTRACTOR
     assert.equal(existsSync(marker), true);
   } finally {
-    rmSync(project, { recursive: true, force: true });
+    removeTemp(project);
   }
 });
 
@@ -231,7 +232,7 @@ w.requeue_lines(Path(${JSON.stringify(queue)}), [${JSON.stringify(rawLine)}])
     assert.match(content, /docs\/new.md/);
     assert.match(content, /docs\/source.md/);
   } finally {
-    rmSync(project, { recursive: true, force: true });
+    removeTemp(project);
   }
 });
 
@@ -256,7 +257,7 @@ print(json.dumps({'candidates': [{
     assert.equal(failures.at(-1).action, 'compile_failed');
     assert.equal(JSON.stringify(failures.at(-1)).includes('This candidate tries'), false);
   } finally {
-    rmSync(project, { recursive: true, force: true });
+    removeTemp(project);
   }
 });
 
@@ -298,7 +299,7 @@ print(json.dumps({'candidates': [{
     assert.equal(rows.at(-1).action, 'merge-needed');
     assert.equal(rows.some((row) => row.action === 'compile_failed'), false);
   } finally {
-    rmSync(project, { recursive: true, force: true });
+    removeTemp(project);
   }
 });
 
@@ -330,7 +331,7 @@ print(json.dumps({'candidates': []}))
     assert.equal(failures.at(-1).action, 'extractor_failed');
     assert.equal(failures.at(-1).reason, 'invalid_source_scope');
   } finally {
-    rmSync(project, { recursive: true, force: true });
+    removeTemp(project);
   }
 });
 
@@ -358,7 +359,7 @@ print('{"candidates": []}')
     assert.equal(failures.at(-1).action, 'extractor_failed');
     assert.equal(failures.at(-1).reason, 'invalid_source_scope');
   } finally {
-    rmSync(project, { recursive: true, force: true });
+    removeTemp(project);
   }
 });
 
@@ -386,7 +387,7 @@ except RuntimeError:
     execFileSync('python3', ['-c', script], { cwd: process.cwd(), encoding: 'utf8' });
     assert.match(readFileSync(queue, 'utf8'), new RegExp(rawLine.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   } finally {
-    rmSync(project, { recursive: true, force: true });
+    removeTemp(project);
   }
 });
 
@@ -450,7 +451,7 @@ test('dispatch picks the adapter for payload.engine', () => {
   try {
     runWorker(project);
     assert.equal(readFileSync(marker, 'utf8'), 'codex');
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });
 
 test('non-executable primary (PermissionError) does NOT trigger fallback', () => {
@@ -465,7 +466,7 @@ test('non-executable primary (PermissionError) does NOT trigger fallback', () =>
     runWorker(project);
     // fallback must NOT have run (no double LLM call on a non-127 runtime failure)
     assert.equal(existsSync(join(project, '.auto-context', 'wiki', 'concepts', 'fb.md')), false);
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });
 
 test('dispatch falls back to default only when primary CLI is absent (exit 127)', () => {
@@ -478,7 +479,7 @@ test('dispatch falls back to default only when primary CLI is absent (exit 127)'
   try {
     runWorker(project);
     assert.equal(existsSync(join(project, '.auto-context', 'wiki', 'concepts', 'fb.md')), true);
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });
 
 test('transient extractor failure sets cooldown and preserves the job', () => {
@@ -489,7 +490,7 @@ test('transient extractor failure sets cooldown and preserves the job', () => {
     runWorker(project);
     assert.equal(existsSync(join(project, '.auto-context', 'compile', 'cooldown')), true);
     assert.notEqual(readFileSync(join(project, '.auto-context', 'compile', 'source-queue.jsonl'), 'utf8'), '');
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });
 
 test('active cooldown skips extraction entirely', () => {
@@ -503,7 +504,7 @@ test('active cooldown skips extraction entirely', () => {
     const cands = jsonl(join(project, '.auto-context', 'compile', 'candidates.jsonl'));
     assert.equal(cands.some((c) => c.reason === 'cooldown_active'), true);
     assert.notEqual(readFileSync(join(project, '.auto-context', 'compile', 'source-queue.jsonl'), 'utf8'), '');
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });
 
 test('debounce: recent single edit under idle window is not processed yet', () => {
@@ -518,7 +519,7 @@ test('debounce: recent single edit under idle window is not processed yet', () =
     assert.equal(existsSync(join(project, '.auto-context', 'wiki', 'concepts', 'x.md')), false);
     // job is re-queued, not lost
     assert.notEqual(readFileSync(join(project, '.auto-context', 'compile', 'source-queue.jsonl'), 'utf8'), '');
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });
 
 test('--flush-all processes even under idle window', () => {
@@ -531,7 +532,7 @@ test('--flush-all processes even under idle window', () => {
     execFileSync('python3', ['core/wiki_compile_worker.py', '--cwd', project, '--flush-all'],
       { cwd: process.cwd(), encoding: 'utf8', env: { ...process.env } });
     assert.equal(existsSync(join(project, '.auto-context', 'wiki', 'concepts', 'f.md')), true);
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });
 
 test('dedup: repeated edits of same path collapse to one extraction', () => {
@@ -547,7 +548,7 @@ test('dedup: repeated edits of same path collapse to one extraction', () => {
   try {
     runWorker(project);
     assert.equal(readFileSync(counter, 'utf8'), '1');
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });
 
 function writeFixture(dir, results) {
@@ -643,7 +644,7 @@ test('gather_similar_pages: queries the daemon with rerank=true (async backgroun
     assert.equal(requests[0].rerank, true, 'background worker lookup must opt into rerank=true');
   } finally {
     await new Promise((resolve) => server.close(resolve));
-    rmSync(project, { recursive: true, force: true });
+    removeTemp(project);
   }
 });
 
@@ -668,7 +669,7 @@ test('gather_similar_pages: above-threshold match is included with full page con
     assert.equal(out[0].score, 0.9);
     assert.match(out[0].content, /The known fact\./);
   } finally {
-    rmSync(project, { recursive: true, force: true });
+    removeTemp(project);
   }
 });
 
@@ -690,7 +691,7 @@ test('gather_similar_pages: below-threshold match is dropped, returns null', () 
     const out = callGatherSimilarPages(project, sourcePath, { QMD_QUERY_FIXTURE: fixture });
     assert.equal(out, 'null');
   } finally {
-    rmSync(project, { recursive: true, force: true });
+    removeTemp(project);
   }
 });
 
@@ -706,7 +707,7 @@ test('gather_similar_pages: a resolved match whose file was since deleted is ski
     const out = callGatherSimilarPages(project, sourcePath, { QMD_QUERY_FIXTURE: fixture });
     assert.equal(out, 'null');
   } finally {
-    rmSync(project, { recursive: true, force: true });
+    removeTemp(project);
   }
 });
 
@@ -720,7 +721,7 @@ test('gather_similar_pages: malformed fixture fails open to null', () => {
     const out = callGatherSimilarPages(project, sourcePath, { QMD_QUERY_FIXTURE: fixture });
     assert.equal(out, 'null');
   } finally {
-    rmSync(project, { recursive: true, force: true });
+    removeTemp(project);
   }
 });
 
@@ -740,7 +741,7 @@ test('gather_similar_pages: semanticDedup.enabled false short-circuits without t
     const out = callGatherSimilarPages(project, sourcePath);
     assert.equal(out, 'null');
   } finally {
-    rmSync(project, { recursive: true, force: true });
+    removeTemp(project);
   }
 });
 
@@ -775,7 +776,7 @@ test('gather_similar_pages: non-numeric score in result does not crash, treated 
     assert.equal(out[0].path, '.auto-context/wiki/entities/numeric.md');
     assert.equal(out[0].score, 0.9);
   } finally {
-    rmSync(project, { recursive: true, force: true });
+    removeTemp(project);
   }
 });
 
@@ -798,7 +799,7 @@ test('gather_similar_pages: null score in result does not crash, treated as belo
     // Should not crash; null is below threshold, so returns null
     assert.equal(out, 'null');
   } finally {
-    rmSync(project, { recursive: true, force: true });
+    removeTemp(project);
   }
 });
 
@@ -831,7 +832,7 @@ print(json.dumps({'candidates': []}))
     assert.equal(receivedWiki.similarPages[0].path, '.auto-context/wiki/entities/known.md');
     assert.match(receivedWiki.similarPages[0].content, /The known fact\./);
   } finally {
-    rmSync(project, { recursive: true, force: true });
+    removeTemp(project);
   }
 });
 
@@ -853,7 +854,7 @@ print(json.dumps({'candidates': []}))
     assert.equal('similarPages' in receivedWiki, false);
     assert.equal(typeof receivedWiki.index, 'string');
   } finally {
-    rmSync(project, { recursive: true, force: true });
+    removeTemp(project);
   }
 });
 
@@ -894,7 +895,7 @@ else:
     const log = jsonl(join(project, '.auto-context', 'compile', 'verify-log.jsonl'));
     assert.equal(log[0].producedBy, 'claude', '생성 엔진은 job이 정하는 사실이다');
     assert.equal(log[0].verifiedMode, 'self');
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });
 
 // 같은 클래스의 가장 깊은 사례: 모델의 `candidate.sources`가 **검증 근거**를 결정할 수
@@ -960,7 +961,7 @@ else:
     assert.ok(loaded.includes('docs/source.md'),
       `실제 원문 없이 검증됐다: ${JSON.stringify(loaded)}`);
     assert.equal(loaded[0], 'docs/source.md', '실제 원문이 먼저 읽힌다');
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });
 
 // `authoritativeSources`는 verify 잡 전용 필드다. 카드 frontmatter로 새면 모델 제공 키가
@@ -987,5 +988,5 @@ print(json.dumps({'candidates': [{
       .find((row) => row.action === 'created');
     const text = readFileSync(join(project, created.targetPath), 'utf8');
     assert.ok(!text.includes('authoritativeSources'), 'frontmatter에 새지 않는다');
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });

@@ -15,6 +15,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { removeTemp } from './helpers/temp.mjs';
 
 const SCRIPT = join(process.cwd(), 'core', 'orphan_reclaim.py');
 
@@ -117,7 +118,7 @@ test('orphan reclaim: 제거 직후(pending 마커)는 비율과 무관하게 �
     assert.deepEqual(qmdCalls(dir), ['cleanup']);
     // 성공했으면 이벤트는 소비된다 — 다음 세션이 같은 remove로 또 vacuum하지 않는다.
     assert.equal(existsSync(join(dir, 'cache', 'orphan-reclaim-pending')), false);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('orphan reclaim: 임계 초과면 remove 없이도 회수한다 (외부 remove·편집 churn)', () => {
@@ -132,7 +133,7 @@ test('orphan reclaim: 임계 초과면 remove 없이도 회수한다 (외부 rem
     assert.equal(r.orphans, 250);
     assert.equal(r.total, 1000);
     assert.deepEqual(qmdCalls(dir), ['cleanup']);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('orphan reclaim: 임계 미달이면 아무 것도 하지 않는다 (vacuum을 매 세션 돌리지 않는다)', () => {
@@ -146,7 +147,7 @@ test('orphan reclaim: 임계 미달이면 아무 것도 하지 않는다 (vacuum
     assert.equal(r.action, 'skip');
     assert.equal(r.reason, 'below_threshold');
     assert.deepEqual(qmdCalls(dir), [], 'qmd cleanup 이 호출됐다 — 임계가 동작하지 않는다');
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('orphan reclaim: 비율은 넘지만 절대량이 적으면 돌지 않는다 (작은 인덱스 잡음)', () => {
@@ -158,7 +159,7 @@ test('orphan reclaim: 비율은 넘지만 절대량이 적으면 돌지 않는�
     const r = reclaim(dir, { indexPath: index, qmdBin: bin });
     assert.equal(r.reason, 'below_threshold');
     assert.deepEqual(qmdCalls(dir), []);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 // ---------------------------------------------------------------------------
@@ -179,7 +180,7 @@ test('orphan reclaim: 시도는 cooldown으로 유계다 — 같은 임계 상�
     assert.equal(second.action, 'skip');
     assert.equal(second.reason, 'cooldown');
     assert.deepEqual(qmdCalls(dir), ['cleanup'], 'cooldown 중에 cleanup이 다시 호출됐다');
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('orphan reclaim: 미래 mtime cooldown 마커는 회수를 영구 skip시키지 않는다', () => {
@@ -200,7 +201,7 @@ test('orphan reclaim: 미래 mtime cooldown 마커는 회수를 영구 skip시�
     const second = reclaim(dir, { indexPath: index, qmdBin: bin });
     assert.equal(second.action, 'reclaim', '미래 mtime 마커가 cooldown을 영구화했다');
     assert.deepEqual(qmdCalls(dir), ['cleanup', 'cleanup']);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('orphan reclaim: stale lock(10분 초과)은 회수된다 — 죽은 프로세스가 회수를 영구 정지시키지 못한다', () => {
@@ -224,7 +225,7 @@ test('orphan reclaim: stale lock(10분 초과)은 회수된다 — 죽은 프로
     assert.match(readFileSync(join(dir, 'reclaim.log'), 'utf8'), /lock stale reclaimed age_secs=1[12]\d\d/);
     // 회수 후에는 자기 lock을 정상적으로 놓는다(누수 금지).
     assert.equal(existsSync(lock), false);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('orphan reclaim: 갓 잡힌 lock은 회수하지 않고 나이를 표면화한다 (일시/영구 구분)', () => {
@@ -239,7 +240,7 @@ test('orphan reclaim: 갓 잡힌 lock은 회수하지 않고 나이를 표면화
     assert.equal(typeof r.lockAgeSecs, 'number');
     assert.ok(r.lockAgeSecs < 600);
     assert.match(readFileSync(join(dir, 'reclaim.log'), 'utf8'), /skip reason=lock_busy lock_age_secs=/);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('orphan reclaim: cooldownSeconds:0 이면 cooldown이 없다(설정으로 껐을 때만)', () => {
@@ -252,7 +253,7 @@ test('orphan reclaim: cooldownSeconds:0 이면 cooldown이 없다(설정으로 �
     const bin = stubQmd(dir);
     assert.equal(reclaim(dir, { indexPath: index, qmdBin: bin }).action, 'reclaim');
     assert.equal(reclaim(dir, { indexPath: index, qmdBin: bin }).reason, 'cooldown');
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('orphan reclaim: 실패는 전역 상태 파일에 남고 pending은 보존된다 (종점 신호)', () => {
@@ -271,7 +272,7 @@ test('orphan reclaim: 실패는 전역 상태 파일에 남고 pending은 보존
     // 재시도 근거(pending)는 남는다. 단 cooldown이 붙어 매 세션 재시도는 아니다.
     assert.equal(existsSync(join(dir, 'cache', 'orphan-reclaim-pending')), true);
     assert.equal(existsSync(join(dir, 'cache', 'orphan-reclaim-cooldown')), true);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('orphan reclaim: 이후 성공이 실패 상태를 지운다 (notice 재무장)', () => {
@@ -286,7 +287,7 @@ test('orphan reclaim: 이후 성공이 실패 상태를 지운다 (notice 재무
     const r = reclaim(dir, { indexPath: index, qmdBin: stubQmd(dir, { rc: 0 }) });
     assert.equal(r.ok, true);
     assert.equal(existsSync(join(dir, 'cache', 'orphan-reclaim-failed')), false);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('orphan reclaim: qmd 부재는 실패로 기록하되 예외로 죽지 않는다', () => {
@@ -297,7 +298,7 @@ test('orphan reclaim: qmd 부재는 실패로 기록하되 예외로 죽지 않�
     const r = reclaim(dir, { indexPath: fakeIndex(dir, { orphans: 0, live: 1 }), qmdBin: join(dir, 'nope') });
     assert.equal(r.ok, false);
     assert.equal(r.detail, 'qmd_not_found');
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('orphan reclaim: 인덱스를 읽을 수 없으면 회수하지 않는다 (판정 불가 ≠ 회수)', () => {
@@ -310,7 +311,7 @@ test('orphan reclaim: 인덱스를 읽을 수 없으면 회수하지 않는다 (
     assert.equal(r.action, 'skip');
     assert.equal(r.reason, 'orphans_unknown');
     assert.deepEqual(qmdCalls(dir), []);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('orphan reclaim: content_vectors 테이블이 없는 인덱스도 판정 불가로 처리한다', () => {
@@ -324,7 +325,7 @@ test('orphan reclaim: content_vectors 테이블이 없는 인덱스도 판정 �
     const r = reclaim(dir, { indexPath: index, qmdBin: stubQmd(dir) });
     assert.equal(r.reason, 'orphans_unknown');
     assert.deepEqual(qmdCalls(dir), []);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 // ---------------------------------------------------------------------------
@@ -341,7 +342,7 @@ test('orphan reclaim: config로 끌 수 있다 (사용자 인덱스를 만지는
     assert.equal(r.action, 'skip');
     assert.equal(r.reason, 'disabled_config');
     assert.deepEqual(qmdCalls(dir), []);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('orphan reclaim: QMD_ORPHAN_RECLAIM=off 는 프로세스 단위 kill switch', () => {
@@ -355,7 +356,7 @@ test('orphan reclaim: QMD_ORPHAN_RECLAIM=off 는 프로세스 단위 kill switch
     });
     assert.equal(r.reason, 'disabled_env');
     assert.deepEqual(qmdCalls(dir), []);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('orphan reclaim: sandbox면 무동작', () => {
@@ -368,7 +369,7 @@ test('orphan reclaim: sandbox면 무동작', () => {
       assert.equal(reclaim(dir, { indexPath: index, qmdBin: bin, env }).reason, 'sandbox');
     }
     assert.deepEqual(qmdCalls(dir), []);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('orphan reclaim: 미설정·optout 프로젝트는 무동작 (컬렉션이 없으면 회수 권한도 없다)', () => {
@@ -386,7 +387,7 @@ test('orphan reclaim: 미설정·optout 프로젝트는 무동작 (컬렉션이 
     r = reclaim(dir, { indexPath: index, qmdBin: bin });
     assert.equal(r.reason, 'no_collections');
     assert.deepEqual(qmdCalls(dir), []);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('orphan reclaim: single-flight — 락이 잡혀 있으면 회수하지 않는다', () => {
@@ -399,7 +400,7 @@ test('orphan reclaim: single-flight — 락이 잡혀 있으면 회수하지 않
     assert.deepEqual(qmdCalls(dir), []);
     // 락 스킵은 cooldown을 소모하지 않는다 — 시도조차 하지 않았으므로.
     assert.equal(existsSync(join(dir, 'cache', 'orphan-reclaim-cooldown')), false);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 // ---------------------------------------------------------------------------
@@ -461,7 +462,7 @@ test('update.sh: collection remove 성공이 pending 마커를 남긴다 (1차 �
     // 마커 경로 SSOT는 orphan_reclaim.py다(update.sh가 그 스크립트를 부른다).
     assert.equal(existsSync(join(fakeHome, 'orphan-reclaim-pending')), true,
       'remove가 성공했는데 회수 트리거가 남지 않았다 — 죽은 벡터가 조용히 누적된다');
-  } finally { rmSync(work, { recursive: true, force: true }); }
+  } finally { removeTemp(work); }
 });
 
 test('update.sh main: 회수 실패 상태를 SessionStart에서 1회 표면화한다', () => {
@@ -497,5 +498,5 @@ test('update.sh main: 회수 실패 상태를 SessionStart에서 1회 표면화�
       input: JSON.stringify({ cwd: work }), encoding: 'utf8', env,
     });
     assert.doesNotMatch(second.stdout, /벡터 회수에 실패/);
-  } finally { rmSync(work, { recursive: true, force: true }); }
+  } finally { removeTemp(work); }
 });

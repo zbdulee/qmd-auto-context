@@ -35,10 +35,11 @@ function writeSettings(work, compile = {}) {
 }
 
 function runCompile(work, payload, env = {}) {
+  // QMD_DIRTY_QUEUE를 임시 경로로 격리하지 않으면 dirty queue 유출 시 사용자 실제 qmd 인덱스에 고아 컬렉션이 등록되며(복구 불가 고아 등록), 자동으로 정리할 수 있는 경로가 없다.
   return execFileSync('python3', ['core/wiki_compile.py', '--cwd', work], {
     encoding: 'utf8',
     input: JSON.stringify(payload),
-    env: { ...process.env, ...env },
+    env: { QMD_DIRTY_QUEUE: join(work, 'dirty-queue'), ...process.env, ...env },
   });
 }
 
@@ -48,7 +49,7 @@ function runCompileAsync(work, payload, env = {}) {
   // payload -- use async spawn instead so the server can actually respond.
   return new Promise((resolve, reject) => {
     const child = spawn('python3', ['core/wiki_compile.py', '--cwd', work], {
-      env: { ...process.env, ...env },
+      env: { QMD_DIRTY_QUEUE: join(work, 'dirty-queue'), ...process.env, ...env },
     });
     let stdout = '';
     let stderr = '';

@@ -36,9 +36,9 @@ test("query skill metadata and wrapper contract", () => {
 });
 
 test("query wrapper uses recall fixture and returns hook context", () => {
-  const base = join(homedir(), ".tmp-qmd-query-skill");
+  const base = join(homedir(), ".cache");
   mkdirSync(base, { recursive: true });
-  const dir = mkdtempSync(join(base, "proj-"));
+  const dir = mkdtempSync(join(base, "qmd-test-query-skill-proj-"));
     mkdirSync(join(dir, ".auto-context"), { recursive: true });
     writeFileSync(join(dir, ".auto-context", "settings.json"), JSON.stringify({
       indexing: true,

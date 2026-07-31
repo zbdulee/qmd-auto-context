@@ -27,9 +27,9 @@ function makeEnv(extra = {}) {
 
 function makeProject() {
   // config discovery walks up to the HOME boundary, so projects must live under HOME.
-  const base = join(homedir(), ".tmp-qmd-sync-compile-test");
+  const base = join(homedir(), ".cache");
   mkdirSync(base, { recursive: true });
-  return mkdtempSync(join(base, "proj-"));
+  return mkdtempSync(join(base, "qmd-test-sync-compile-proj-"));
 }
 
 function writeSettings(dir, overrides = {}) {

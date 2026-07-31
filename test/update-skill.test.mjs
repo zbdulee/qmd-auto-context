@@ -40,9 +40,9 @@ test("update skill metadata and wrapper contract", () => {
 });
 
 test("update wrapper can invoke update path in sandbox without side effects", () => {
-  const base = join(homedir(), ".tmp-qmd-update-skill");
+  const base = join(homedir(), ".cache");
   mkdirSync(base, { recursive: true });
-  const dir = mkdtempSync(join(base, "proj-"));
+  const dir = mkdtempSync(join(base, "qmd-test-update-skill-proj-"));
   try {
     const out = execFileSync("bash", ["skills/update/scripts/update.sh", dir], {
       encoding: "utf8",

@@ -17,9 +17,9 @@ function py(code, args = []) {
 
 // config 탐색은 HOME 경계까지만 올라가므로 프로젝트는 HOME 아래에 둔다.
 function homeProject(prefix) {
-  const base = join(homedir(), '.tmp-qmd-role-source');
+  const base = join(homedir(), '.cache');
   mkdirSync(base, { recursive: true });
-  return mkdtempSync(join(base, `${prefix}-`));
+  return mkdtempSync(join(base, `qmd-test-role-source-${prefix}-`));
 }
 
 function writeSettings(dir, settings) {
