@@ -19,6 +19,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.resolve()))
 import config as qmd_config
+import cooldown as qmd_cooldown
 from collection_match import select_collections
 from wiki_compile_enqueue import _queue_lock_path, _safe_queue_path
 import wiki_compile as wc
@@ -27,7 +28,9 @@ import wiki_compile as wc
 DEFAULT_SOURCE_QUEUE = ".auto-context/compile/source-queue.jsonl"
 BUILTIN_EXTRACTOR_ENGINES = {"claude", "codex", "hermes"}
 # 후보 식힘 만료의 상한(24h). 손상·주입된 만료값이 후보를 영구히 배제하지 못하게 한다.
-MAX_ENGINE_COOLDOWN_SECS = 86400
+# 정의는 `cooldown.MAX_COOLDOWN_SECS`가 SSOT다(전역 compile/dedup cooldown과 같은 상한 —
+# 리터럴이 두 벌이면 한쪽만 바뀌어 판정이 갈린다). 이 이름은 기존 호출부용 별칭이다.
+MAX_ENGINE_COOLDOWN_SECS = qmd_cooldown.MAX_COOLDOWN_SECS
 # 엔진에 귀속되지 않는 argv(레거시 `extractor.argv`, `extractor.default`)의 cooldown 키.
 # 엔진 라벨로 식히면 실제로 실패한 것은 default argv인데 그 엔진의 adapter까지 막힌다.
 UNATTRIBUTED_KEY = "(unattributed)"
@@ -113,18 +116,22 @@ def cooldown_path(root: Path) -> Path:
 
 
 def cooldown_active(root: Path) -> bool:
+    """판정은 `cooldown.expiry_active`가 SSOT다. `now < float(파일내용)`만 보면 오염된
+    만료값(`1e300`) 하나가 **영구 True**가 되어 이 프로젝트의 compile이 다시는 돌지
+    않는다 — `load_engine_cooldowns`가 4단계에 받은 상한 클램프와 같은 처방이다."""
     path = cooldown_path(root)
     try:
-        expiry = float(path.read_text(encoding="utf-8").strip())
-    except (OSError, ValueError):
+        raw = path.read_text(encoding="utf-8").strip()
+    except OSError:
         return False
-    return datetime.now(timezone.utc).timestamp() < expiry
+    return qmd_cooldown.expiry_active(raw, datetime.now(timezone.utc).timestamp())
 
 
 def set_cooldown(root: Path, seconds: int) -> None:
     path = cooldown_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    expiry = datetime.now(timezone.utc).timestamp() + max(0, seconds)
+    # 쓰기도 같은 상한으로 클램프한다 — 정상 경로가 절대 읽기 상한을 넘지 않게.
+    expiry = qmd_cooldown.expiry_value(datetime.now(timezone.utc).timestamp(), seconds)
     path.write_text(f"{expiry}\n", encoding="utf-8")
 
 
@@ -348,8 +355,12 @@ def load_engine_cooldowns(path: Path) -> dict:
 
 
 def cooling_engines(path: Path) -> set:
+    # 활성 판정은 `cooldown.expiry_active` 한 벌을 쓴다(전역 cooldown과 같은 규칙).
+    # `load_engine_cooldowns`의 ceiling 필터는 남겨 둔다 — 다음 쓰기에서 오염 항목을
+    # 실제로 지우는 것이 그 필터이고, 이쪽은 판정만 한다.
     now = datetime.now(timezone.utc).timestamp()
-    return {key for key, expiry in load_engine_cooldowns(path).items() if now < expiry}
+    return {key for key, expiry in load_engine_cooldowns(path).items()
+            if qmd_cooldown.expiry_active(expiry, now)}
 
 
 def set_engine_cooldown(path: Path, key: str, seconds: int) -> bool:

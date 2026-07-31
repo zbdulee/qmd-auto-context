@@ -713,7 +713,7 @@ jq -c 'select(.event=="qmd_recall_shadow" and .verdict.selected_empty_raw_nonemp
 | `compile.verify.onInconclusive` | `"delete"` | 검증 판정 불가(verifier가 대조하지 못함) 시 동작입니다. 값 집합은 `onFail`과 같습니다. `none`이 "현행 유지"(카드를 `generated`로 남김)입니다. |
 | `compile.verify.crossEngine` | `"prefer"` | 검수 엔진을 카드를 만든 엔진과 분리합니다. `prefer`는 다른 엔진을 먼저 시도하고 없으면 같은 엔진으로 검수합니다(자기검증으로 기록). `require`는 다른 엔진만 허용하고 없으면 검수하지 않습니다(엔진별 `backends`/`builtins`가 필요합니다 — 레거시 `extractor.argv`·`extractor.default`는 엔진 귀속이 불가해 이 요구를 만족시키지 못합니다). `off`는 0.x 동작(카드를 만든 엔진)이며, 그 엔진이 귀속 불가면 풀의 첫 후보로 폴백합니다(폐기하면 그 카드가 영원히 검수되지 않습니다). |
 | `compile.verify.builtins` | `[]` | 검수 후보 엔진 목록(symbolic 이름만). 비면 `compile.extractor`의 `builtins` + 명시 `backends` 키를 물려받습니다. **카드를 만든 엔진은 이 목록에 없어도 `prefer`의 최후 후보로 남습니다** — 목록을 좁혀도(또는 이름을 잘못 적어도) self 폴백이 사라지지 않습니다. adapter argv 해석은 extractor와 같은 한 벌을 씁니다. |
-| `compile.verify.cooldownSeconds` | `600` | verifier 실패/timeout 뒤 재시도 cooldown입니다. |
+| `compile.verify.cooldownSeconds` | `600` | verifier 실패/timeout 뒤 재시도 cooldown입니다. **24시간(86400초)으로 클램프**됩니다 — 아래 "cooldown·lock의 영구 정지 방어" 참조. |
 | `compile.verify.maxPerRun` | `3` | 한 번에 처리할 verify job 수의 **기본 예산**입니다. 실제 예산은 `max(maxPerRun, min(그 run이 만든 카드 수, 30))`입니다 — 고정값이면 카드를 만드는 속도가 검수하는 속도를 넘어 큐가 자라고, `recallVerifiedOnly` 기본값(`true`) 아래에서 `generated`로 남은 카드는 recall에 나오지 않습니다(문서 10개를 편집해 카드 20장이 생겨도 3장만 검수하면 나머지는 다음 run들을 기다립니다). 생산량을 하한으로 두면 큐는 줄어들 수만 있습니다. **생산량에 씌운 상한 30**은 그 값이 모델 출력(`candidates` 길이)에서 유도되기 때문입니다 — 없으면 카드 40장을 낸 run이 verify 200회를 돌려 모델이 청구액을 정합니다. 사람이 적은 `maxPerRun`은 언제나 존중되며 50으로 클램프됩니다. 처리 순서는 **그 run이 만든 카드 먼저**이고(예산만 키우면 FIFO가 오래된 backlog에 다 쓰고 새 카드는 `generated`로 남습니다) backlog에는 1건이 항상 예약됩니다. **이 예약은 예산 안이 아니라 예산 밖의 +1입니다** — 이 run의 카드가 예산을 전부 소진하면 backlog 1건을 추가로 처리하므로 한 run의 verify 유료 호출 상한은 `예산 + 1`입니다(기본값 `30 + 1 = 31`). 위 Batch 절의 총량 셈이 이 `+1`을 포함합니다. |
 | `compile.verify.skippedPath` | `.auto-context/compile/verify-skipped.jsonl` | inconclusive 삭제 억제 마커 파일입니다. |
 
@@ -1101,6 +1101,35 @@ write-time만)로 남습니다. 판정이 없었던 행에는 이 필드들을 �
 **끄는 방법.** `maintenance.orphanVectors.enabled: false`(프로젝트 단위) 또는
 `QMD_ORPHAN_RECLAIM=off`(프로세스 단위 kill switch). 미설정·optout 프로젝트에서는 애초에
 동작하지 않습니다 — 컬렉션이 없으면 전역 인덱스를 만질 근거도 없습니다.
+
+## cooldown·lock의 "영구 정지" 방어
+
+시간 게이트(cooldown·TTL·stale lock)는 **한 번 잘못 닫히면 영구히 닫혀 있어서는 안 됩니다.**
+그 실패는 아무 로그도 남기지 않고 해당 파이프라인을 통째로 멈추기 때문입니다(4단계의 검수
+영구 정지, 6단계의 무한 과금 루프가 같은 클래스였습니다). 판정 규칙은 `core/cooldown.py`
+한 벌이고 두 가지입니다.
+
+**① 만료 시각을 파일에 적는 cooldown은 24시간으로 클램프됩니다.** 대상은 compile
+cooldown(`extractor.cooldownSeconds`), 검수 cooldown(`compile.verify.cooldownSeconds`),
+dedup judge cooldown(`semanticDedup.judge.cooldownSeconds`)과 그 엔진 단위 파일입니다.
+쓰기·읽기 양쪽에 같은 상한이 걸리므로 **24시간보다 긴 값을 적으면 24시간으로 동작합니다.**
+이유는 상한이 없으면 오염되거나 주입된 만료값 하나(`1e300`)가 그 게이트를 영구 활성으로
+만들어 compile·검수·dedup 판정이 다시는 돌지 않기 때문입니다(복구 경로는 사람이 그 파일을
+찾아 지우는 것뿐입니다).
+
+**② mtime 나이로 판정하는 창은 미래 mtime을 "창이 끝났다"로 읽습니다.** 미래 mtime은 시계
+되돌림·백업 복원·파일시스템 이관으로 실제로 생기고, `now - mtime`을 그대로 쓰면 나이가
+음수가 되어 창이 영원히 끝나지 않습니다. 방향은 지점마다 다르지만 병리는 하나입니다 —
+dedup 스캔 영구 skip, orphan 회수 영구 skip, `sync` lock의 stale 회수 불가(영구
+`sync_busy`), SessionStart 알림 영구 억제, `--skip` 마커의 2시간 TTL 무기한화(편집 gate
+영구 우회). 60초 이내의 시계 오차(NTP 미세 조정·타임스탬프 반올림)는 "방금 쓴 것"으로 보아
+존중합니다.
+
+**stale lock 회수는 모든 lock에 있습니다.** 프로세스가 비정상 종료해 lock만 남으면 그
+파이프라인이 영구 정지하므로, 잡힌 지 10분이 넘은 lock 디렉터리는 회수됩니다(bash 5곳의
+`find -mmin +10` 관례와 같은 임계). orphan 회수는 회수한 사실과 skip한 lock의 나이를
+로그·`--json`(`lockAgeSecs`)에 남깁니다 — 그 값 없이는 "지금 다른 프로세스가 돈다"와
+"영구히 막혔다"를 구분할 수 없습니다.
 
 ## Common Recipes
 

@@ -45,6 +45,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.resolve()))
 import config as qmd_config
+import cooldown as qmd_cooldown
 
 # `qmd cleanup` also clears the LLM cache and hard-deletes inactive document rows.
 # Both are qmd's own maintenance semantics for this command; we do not hand-roll
@@ -147,14 +148,18 @@ def cooldown_active(seconds: int) -> bool:
     cannot delete anything (sqlite-vec unavailable -> it returns 0 by design) the
     orphan count stays above the threshold forever, and a success-based cooldown
     would vacuum on every single session -- the one thing this must not do.
+
+    판정은 `cooldown.window_elapsed`가 SSOT다. 직접 `now - mtime`을 쓰면 **미래 mtime**
+    (시계 되돌림·백업 복원)에서 나이가 음수가 되어 이 함수가 영구 True를 내고 **회수가
+    영구 skip**된다 — 같은 병리가 dedup scan·sync lock·notice_once에도 있었다.
     """
     if seconds <= 0:
         return False
     try:
-        age = time.time() - cooldown_path().stat().st_mtime
+        mtime = cooldown_path().stat().st_mtime
     except OSError:
         return False  # absent marker means "never attempted" -> run
-    return age < seconds
+    return not qmd_cooldown.window_elapsed(mtime, time.time(), seconds)
 
 
 def touch_cooldown() -> None:
@@ -317,8 +322,36 @@ def run(cwd: str, qmd_bin: str = "", timeout: float = 600.0) -> dict:
         lock.parent.mkdir(parents=True, exist_ok=True)
         lock.mkdir()
     except FileExistsError:
-        log("skip reason=lock_busy")
-        return {**result, "action": "skip", "reason": "lock_busy"}
+        # **stale 회수가 없으면 이것이 영구 정지의 입구다**: 프로세스가 죽어 lock
+        # 디렉터리가 남으면(SIGKILL·전원 차단·컨테이너 종료) 회수가 다시는 돌지 않고,
+        # `qmd cleanup`은 사용자가 명령을 기억해야만 도는 상태로 되돌아간다. 저장소의
+        # 다른 lock 5곳(`backend/keepalive.sh`, `backend/index_worker.sh`,
+        # `core/backend_manager.sh`×3)이 전부 `find -mmin +10`으로 같은 처방을 갖고
+        # 있으므로 같은 임계(`cooldown.LOCK_STALE_SECS`)를 파이썬으로 적용한다.
+        #
+        # 종점: 회수한 사실과 skip한 lock의 나이를 로그·`--json`에 남긴다 —
+        # `lock_busy`만 있으면 "지금 다른 프로세스가 돈다"와 "영구히 막혔다"가
+        # 구분되지 않아 진단이 불가능하다.
+        reclaimed = False
+        age = None
+        try:
+            mtime = lock.stat().st_mtime
+            now = time.time()
+            age = qmd_cooldown.age_seconds(mtime, now)  # 진단용 — 판정은 아래 한 곳이다
+            if qmd_cooldown.window_elapsed(mtime, now, qmd_cooldown.LOCK_STALE_SECS):
+                # rmdir 은 비어 있는 디렉터리만 지운다 — 우리 lock 은 파일을 담지 않으므로
+                # 예상 밖 내용이 있으면 실패로 보호된다(env override 오설정 시 재귀 삭제 금지).
+                lock.rmdir()
+                lock.mkdir()
+                reclaimed = True
+        except OSError:
+            reclaimed = False
+        if not reclaimed:
+            log(f"skip reason=lock_busy lock_age_secs={age}")
+            return {**result, "action": "skip", "reason": "lock_busy",
+                    "lockAgeSecs": age}
+        log(f"lock stale reclaimed age_secs={age}")
+        result["lockStaleReclaimed"] = True
     except OSError as exc:
         log(f"skip reason=lock_error errno={exc.errno}")
         return {**result, "action": "skip", "reason": "lock_error"}

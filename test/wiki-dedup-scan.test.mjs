@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { createServer } from 'node:http';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 
@@ -266,6 +266,70 @@ test('wiki_dedup_scan: cooldown skip when lock is younger than 24h; runs when lo
     runScan(work, { QMD_QUERY_FIXTURE: fixture2 });
     assert.equal(readDedupNeeded(work).length, 1, 'second run within cooldown must not scan again');
     assert.equal(existsSync(cooldownDir), true);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('wiki_dedup_scan: 미래 mtime cooldown 디렉터리는 scan을 영구 skip시키지 않는다', () => {
+  const work = repoTemp('dedup-scan-future-mtime');
+  try {
+    writeSettings(work);
+    writePage(work, 'entities/page-a.md', { body: 'Content A.' });
+    const fixture = join(work, 'fixture.json');
+    writeFileSync(fixture, JSON.stringify({ results: [] }));
+    const env = runScan(work, { QMD_QUERY_FIXTURE: fixture });
+
+    // 시계 되돌림·백업 복원·파일시스템 이관으로 실제로 생기는 상태. `now - mtime`을 그대로
+    // 쓰면 나이가 음수 → `age >= cooldown`이 영구 False → **scan이 영구 skip**되고 dedup 큐가
+    // 다시는 채워지지 않는다(근중복 정리가 통째로 멈춘다).
+    // lock은 <base>/<project_key>다 — base가 아니라 그 자식의 mtime이 판정 대상이다.
+    const [key] = readdirSync(env.cooldownDir);
+    const future = Math.floor(Date.now() / 1000) + 365 * 24 * 3600;
+    utimesSync(join(env.cooldownDir, key), future, future);
+
+    writePage(work, 'entities/page-b.md', { body: 'Content B, brand new.' });
+    writeFileSync(fixture, JSON.stringify({ results: [{ file: 'proj-wiki/entities/page-a.md', score: 0.95 }] }));
+    runScan(work, {
+      QMD_QUERY_FIXTURE: fixture,
+      QMD_DEDUP_COOLDOWN_DIR: env.cooldownDir,
+      QMD_SYNC_STATE_DIR: env.stateDir,
+      QMD_DEDUP_LOG: env.logFile,
+    });
+    assert.equal(readDedupNeeded(work).length, 1, '미래 mtime이 cooldown을 영구화해 scan이 돌지 않았다');
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('wiki_dedup_scan: cooldown 경로가 파일이어도 scan은 죽지 않는다 (FileExistsError 영구 사망)', () => {
+  const work = repoTemp('dedup-scan-cooldown-file');
+  try {
+    writeSettings(work);
+    writePage(work, 'entities/page-a.md', { body: 'Content A.' });
+    writePage(work, 'entities/page-b.md', { body: 'Content B.' });
+    const fixture = join(work, 'fixture.json');
+    writeFileSync(fixture, JSON.stringify({ results: [{ file: 'proj-wiki/entities/page-b.md', score: 0.95 }] }));
+
+    // 그 경로가 파일이면 `cooldown_ready`의 `is_dir()`가 False라 "준비됨"을 내고, 직후
+    // `touch_cooldown`의 mkdir이 FileExistsError(17)로 죽어 main의 except가 삼킨다 =
+    // scan 영구 사망(실측: 연속 3회 전부 errno 17, scan 0회). 만드는 코드는 없으나
+    // 가드 없이는 복구가 사람의 수동 삭제뿐이다.
+    const cooldownDir = join(work, 'dedup-cooldown');
+    mkdirSync(cooldownDir, { recursive: true });
+    // 실제 lock 경로 = <base>/<project_key>. 키는 내부 해시라 코드에서 그대로 계산한다.
+    const projectKey = execFileSync('python3', ['-c', [
+      'import sys',
+      `sys.path.insert(0, ${JSON.stringify(join(process.cwd(), 'core'))})`,
+      'import sync',
+      `print(sync.project_key(${JSON.stringify(work)}, ${JSON.stringify(join(work, '.auto-context', 'settings.json'))}))`,
+    ].join('\n')], { encoding: 'utf8' }).trim();
+    const lockPath = join(cooldownDir, projectKey);
+    writeFileSync(lockPath, 'not a directory\n');
+
+    runScan(work, { QMD_QUERY_FIXTURE: fixture, QMD_DEDUP_COOLDOWN_DIR: cooldownDir });
+    assert.equal(readDedupNeeded(work).length, 1, 'cooldown 경로가 파일이면 scan이 죽어 큐가 비었다');
+    assert.equal(statSync(lockPath).isDirectory(), true, '가드가 파일을 치우고 cooldown을 정상 기록해야 한다');
   } finally {
     rmSync(work, { recursive: true, force: true });
   }

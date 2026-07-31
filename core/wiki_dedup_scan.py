@@ -25,6 +25,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.resolve()))
 import config as qmd_config
+import cooldown as qmd_cooldown
 import sync as qmd_sync
 import wiki_compile as wc
 import wiki_dedup_judge as judge
@@ -97,14 +98,30 @@ def cooldown_ready(lock: Path) -> bool:
     """True if the scan should run now. Absence of the lock means "never
     scanned" and MUST mean run, not skip -- the opposite of
     backend_manager.sh's stale-lock convention, which assumes the lock
-    already exists."""
+    already exists.
+
+    나이 판정은 `cooldown.window_elapsed`가 SSOT다 — `now - mtime`을 그대로 쓰면
+    **미래 mtime**(시계 되돌림·백업 복원)에서 나이가 음수가 되어 이 함수가 영구 False를
+    내고 **scan이 영구 skip**된다(dedup 큐가 다시는 채워지지 않는다).
+    """
+    if lock.exists() and not lock.is_dir():
+        # 그 경로가 파일이면 `is_dir()`가 False라 "준비됨"을 내고, 직후 `touch_cooldown`의
+        # `mkdir`이 FileExistsError로 죽어 `main`의 except가 그것을 삼킨다 = **scan 영구
+        # 사망**(실측: 연속 3회 전부 errno 17, scan 0회). 그 파일을 만드는 코드는 없어
+        # 우선순위는 낮지만, 가드가 없으면 복구 경로가 사람의 수동 삭제뿐이다.
+        try:
+            lock.unlink()
+        except OSError:
+            log("SKIP: cooldown path exists as a file and could not be removed")
+            return False
+        return True
     if not lock.is_dir():
         return True
     try:
-        age = time.time() - lock.stat().st_mtime
+        mtime = lock.stat().st_mtime
     except OSError:
         return True
-    return age >= cooldown_seconds()
+    return qmd_cooldown.window_elapsed(mtime, time.time(), cooldown_seconds())
 
 
 def touch_cooldown(lock: Path) -> None:

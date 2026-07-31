@@ -12,7 +12,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -179,6 +179,66 @@ test('orphan reclaim: 시도는 cooldown으로 유계다 — 같은 임계 상�
     assert.equal(second.action, 'skip');
     assert.equal(second.reason, 'cooldown');
     assert.deepEqual(qmdCalls(dir), ['cleanup'], 'cooldown 중에 cleanup이 다시 호출됐다');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('orphan reclaim: 미래 mtime cooldown 마커는 회수를 영구 skip시키지 않는다', () => {
+  const dir = scratch('future-cooldown');
+  try {
+    project(dir, OPTED_IN);
+    const index = fakeIndex(dir, { orphans: 250, live: 750 });
+    const bin = stubQmd(dir);
+    assert.equal(reclaim(dir, { indexPath: index, qmdBin: bin }).action, 'reclaim');
+
+    // 시계 되돌림·백업 복원·파일시스템 이관으로 실제로 생기는 상태. `now - mtime`을 그대로
+    // 쓰면 나이가 음수 → `age < seconds`가 영구 True → **회수가 영구 skip**된다(그 사이
+    // orphan 벡터가 vec deep 창을 계속 점유한다).
+    const marker = join(dir, 'cache', 'orphan-reclaim-cooldown');
+    const future = Math.floor(Date.now() / 1000) + 365 * 24 * 3600;
+    utimesSync(marker, future, future);
+
+    const second = reclaim(dir, { indexPath: index, qmdBin: bin });
+    assert.equal(second.action, 'reclaim', '미래 mtime 마커가 cooldown을 영구화했다');
+    assert.deepEqual(qmdCalls(dir), ['cleanup', 'cleanup']);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('orphan reclaim: stale lock(10분 초과)은 회수된다 — 죽은 프로세스가 회수를 영구 정지시키지 못한다', () => {
+  const dir = scratch('stale-lock');
+  try {
+    project(dir, OPTED_IN);
+    // SIGKILL·전원 차단·컨테이너 종료로 lock 디렉터리만 남은 상태. stale 회수가 없으면
+    // `qmd cleanup`은 사용자가 명령을 기억해야만 도는 상태로 영구히 되돌아간다.
+    // 저장소의 다른 lock 5곳이 전부 `find -mmin +10`이라 같은 임계를 쓴다.
+    const lock = join(dir, 'locks', 'qmd-orphan-reclaim.lock.d');
+    mkdirSync(lock, { recursive: true });
+    const stale = Math.floor(Date.now() / 1000) - 20 * 60;
+    utimesSync(lock, stale, stale);
+
+    const r = reclaim(dir, { indexPath: fakeIndex(dir, { orphans: 250, live: 750 }), qmdBin: stubQmd(dir) });
+    assert.equal(r.action, 'reclaim');
+    assert.equal(r.lockStaleReclaimed, true);
+    assert.deepEqual(qmdCalls(dir), ['cleanup']);
+    // 종점: 회수했다는 사실이 로그에 남아야 한다 — 없으면 `lock_busy`가 일시인지 영구인지
+    // 구분할 수 없다.
+    assert.match(readFileSync(join(dir, 'reclaim.log'), 'utf8'), /lock stale reclaimed age_secs=1[12]\d\d/);
+    // 회수 후에는 자기 lock을 정상적으로 놓는다(누수 금지).
+    assert.equal(existsSync(lock), false);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('orphan reclaim: 갓 잡힌 lock은 회수하지 않고 나이를 표면화한다 (일시/영구 구분)', () => {
+  const dir = scratch('fresh-lock');
+  try {
+    project(dir, OPTED_IN);
+    mkdirSync(join(dir, 'locks', 'qmd-orphan-reclaim.lock.d'), { recursive: true });
+    const r = reclaim(dir, { indexPath: fakeIndex(dir, { orphans: 250, live: 750 }), qmdBin: stubQmd(dir) });
+    assert.equal(r.reason, 'lock_busy', '갓 잡힌 lock을 훔치면 single-flight가 깨진다');
+    assert.deepEqual(qmdCalls(dir), []);
+    // `lock_busy`만으로는 "지금 다른 프로세스가 돈다"와 "영구히 막혔다"가 구분되지 않는다.
+    assert.equal(typeof r.lockAgeSecs, 'number');
+    assert.ok(r.lockAgeSecs < 600);
+    assert.match(readFileSync(join(dir, 'reclaim.log'), 'utf8'), /skip reason=lock_busy lock_age_secs=/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 

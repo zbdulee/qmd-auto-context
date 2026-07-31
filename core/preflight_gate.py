@@ -8,6 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 import config as qmd_config
+import cooldown as qmd_cooldown
 import resolve_paths as rp
 
 GATED_TOOLS = {"Edit", "Write", "apply_patch", "MultiEdit", "NotebookEdit"}
@@ -20,7 +21,12 @@ def is_sandbox():
 
 
 def has_skip_marker(cwd):
-    """skip 마커 파일 존재 + TTL 확인. TTL 만료 시 lazy unlink 후 False 반환."""
+    """skip 마커 파일 존재 + TTL 확인. TTL 만료 시 lazy unlink 후 False 반환.
+
+    TTL 판정은 `cooldown.window_elapsed`가 SSOT다 — `time.time() - mtime`을 그대로 쓰면
+    **미래 mtime**(시계 되돌림·백업 복원)에서 나이가 음수가 되어 마커가 만료되지 않고
+    **2h TTL이 무기한**이 된다(= pending 프로젝트의 편집 gate가 영구 우회된다).
+    """
     real_cwd = os.path.realpath(cwd)
     h = hashlib.sha256(real_cwd.encode()).hexdigest()
     marker = Path.home() / ".config" / "qmd" / "skip" / h
@@ -30,7 +36,7 @@ def has_skip_marker(cwd):
         mtime = marker.stat().st_mtime
     except OSError:
         return False
-    if time.time() - mtime > SKIP_TTL_SECONDS:
+    if qmd_cooldown.window_elapsed(mtime, time.time(), SKIP_TTL_SECONDS):
         # lazy expire: TTL 지난 마커 unlink
         try:
             marker.unlink()

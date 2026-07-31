@@ -10,6 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.resolve()))
 import config as qmd_config
+import cooldown as qmd_cooldown
 import dirty_queue
 import resolve_paths as qmd_resolve_paths
 import wiki_compile_enqueue as compile_enqueue
@@ -112,11 +113,15 @@ def lock_is_stale(lock):
         raw_pid = pid_file.read_text(encoding="utf-8").strip()
         pid = int(raw_pid)
     except (OSError, ValueError):
+        # pid를 못 읽으면 나이로 판정한다. 나이 계산은 `cooldown.window_elapsed`가 SSOT다 —
+        # `now - mtime`을 그대로 쓰면 **미래 mtime**(시계 되돌림·백업 복원)에서 나이가
+        # 음수가 되어 lock이 영원히 stale로 보이지 않고 **sync가 영구 sync_busy**가 된다
+        # (pid 파일이 없는 lock = 정확히 비정상 종료로 남은 lock이라 이 분기가 회수 경로다).
         try:
-            age = time.time() - lock.stat().st_mtime
+            mtime = lock.stat().st_mtime
         except OSError:
             return False
-        return age >= stale_lock_seconds()
+        return qmd_cooldown.window_elapsed(mtime, time.time(), stale_lock_seconds())
     return not pid_is_running(pid)
 
 

@@ -109,7 +109,7 @@ _notice_marker() {
 }
 
 notice_once() {
-  local key="$1" project="$2" message="$3" marker ttl now mtime
+  local key="$1" project="$2" message="$3" marker ttl now mtime age
   [ -n "${QMD_SUPPRESS_NOTICE:-}" ] && return 0
   marker="$(_notice_marker "$key" "$project")"
   ttl="${QMD_NOTICE_TTL_SECS:-14400}"
@@ -117,7 +117,13 @@ notice_once() {
   if [ -f "$marker" ]; then
     now=$(date +%s)
     mtime=$(stat -f %m "$marker" 2>/dev/null || stat -c %Y "$marker" 2>/dev/null || echo 0)
-    if [ $((now - mtime)) -lt "$ttl" ]; then
+    age=$((now - mtime))
+    # 미래 mtime 가드(시계 되돌림·백업 복원·파일시스템 이관). age가 음수면 `-lt $ttl`이
+    # 참이 되어 그 marker가 **모든 알림을 영구 억제**한다 — 이 함수는 orphan 회수 실패·
+    # unregister 실패·source_missing·invalid role 등 **모든 종점**이 사용자에게 닿는
+    # 유일한 채널이므로, 여기서 조용해지면 다른 어떤 가드도 표면화되지 않는다.
+    # python 쪽 동일 규칙은 `core/cooldown.py:window_elapsed`(관용 60초)다.
+    if [ "$age" -ge -60 ] && [ "$age" -lt "$ttl" ]; then
       return 0
     fi
   fi

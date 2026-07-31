@@ -29,6 +29,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.resolve()))
 import config as qmd_config
+import cooldown as qmd_cooldown
 
 VERDICT_VALUES = {"duplicate", "distinct", "unclear"}
 
@@ -101,11 +102,14 @@ def engine_cooldown_path(root: Path) -> Path:
 
 
 def cooldown_active(root: Path) -> bool:
+    """판정은 `cooldown.expiry_active`가 SSOT다(compile cooldown과 같은 규칙).
+    `now < float(파일내용)`만 보면 오염된 만료값 하나로 **판정이 영구 정지**한다 —
+    전역 식힘이 후보 소진의 종점이므로 그 정지에는 복구 경로가 없다."""
     try:
-        expiry = float(cooldown_path(root).read_text(encoding="utf-8").strip())
-    except (OSError, ValueError):
+        raw = cooldown_path(root).read_text(encoding="utf-8").strip()
+    except OSError:
         return False
-    return datetime.now(timezone.utc).timestamp() < expiry
+    return qmd_cooldown.expiry_active(raw, datetime.now(timezone.utc).timestamp())
 
 
 def set_cooldown(root: Path, seconds: int) -> bool:
@@ -114,7 +118,9 @@ def set_cooldown(root: Path, seconds: int) -> bool:
     path = cooldown_path(root)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(f"{datetime.now(timezone.utc).timestamp() + max(0, seconds)}\n", encoding="utf-8")
+        # 쓰기도 읽기와 같은 상한으로 클램프한다(`cooldown.expiry_value`).
+        expiry = qmd_cooldown.expiry_value(datetime.now(timezone.utc).timestamp(), seconds)
+        path.write_text(f"{expiry}\n", encoding="utf-8")
         return True
     except OSError:
         return False
