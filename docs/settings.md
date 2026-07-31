@@ -1015,7 +1015,7 @@ embed 서브셸 안에 두지 않습니다). 카드 mtime 스냅샷을 쓰지 �
 | `compile.semanticDedup.similarPageMaxChars` | `12000` | extractor에 함께 넘길 유사 page content 최대 길이입니다. |
 | `compile.semanticDedup.autoMergeThreshold` | `0.9` | 자동 dedup scan에서 merge 후보로 볼 기준입니다. |
 | `compile.semanticDedup.maxPairsPerScan` | `10` | 한 번의 scan에서 queueing할 최대 pair 수입니다. |
-| `compile.semanticDedup.judge.crossEngine` | `"prefer"` | 중복 판정 엔진을 **신규 후보를 만든** 엔진과 분리합니다. 값 집합은 `compile.verify.crossEngine`과 같습니다. `prefer`는 다른 엔진을 먼저 시도하고 없으면 생산 엔진으로 폴백합니다(`judgedMode: self`). `require`는 생산 엔진을 후보에서 제외하며 다른 엔진이 없으면 판정하지 않고 레거시 score 게이트로 degrade합니다(즉 `targetPath`가 명시된 후보는 dedup을 받지 않습니다 — 명시 선택만 권합니다). `off`는 0.x 동작입니다. |
+| `compile.semanticDedup.judge.crossEngine` | `"prefer"` | 중복 판정 엔진을 **신규 후보를 만든** 엔진과 분리합니다. 값 집합은 `compile.verify.crossEngine`과 같습니다. `prefer`는 다른 엔진을 먼저 시도하고 없으면 생산 엔진으로 폴백합니다(`judgedMode: self`). `require`는 생산 엔진을 후보에서 제외하며 다른 엔진이 없으면 판정하지 않고 레거시 score 게이트로 degrade합니다(즉 `targetPath`가 명시된 후보는 dedup을 받지 않습니다 — 명시 선택만 권합니다). `off`는 0.x 동작입니다. **이 설정은 write-time gate에만 적용됩니다** — retroactive scan에는 생산 엔진이라는 사실이 없어 `require`를 적용하지 않습니다(아래 참조). |
 
 #### 판정 엔진 분리 (dedup)
 
@@ -1027,6 +1027,16 @@ embed 서브셸 안에 두지 않습니다). 카드 mtime 스냅샷을 쓰지 �
 중립이 아니어서 교차라는 개념 자체가 성립하지 않습니다. 이 경로는 예전 선택(host engine →
 풀의 첫 후보)을 그대로 쓰고 판정 행에 `judgedMode: unknown`을 남깁니다.
 
+**그래서 `require`는 retroactive scan에 적용되지 않습니다.** `require`는 "생성 엔진이 **아닌**
+엔진이 판정한다"는 약속인데 그 경로에는 약속의 주체가 존재하지 않으므로 **어떤 설정으로도 만족될
+수 없는 조건**입니다. 여기에 fail-closed를 걸면 지켜지는 것 없이 그 경로의 판정만 사라집니다
+(judge를 "없음"으로 선판정 → retrieval floor가 `autoMergeThreshold`로 올라가 사실상 아무것도
+queueing되지 않음 = judge가 대체하려고 만들어진 무료 score 게이트로 회귀). 적용되지 않은 사실은
+`~/.cache/qmd/dedup.log`의 scan 요약 줄에 `crossEngine=require:waived_unattributable_path`로
+남습니다(쌍이 하나도 판정되지 않은 scan에서도 남습니다). write-time gate는 그대로 fail-closed입니다
+— 거기서는 생산 엔진이 큐 잡의 사실이라 `require`가 만족될 수 있고, 못 지킬 때의 종점도 레거시
+score 게이트로 존재합니다.
+
 **호출 수는 늘지 않습니다.** judge는 쌍당 1회이고 엔진만 바뀝니다. 후보 사이를 넘어가는 조건은
 **exit 127(host CLI 부재, 토큰 0)뿐**이며, 실제로 실행된 첫 후보가 순회를 끝냅니다.
 
@@ -1036,6 +1046,22 @@ embed 서브셸 안에 두지 않습니다). 카드 mtime 스냅샷을 쓰지 �
 degrade**하게 합니다. 후보가 소진되면 전역 `dedup-judge-cooldown`으로 judge 전체를 식힙니다
 (0.x 동작). 두 기록이 모두 실패하면 그 사실을 `cooldownWriteFailed`로 표면화합니다 —
 식힘 기록이 degrade의 유일한 메커니즘이므로 조용히 삼키면 판정이 영구 정지합니다.
+
+**그 표면화의 종점은 두 곳입니다.** scan은 `~/.cache/qmd/dedup.log`에 `JUDGE pair=… outcome=…
+reason=… engine=… engineCooldown=… cooldownWriteFailed=…` 줄을, write-time은
+`candidates.jsonl` 행의 `judge` 필드에 같은 값을 남깁니다(어느 쪽도 정상 판정에는 아무것도 쓰지
+않으므로 기존 행 모양은 그대로입니다). 이 종점이 없던 동안 요약 줄의 `judged=1 queued=0`만 남아
+"judge가 유료로 실패했다"와 "judge가 unclear로 판정했다"가 구분되지 않았습니다.
+
+**판정 불가 출력은 재과금되지 않습니다.** judge가 유효 verdict를 내지 못한 경우
+(`invalid_verdict` / `invalid_extractor_json` — exit 0 + 쓰레기 stdout)는 timeout과 달리 같은
+입력에서 재현되는 설정·adapter 오류이므로, 남은 후보가 있으면 그 후보만 식혀 **다음 run이 다음
+후보로 degrade**하고, 후보가 소진되면 그 쌍을 `dedup-skipped.jsonl`에 `judgeVerdict: unclear`로
+기록해 **본문이 바뀔 때까지 재판정하지 않습니다**. 모델이 정말 판단하지 못한 진짜 `unclear`도 같은
+성질(같은 본문 = 같은 무응답)이라 같이 억제합니다. `duplicate`는 큐 행 자체가 기록이라 별도
+억제가 없고, transient·식힘·CLI 부재는 **판정이 일어나지 않았으므로** 억제하지 않습니다.
+(verify의 `UNUSABLE_OUTPUT_REASONS`/`defer_or_drop`와 같은 규칙이고 종점의 모양만 다릅니다 —
+verify는 잡을 폐기, dedup은 쌍을 억제.)
 
 판정 기록은 `merge-needed.jsonl`(write-time)과 `dedup-needed.jsonl`·`dedup-skipped.jsonl`
 (scan)에 `judgedBy`(판정 엔진) / `judgedMode`(달성된 관계) / `producedBy`(생산 엔진,

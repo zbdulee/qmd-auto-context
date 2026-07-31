@@ -43,6 +43,27 @@ OUTCOME_OK = "ok"
 OUTCOME_UNAVAILABLE = "unavailable"
 OUTCOME_TRANSIENT = "transient"
 
+# 유료 호출은 났는데 **쓸 수 있는 출력이 아니었던** 사유. `wiki_verify_worker`의 동명 집합과
+# 같은 의미이고 같은 처방을 받는다(`_unusable_output` ↔ verify `defer_or_drop`): 같은 입력에서
+# 재현되는 설정·adapter 오류라, 남은 후보가 있으면 degrade하고 후보가 소진되면 **종점**을 만든다.
+# timeout·실행 실패는 여기 들어가지 않는다(진짜 transient라 종점 없이 항상 보존).
+UNUSABLE_OUTPUT_REASONS = {"invalid_extractor_json", "invalid_verdict"}
+
+# 귀속 가능성은 **호출 경로의 성질**이지 이번 호출의 운이 아니다. 이 구분이 없으면
+# `producing=""` 하나가 두 세계를 뭉친다 — (a) write-time인데 이번 카드의 생산 엔진을 못 읽음
+# (사용자가 고친다 = require를 지킬 여지가 있다), (b) retroactive scan(생산자라는 사실이
+# 애초에 존재하지 않는다 = require를 지킬 여지가 영원히 없다).
+ATTRIBUTION_JOB = "job"    # 생산 엔진이 큐 잡에서 온 사실 (write-time gate)
+ATTRIBUTION_NONE = "none"  # 카드 두 장, 둘째 생산자 미기록 (retroactive scan)
+
+# `diagnostics()`가 남기는 필드. 값이 있는 것만 나간다.
+DIAGNOSTIC_KEYS = (
+    "outcome", "reason", "engine", "mode", "producedBy", "crossEngine", "crossEngineWaived",
+    "enginesAttempted", "enginesCooling", "engineCooldown", "cooldownWriteFailed", "unusableOutput",
+)
+# degrade·차단이 실제로 일어났다는 신호. 이게 있으면 판정이 성공했어도 보고한다.
+_NOTABLE_KEYS = ("crossEngineWaived", "engineCooldown", "cooldownWriteFailed", "unusableOutput")
+
 DEFAULT_MAX_CHARS = 6000
 DEFAULT_TIMEOUT = 120
 DEFAULT_COOLDOWN_SECONDS = 600
@@ -82,6 +103,46 @@ def _int(value, fallback: int) -> int:
 def cross_engine_mode(compile_cfg: dict) -> str:
     mode = judge_cfg_of(compile_cfg).get("crossEngine", "prefer")
     return mode if mode in qmd_config.CROSS_ENGINE_MODES else "prefer"
+
+
+def require_waived(compile_cfg: dict, attribution: str) -> bool:
+    """`crossEngine: "require"`가 이 경로에 **적용되지 않는가**.
+
+    `require`는 "생성 엔진이 **아닌** 엔진이 판정한다"는 약속이다. retroactive scan에는 그
+    약속의 주체가 없다 — 이미 디스크에 있는 카드 두 장을 비교하고 둘째 카드의 생산자는 어디에도
+    기록되지 않는다(라이브 실측: judge가 돈 12쌍 중 양쪽 생산자가 기록된 쌍 0). 즉 **구조적으로
+    만족될 수 없는 조건**이고, 거기에 fail-closed를 걸면 그 경로의 판정이 통째로 사라진다
+    (`is_available`→False → `wiki_dedup_scan`이 retrieval floor를 `autoMergeThreshold`로 올려
+    실질적으로 아무것도 큐하지 않는다 = 이 모듈이 대체하려고 만들어진 그 무료 게이트로 회귀).
+    그래서 이 경로에서는 require를 적용하지 않고 `prefer`와 같은 기존 순서를 쓴다.
+
+    **조용히 넘기지 않는다**: 이 함수가 규칙의 한 곳이고, `judge_pair`가
+    `crossEngineWaived`로, `wiki_dedup_scan`이 로그(요약 줄 + 판정 줄)로 그 사실을 남긴다.
+    write-time gate(`ATTRIBUTION_JOB`)는 그대로 fail-closed다 — 거기서는 생산 엔진이 큐 잡의
+    사실이라 require가 만족될 수 있고, 못 지키는 경우의 종점도 레거시 score 게이트로 존재한다.
+    """
+    return attribution == ATTRIBUTION_NONE and cross_engine_mode(compile_cfg) == "require"
+
+
+def diagnostics(info: dict) -> dict:
+    """판정이 안 나왔거나 degrade가 일어난 사실을 남길 최소 필드(없으면 빈 dict).
+
+    **transient·식힘의 종점이다.** `_back_off`가 돌려주는 `engineCooldown`/
+    `cooldownWriteFailed`를 읽는 소비자가 저장소에 하나도 없던 동안 dedup의 유료 실패는 어디에도
+    기록되지 않아 "판정 실패"와 "unclear 판정"이 사후에 구분되지 않았고, 두 식힘 쓰기가 모두
+    실패하면 write-time이 compile마다 같은 쌍을 재과금하는데 흔적이 0이었다. verify는 같은 사실을
+    `verify-log.jsonl`의 `deferred` 행(+`cooldownWriteFailed`)으로 남긴다 — 같은 처방이다.
+
+    후보를 **하나도 세우지 못한** 상시 상태(`judge_unavailable`/`missing_extractor`)는 degrade가
+    아니라 이 머신의 설정이므로 빈 dict를 돌려준다 — 매 행에 남기면 잡음만 늘고 기존 행 모양이
+    바뀐다.
+    """
+    notable = any(info.get(key) for key in _NOTABLE_KEYS)
+    if info.get("outcome") == OUTCOME_OK and not notable:
+        return {}
+    if not (info.get("enginesAttempted") or info.get("enginesCooling") or notable):
+        return {}
+    return {key: info[key] for key in DIAGNOSTIC_KEYS if info.get(key)}
 
 
 def cooldown_path(root: Path) -> Path:
@@ -146,7 +207,7 @@ def judge_engine_pool(compile_cfg: dict) -> list[str]:
 
 
 def plan_judge_attempts(
-    compile_cfg: dict, producing: str = "", cooled=()
+    compile_cfg: dict, producing: str = "", cooled=(), attribution: str = ATTRIBUTION_JOB
 ) -> tuple[list[dict], str, str]:
     """Ordered judge attempts → ([{engine, argv, mode, key}], crossEngine mode, empty reason).
 
@@ -157,8 +218,15 @@ def plan_judge_attempts(
     `generated-manifest.jsonl`). So only the write-time gate — where the new candidate's
     producer is a fact assigned by the worker from the queue job, never model output —
     can claim anything about self-review, and it is the only path that passes `producing`.
-    The retroactive scan passes nothing, lands in the unattributable branch, and keeps
-    its previous engine order exactly.
+    The retroactive scan passes `attribution=ATTRIBUTION_NONE`, lands in the unattributable
+    branch, and keeps its previous engine order exactly.
+
+    **`attribution` is a different question from `producing`.** An empty `producing` under
+    `ATTRIBUTION_JOB` means "this card's producer could not be read" — a config/install state
+    the user can fix, so `require` still fails CLOSED there (the caller then degrades to its
+    legacy score gate). `ATTRIBUTION_NONE` means no producer exists as a fact on that path at
+    all, so `require` can never be satisfied and gating on it deleted the entire retroactive
+    verdict instead of gating anything. See `require_waived` for the rule and its endpoint.
 
     On top of that, verify reads `compile.verify.*`, labels attempts for `verifiedMode`,
     and maps an unsatisfiable `require` onto "preserve the queued job" — none of which
@@ -170,11 +238,16 @@ def plan_judge_attempts(
     import wiki_compile_worker as wcw
 
     mode = cross_engine_mode(compile_cfg)
+    # 귀속이 **경로 차원에서** 불가능하면 require를 적용하지 않는다(`require_waived` 참조).
+    # 순서는 prefer와 같은 것으로 명시한다 — 지금은 `plan_engine_order`가 두 모드의
+    # unattributable 분기에서 같은 값(`list(pool)`)을 내지만, 그 우연에 의존하지 않는다.
+    enforce_require = mode == "require" and attribution != ATTRIBUTION_NONE
+    order_mode = mode if (mode != "require" or enforce_require) else "prefer"
     cooled = set(cooled)
     legacy = wcw.legacy_extractor_argv(compile_cfg)
     if legacy is not None:
         # 하나의 argv가 모든 엔진을 담당하므로 엔진 귀속이 불가하다 → 교차 주장을 하지 않는다.
-        if mode == "require":
+        if enforce_require:
             return [], mode, "cross_engine_unavailable"
         if wcw.UNATTRIBUTED_KEY in cooled:
             return [], mode, "engines_cooling"
@@ -188,11 +261,11 @@ def plan_judge_attempts(
         producing and producing != qmd_config.UNKNOWN_ENGINE
         and wcw.resolve_extractor_argv(compile_cfg, producing)[0] is not None
     )
-    if mode == "require" and not attributable:
+    if enforce_require and not attributable:
         # 어느 후보도 "생성 엔진과 다르다"를 증명할 수 없다 → 약속을 지킬 수 없으므로 거부.
         return [], mode, "cross_engine_unavailable"
 
-    order = wcw.plan_engine_order(pool, producing, mode, attributable)
+    order = wcw.plan_engine_order(pool, producing, order_mode, attributable)
     attempts: list[dict] = []
     seen_argv: list[list[str]] = []
     skipped_cooling = 0
@@ -201,6 +274,12 @@ def plan_judge_attempts(
     _, default_argv = wcw.resolve_extractor_argv(compile_cfg, "", builtins=[])
     for engine in order:
         primary, _ = wcw.resolve_extractor_argv(compile_cfg, engine)
+        # 두 라벨이 **같은 argv**를 가리키면 뒤 라벨이 탈락하고, 남은 라벨이 교차를 주장한다.
+        # 그대로 둔다(판정 2026-07-31): payload `engine`이 그 argv에 전달되므로 by-engine
+        # dispatch wrapper 에서는 실제로 다른 엔진이 돌고, 같은 스크립트라면 틀리는 것은
+        # provenance 라벨 하나이며 유료 호출 수·안전에는 영향이 없다. 무엇보다 이 argv 중복
+        # 제거는 `plan_verify_attempts`와 **같은 규칙**이다 — 한쪽만 고치면 두 판정 경로가
+        # 갈리고, 공용화한 것이 순서 규칙뿐이라 그 갈림을 잡아 줄 곳이 없다.
         if primary is None or primary in seen_argv:
             continue
         seen_argv.append(primary)
@@ -214,7 +293,7 @@ def plan_judge_attempts(
         else:
             attempt_mode = qmd_config.VERIFIED_MODE_CROSS
         attempts.append({"engine": engine, "argv": primary, "mode": attempt_mode, "key": engine})
-    if default_argv is not None and default_argv not in seen_argv and mode != "require":
+    if default_argv is not None and default_argv not in seen_argv and not enforce_require:
         if wcw.UNATTRIBUTED_KEY in cooled:
             skipped_cooling += 1
         else:
@@ -228,22 +307,27 @@ def plan_judge_attempts(
         return attempts, mode, ""
     if skipped_cooling:
         return [], mode, "engines_cooling"
-    if mode == "require" and attributable:
+    if enforce_require and attributable:
         return [], mode, "cross_engine_unavailable"
     return [], mode, "missing_extractor"
 
 
-def is_available(compile_cfg: dict, engine: str = "") -> bool:
+def is_available(compile_cfg: dict, engine: str = "", attribution: str = ATTRIBUTION_JOB) -> bool:
     """Config-only check that at least one judge candidate resolves.
 
     Callers use it to skip the whole judge path — including the daemon retrieval
     query — on machines with no host CLI configured, so behavior there stays
     byte-identical to the pre-judge code path. Cooldowns are deliberately NOT consulted:
     they are temporal state, and `judge_pair` maps them onto `transient`.
+
+    Callers MUST pass the same `attribution` they will pass to `judge_pair`: this is the
+    gate that decides whether the daemon retrieval query happens at all, so a mismatch
+    would report "no judge" for a path that would in fact have judged (that mismatch is
+    exactly how `require` silenced the retroactive scan).
     """
     if not is_enabled(compile_cfg):
         return False
-    attempts, _, _ = plan_judge_attempts(compile_cfg, engine)
+    attempts, _, _ = plan_judge_attempts(compile_cfg, engine, attribution=attribution)
     return bool(attempts)
 
 
@@ -253,6 +337,7 @@ def judge_pair(
     page_a: dict,
     page_b: dict,
     engine: str = "",
+    attribution: str = ATTRIBUTION_JOB,
 ) -> tuple[str | None, dict]:
     """Ask the host CLI whether two card bodies record the same fact.
 
@@ -268,6 +353,10 @@ def judge_pair(
     **Paid calls stay at exactly one per pair.** The candidate list is walked only while
     `run_extractor` returns 127 (host CLI absent — the binary never ran, so no tokens
     were billed); the first candidate that actually executes ends the walk.
+
+    `attribution` says whether a producing engine exists as a fact on this path at all
+    (`ATTRIBUTION_JOB` for the write-time gate, `ATTRIBUTION_NONE` for the retroactive
+    scan). It gates whether `crossEngine: "require"` applies — see `require_waived`.
     """
     # Lazy import: wiki_compile_worker imports wiki_compile, which imports this
     # module -- a module-level import here would close the cycle.
@@ -279,10 +368,17 @@ def judge_pair(
     jcfg = judge_cfg_of(compile_cfg)
     producing = engine if isinstance(engine, str) else ""
     cooled = wcw.cooling_engines(engine_cooldown_path(root))
-    attempts, mode, empty_reason = plan_judge_attempts(compile_cfg, producing, cooled)
+    attempts, mode, empty_reason = plan_judge_attempts(
+        compile_cfg, producing, cooled, attribution=attribution
+    )
     provenance = {
         "engine": "", "mode": qmd_config.VERIFIED_MODE_UNKNOWN, "producedBy": producing,
+        # `crossEngine`은 **설정된 값**이다. 그 값이 이 경로에 적용되지 않았다면 그 사실을
+        # 별도 필드로 남긴다 — 설정을 조용히 다른 값으로 보고하면(`off`) 무엇이 설정이고 무엇이
+        # 코드 판단인지 사후에 구분할 수 없다.
         "crossEngine": mode, "enginesAttempted": [], "enginesCooling": sorted(cooled),
+        **({"crossEngineWaived": "unattributable_path"}
+           if require_waived(compile_cfg, attribution) else {}),
     }
     if not attempts:
         # 분류 경계: 식힘은 **시간**의 함수라 transient(작업 보존), 나머지(설정 없음,
@@ -324,17 +420,18 @@ def judge_pair(
     if returncode == 127:
         # 후보 전원 CLI 부재: 이 머신에서는 어떤 judge도 답하지 않는다(과금 0).
         return None, {**provenance, "outcome": OUTCOME_UNAVAILABLE, "reason": "cli_absent"}
-    if reason:
-        if reason != "invalid_extractor_json":
-            return None, {
-                **provenance, "outcome": OUTCOME_TRANSIENT, "reason": reason,
-                **_back_off(root, jcfg, attempt["key"], has_more),
-            }
-        return "unclear", {**provenance, "outcome": OUTCOME_OK, "verdict": "unclear", "reason": reason}
+    if reason and reason not in UNUSABLE_OUTPUT_REASONS:
+        # timeout·실행 실패 = 진짜 transient(부하·네트워크·일시적 CLI 상태). 판정이 없었으므로
+        # 종점 없이 항상 작업을 보존한다 — verify가 같은 사유를 항상 보존하는 것과 같다.
+        return None, {
+            **provenance, "outcome": OUTCOME_TRANSIENT, "reason": reason,
+            **_back_off(root, jcfg, attempt["key"], has_more),
+        }
 
     verdict = parsed.get("verdict") if isinstance(parsed, dict) else None
-    if verdict not in VERDICT_VALUES:
-        return "unclear", {**provenance, "outcome": OUTCOME_OK, "verdict": "unclear", "reason": "invalid_verdict"}
+    unusable = reason or ("" if verdict in VERDICT_VALUES else "invalid_verdict")
+    if unusable:
+        return _unusable_output(root, jcfg, provenance, attempt, has_more, unusable)
 
     def strings(key: str) -> list[str]:
         raw = parsed.get(key)
@@ -347,6 +444,37 @@ def judge_pair(
         "reason": str(parsed.get("reason") or "")[:500],
         "uniqueToA": strings("uniqueToA"),
         "uniqueToB": strings("uniqueToB"),
+    }
+
+
+def _unusable_output(
+    root: Path, jcfg: dict, provenance: dict, attempt: dict, has_more: bool, reason: str
+) -> tuple[str | None, dict]:
+    """유료 호출을 소진했는데 **쓸 수 있는 출력이 아니었던** 경우. verify `defer_or_drop`와
+    같은 처방이고 갈리는 것은 종점의 모양뿐이다(verify는 잡을 폐기, dedup은 쌍을 억제).
+
+    `invalid_extractor_json`/`invalid_verdict`는 timeout과 달리 **같은 입력에서 재현되는**
+    설정·adapter 오류다. 그래서:
+      - 남은 후보가 있으면 그 후보만 식히고 `transient`로 돌려 작업을 보존한다 → 다음 run이
+        **다음 후보로 degrade**한다(그 후보가 정상이면 판정을 얻는다).
+      - 후보가 소진되면 **종점을 만든다**: `unclear`를 유효 판정(`OUTCOME_OK`)으로 돌려
+        호출자가 억제 마커를 남기게 한다. 이것이 없던 동안 같은 쌍이 매 scan 재판정됐고
+        (`dedup-skipped.jsonl`은 `distinct`만 기록했다) 매 반복이 사용자 계정 과금이었다 —
+        이 저장소가 verify 원장으로 반복해서 닫아 온 클래스다.
+
+    후보 소진 경로에서도 `_back_off`를 호출해 전역 식힘을 건다. 쓰레기를 내는 adapter는 다음
+    쌍에도 같은 출력을 내므로, 식히지 않으면 그 한 번의 오설정이 이번 scan의 `maxPairsPerScan`
+    예산을 전부 태운다(쌍 억제는 **같은** 쌍의 재과금만 막는다).
+    """
+    if has_more:
+        return None, {
+            **provenance, "outcome": OUTCOME_TRANSIENT, "reason": reason, "unusableOutput": True,
+            **_back_off(root, jcfg, attempt["key"], True),
+        }
+    return "unclear", {
+        **provenance, "outcome": OUTCOME_OK, "verdict": "unclear", "reason": reason,
+        "unusableOutput": True,
+        **_back_off(root, jcfg, attempt["key"], False),
     }
 
 

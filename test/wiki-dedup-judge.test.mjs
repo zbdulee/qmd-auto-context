@@ -921,3 +921,311 @@ test('retroactive scan: 억제 원장에 쓸 수 없으면 judge 를 부르지 �
     rmSync(work, { recursive: true, force: true });
   }
 });
+
+// ========================================================== 적대적 리뷰 major 3건 (2026-07-31)
+
+// MAJOR 1 — `crossEngine:"require"` 가 retroactive scan 의 판정을 통째로 죽였다.
+//
+// `require` 는 "생성 엔진이 **아닌** 엔진이 판정한다"는 약속인데 scan 경로에는 생성 엔진이라는
+// 사실이 존재하지 않는다(카드 두 장, 둘째 생산자 미기록 — 실측 12쌍 중 0쌍). 즉 **절대 만족될 수
+// 없는 조건에 fail-closed** 가 걸려 있었다: producing="" → attributable=False →
+// `cross_engine_unavailable` → `is_available` False → scan 의 `judging=False` → retrieval floor 가
+// `autoMergeThreshold`(0.9)로 올라가 사실상 아무것도 큐되지 않는다. 이 커밋 자신의 docstring 과
+// docs/settings.md 는 "scan 은 확장하지 않고 예전 선택을 그대로 쓴다"고 서술해 그 상실을 부정했다.
+test('MAJOR 1 — scan 은 crossEngine:require 로 게이팅되지 않는다(귀속 불가 경로) + 그 사실이 로그에 남는다', () => {
+  const work = repoTemp('judge-require-scan');
+  const tracker = trackerFile('require-scan');
+  try {
+    writeScanSettings(work, { candidateMinScore: 0.3, judge: { crossEngine: 'require' } }, {
+      extractor: {
+        dispatch: 'by-engine',
+        timeout: 30,
+        backends: {
+          claude: engineJudgeStub('claude', 'duplicate', tracker),
+          codex: engineJudgeStub('codex', 'duplicate', tracker),
+        },
+      },
+    });
+    writePage(work, 'entities/page-a.md', 'The stalker asked for CCTV footage at the front desk.');
+    writePage(work, 'entities/page-b.md', 'A restatement of the very same front desk CCTV request.');
+    const fixture = join(work, 'fixture.json');
+    writeFileSync(fixture, JSON.stringify({ results: [{ file: 'proj-wiki/entities/page-b.md', score: 0.56 }] }));
+
+    const dirs = runScan(work, { QMD_QUERY_FIXTURE: fixture });
+
+    // 0.56 은 레거시 임계(0.9) 아래다 — 큐에 들어왔다는 것은 judge 가 실제로 판정했다는 뜻이다.
+    assert.deepEqual(judgedByEngines(tracker), ['claude'], 'require 는 이 경로에 적용되지 않으므로 예전 순서 그대로');
+    const queued = scanQueue(work);
+    assert.equal(queued.length, 1, `require 가 판정을 죽이면 안 된다: ${JSON.stringify(queued)}`);
+    assert.equal(queued[0].judgeVerdict, 'duplicate');
+    assert.equal(queued[0].judgedMode, 'unknown', '귀속 불가이므로 교차를 주장하지 않는다');
+    // **종점**: 왜 require 가 적용되지 않았는지 로그에서 알 수 있어야 한다(차단에 종점 없음 금지).
+    assert.match(readFileSync(dirs.logFile, 'utf8'), /crossEngine=require:waived_unattributable_path/);
+  } finally { removeTemp(work); }
+});
+
+test('MAJOR 1 — 귀속 가능성은 경로의 성질이다: scan 은 waive, write-time 은 그대로 fail-closed', () => {
+  const py = `import json,sys; sys.path.insert(0,'core'); import wiki_dedup_judge as j
+cfg = {'extractor': {'dispatch': 'by-engine', 'backends': {'claude': ['/x/claude'], 'codex': ['/x/codex']}, 'default': []},
+       'semanticDedup': {'judge': {'crossEngine': 'require'}}}
+out = {}
+# retroactive scan: 생산자라는 사실이 존재하지 않는다 → require 미적용, prefer 와 같은 순서.
+a, mode, reason = j.plan_judge_attempts(cfg, '', attribution=j.ATTRIBUTION_NONE)
+out['scan'] = [[x['engine'] for x in a], mode, reason]
+out['scan_modes'] = [x['mode'] for x in a]
+out['scan_available'] = j.is_available(cfg, attribution=j.ATTRIBUTION_NONE)
+out['scan_waived'] = j.require_waived(cfg, j.ATTRIBUTION_NONE)
+# write-time 인데 이번 카드의 생산자를 못 읽음 → 사용자가 고칠 수 있는 상태라 fail-closed 유지.
+b, bmode, breason = j.plan_judge_attempts(cfg, '', attribution=j.ATTRIBUTION_JOB)
+out['job_unknown_producer'] = [[x['engine'] for x in b], bmode, breason]
+out['job_waived'] = j.require_waived(cfg, j.ATTRIBUTION_JOB)
+# write-time + 귀속 가능 → 교차가 실제로 강제된다(생산 엔진 제외).
+c, _, _ = j.plan_judge_attempts(cfg, 'claude', attribution=j.ATTRIBUTION_JOB)
+out['job_attributed'] = [[x['engine'] for x in c], [x['mode'] for x in c]]
+# 기본값은 write-time 이다 — 새 호출자가 실수로 waive 하지 않는다.
+d, _, dreason = j.plan_judge_attempts(cfg, '')
+out['default_reason'] = dreason
+print(json.dumps(out))`;
+  const out = JSON.parse(runLib(py));
+  assert.deepEqual(out.scan, [['claude', 'codex'], 'require', ''], 'scan 은 후보를 잃지 않는다');
+  assert.deepEqual(out.scan_modes, ['unknown', 'unknown']);
+  assert.equal(out.scan_available, true, 'is_available 도 같은 판정을 써야 한다');
+  assert.equal(out.scan_waived, true);
+  assert.deepEqual(out.job_unknown_producer, [[], 'require', 'cross_engine_unavailable']);
+  assert.equal(out.job_waived, false);
+  assert.deepEqual(out.job_attributed, [['codex'], ['cross-engine']]);
+  assert.equal(out.default_reason, 'cross_engine_unavailable', '기본 attribution 은 JOB');
+});
+
+// MAJOR 2 — 판정 불가 출력이 억제 기록 없이 매 scan 재과금됐다.
+//
+// judge 는 `invalid_extractor_json`/`invalid_verdict` 를 `unclear`+OK 로 돌리는데 scan 은
+// `distinct` 만 `dedup-skipped.jsonl` 에 기록했다 → 마커가 없어 같은 쌍이 매 scan 재판정 = 재과금.
+// verify 는 같은 클래스를 `UNUSABLE_OUTPUT_REASONS`+`defer_or_drop` 로 이미 막았다(남은 후보가
+// 있으면 degrade, 소진되면 종점). 대칭으로 만든다.
+test('MAJOR 2 — 쓸 수 없는 출력(invalid_verdict)은 억제되어 2회차 scan 이 유료 호출을 하지 않는다', () => {
+  const work = repoTemp('judge-unusable-suppressed');
+  const tracker = trackerFile('unusable');
+  try {
+    // 후보가 소진된 판정 불가는 전역 식힘도 함께 건다. 2회차를 막은 것이 그 식힘이 아니라
+    // **쌍 억제**임을 분리해서 보려면 식힘이 먼저 만료돼야 한다(`coerce_int`가 0을 거부하므로
+    // 최소값 1초 + sleep). 이 분리가 없으면 이 테스트는 억제가 아니라 식힘을 검증한다.
+    writeScanSettings(work, { candidateMinScore: 0.3, judge: { cooldownSeconds: 1 } }, {
+      extractor: {
+        dispatch: 'by-engine',
+        timeout: 30,
+        backends: { claude: engineJudgeStub('claude', 'maybe', tracker) }, // 스키마 밖 verdict
+      },
+    });
+    writePage(work, 'entities/page-a.md', 'Content about the front desk.');
+    writePage(work, 'entities/page-b.md', 'Content about a different corridor entirely.');
+    const fixture = join(work, 'fixture.json');
+    writeFileSync(fixture, JSON.stringify({ results: [{ file: 'proj-wiki/entities/page-b.md', score: 0.56 }] }));
+
+    const dirs = runScan(work, { QMD_QUERY_FIXTURE: fixture });
+    assert.equal(judgedByEngines(tracker).length, 1, '쌍당 유료 호출 1회');
+    const skipped = scanSkipped(work);
+    assert.equal(skipped.length, 1, `억제 마커가 없으면 다음 scan 이 재과금한다: ${JSON.stringify(skipped)}`);
+    assert.equal(skipped[0].judgeVerdict, 'unclear', '실제 판정값을 기록한다(distinct 로 위장하지 않는다)');
+    assert.equal(skipped[0].judgeReason, 'invalid_verdict');
+    assert.ok(skipped[0].pageAHash && skipped[0].pageBHash, 'body hash 가 억제의 키다');
+    assert.deepEqual(scanQueue(work), []);
+    assert.match(readFileSync(dirs.logFile, 'utf8'), /unusableOutput=True/, '판정 불가 사실이 남아야 한다');
+
+    // 2회차: 본문이 그대로면 유료 호출이 0회여야 한다.
+    clearCooldown(dirs);
+    execFileSync('sleep', ['1.3']); // 전역 식힘 만료 대기 — 억제만 남긴다
+    assert.ok(Number(readFileSync(globalCooldown(work), 'utf8')) < Date.now() / 1000,
+      '전역 식힘이 아직 유효하면 이 테스트는 억제를 검증하지 못한다');
+    writePage(work, 'entities/page-a.md', 'Content about the front desk.'); // mtime 만 갱신
+    runScan(work, {
+      QMD_QUERY_FIXTURE: fixture,
+      QMD_DEDUP_COOLDOWN_DIR: dirs.cooldownDir,
+      QMD_SYNC_STATE_DIR: dirs.stateDir,
+      QMD_DEDUP_LOG: dirs.logFile,
+    });
+    assert.equal(judgedByEngines(tracker).length, 1, '2회차 scan 의 유료 호출은 0회여야 한다');
+    assert.equal(scanSkipped(work).length, 1, '재판정이 없으므로 새 마커도 없다');
+  } finally { removeTemp(work); }
+});
+
+test('MAJOR 2 — 진짜 unclear 판정도 같은 성질이라 함께 억제한다(같은 본문 = 같은 무응답)', () => {
+  const work = repoTemp('judge-unclear-suppressed');
+  const tracker = trackerFile('unclear');
+  try {
+    writeScanSettings(work, { candidateMinScore: 0.3 }, {
+      extractor: {
+        dispatch: 'by-engine',
+        timeout: 30,
+        backends: { claude: engineJudgeStub('claude', 'unclear', tracker) },
+      },
+    });
+    writePage(work, 'entities/page-a.md', 'Content about the front desk.');
+    writePage(work, 'entities/page-b.md', 'Content about a different corridor entirely.');
+    const fixture = join(work, 'fixture.json');
+    writeFileSync(fixture, JSON.stringify({ results: [{ file: 'proj-wiki/entities/page-b.md', score: 0.56 }] }));
+
+    const dirs = runScan(work, { QMD_QUERY_FIXTURE: fixture });
+    assert.equal(judgedByEngines(tracker).length, 1);
+    assert.equal(scanSkipped(work)[0].judgeVerdict, 'unclear');
+    assert.deepEqual(scanQueue(work), [], 'unclear 는 중복이 아니므로 큐하지 않는다');
+
+    clearCooldown(dirs);
+    writePage(work, 'entities/page-a.md', 'Content about the front desk.');
+    runScan(work, {
+      QMD_QUERY_FIXTURE: fixture,
+      QMD_DEDUP_COOLDOWN_DIR: dirs.cooldownDir,
+      QMD_SYNC_STATE_DIR: dirs.stateDir,
+      QMD_DEDUP_LOG: dirs.logFile,
+    });
+    assert.equal(judgedByEngines(tracker).length, 1, '같은 본문을 다시 물어보면 같은 무응답 = 순수 낭비');
+
+    // 본문이 바뀌면 재무장한다(영구 억제가 아니다).
+    clearCooldown(dirs);
+    writePage(work, 'entities/page-a.md', 'A completely rewritten body about the front desk incident.');
+    runScan(work, {
+      QMD_QUERY_FIXTURE: fixture,
+      QMD_DEDUP_COOLDOWN_DIR: dirs.cooldownDir,
+      QMD_SYNC_STATE_DIR: dirs.stateDir,
+      QMD_DEDUP_LOG: dirs.logFile,
+    });
+    assert.equal(judgedByEngines(tracker).length, 2, '본문 변경은 억제를 해제한다');
+  } finally { removeTemp(work); }
+});
+
+test('MAJOR 2 — 남은 후보가 있으면 폐기가 아니라 degrade 다(verify defer_or_drop 와 대칭)', () => {
+  const work = repoTemp('judge-unusable-degrade');
+  const tracker = trackerFile('degrade');
+  try {
+    writeScanSettings(work, { candidateMinScore: 0.3 }, {
+      extractor: {
+        dispatch: 'by-engine',
+        timeout: 30,
+        backends: {
+          claude: engineJudgeStub('claude', 'maybe', tracker),      // 첫 후보: 쓸 수 없는 출력
+          codex: engineJudgeStub('codex', 'duplicate', tracker),    // 다음 후보: 정상
+        },
+      },
+    });
+    writePage(work, 'entities/page-a.md', 'The stalker asked for CCTV footage at the front desk.');
+    writePage(work, 'entities/page-b.md', 'A restatement of the very same front desk CCTV request.');
+    const fixture = join(work, 'fixture.json');
+    writeFileSync(fixture, JSON.stringify({ results: [{ file: 'proj-wiki/entities/page-b.md', score: 0.56 }] }));
+
+    const dirs = runScan(work, { QMD_QUERY_FIXTURE: fixture });
+    assert.deepEqual(judgedByEngines(tracker), ['claude'],
+      'run 당 유료 호출 1회 — 같은 run 에서 다음 엔진을 부르지 않는다');
+    assert.deepEqual(scanSkipped(work), [], '후보가 남아 있으면 억제하지 않는다(다음 후보가 판정할 수 있다)');
+    assert.match(readFileSync(engineCooldown(work), 'utf8'), /claude/, '실패한 후보만 식힌다');
+
+    // 다음 run: 식힌 후보를 건너뛰고 codex 가 판정한다.
+    clearCooldown(dirs);
+    runScan(work, {
+      QMD_QUERY_FIXTURE: fixture,
+      QMD_DEDUP_COOLDOWN_DIR: dirs.cooldownDir,
+      QMD_SYNC_STATE_DIR: dirs.stateDir,
+      QMD_DEDUP_LOG: dirs.logFile,
+    });
+    assert.deepEqual(judgedByEngines(tracker), ['claude', 'codex'], '다음 run 이 다음 후보로 degrade');
+    assert.equal(scanQueue(work).length, 1, 'degrade 후 실제 판정을 얻는다');
+  } finally { removeTemp(work); }
+});
+
+// MAJOR 3 — dedup 의 transient·식힘이 어디에도 기록되지 않았다(종점 부재 + 거짓 문서).
+//
+// `_back_off` 의 `engineCooldown`/`cooldownWriteFailed` 를 읽는 소비자가 저장소 전체에 없었고
+// (`wiki_dedup_scan`·`wiki_compile` 은 verdict 있는 행만 기록) 요약 줄은 `judged=1 queued=0` 뿐이라
+// "판정 실패"와 "unclear 판정"이 구분 불가였다. verify 는 `wiki_verify_worker.defer_or_drop` 에서
+// 실제로 로그에 쓴다 — 같은 처방.
+test('MAJOR 3 — scan: 유료 실패(exit 3)의 사유·엔진·식힘이 로그에 남는다', () => {
+  const work = repoTemp('judge-transient-logged');
+  const tracker = trackerFile('transient-log');
+  try {
+    writeScanSettings(work, { candidateMinScore: 0.3 }, {
+      extractor: {
+        dispatch: 'by-engine',
+        timeout: 30,
+        backends: { claude: engineJudgeStub('claude', 'duplicate', tracker, { exitCode: 3 }) },
+      },
+    });
+    writePage(work, 'entities/page-a.md', 'Body A about the front desk.');
+    writePage(work, 'entities/page-b.md', 'Body B about the front desk.');
+    const fixture = join(work, 'fixture.json');
+    writeFileSync(fixture, JSON.stringify({ results: [{ file: 'proj-wiki/entities/page-b.md', score: 0.56 }] }));
+
+    const dirs = runScan(work, { QMD_QUERY_FIXTURE: fixture });
+    const logText = readFileSync(dirs.logFile, 'utf8');
+
+    assert.equal(judgedByEngines(tracker).length, 1);
+    assert.match(logText, /JUDGE pair=entities\/page-a\.md\|entities\/page-b\.md/);
+    assert.match(logText, /outcome=transient/, '"판정 실패"가 "unclear 판정"과 구분되어야 한다');
+    assert.match(logText, /engine=claude/);
+    assert.match(logText, /reason=\S+/, '사유 없는 실패는 진단할 수 없다');
+    // 후보가 하나뿐이므로 종점은 전역 식힘이다(그 사실도 관측 가능해야 한다).
+    assert.equal(existsSync(globalCooldown(work)), true);
+    assert.deepEqual(scanQueue(work), []);
+    assert.deepEqual(scanSkipped(work), [], 'transient 는 판정이 아니므로 억제하지 않는다');
+  } finally { removeTemp(work); }
+});
+
+test('MAJOR 3 — 식힘 쓰기가 전부 실패하면 cooldownWriteFailed 가 표면화된다(scan)', () => {
+  const work = repoTemp('judge-cooldown-write-failed');
+  const tracker = trackerFile('cooldown-fail');
+  try {
+    writeScanSettings(work, { candidateMinScore: 0.3 }, {
+      extractor: {
+        dispatch: 'by-engine',
+        timeout: 30,
+        backends: { claude: engineJudgeStub('claude', 'duplicate', tracker, { exitCode: 3 }) },
+      },
+    });
+    writePage(work, 'entities/page-a.md', 'Body A about the front desk.');
+    writePage(work, 'entities/page-b.md', 'Body B about the front desk.');
+    // 전역 식힘 경로를 **디렉터리**로 만들어 쓰기 불가 상태를 만든다(실측된 실패 모드).
+    mkdirSync(globalCooldown(work), { recursive: true });
+    const fixture = join(work, 'fixture.json');
+    writeFileSync(fixture, JSON.stringify({ results: [{ file: 'proj-wiki/entities/page-b.md', score: 0.56 }] }));
+
+    const dirs = runScan(work, { QMD_QUERY_FIXTURE: fixture });
+    assert.match(readFileSync(dirs.logFile, 'utf8'), /cooldownWriteFailed=True/,
+      '조용히 삼키면 다음 run 이 같은 후보를 다시 유료로 부르는데 흔적이 0이다');
+  } finally { removeTemp(work); }
+});
+
+test('MAJOR 3 — write-time: 유료 실패가 candidates.jsonl 의 judge 진단에 남는다', () => {
+  const work = repoTemp('judge-writetime-diag');
+  const tracker = trackerFile('writetime-diag');
+  try {
+    crossEngineSettings(work, { claude: engineJudgeStub('claude', 'duplicate', tracker, { exitCode: 3 }) });
+    writeExistingCard(work, 'entities/existing.md');
+    mkdirSync(join(work, '.auto-context', 'compile'), { recursive: true });
+    // 후보가 하나뿐 → 종점은 전역 식힘이고, 그 경로를 디렉터리로 막아 두 쓰기를 모두 실패시킨다.
+    mkdirSync(globalCooldown(work), { recursive: true });
+    const fixture = fixtureFor(work, [{ file: 'proj-wiki/entities/existing.md', score: 0.56 }]);
+
+    const out = runCrossCompile(work, fixture, 'Candidate judged while the only CLI fails');
+    assert.equal(out.action, 'created', '판정이 없었으므로 score 게이트로 degrade');
+
+    const candidates = jsonl(join(work, '.auto-context/compile/candidates.jsonl'));
+    const diag = candidates.at(-1).judge;
+    assert.ok(diag, 'judge 진단이 없으면 compile 마다 재과금하는데 흔적이 0이다');
+    assert.equal(diag.outcome, 'transient');
+    assert.equal(diag.engine, 'claude');
+    assert.equal(diag.cooldownWriteFailed, true);
+    assert.deepEqual(diag.enginesAttempted, ['claude']);
+  } finally { removeTemp(work); }
+});
+
+test('정상 판정에는 judge 진단을 남기지 않는다(기존 행 모양 불변)', () => {
+  const work = repoTemp('judge-diag-quiet');
+  const tracker = trackerFile('diag-quiet');
+  try {
+    crossEngineSettings(work, { claude: engineJudgeStub('claude', 'distinct', tracker) });
+    writeExistingCard(work, 'entities/existing.md');
+    const fixture = fixtureFor(work, [{ file: 'proj-wiki/entities/existing.md', score: 0.56 }]);
+
+    runCrossCompile(work, fixture, 'A genuinely different fact');
+    const candidates = jsonl(join(work, '.auto-context/compile/candidates.jsonl'));
+    assert.equal('judge' in candidates.at(-1), false, '보고할 것이 없으면 필드를 만들지 않는다');
+  } finally { removeTemp(work); }
+});
