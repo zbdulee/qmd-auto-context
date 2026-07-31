@@ -165,6 +165,10 @@ DEFAULT_CONFIG = {
             "candidateMinScore": 0.3,
             "judge": {
                 "enabled": True,
+                # 중복 판정 엔진을 **신규 후보를 만든** 엔진과 분리한다(CROSS_ENGINE_MODES).
+                # 기존 카드 두 장을 비교하는 retroactive scan은 생산자를 모르므로 이 값과
+                # 무관하게 예전 순서(host engine → 풀)를 그대로 쓴다.
+                "crossEngine": "prefer",
                 "timeout": 120,
                 "cooldownSeconds": 600,
                 "maxPairsPerScan": 8,
@@ -232,6 +236,11 @@ VERIFY_ON_FAIL = {"delete", "contested", "none"}
 #             wiki가 통째로 사라지므로 명시 선택만 허용한다)
 #   off     — 0.x 동작(카드를 만든 엔진으로 검증)
 VERIFY_CROSS_ENGINE = {"prefer", "require", "off"}
+# dedup judge(`compile.semanticDedup.judge.crossEngine`)가 **같은 어휘**를 쓴다. 값 집합을
+# 따로 두면 두 파이프라인의 정책 이름이 갈려 사용자가 한쪽만 끄게 된다. 뜻도 같다 —
+# 다만 dedup에서 `require`가 만족되지 않으면 잡 보존이 아니라 `unavailable`(레거시 score
+# 게이트로 degrade)이다: 판정 대상이 큐가 아니라 지금 쓰려는 카드이므로 보류할 자리가 없다.
+CROSS_ENGINE_MODES = VERIFY_CROSS_ENGINE
 # 카드 frontmatter `verifiedMode` = 검수 엔진과 생성 엔진의 관계. 값 집합은 코드가 정하고
 # 모델 입력이 아니다. 이 필드가 **없는** 카드는 4단계 이전에 검수된 카드로, 자기검증일
 # 가능성이 높다(실측 655/688) — 없음은 cross-engine을 뜻하지 않는다.
@@ -564,6 +573,7 @@ def compile_config(value):
         "candidateMinScore": coerce_float(semantic.get("candidateMinScore", default_semantic["candidateMinScore"]), default_semantic["candidateMinScore"]),
         "judge": {
             "enabled": judge.get("enabled") if isinstance(judge.get("enabled"), bool) else default_judge.get("enabled", True),
+            "crossEngine": judge.get("crossEngine") if judge.get("crossEngine") in CROSS_ENGINE_MODES else default_judge.get("crossEngine", "prefer"),
             "timeout": coerce_int(judge.get("timeout", default_judge.get("timeout", 120)), default_judge.get("timeout", 120)),
             "cooldownSeconds": coerce_int(judge.get("cooldownSeconds", default_judge.get("cooldownSeconds", 600)), default_judge.get("cooldownSeconds", 600)),
             "maxPairsPerScan": coerce_int(judge.get("maxPairsPerScan", default_judge.get("maxPairsPerScan", 8)), default_judge.get("maxPairsPerScan", 8)),

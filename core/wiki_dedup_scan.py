@@ -190,6 +190,9 @@ def judge_fields(rel: str, key: tuple[str, str], info: dict | None) -> dict:
         "judgeVerdict": info.get("verdict", ""),
         "judgeReason": info.get("reason", ""),
         "judgedBy": info.get("engine", ""),
+        # 이 경로에서는 항상 `unknown`이다 — 기존 카드 두 장의 생산자는 기록되지 않으므로
+        # (실측 0/12쌍) 자기검증인지 확정할 수 없다. 그 사실을 행에 남긴다.
+        "judgedMode": info.get("mode", ""),
         "uniqueToA": info.get("uniqueToA", []),
         "uniqueToB": info.get("uniqueToB", []),
     }
@@ -238,6 +241,7 @@ def record_judged_distinct(
             "judgeVerdict": "distinct",
             "judgeReason": info.get("reason", ""),
             "judgedBy": info.get("engine", ""),
+            "judgedMode": info.get("mode", ""),
         })
     except OSError:
         return False

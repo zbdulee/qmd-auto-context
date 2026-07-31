@@ -751,11 +751,11 @@ recall에서 사라집니다.** 사람 검수를 전제하지 않으므로 복�
 | `verifiedMode: unknown` | 엔진 귀속이 불가합니다 — 레거시 `extractor.argv`(하나의 argv가 모든 엔진을 담당), `extractor.default` 폴백, 또는 카드를 만든 엔진이 기록되지 않은 잡입니다. |
 | 필드 없음 | 이 기능 이전에 검수된 카드입니다. **자기검증일 가능성이 높습니다**(실측 655/688). 없음은 `cross-engine`을 뜻하지 않습니다. |
 
-**남은 자기검증: dedup judge.** 중복 판정(`wiki_dedup_judge`)은 여전히 카드를 만든
-엔진을 hint로 받습니다. `plan_verify_attempts`를 그대로 재사용할 수는 없습니다 — dedup은
-카드 **두 장**을 비교하고 그 둘의 생산자가 다르거나 불명일 수 있어 무엇이 자기검증인지
-확정되지 않습니다. 생산자가 확실한 write-time gate 만 교차 엔진으로 확장하는 것이 타당하고,
-이는 **후속 작업**입니다.
+**dedup judge도 분리됩니다(write-time 한정).** 중복 판정(`wiki_dedup_judge`)은 이제 신규
+후보를 만든 엔진을 **피할 대상**으로 받습니다(`compile.semanticDedup.judge.crossEngine`,
+아래 dedup 절 참고). `plan_verify_attempts`를 그대로 재사용하지는 않습니다 — dedup은 카드
+**두 장**을 비교하고 그 둘의 생산자가 다르거나 불명일 수 있어 무엇이 자기검증인지 확정되지
+않습니다. 공용화한 것은 **순서 규칙 하나**(`wiki_compile_worker.plan_engine_order`)입니다.
 
 로그 키의 의미는 고정입니다: `producedBy`는 **생성** 엔진, `engine`은 **검수** 엔진(시도가
 있는 행에만), `verifiedMode`는 **달성된** 관계(판정이 실제로 나온 행에만), `attemptedMode`는
@@ -1015,6 +1015,31 @@ embed 서브셸 안에 두지 않습니다). 카드 mtime 스냅샷을 쓰지 �
 | `compile.semanticDedup.similarPageMaxChars` | `12000` | extractor에 함께 넘길 유사 page content 최대 길이입니다. |
 | `compile.semanticDedup.autoMergeThreshold` | `0.9` | 자동 dedup scan에서 merge 후보로 볼 기준입니다. |
 | `compile.semanticDedup.maxPairsPerScan` | `10` | 한 번의 scan에서 queueing할 최대 pair 수입니다. |
+| `compile.semanticDedup.judge.crossEngine` | `"prefer"` | 중복 판정 엔진을 **신규 후보를 만든** 엔진과 분리합니다. 값 집합은 `compile.verify.crossEngine`과 같습니다. `prefer`는 다른 엔진을 먼저 시도하고 없으면 생산 엔진으로 폴백합니다(`judgedMode: self`). `require`는 생산 엔진을 후보에서 제외하며 다른 엔진이 없으면 판정하지 않고 레거시 score 게이트로 degrade합니다(즉 `targetPath`가 명시된 후보는 dedup을 받지 않습니다 — 명시 선택만 권합니다). `off`는 0.x 동작입니다. |
+
+#### 판정 엔진 분리 (dedup)
+
+**write-time gate만** 교차 엔진으로 동작합니다. 그 경로의 신규 후보 생산 엔진은 큐 잡이 정하는
+사실(`candidate.engine`은 worker가 잡의 값으로 덮어씁니다)이므로 "무엇이 자기검증인지"가
+확정됩니다. **retroactive scan(`wiki_dedup_scan`)은 확장하지 않습니다** — 이미 디스크에 있는
+카드 두 장의 생산자는 어디에도 기록되지 않고(실측: judge가 실제로 돈 12쌍 전부
+`generated-manifest.jsonl`에 생산 엔진이 없었습니다), 두 생산자가 서로 다르면 어떤 엔진도
+중립이 아니어서 교차라는 개념 자체가 성립하지 않습니다. 이 경로는 예전 선택(host engine →
+풀의 첫 후보)을 그대로 쓰고 판정 행에 `judgedMode: unknown`을 남깁니다.
+
+**호출 수는 늘지 않습니다.** judge는 쌍당 1회이고 엔진만 바뀝니다. 후보 사이를 넘어가는 조건은
+**exit 127(host CLI 부재, 토큰 0)뿐**이며, 실제로 실행된 첫 후보가 순회를 끝냅니다.
+
+**degrade의 종점.** 다른 엔진 CLI가 없으면(127) 생산 엔진으로 내려와 `self`로 기록합니다.
+선호 후보가 **유료로** 실패하면(비127·timeout) 같은 run에서 다른 엔진을 부르지 않고(이중 과금)
+그 후보만 `dedup-judge-engine-cooldown.json`에 엔진 단위로 식혀 **다음 run이 다음 후보로
+degrade**하게 합니다. 후보가 소진되면 전역 `dedup-judge-cooldown`으로 judge 전체를 식힙니다
+(0.x 동작). 두 기록이 모두 실패하면 그 사실을 `cooldownWriteFailed`로 표면화합니다 —
+식힘 기록이 degrade의 유일한 메커니즘이므로 조용히 삼키면 판정이 영구 정지합니다.
+
+판정 기록은 `merge-needed.jsonl`(write-time)과 `dedup-needed.jsonl`·`dedup-skipped.jsonl`
+(scan)에 `judgedBy`(판정 엔진) / `judgedMode`(달성된 관계) / `producedBy`(생산 엔진,
+write-time만)로 남습니다. 판정이 없었던 행에는 이 필드들을 쓰지 않습니다.
 
 ## orphan 벡터 자동 회수
 

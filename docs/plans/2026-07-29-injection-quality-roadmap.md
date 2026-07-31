@@ -396,9 +396,9 @@ title: "claude-runner — 구독 기반 Claude Code headless AI 실행 계층"
   `hierarchical` 이고 `recallVerifiedOnly` 의 안전 설계가 raw backfill 에 기대므로,
   종점을 wiki-only 로 고정하면 자기 제품의 기본값과 모순됩니다
 
-## 후속 항목 (미구현)
+## 후속 항목
 
-### F1. dedup 판정의 자기검증 노출 — write-time gate 한정으로 교차 엔진화
+### F1. dedup 판정의 자기검증 노출 — write-time gate 한정으로 교차 엔진화 (구현 완료)
 
 **문제.** 4단계가 verify에 교차 엔진(`compile.verify.crossEngine`, 기본 `prefer`)을 도입해
 "카드를 만든 엔진이 그 카드를 검수한다"를 완화했지만, **dedup 판정에는 적용되지 않았다.**
@@ -415,13 +415,37 @@ retroactive scan(`wiki_dedup_scan.py`)은 hint조차 없어 `builtins[0]`으로 
 생산자와 판정자의 관계가 우연에 맡겨진다. 그래서 **생산자가 확실한 write-time dedup만**
 "다른 엔진 우선"으로 확장하는 것이 타당한 범위다(codex 판단, 동의).
 
-**범위 제안.**
-- write-time gate(`wiki_compile.judge_new_page_duplicate`)에서만 `crossEngine: prefer`와 같은
-  선호 규칙을 적용한다: candidate 엔진과 **다른** 엔진을 1순위로, 없으면 기존 동작으로 degrade.
-- retroactive scan은 **범위 밖**으로 명시한다. 여기서 "다른 엔진"을 정의하려면 카드마다
-  생산자 provenance가 필요하고(현재 카드 frontmatter에 생산 엔진 필드가 없다 — `verifiedBy`는
-  검수자다), 그 provenance 도입이 별건이다.
-- adapter argv 해석은 여전히 한 벌(`wiki_compile_worker.resolve_extractor_argv`)을 쓴다.
+**구현.**
+- 공용화한 것은 **순서 규칙 하나**다(`wiki_compile_worker.plan_engine_order`) — verify의
+  `plan_verify_attempts`와 dedup의 `wiki_dedup_judge.plan_judge_attempts`가 같은 함수를 부른다.
+  나머지(argv 해석·식힘 건너뛰기·mode 라벨·빈 계획의 사유)는 두 파이프라인이 다르므로 각자
+  둔다: verify는 `compile.verify.*`를 읽고 `require` 불충족 시 **잡을 보존**하지만, dedup은
+  `compile.semanticDedup.judge.*`를 읽고 판정 대상이 큐가 아니라 지금 쓰려는 카드이므로
+  보류할 자리가 없어 `unavailable`(레거시 score 게이트로 degrade)로 매핑한다. "어느 엔진이
+  존재하는가"도 한 벌로 모았다(`wcw.extractor_engine_pool` — verify의 상속 경로가 이걸 쓴다).
+- write-time gate만 확장한다. 신규 후보의 생산 엔진은 worker가 잡에서 대입하는 **사실**이라
+  (모델 출력이 아니다) 자기검증 판정이 성립한다. `crossEngine` 값 집합은 verify와 공유한다
+  (`config.CROSS_ENGINE_MODES`) — 정책 이름이 갈리면 사용자가 한쪽만 끈다.
+- **retroactive scan은 확장하지 않는다(실측 근거).** 판정이 실제로 돈 12쌍을
+  `generated-manifest.jsonl`과 대조한 결과 **두 카드의 생산자가 모두 기록된 쌍은 0/12**였다
+  (대부분의 행이 4단계 이전이라 `engine` 필드 자체가 없다). 생산자를 모르면 "자기검증"이
+  정의되지 않고, 두 생산자가 서로 다르면 어떤 후보도 중립이 아니어서 교차라는 개념 자체가
+  성립하지 않는다. 그래서 이 경로는 예전 선택(host engine → 풀 첫 후보)을 그대로 쓰고, 판정
+  행에 `judgedMode: unknown`을 남겨 **그 사실이 집계에 보이게** 한다. 카드 frontmatter에
+  생산자 provenance를 넣는 것은 여전히 별건이다.
+- 기록: `merge-needed.jsonl`에 `judgedBy`/`judgedMode`/`producedBy`, scan 큐·`dedup-skipped.jsonl`에
+  `judgedBy`/`judgedMode`. 판정이 없었던 행에는 쓰지 않는다(4단계 `attemptedMode` 분리와 같은 이유).
+- **degrade의 종점.** 127(CLI 부재)은 토큰 0이므로 같은 run에서 다음 후보로 넘어가고 최종적으로
+  생산 엔진에 닿는다(`self`). 비127·timeout은 이미 과금된 것이라 같은 run에서 넘기지 않고,
+  실패한 후보만 `dedup-judge-engine-cooldown.json`에 엔진 단위로 식혀 **다음 run이 degrade**하게
+  한다 — 전역 식힘만 있던 상태로 교차 선호를 켜면 만료마다 같은 후보를 다시 불러 판정이 영구
+  정지한다(verify가 0.x 전역 식힘에서 겪은 것과 같은 클래스). 후보가 소진되면 전역 식힘이
+  종점이고(= 단일 CLI 머신은 동작이 이전과 동일), 두 기록이 다 실패하면 `cooldownWriteFailed`로
+  표면화한다. `transient`(시간의 함수)와 `unavailable`(이 머신의 상태) 경계는 유지된다 —
+  식힘만 `transient`이고 설정 부재·`require` 불충족은 `unavailable`이다.
+- **호출 수 불변 실측**: 두 엔진 stub을 붙인 write-time 경로에서 실행된 adapter는 `['codex']`
+  1개다(생산 엔진 claude는 아예 실행되지 않는다). 127 degrade에서도 실제 실행은 1회이며
+  (`['claude']`), 유료 실패 후 다음 run까지 합쳐 `['codex', 'claude']` = run당 1회다.
 
 **비용 영향: 호출 수는 늘지 않는다.** judge는 후보 쌍당 1회이고 예산도 그대로다
 (`semanticDedup.judge.maxPairsPerCompile` 기본 1 / `maxPairsPerScan` 기본 8). 바뀌는 것은
@@ -441,6 +465,14 @@ retroactive scan(`wiki_dedup_scan.py`)은 hint조차 없어 `builtins[0]`으로 
 **판정 17건 전부가 자기검증**이다. 참고로 같은 기간 verify는 이미 교차 엔진이 작동해
 service-engineering에서 `claude` 193 / `codex` 59로 갈려 있다(4단계 효과). `judgedBy`가 없는
 과거 행(se 7 / novel 36)은 judge 도입 전 score-threshold 기록이라 분모에서 제외했다.
+
+**단, "자기검증"은 여기서 추론값이다.** 위 표의 판정은 전부 retroactive scan 경로이고
+(`dedup-skipped.jsonl`은 그 경로만 기록한다 — write-time의 `distinct`는 원장 행을 남기지
+않으므로 write-time judge 호출 수는 원장으로 셀 수 없다), 그 경로는 카드의 생산자를 보지 않는다.
+12쌍을 `generated-manifest.jsonl`과 대조하면 **두 카드의 생산자가 모두 기록된 쌍은 0/12**다.
+즉 "판정자 = 생산자"는 프로젝트의 유일한 extractor 엔진이 `claude`라는 사실에서 나온 추론이고,
+쌍 단위로 증명된 것이 아니다 — 바로 이것이 scan을 확장하지 않고 `judgedMode`/`producedBy`를
+기록하기 시작한 이유다(다음 측정은 추론이 아니라 원장으로 가능하다).
 
 ## 로드맵에 넣지 않은 것 (선행 검토가 지적했으나 범위 밖)
 

@@ -8,6 +8,8 @@ import { join } from 'node:path';
 // compile.semanticDedup.judge — LLM dedup judge defaults (core/config.py DEFAULTS)
 const JUDGE_DEFAULTS = {
   enabled: true,
+  // 판정 엔진을 신규 후보를 만든 엔진과 분리한다(verify.crossEngine과 같은 값 집합).
+  crossEngine: 'prefer',
   timeout: 120,
   cooldownSeconds: 600,
   maxPairsPerScan: 8,
@@ -565,6 +567,12 @@ test('compile.semanticDedup normalizes enabled/threshold/topK; defaults to true/
     compile: { semanticDedup: { enabled: 'nope', threshold: 'nan', topK: -1 } },
   }));
   assert.deepEqual(withBadValues.compile.semanticDedup, { enabled: true, threshold: 0.82, topK: 3, similarPageMaxChars: 12000, autoMergeThreshold: 0.9, maxPairsPerScan: 10, candidateMinScore: 0.3, judge: JUDGE_DEFAULTS });
+
+  // judge.crossEngine은 verify.crossEngine과 **같은 닫힌 집합**이다(CROSS_ENGINE_MODES).
+  const withCross = loadConfig(JSON.stringify({ compile: { semanticDedup: { judge: { crossEngine: 'require' } } } }));
+  assert.equal(withCross.compile.semanticDedup.judge.crossEngine, 'require');
+  const withBadCross = loadConfig(JSON.stringify({ compile: { semanticDedup: { judge: { crossEngine: 'sometimes' } } } }));
+  assert.equal(withBadCross.compile.semanticDedup.judge.crossEngine, 'prefer', '집합 밖 값은 기본값으로');
 });
 
 test('compile.semanticDedup.similarPageMaxChars normalizes with a 12000 default', () => {

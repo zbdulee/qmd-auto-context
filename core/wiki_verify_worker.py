@@ -38,7 +38,6 @@ path); queue/log records never store source bodies.
 
 from __future__ import annotations
 import argparse
-import fcntl
 import json
 import os
 import sys
@@ -51,7 +50,7 @@ import wiki_compile as wc
 import wiki_compile_worker as wcw
 import wiki_source_missing as wsm
 from dirty_queue import enqueue_collections
-from wiki_compile_enqueue import _queue_lock_path, _safe_queue_path
+from wiki_compile_enqueue import _safe_queue_path
 
 VERIFY_QUEUE_DEFAULT = ".auto-context/compile/verify-queue.jsonl"
 VERIFY_LOG_DEFAULT = ".auto-context/compile/verify-log.jsonl"
@@ -59,14 +58,12 @@ VERIFY_SKIPPED_DEFAULT = ".auto-context/compile/verify-skipped.jsonl"
 VERIFY_DELETED_DEFAULT = ".auto-context/compile/verify-deleted.jsonl"
 VERDICT_VALUES = {"pass", "fail", "inconclusive"}
 MAX_SOURCES = 3
-# 후보 식힘 만료의 상한(24h). 손상·주입된 만료값이 후보를 영구히 배제하지 못하게 한다.
-MAX_ENGINE_COOLDOWN_SECS = 86400
 # "호출은 됐지만 출력이 판정으로 쓸 수 없다" — 같은 입력에서 재현되는 설정 오류이므로
 # 후보가 다 떨어지면 종점이 있다(defer_or_drop). transient(timeout·실행 실패)와 구분된다.
 UNUSABLE_OUTPUT_REASONS = {"invalid_extractor_json", "invalid_verdict"}
-# 엔진에 귀속되지 않는 argv(레거시 `extractor.argv`, `extractor.default`)의 cooldown 키.
-# 엔진 라벨로 식히면 실제로 실패한 것은 default argv인데 그 엔진의 adapter까지 막힌다.
-UNATTRIBUTED_KEY = "(unattributed)"
+# 귀속 불가 키·식힘 상한·엔진 식힘 저장소는 dedup judge와 **같은 헬퍼**를 쓴다(wcw가 SSOT).
+# 리터럴이나 read-modify-write를 각자 들고 있으면 한쪽만 고쳐지고 그 사실이 드러나지 않는다.
+UNATTRIBUTED_KEY = wcw.UNATTRIBUTED_KEY
 
 
 def extractor_builtins(compile_cfg: dict) -> list[str]:
@@ -91,11 +88,8 @@ def verify_engine_pool(compile_cfg: dict, vcfg: dict) -> list[str]:
     """
     picked = [e for e in (vcfg.get("builtins") or []) if isinstance(e, str) and e]
     if not picked:
-        raw = compile_cfg.get("extractor")
-        extractor = raw if isinstance(raw, dict) else {}
-        picked = extractor_builtins(compile_cfg)
-        backends = extractor.get("backends") if isinstance(extractor.get("backends"), dict) else {}
-        picked += sorted(name for name in backends if isinstance(name, str) and name)
+        # 상속 목록은 `wcw.extractor_engine_pool`이 SSOT다(dedup judge도 같은 함수를 쓴다).
+        picked = wcw.extractor_engine_pool(compile_cfg)
     ordered = []
     for engine in picked:
         if engine not in ordered:
@@ -166,17 +160,9 @@ def plan_verify_attempts(
         # 어느 후보도 "생성 엔진과 다르다"를 증명할 수 없다 → 약속을 지킬 수 없으므로 거부.
         return [], mode, "cross_engine_unavailable"
 
-    if mode == "off":
-        # 0.x 동작. 생성 엔진이 귀속 불가(sentinel·풀 밖 라벨)면 그 라벨로는 argv가 안 나오므로
-        # 풀의 첫 후보로 폴백한다 — 0.x가 빈 엔진 라벨에서 `builtins[0]`으로 폴백했던 것과 같은
-        # 의도이고, 폐기하면 그 카드는 **영원히 검수되지 않는다**(generated로 남아 recall에서
-        # 빠진 채 아무도 그 사실을 모른다). mode는 unknown이라 거짓 주장도 하지 않는다.
-        order = [producing] if producing_attributable else pool[:1]
-    elif not producing_attributable:
-        order = list(pool)
-    else:
-        others = [e for e in pool if e != producing]
-        order = others if mode == "require" else others + [producing]
+    # 순서 규칙은 dedup judge와 공용이다(`wcw.plan_engine_order`가 SSOT). 여기 남는 것은
+    # verify 고유의 것들 — argv 해석, 식힘 건너뛰기, mode 라벨, 빈 계획의 사유다.
+    order = wcw.plan_engine_order(pool, producing, mode, producing_attributable)
 
     attempts: list[dict] = []
     seen_argv: list[list[str]] = []
@@ -237,32 +223,15 @@ def engine_cooldown_path(root: Path) -> Path:
     return root / ".auto-context" / "compile" / "verify-engine-cooldown.json"
 
 
+# 엔진 단위 식힘 저장소의 구현은 `wcw`가 SSOT다(dedup judge가 자기 파일로 같은 헬퍼를
+# 쓴다 — flock read-modify-write·만료 클램프·원자 쓰기 반환값 확인을 두 벌 두지 않는다).
+# 여기 남는 것은 **경로**뿐이고, 그것이 verify와 dedup을 분리하는 유일한 차이다.
 def load_engine_cooldowns(root: Path) -> dict:
-    """{cooldown key: expiry epoch}. 읽기 실패는 fail-open(빈 dict) — 식힘 기록을 못 읽는
-    것이 검수를 막는 이유가 되면 안 된다(최악은 한 번 더 시도하는 것이다).
-
-    **만료값은 상한으로 클램프한다.** 손상되거나 주입된 값(`{"claude": 9e18}`)이 있으면 그
-    후보가 영구히 후보에서 빠져 검수가 무한 연기된다 — 파일 쓰기 권한이 전제인 시나리오지만,
-    상한 검사는 공짜이고 "오염된 상태로부터의 자동 복구"를 준다. 상한을 넘는 항목은 식힘으로
-    보지 않는다(다음 쓰기에서 정리된다).
-    """
-    try:
-        raw = json.loads(engine_cooldown_path(root).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    if not isinstance(raw, dict):
-        return {}
-    ceiling = datetime.now(timezone.utc).timestamp() + MAX_ENGINE_COOLDOWN_SECS
-    return {
-        key: float(value) for key, value in raw.items()
-        if isinstance(key, str) and isinstance(value, (int, float))
-        and not isinstance(value, bool) and float(value) <= ceiling
-    }
+    return wcw.load_engine_cooldowns(engine_cooldown_path(root))
 
 
 def cooling_engines(root: Path) -> set:
-    now = datetime.now(timezone.utc).timestamp()
-    return {key for key, expiry in load_engine_cooldowns(root).items() if now < expiry}
+    return wcw.cooling_engines(engine_cooldown_path(root))
 
 
 def set_engine_cooldown(root: Path, key: str, seconds: int) -> bool:
@@ -271,28 +240,8 @@ def set_engine_cooldown(root: Path, key: str, seconds: int) -> bool:
     **호출자는 False를 반드시 표면화해야 한다.** 이 파일이 MAJOR 1(영구 정지) 수정의 복구
     메커니즘이다 — 기록이 없으면 다음 run이 같은 엔진을 다시 부르고 degrade가 일어나지 않아
     정지가 그대로 돌아온다. 조용히 실패하면 그 사실을 알 방법이 없다.
-
-    read-modify-write이므로 **sidecar flock으로 직렬화한다**(3단계 원장과 같은 패턴·같은
-    헬퍼). 정상 경로는 `claim_queue`가 프로젝트 단위로 직렬화하므로 경합 자체가 드물고 손실의
-    등급도 감사 추적 유실보다 낮지만(최악: 유료 호출 1회 추가 + 다음 실패에 자기치유),
-    **잃는 것이 하필 이 수정의 복구 메커니즘**이라 공짜에 가까운 방어를 생략할 이유가 없다.
-    만료 항목은 쓰기 때 정리해 파일을 유계로 둔다. seconds는 상한으로 클램프한다.
     """
-    path = engine_cooldown_path(root)
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(_queue_lock_path(path), "a", encoding="utf-8") as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-            try:
-                now = datetime.now(timezone.utc).timestamp()
-                entries = {k: v for k, v in load_engine_cooldowns(root).items() if v > now}
-                entries[key or UNATTRIBUTED_KEY] = now + min(max(0, seconds), MAX_ENGINE_COOLDOWN_SECS)
-                # 원자적 쓰기(wiki_compile SSOT) — 실패해도 기존 식힘 기록이 잘리지 않는다.
-                return wc.write_text_atomic(path, json.dumps(entries, ensure_ascii=False, sort_keys=True) + "\n")
-            finally:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
-    except OSError:
-        return False
+    return wcw.set_engine_cooldown(engine_cooldown_path(root), key, seconds)
 
 
 def log_verdict(log_path: Path, payload: dict) -> None:

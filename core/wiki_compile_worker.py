@@ -26,6 +26,11 @@ import wiki_compile as wc
 
 DEFAULT_SOURCE_QUEUE = ".auto-context/compile/source-queue.jsonl"
 BUILTIN_EXTRACTOR_ENGINES = {"claude", "codex", "hermes"}
+# 후보 식힘 만료의 상한(24h). 손상·주입된 만료값이 후보를 영구히 배제하지 못하게 한다.
+MAX_ENGINE_COOLDOWN_SECS = 86400
+# 엔진에 귀속되지 않는 argv(레거시 `extractor.argv`, `extractor.default`)의 cooldown 키.
+# 엔진 라벨로 식히면 실제로 실패한 것은 default argv인데 그 엔진의 adapter까지 막힌다.
+UNATTRIBUTED_KEY = "(unattributed)"
 
 
 def now_iso():
@@ -270,6 +275,107 @@ def legacy_extractor_argv(compile_cfg: dict) -> list[str] | None:
     raw = compile_cfg.get("extractor")
     extractor = raw if isinstance(raw, dict) else {}
     return _argv_list(extractor.get("argv"))
+
+
+def extractor_engine_pool(compile_cfg: dict) -> list[str]:
+    """Symbolic engines this project can dispatch to, in preference order.
+
+    `compile.extractor.builtins` first (declared order), then explicitly configured
+    `backends` keys sorted (deterministic so two hosts scanning the same project pick
+    the same engine). One definition of "which engines exist" — the verifier inherits
+    it when `compile.verify.builtins` is empty and the dedup judge uses it directly.
+    """
+    raw = compile_cfg.get("extractor")
+    extractor = raw if isinstance(raw, dict) else {}
+    picked = [e for e in (extractor.get("builtins") or []) if isinstance(e, str) and e]
+    backends = extractor.get("backends") if isinstance(extractor.get("backends"), dict) else {}
+    picked += sorted(name for name in backends if isinstance(name, str) and name)
+    ordered: list[str] = []
+    for engine in picked:
+        if engine not in ordered:
+            ordered.append(engine)
+    return ordered
+
+
+def plan_engine_order(pool: list[str], producing: str, mode: str, attributable: bool) -> list[str]:
+    """Candidate order for a judgment ABOUT work an engine produced. Shared rule.
+
+    LLM self-review measurably degrades judgment (Huang et al. ICLR'24) and the stated
+    mitigation is separating generator from judge, so the producing engine goes LAST
+    (`prefer`) or is dropped (`require`). `off` is the 0.x path: producer only.
+
+    `attributable` is the caller's proof that `producing` names a real, resolvable
+    engine — without it no candidate can be SHOWN to differ from the producer, so the
+    whole pool is offered and every attempt is labelled `unknown`.
+
+    Only the ORDER lives here. Argv resolution (resolve_extractor_argv), cooldown
+    skipping, mode labelling and the empty-plan reasons stay with each caller, because
+    verify and dedup differ there: verify reads `compile.verify.*` and preserves its
+    queue when `require` cannot be satisfied, while the dedup judge reads
+    `compile.semanticDedup.judge.*` and must map an empty plan onto its own
+    unavailable/transient outcome contract.
+    """
+    if mode == "off":
+        # 생성 엔진이 귀속 불가면 그 라벨로는 argv가 안 나오므로 풀의 첫 후보로 폴백한다 —
+        # 폐기하면 그 대상은 영원히 판정되지 않는다(mode는 unknown이라 거짓 주장도 아니다).
+        return [producing] if attributable else pool[:1]
+    if not attributable:
+        return list(pool)
+    others = [engine for engine in pool if engine != producing]
+    return others if mode == "require" else others + [producing]
+
+
+def load_engine_cooldowns(path: Path) -> dict:
+    """{cooldown key: expiry epoch}. 읽기 실패는 fail-open(빈 dict) — 식힘 기록을 못 읽는
+    것이 판정을 막는 이유가 되면 안 된다(최악은 한 번 더 시도하는 것이다).
+
+    **만료값은 상한으로 클램프한다.** 손상되거나 주입된 값(`{"claude": 9e18}`)이 있으면 그
+    후보가 영구히 후보에서 빠져 판정이 무한 연기된다. 상한을 넘는 항목은 식힘으로 보지
+    않는다(다음 쓰기에서 정리된다).
+    """
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    ceiling = datetime.now(timezone.utc).timestamp() + MAX_ENGINE_COOLDOWN_SECS
+    return {
+        key: float(value) for key, value in raw.items()
+        if isinstance(key, str) and isinstance(value, (int, float))
+        and not isinstance(value, bool) and float(value) <= ceiling
+    }
+
+
+def cooling_engines(path: Path) -> set:
+    now = datetime.now(timezone.utc).timestamp()
+    return {key for key, expiry in load_engine_cooldowns(path).items() if now < expiry}
+
+
+def set_engine_cooldown(path: Path, key: str, seconds: int) -> bool:
+    """이 후보를 seconds 동안 후보에서 제외한다. 반환값은 "기록이 남았는가"다.
+
+    **호출자는 False를 반드시 표면화해야 한다** — 기록이 없으면 다음 run이 같은 엔진을 다시
+    불러 degrade가 일어나지 않고, 실패가 반복되는 엔진에서 판정이 영구 정지한다(그것이
+    엔진 단위 식힘이 존재하는 이유다).
+
+    read-modify-write이므로 sidecar flock으로 직렬화하고, 만료 항목은 쓰기 때 정리해 파일을
+    유계로 둔다. seconds는 상한으로 클램프한다.
+    """
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(_queue_lock_path(path), "a", encoding="utf-8") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                now = datetime.now(timezone.utc).timestamp()
+                entries = {k: v for k, v in load_engine_cooldowns(path).items() if v > now}
+                entries[key or UNATTRIBUTED_KEY] = now + min(max(0, seconds), MAX_ENGINE_COOLDOWN_SECS)
+                # 원자적 쓰기(wiki_compile SSOT) — 실패해도 기존 식힘 기록이 잘리지 않는다.
+                return wc.write_text_atomic(path, json.dumps(entries, ensure_ascii=False, sort_keys=True) + "\n")
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+    except OSError:
+        return False
 
 
 def resolve_extractor_argv(

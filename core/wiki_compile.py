@@ -1392,6 +1392,11 @@ def main() -> int:
                 entry["judgeVerdict"] = judge_info["verdict"]
                 entry["judgeReason"] = judge_info.get("reason", "")
                 entry["judgedBy"] = judge_info.get("engine", "")
+                # 판정 엔진과 **신규 후보를 만든** 엔진의 관계. verify의 `verifiedMode`/
+                # `producedBy`와 같은 어휘·같은 목적이다 — 이 두 필드가 없으면 자기검증
+                # 노출을 사후에 셀 수 없다(실측: 기존 12건 전부 생산자 미기록이었다).
+                entry["judgedMode"] = judge_info.get("mode", "")
+                entry["producedBy"] = judge_info.get("producedBy", "")
                 entry["uniqueToCandidate"] = judge_info.get("uniqueToA", [])
                 entry["uniqueToMatched"] = judge_info.get("uniqueToB", [])
             append_jsonl(merge_needed_path, entry)

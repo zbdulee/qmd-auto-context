@@ -17,6 +17,48 @@ function repoTemp(prefix) {
   return mkdtempSync(join(base, `qmd-test-${prefix}-`));
 }
 
+// 임시 디렉터리 정리 재시도(update.test.mjs의 removeTemp와 같은 이유·같은 형태):
+// 병렬 실행에서 ENOTEMPTY/EBUSY가 flaky 실패를 만든다.
+function removeTemp(dir) {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+      return;
+    } catch (err) {
+      if (err.code !== 'ENOTEMPTY' && err.code !== 'EBUSY') throw err;
+      execFileSync('sleep', ['0.05']);
+    }
+  }
+  rmSync(dir, { recursive: true, force: true, maxRetries: 5 });
+}
+
+/** Per-engine judge stub. `label` lands in the shared call log so a test can prove
+ *  WHICH adapter argv ran, not merely which engine label the plan passed down. */
+function engineJudgeStub(label, verdict, tracker, { exitCode = 0, sleep = 0 } = {}) {
+  const script = join(mkdtempSync(join(tmpdir(), `dedup-${label}-`)), `${label}.py`);
+  writeFileSync(script, `#!/usr/bin/env python3
+import json, sys, time
+payload = json.loads(sys.stdin.read())
+assert payload.get('task') == 'dedup', 'dedup payload expected, got %r' % payload.get('task')
+with open(${JSON.stringify(tracker)}, 'a', encoding='utf-8') as fh:
+    fh.write(json.dumps({'who': ${JSON.stringify(label)}, 'engine': payload.get('engine', '')}) + '\\n')
+time.sleep(${sleep})
+if ${exitCode} != 0:
+    sys.exit(${exitCode})
+print(json.dumps({'verdict': ${JSON.stringify(verdict)}, 'reason': 'judged by ${label}'}))
+`);
+  return ['python3', script];
+}
+
+function trackerFile(label) {
+  return join(mkdtempSync(join(tmpdir(), `dedup-tracker-${label}-`)), 'calls');
+}
+
+/** Engine labels of every adapter that actually executed, in order. */
+function judgedByEngines(tracker) {
+  return jsonl(tracker).map((row) => row.who);
+}
+
 /** A fake host CLI adapter: reads the dedup payload, asserts its shape, emits a verdict. */
 function judgeStub(verdict, { reason = 'stub reason', callLog = null, exitCode = 0, sleep = 0 } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'dedup-judge-'));
@@ -110,33 +152,45 @@ test('claude adapter: task=dedup uses the dedup prompt and emits a dedup verdict
   rmSync(d, { recursive: true, force: true });
 });
 
-test('resolve_engine: backends-only config resolves without a caller hint (retroactive scan has none)', () => {
+test('judge_engine_pool: backends-only config resolves without a producer (retroactive scan has none)', () => {
   // Regression: the scan calls is_available()/judge_pair() with no engine, so a
   // config using extractor.backends WITHOUT builtins resolved to "" -> backends[""]
   // missed -> judge permanently "unavailable" -> every scan silently degraded to the
   // legacy score gate. Both dogfood projects use exactly that shape.
   const py = `import json,os,sys; sys.path.insert(0,'core'); import wiki_dedup_judge as j
-backends = {'compile': None}
 cfg_backends = {'extractor': {'dispatch': 'by-engine', 'backends': {'codex': ['/x/codex'], 'claude': ['/x/claude']}, 'default': []}}
 cfg_builtins = {'extractor': {'dispatch': 'by-engine', 'builtins': ['codex'], 'backends': {'claude': ['/x/claude']}, 'default': []}}
 out = {}
-out['backends_no_hint'] = j.resolve_engine(cfg_backends)
-out['backends_hint_wins'] = j.resolve_engine(cfg_backends, 'hermes')
-out['builtins_preferred'] = j.resolve_engine(cfg_builtins)
+out['pool_no_producer'] = j.judge_engine_pool(cfg_backends)
+out['pool_builtins_first'] = j.judge_engine_pool(cfg_builtins)
 os.environ['QMD_ENGINE'] = 'codex'
-out['env_configured'] = j.resolve_engine(cfg_backends)
+out['env_configured'] = j.judge_engine_pool(cfg_backends)
 os.environ['QMD_ENGINE'] = 'gemini'
-out['env_unconfigured'] = j.resolve_engine(cfg_backends)
-out['available_no_hint'] = j.is_available(cfg_backends)
+out['env_unconfigured'] = j.judge_engine_pool(cfg_backends)
+del os.environ['QMD_ENGINE']
+out['available_no_producer'] = j.is_available(cfg_backends)
+# 생산자를 아는 경우(write-time): 그 엔진이 **마지막**으로 밀린다.
+attempts, mode, reason = j.plan_judge_attempts(cfg_backends, 'claude')
+out['order_with_producer'] = [a['engine'] for a in attempts]
+out['modes'] = [a['mode'] for a in attempts]
+out['mode'] = mode
+# 생산자를 모르는 경우(scan): 예전 순서 그대로이고 어떤 시도도 교차를 주장하지 않는다.
+scan_attempts, _, _ = j.plan_judge_attempts(cfg_backends)
+out['order_scan'] = [a['engine'] for a in scan_attempts]
+out['modes_scan'] = [a['mode'] for a in scan_attempts]
 print(json.dumps(out))`;
   const out = JSON.parse(runLib(py));
   // Deterministic pick (sorted) so two hosts scanning the same project agree.
-  assert.equal(out.backends_no_hint, 'claude');
-  assert.equal(out.backends_hint_wins, 'hermes', '명시 hint가 최우선');
-  assert.equal(out.builtins_preferred, 'codex', 'builtins가 backends 키보다 우선');
-  assert.equal(out.env_configured, 'codex', '설정된 host engine이면 QMD_ENGINE 채택');
-  assert.equal(out.env_unconfigured, 'claude', '미설정 engine 라벨로는 죽지 않음');
-  assert.equal(out.available_no_hint, true, 'hint 없이도 judge 가용');
+  assert.deepEqual(out.pool_no_producer, ['claude', 'codex']);
+  assert.deepEqual(out.pool_builtins_first, ['codex', 'claude'], 'builtins가 backends 키보다 우선');
+  assert.equal(out.env_configured[0], 'codex', '설정된 host engine이면 QMD_ENGINE 우선');
+  assert.equal(out.env_unconfigured[0], 'claude', '미설정 engine 라벨로는 죽지 않음');
+  assert.equal(out.available_no_producer, true, '생산자 없이도 judge 가용');
+  assert.deepEqual(out.order_with_producer, ['codex', 'claude'], '생산 엔진(claude)이 마지막');
+  assert.deepEqual(out.modes, ['cross-engine', 'self']);
+  assert.equal(out.mode, 'prefer');
+  assert.deepEqual(out.order_scan, ['claude', 'codex'], 'scan 순서는 예전 그대로');
+  assert.deepEqual(out.modes_scan, ['unknown', 'unknown'], '생산자 불명이면 교차를 주장하지 않는다');
 });
 
 // ------------------------------------------------- write-time gate (wiki_compile)
@@ -376,6 +430,184 @@ test('write-time gate: a reviewed target is still only queued, never overwritten
   }
 });
 
+// ------------------------------------- 교차 엔진 (write-time gate 한정)
+//
+// 4단계가 verify 에서 실측한 노출: verified 688장 중 655장(95%)이 자기검증이었다. dedup judge 도
+// 같은 구조였다 — 카드를 만든 엔진을 hint 로 받아 **그 엔진으로** 판정했다.
+//
+// verify 의 처방(`plan_verify_attempts`)을 그대로 쓸 수는 없다: dedup 은 카드 **두 장**을
+// 비교하고 기존 카드의 생산자는 기록되지 않으므로(라이브 실측 0/12쌍) 무엇이 자기검증인지
+// 확정되지 않는다. 그래서 생산자가 사실로 확정된 write-time gate 만 확장하고, 공용화한 것은
+// **순서 규칙**(`wiki_compile_worker.plan_engine_order`) 하나다.
+
+function crossEngineSettings(work, backends, judge = {}, extra = {}) {
+  writeCompileSettings(work, {
+    extractor: { dispatch: 'by-engine', backends, timeout: 30 },
+    semanticDedup: { judge, ...extra },
+  });
+}
+
+function runCrossCompile(work, fixture, title, engine = 'claude') {
+  return runCompile(work, {
+    title,
+    summary: 'A near-duplicate of the existing card, restated in other words.',
+    suggestedType: 'entity',
+    confidence: 'high',
+    // 생성 엔진은 **큐 잡이 정하는 사실**이다(worker 가 candidate.engine 을 대입한다).
+    engine,
+  }, { QMD_QUERY_FIXTURE: fixture });
+}
+
+const mergeNeeded = (work) => jsonl(join(work, '.auto-context/compile/merge-needed.jsonl'));
+const globalCooldown = (work) => join(work, '.auto-context/compile/dedup-judge-cooldown');
+const engineCooldown = (work) => join(work, '.auto-context/compile/dedup-judge-engine-cooldown.json');
+
+test('write-time: 후보를 만든 엔진(claude)이 아닌 codex 가 판정하고 유료 호출은 그대로 1회', () => {
+  const work = repoTemp('judge-cross-engine');
+  const tracker = trackerFile('cross');
+  try {
+    crossEngineSettings(work, {
+      claude: engineJudgeStub('claude', 'duplicate', tracker),
+      codex: engineJudgeStub('codex', 'duplicate', tracker),
+    });
+    writeExistingCard(work, 'entities/existing.md');
+    const fixture = fixtureFor(work, [{ file: 'proj-wiki/entities/existing.md', score: 0.56 }]);
+
+    const out = runCrossCompile(work, fixture, 'Restated version of the same event');
+
+    assert.equal(out.action, 'queued_for_review');
+    assert.deepEqual(judgedByEngines(tracker), ['codex'],
+      'codex 만 실행된다 — 엔진만 바뀌고 호출 수는 카드당 1회로 불변');
+    const queued = mergeNeeded(work);
+    assert.equal(queued.length, 1);
+    assert.equal(queued[0].judgedBy, 'codex');
+    assert.equal(queued[0].judgedMode, 'cross-engine');
+    assert.equal(queued[0].producedBy, 'claude', '노출을 사후에 세려면 생산 엔진도 남아야 한다');
+  } finally { removeTemp(work); }
+});
+
+test('write-time: 엔진이 하나뿐이면 그 엔진이 판정하고 self 로 기록된다(단일 CLI 머신 동작 불변)', () => {
+  const work = repoTemp('judge-single-engine');
+  const tracker = trackerFile('single');
+  try {
+    crossEngineSettings(work, { claude: engineJudgeStub('claude', 'duplicate', tracker) });
+    writeExistingCard(work, 'entities/existing.md');
+    const fixture = fixtureFor(work, [{ file: 'proj-wiki/entities/existing.md', score: 0.56 }]);
+
+    const out = runCrossCompile(work, fixture, 'Restated with only one CLI installed');
+
+    assert.equal(out.action, 'queued_for_review');
+    assert.deepEqual(judgedByEngines(tracker), ['claude']);
+    assert.equal(mergeNeeded(work)[0].judgedMode, 'self', '약한 근거지만 라벨이 붙는다');
+  } finally { removeTemp(work); }
+});
+
+test('write-time degrade: 다른 엔진 CLI 가 없으면(127) 생산 엔진으로 폴백하고 self 로 기록한다', () => {
+  const work = repoTemp('judge-cross-absent');
+  const tracker = trackerFile('absent');
+  try {
+    // 127 은 CLI 를 실행하지도 못한 상태라 토큰이 0 이므로 다음 후보 시도가 공짜다.
+    crossEngineSettings(work, {
+      claude: engineJudgeStub('claude', 'duplicate', tracker),
+      codex: ['/nonexistent/dedup-judge-codex'],
+    });
+    writeExistingCard(work, 'entities/existing.md');
+    const fixture = fixtureFor(work, [{ file: 'proj-wiki/entities/existing.md', score: 0.56 }]);
+
+    const out = runCrossCompile(work, fixture, 'Restated while the second CLI is missing');
+
+    assert.equal(out.action, 'queued_for_review');
+    assert.deepEqual(judgedByEngines(tracker), ['claude'], '유료 호출은 여전히 1회');
+    assert.equal(mergeNeeded(work)[0].judgedBy, 'claude');
+    assert.equal(mergeNeeded(work)[0].judgedMode, 'self');
+    assert.equal(existsSync(globalCooldown(work)), false, '127 은 실패가 아니라 부재다');
+  } finally { removeTemp(work); }
+});
+
+test('write-time degrade: crossEngine:require + 다른 엔진 없음 → judge 호출 0회, 레거시 score 게이트', () => {
+  const work = repoTemp('judge-cross-require');
+  const tracker = trackerFile('require');
+  try {
+    crossEngineSettings(work, { claude: engineJudgeStub('claude', 'distinct', tracker) }, { crossEngine: 'require' });
+    writeExistingCard(work, 'entities/existing.md');
+    // 레거시 임계(0.82) 위 → judge 가 없어도 score 게이트가 큐한다. 종점은 "유료 호출 0회".
+    const fixture = fixtureFor(work, [{ file: 'proj-wiki/entities/existing.md', score: 0.95 }]);
+
+    const out = runCrossCompile(work, fixture, 'Slug target under crossEngine require');
+
+    assert.deepEqual(judgedByEngines(tracker), [], '자기판정을 금지했으므로 아무 CLI도 부르지 않는다');
+    assert.equal(out.action, 'queued_for_review');
+    assert.equal(out.judgeVerdict, undefined, '판정이 없었으므로 verdict 를 주장하지 않는다');
+    assert.equal(mergeNeeded(work)[0].judgedMode, undefined, '판정 없는 행에 mode 를 쓰지 않는다');
+  } finally { removeTemp(work); }
+});
+
+test('write-time: crossEngine:off 는 0.x 동작(생산 엔진이 판정)', () => {
+  const work = repoTemp('judge-cross-off');
+  const tracker = trackerFile('off');
+  try {
+    crossEngineSettings(work, {
+      claude: engineJudgeStub('claude', 'duplicate', tracker),
+      codex: engineJudgeStub('codex', 'duplicate', tracker),
+    }, { crossEngine: 'off' });
+    writeExistingCard(work, 'entities/existing.md');
+    const fixture = fixtureFor(work, [{ file: 'proj-wiki/entities/existing.md', score: 0.56 }]);
+
+    runCrossCompile(work, fixture, 'Restated with cross engine turned off');
+
+    assert.deepEqual(judgedByEngines(tracker), ['claude']);
+    assert.equal(mergeNeeded(work)[0].judgedMode, 'self');
+  } finally { removeTemp(work); }
+});
+
+// degrade 의 **종점**: 선호 후보가 유료로 실패하면(비127) 같은 run 에서 다음 엔진을 부르지
+// 않는다(이중 과금). 그 후보만 엔진 단위로 식혀 **다음 run 이 생산 엔진으로 degrade** 하게
+// 한다 — 전역 식힘만 있으면 만료마다 같은 후보를 다시 불러 판정이 영구 정지한다(verify 가
+// 0.x 전역 식힘에서 겪은 것과 같은 클래스).
+test('write-time degrade: 선호 엔진의 유료 실패는 그 엔진만 식히고 다음 run 이 생산 엔진으로 내려온다', () => {
+  const work = repoTemp('judge-cross-transient');
+  const tracker = trackerFile('transient');
+  try {
+    crossEngineSettings(work, {
+      claude: engineJudgeStub('claude', 'duplicate', tracker),
+      codex: engineJudgeStub('codex', 'duplicate', tracker, { exitCode: 3 }),
+    });
+    writeExistingCard(work, 'entities/existing.md');
+    // 레거시 임계(0.82) 아래 → judge 가 판정하지 못하면 아무것도 큐되지 않는다.
+    const fixture = fixtureFor(work, [{ file: 'proj-wiki/entities/existing.md', score: 0.56 }]);
+
+    const first = runCrossCompile(work, fixture, 'First candidate while codex is broken');
+    assert.equal(first.action, 'created', '판정이 없었으므로 score 게이트로 degrade');
+    assert.deepEqual(judgedByEngines(tracker), ['codex'], '유료 호출은 run 당 1회');
+    assert.equal(existsSync(engineCooldown(work)), true, '실패한 후보만 식힌다');
+    assert.match(readFileSync(engineCooldown(work), 'utf8'), /codex/);
+    assert.equal(existsSync(globalCooldown(work)), false,
+      '전역 식힘을 걸면 다음 run 이 degrade 하지 못하고 judge 가 영구 정지한다');
+
+    const second = runCrossCompile(work, fixture, 'Second candidate after codex was cooled');
+    assert.deepEqual(judgedByEngines(tracker), ['codex', 'claude'], '다음 run 은 생산 엔진으로 내려온다');
+    assert.equal(second.action, 'queued_for_review');
+    assert.equal(mergeNeeded(work).at(-1).judgedMode, 'self', 'degrade 사실이 라벨로 남는다');
+  } finally { removeTemp(work); }
+});
+
+test('write-time: 후보가 소진되면 전역 식힘으로 종점을 만든다(judge 전체 backoff)', () => {
+  const work = repoTemp('judge-cross-exhausted');
+  const tracker = trackerFile('exhausted');
+  try {
+    // 후보가 생산 엔진 하나뿐 → 다음 후보가 없으므로 기존 동작(전역 식힘)이 종점이다.
+    crossEngineSettings(work, { claude: engineJudgeStub('claude', 'duplicate', tracker, { exitCode: 3 }) });
+    writeExistingCard(work, 'entities/existing.md');
+    const fixture = fixtureFor(work, [{ file: 'proj-wiki/entities/existing.md', score: 0.56 }]);
+
+    runCrossCompile(work, fixture, 'Only candidate fails while billing');
+
+    assert.deepEqual(judgedByEngines(tracker), ['claude']);
+    assert.equal(existsSync(globalCooldown(work)), true);
+    assert.equal(existsSync(engineCooldown(work)), false, '후보가 없으면 엔진 식힘은 의미가 없다');
+  } finally { removeTemp(work); }
+});
+
 // --------------------------------------------- retroactive scan (wiki_dedup_scan)
 
 function writeScanSettings(work, semanticDedup = {}, compile = {}) {
@@ -500,6 +732,7 @@ test('retroactive scan: a "distinct" verdict is not queued, is recorded as a ski
     assert.equal(skipped[0].judgeVerdict, 'distinct');
     assert.equal(skipped[0].judgeReason, 'different events');
     assert.ok(skipped[0].pageAHash && skipped[0].pageBHash, 'body hashes drive suppression');
+    assert.equal(skipped[0].judgedMode, 'unknown', '기존 카드의 생산자는 기록되지 않는다 → 교차 주장 불가');
 
     const first = callCount(log);
     // Second scan with unchanged bodies: suppression must keep the judge idle.
@@ -603,6 +836,40 @@ test('retroactive scan: the judge never deletes or edits a card — it only queu
   } finally {
     rmSync(work, { recursive: true, force: true });
   }
+});
+
+// **retroactive scan 은 교차 엔진으로 확장하지 않는다.** 기존 카드 두 장의 생산자는 어디에도
+// 기록되지 않아(라이브 실측: judge 가 돈 12쌍 전부 `generated-manifest.jsonl` 에 생산 엔진 없음)
+// "무엇이 자기검증인지"가 정의되지 않고, 두 생산자가 다르면 중립 엔진이라는 것 자체가
+// 성립하지 않는다. 그래서 이 경로는 예전 선택(host engine → 풀 첫 후보)을 그대로 쓴다.
+test('retroactive scan: 엔진 선택이 예전과 같고 판정 mode 는 unknown 이다(확장하지 않음)', () => {
+  const work = repoTemp('judge-scan-no-cross');
+  const tracker = trackerFile('scan-no-cross');
+  try {
+    writeScanSettings(work, { candidateMinScore: 0.3 }, {
+      extractor: {
+        dispatch: 'by-engine',
+        timeout: 30,
+        backends: {
+          claude: engineJudgeStub('claude', 'duplicate', tracker),
+          codex: engineJudgeStub('codex', 'duplicate', tracker),
+        },
+      },
+    });
+    writePage(work, 'entities/page-a.md', 'The stalker asked for CCTV footage at the front desk.');
+    writePage(work, 'entities/page-b.md', 'A restatement of the very same front desk CCTV request.');
+    const fixture = join(work, 'fixture.json');
+    writeFileSync(fixture, JSON.stringify({ results: [{ file: 'proj-wiki/entities/page-b.md', score: 0.56 }] }));
+
+    runScan(work, { QMD_QUERY_FIXTURE: fixture });
+
+    assert.deepEqual(judgedByEngines(tracker), ['claude'],
+      'sorted 풀의 첫 후보 — 두 호스트가 같은 프로젝트에서 같은 엔진을 고른다');
+    const queued = scanQueue(work);
+    assert.equal(queued.length, 1);
+    assert.equal(queued[0].judgedBy, 'claude');
+    assert.equal(queued[0].judgedMode, 'unknown');
+  } finally { removeTemp(work); }
 });
 
 test('QMD_DEDUP_JUDGE=off disables judging entirely (legacy threshold behavior)', () => {
