@@ -3,9 +3,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { removeTemp } from './helpers/temp.mjs';
 
 test('update.sh: 데몬 down → 안내만, launchd 자동기동 안 함', () => {
   const out = execFileSync('bash', ['core/update.sh', '--resolve-only'], {
@@ -72,7 +73,7 @@ test('update.sh main: 데몬 down → stdout 1회 알림, TTL 내 재실행은 �
     const third = runMain(d, { ...env, QMD_NOTICE_TTL_SECS: '0' });
     assert.match(third, /검색 데몬 미응답/, 'TTL 만료 후 재알림');
   } finally {
-    rmSync(base, { recursive: true, force: true });
+    removeTemp(base);
   }
 });
 
@@ -98,7 +99,7 @@ test('update.sh main: dirty-queue 적체는 자기 프로젝트 컬렉션만 집
     const quiet = runMain(d, env);
     assert.doesNotMatch(quiet, /적체/, '타 프로젝트 잔량은 집계 제외');
   } finally {
-    rmSync(base, { recursive: true, force: true });
+    removeTemp(base);
   }
 });
 
@@ -117,7 +118,7 @@ test('update.sh main: staleQueueThreshold 설정으로 임계 조정', () => {
   try {
     assert.match(runMain(d, env), /4건 적체/);
   } finally {
-    rmSync(base, { recursive: true, force: true });
+    removeTemp(base);
   }
 });
 
@@ -136,7 +137,7 @@ test('update.sh main: QMD_SUPPRESS_NOTICE=1 → 알림 무출력 + marker 미생
     const normal = runMain(d, env);
     assert.match(normal, /검색 데몬 미응답/, 'suppress 실행이 후속 세션 알림을 삼키지 않음');
   } finally {
-    rmSync(base, { recursive: true, force: true });
+    removeTemp(base);
   }
 });
 
@@ -151,7 +152,7 @@ test('update.sh main: 이전 update 실패 status가 stdout으로 표면화 (회
   try {
     assert.match(runMain(d, env), /qmd previous update failed: FAIL 2026-07-04/);
   } finally {
-    rmSync(base, { recursive: true, force: true });
+    removeTemp(base);
   }
 });
 
@@ -172,7 +173,7 @@ test('update.sh main: 이전 update 실패 status는 프로젝트별로만 표�
     const same = runMain(first, env);
     assert.match(same, /qmd previous update failed: FAIL scoped first project/);
   } finally {
-    rmSync(base, { recursive: true, force: true });
+    removeTemp(base);
   }
 });
 
@@ -229,7 +230,7 @@ test('update.sh main: collectionPath "." + 크기 가드 초과 → 1줄 안내,
     const third = runMain(d, { ...env, QMD_NOTICE_TTL_SECS: '0' });
     assert.match(third, ROOT_PATH_RE, 'TTL 만료 후 재알림');
   } finally {
-    rmSync(base, { recursive: true, force: true });
+    removeTemp(base);
   }
 });
 
@@ -244,7 +245,7 @@ test('update.sh main: 크기 가드 미달이면 "."이어도 무출력 (작은 
     const markers = readdirSync(cache).filter((f) => f.startsWith('notice-root-collection-path-'));
     assert.equal(markers.length, 0, '가드 미달은 marker도 남기지 않음(조건 해소 시 재무장)');
   } finally {
-    rmSync(base, { recursive: true, force: true });
+    removeTemp(base);
   }
 });
 
@@ -257,7 +258,7 @@ test('update.sh main: 좁은 collectionPath는 무출력', () => {
   try {
     assert.doesNotMatch(runMain(d, env), ROOT_PATH_RE);
   } finally {
-    rmSync(base, { recursive: true, force: true });
+    removeTemp(base);
   }
 });
 
@@ -268,7 +269,7 @@ test('update.sh main: collectionPaths 미지정 컬렉션도 "."으로 해석돼
   try {
     assert.match(runMain(d, env), /'p-implicit'/);
   } finally {
-    rmSync(base, { recursive: true, force: true });
+    removeTemp(base);
   }
 });
 
@@ -283,7 +284,7 @@ test('update.sh main: optout/미설정 프로젝트는 루트 안내도 무출�
     assert.doesNotMatch(runMain(optout, env), ROOT_PATH_RE, 'optout 프로젝트는 무동작');
     assert.doesNotMatch(runMain(pending, env), ROOT_PATH_RE, '미설정 프로젝트는 무동작');
   } finally {
-    rmSync(base, { recursive: true, force: true });
+    removeTemp(base);
   }
 });
 
@@ -300,7 +301,7 @@ test('update.sh main: QMD_SUPPRESS_NOTICE=1 → 루트 안내 무출력 + marker
     assert.equal(markers.length, 0, 'suppress 실행은 marker를 선점하지 않음');
     assert.match(runMain(d, env), ROOT_PATH_RE, 'suppress 실행이 후속 세션 알림을 삼키지 않음');
   } finally {
-    rmSync(base, { recursive: true, force: true });
+    removeTemp(base);
   }
 });
 
@@ -320,7 +321,7 @@ test('update.sh main: recallStrategy wikiOnly면 루트 안내 무출력 + marke
     const markers = readdirSync(cache).filter((f) => f.startsWith('notice-root-collection-path-'));
     assert.equal(markers.length, 0, 'marker도 남기지 않음');
   } finally {
-    rmSync(base, { recursive: true, force: true });
+    removeTemp(base);
   }
 });
 
@@ -345,7 +346,7 @@ for (const strategy of ['hierarchical', 'flat']) {
       assert.match(hits[0], new RegExp(`recallStrategy가 ${strategy}라`), '유효한 전략을 문안에 명시');
       assert.doesNotMatch(hits[0], /skipPaths/, '색인을 못 줄이는 skipPaths를 권하지 않음');
     } finally {
-      rmSync(base, { recursive: true, force: true });
+      removeTemp(base);
     }
   });
 }
@@ -364,7 +365,7 @@ test('update.sh main: wikiOnly로 바꾸면 남아 있던 루트 안내 marker�
     assert.doesNotMatch(runMain(d, { ...env, QMD_NOTICE_TTL_SECS: '0' }), ROOT_PATH_RE, '전략 변경 후 조용');
     assert.equal(markersOf().length, 0, '조건 해소로 marker 정리(재무장)');
   } finally {
-    rmSync(base, { recursive: true, force: true });
+    removeTemp(base);
   }
 });
 
@@ -383,7 +384,7 @@ test('update.sh main: wikiOnly + QMD_SUPPRESS_NOTICE=1도 marker를 건드리지
     assert.doesNotMatch(suppressed, ROOT_PATH_RE);
     assert.ok(readdirSync(cache).includes(marker), 'suppress 경로는 타 호스트 marker를 지우지 않음');
   } finally {
-    rmSync(base, { recursive: true, force: true });
+    removeTemp(base);
   }
 });
 
@@ -413,6 +414,6 @@ test('update.sh: healthcheck timeout 기본값 2s + QMD_HEALTH_TIMEOUT override/
     assert.match(lines[1], / -m 3\.5 /);
     assert.match(lines[2], / -m 2 /);
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTemp(dir);
   }
 });

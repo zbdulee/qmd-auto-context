@@ -1,9 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { removeTemp } from './helpers/temp.mjs';
 
 function frontmatter(text) {
   const match = /^---\n([\s\S]*?)\n---/.exec(text);
@@ -49,6 +50,6 @@ test("update wrapper can invoke update path in sandbox without side effects", ()
     });
     assert.equal(out, "");
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTemp(dir);
   }
 });

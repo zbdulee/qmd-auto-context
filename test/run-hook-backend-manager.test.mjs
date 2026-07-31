@@ -1,9 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { removeTemp } from './helpers/temp.mjs';
 
 function makeExecutable(path, body) {
   writeFileSync(path, body, { mode: 0o755 });
@@ -27,7 +28,7 @@ test("sandbox exits before backend manager", () => {
     assert.equal(out, "");
     assert.equal(existsSync(marker), false);
   } finally {
-    rmSync(d, { recursive: true, force: true });
+    removeTemp(d);
   }
 });
 
@@ -61,7 +62,7 @@ test("update action runs core, then ensures/warms/rotates backend in background 
     const managerContent = waitForFile(managerLog, (c) => c.split("\n").filter(Boolean).length >= 3);
     assert.equal(managerContent, "ensure\nwarm\nrotate\n");
   } finally {
-    rmSync(d, { recursive: true, force: true });
+    removeTemp(d);
   }
 });
 
@@ -89,7 +90,7 @@ test("update action does not block on a slow backend ensure", () => {
     // backend ensure was still kicked (in background)
     assert.notEqual(waitForFile(managerStarted, () => true), "");
   } finally {
-    rmSync(d, { recursive: true, force: true });
+    removeTemp(d);
   }
 });
 
@@ -108,7 +109,7 @@ test("posttool action waits for backend before posttool core", () => {
     assert.equal(readFileSync(managerLog, "utf8"), "ensure --wait\n");
     assert.equal(readFileSync(coreLog, "utf8"), "posttool\n");
   } finally {
-    rmSync(d, { recursive: true, force: true });
+    removeTemp(d);
   }
 });
 
@@ -128,7 +129,7 @@ test("index action enqueues through core then kicks async worker", () => {
     assert.equal(readFileSync(stdinLog, "utf8"), payload);
     assert.equal(readFileSync(managerLog, "utf8"), "kick-index\n");
   } finally {
-    rmSync(d, { recursive: true, force: true });
+    removeTemp(d);
   }
 });
 
@@ -157,6 +158,6 @@ test("index action stays silent if index_enqueue.py invocation fails, and still 
     assert.equal(result.stderr, "");
     assert.equal(readFileSync(managerLog, "utf8"), "kick-index\n");
   } finally {
-    rmSync(d, { recursive: true, force: true });
+    removeTemp(d);
   }
 });

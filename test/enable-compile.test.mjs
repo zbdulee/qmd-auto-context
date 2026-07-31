@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { removeTemp } from './helpers/temp.mjs';
 
 const ROOT = process.cwd();
 
@@ -35,7 +36,7 @@ test('--enable-compile wires compile block with portable built-in engines', () =
     assert.ok(cfg.compile.triggers.includes('post_tool_source'));
     assert.equal(existsSync(join(project, '.auto-context', 'wiki', 'SCHEMA.md')), true); // scaffolded
     assert.match(out, /auto-compile/i); // disclosure printed
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });
 
 test('--enable-compile --engines limits built-in engines', () => {
@@ -45,7 +46,7 @@ test('--enable-compile --engines limits built-in engines', () => {
     const cfg = JSON.parse(readFileSync(join(project, '.auto-context', 'settings.json'), 'utf8'));
     assert.deepEqual(cfg.compile.extractor.builtins, ['codex']);
     assert.deepEqual(cfg.compile.extractor.backends, {});
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });
 
 test('--enable-compile preserves existing explicit extractor configuration', () => {
@@ -75,7 +76,7 @@ test('--enable-compile preserves existing explicit extractor configuration', () 
     assert.equal(updated.compile.extractor.timeout, 9);
     assert.ok(updated.compile.triggers.includes('manual'));
     assert.ok(updated.compile.triggers.includes('post_tool_source'));
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });
 
 test('--enable-compile is idempotent', () => {
@@ -87,7 +88,7 @@ test('--enable-compile is idempotent', () => {
     const second = readFileSync(join(project, '.auto-context', 'settings.json'), 'utf8');
     assert.equal(JSON.parse(first).compile.triggers.filter((t) => t === 'post_tool_source').length, 1);
     assert.deepEqual(JSON.parse(first).compile, JSON.parse(second).compile);
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });
 
 test('--enable-compile refuses a non-opted-in project', () => {
@@ -96,7 +97,7 @@ test('--enable-compile refuses a non-opted-in project', () => {
     const out = runEnable(d);
     assert.match(out, /--optin/);
     assert.equal(existsSync(join(d, '.auto-context', 'settings.json')), false);
-  } finally { rmSync(d, { recursive: true, force: true }); }
+  } finally { removeTemp(d); }
 });
 
 test('--enable-compile refuses a subdir under an opted-in parent (target has no own settings.json)', () => {
@@ -119,7 +120,7 @@ test('--enable-compile refuses a subdir under an opted-in parent (target has no 
     });
     assert.match(out, /--optin/);
     assert.equal(existsSync(join(subdir, '.auto-context', 'settings.json')), false);
-  } finally { rmSync(parent, { recursive: true, force: true }); }
+  } finally { removeTemp(parent); }
 });
 
 test('--enable-compile refuses project opted-in via legacy .auto-context.json (no settings.json)', () => {
@@ -134,7 +135,7 @@ test('--enable-compile refuses project opted-in via legacy .auto-context.json (n
     assert.match(out, /--migrate-config/, 'output must mention --migrate-config');
     assert.equal(existsSync(join(d, '.auto-context', 'settings.json')), false,
       '.auto-context/settings.json must NOT be created for legacy-only opted-in project');
-  } finally { rmSync(d, { recursive: true, force: true }); }
+  } finally { removeTemp(d); }
 });
 
 test('--enable-compile --engines codex <project> (engines BEFORE path) sets builtins to exactly [codex]', () => {
@@ -146,5 +147,5 @@ test('--enable-compile --engines codex <project> (engines BEFORE path) sets buil
     const cfg = JSON.parse(readFileSync(join(project, '.auto-context', 'settings.json'), 'utf8'));
     assert.deepEqual(cfg.compile.extractor.builtins, ['codex']);
     assert.deepEqual(cfg.compile.extractor.backends, {});
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });

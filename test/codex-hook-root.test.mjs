@@ -15,9 +15,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from 'node:fs';
+import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { removeTemp } from './helpers/temp.mjs';
 
 const REPO = process.cwd();
 const FIXTURE = 'test/fixtures/daemon-response.json';
@@ -64,7 +65,7 @@ test('CLAUDE_PLUGIN_ROOT 주입 + PLUGIN_ROOT 누락 → recall codex 도달해 
     assert.notEqual(res.code, 127, 'PLUGIN_ROOT 누락이 command-not-found(127)로 이어지면 안 됨');
     assert.equal(res.code, 0);
     assert.match(JSON.parse(res.stdout.trim()).hookSpecificOutput.additionalContext, /\[sample\]/);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('빈 문자열 PLUGIN_ROOT가 새어들어와도 CLAUDE_PLUGIN_ROOT로 recall 동작 (127 아님)', () => {
@@ -76,7 +77,7 @@ test('빈 문자열 PLUGIN_ROOT가 새어들어와도 CLAUDE_PLUGIN_ROOT로 reca
     assert.notEqual(res.code, 127);
     assert.equal(res.code, 0);
     assert.match(JSON.parse(res.stdout.trim()).hookSpecificOutput.additionalContext, /\[sample\]/);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('실제 Codex payload(stdin JSON)가 recall codex까지 전달되어 정상 종료', () => {
@@ -89,7 +90,7 @@ test('실제 Codex payload(stdin JSON)가 recall codex까지 전달되어 정상
     assert.equal(res.code, 0);
     const out = JSON.parse(res.stdout.trim());
     assert.equal(out.hookSpecificOutput.hookEventName, 'UserPromptSubmit');
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('공백/유니코드가 포함된 plugin-root 경로에서도 quoting이 안전 (127/word-split 아님)', () => {
@@ -108,7 +109,7 @@ test('공백/유니코드가 포함된 plugin-root 경로에서도 quoting이 �
     assert.notEqual(res.code, 127, '공백/유니코드 경로가 127로 깨지면 안 됨');
     assert.equal(res.code, 0);
     assert.match(JSON.parse(res.stdout.trim()).hookSpecificOutput.additionalContext, /\[sample\]/);
-  } finally { rmSync(linkDir, { recursive: true, force: true }); rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(linkDir); removeTemp(dir); }
 });
 
 test('POSIX sh(-c)에서도 command가 동작 (이식성)', () => {
@@ -120,7 +121,7 @@ test('POSIX sh(-c)에서도 command가 동작 (이식성)', () => {
     });
     assert.equal(res.code, 0);
     assert.match(JSON.parse(res.stdout.trim()).hookSpecificOutput.additionalContext, /\[sample\]/);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('모든 codex hook command가 검증된 관례 형태(${CLAUDE_PLUGIN_ROOT})를 갖고, novel 문법/제어 연산자를 쓰지 않는다', () => {

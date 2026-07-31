@@ -1,9 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { removeTemp } from './helpers/temp.mjs';
 
 function frontmatter(text) {
   const match = /^---\n([\s\S]*?)\n---/.exec(text);
@@ -55,6 +56,6 @@ test("query wrapper uses recall fixture and returns hook context", () => {
       assert.match(parsed.hookSpecificOutput.additionalContext, /\[sample\]/);
       assert.equal(readFileSync(managerLog, "utf8"), "check-qmd --manual\nensure --wait\n");
     } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTemp(dir);
   }
 });

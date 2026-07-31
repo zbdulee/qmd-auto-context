@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import { removeTemp } from './helpers/temp.mjs';
 
 function repoTemp(prefix) {
   const base = join(homedir(), '.cache');
@@ -61,7 +62,7 @@ test('wiki_extract: compact durable summary becomes wiki_compile candidate and p
     assert.match(page, /kind: "session"/);
     assert.match(page, /ref: "session:local"/);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -86,7 +87,7 @@ test('wiki_extract: preserves canonicalKey and aliases from compact candidates',
     assert.match(page, /canonicalKey: "signal-perception-rule"/);
     assert.match(page, /aliases:\n  - "Signal rule"/);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -115,7 +116,7 @@ test('wiki_extract: raw transcript-shaped input is rejected before compile write
     assert.match(candidate, /transcript-dump/);
     assert.match(candidate, /Transcript dump alias/);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -127,6 +128,6 @@ test('wiki_extract: no durable summary is a no-op with empty stdout', () => {
     assert.equal(out.trim(), '');
     assert.equal(existsSync(join(work, '.auto-context', 'compile', 'candidates.jsonl')), false);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });

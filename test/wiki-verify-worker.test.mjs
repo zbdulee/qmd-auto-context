@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { removeTemp } from './helpers/temp.mjs';
 
 const CARD_REL = '.auto-context/wiki/concepts/test-card.md';
 const HASH = 'abc123';
@@ -110,7 +111,7 @@ test('verify pass → status verified + verifiedBy/verifiedAt 패치 + 재인덱
     const log = jsonl(join(project, '.auto-context', 'compile', 'verify-log.jsonl'));
     assert.equal(log[0].result, 'verified');
     assert.equal(readFileSync(join(project, '.auto-context', 'compile', 'verify-queue.jsonl'), 'utf8'), '');
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });
 
 test('verify fail + onFail 기본(delete) → 카드 삭제, tombstone 없음, 재인덱싱 enqueue', () => {
@@ -126,7 +127,7 @@ test('verify fail + onFail 기본(delete) → 카드 삭제, tombstone 없음, �
     const log = jsonl(join(project, '.auto-context', 'compile', 'verify-log.jsonl'));
     assert.equal(log[0].result, 'deleted');
     assert.equal(log[0].reasons[0], 'source contradicts claim');
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });
 
 // 기계 판정이 카드를 지우는 유일한 게이트이므로 삭제 사유는 pass 트래픽과 분리된
@@ -149,7 +150,7 @@ test('verify fail delete → verify-deleted.jsonl 감사 레코드 (fail은 억�
     assert.equal(JSON.stringify(deleted[0]).includes('Durable claim'), false, '원문 본문은 담지 않는다');
     assert.equal(jsonl(join(project, '.auto-context', 'compile', 'verify-skipped.jsonl')).length, 0,
       'fail은 재컴파일을 막지 않으므로 억제 마커 없음 — 감사 추적은 verify-deleted가 책임');
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });
 
 test('verify-deleted.jsonl은 상한을 넘어도 트림되지 않는다 (verify-log와 대비)', () => {
@@ -170,7 +171,7 @@ test('verify-deleted.jsonl은 상한을 넘어도 트림되지 않는다 (verify
     const log = jsonl(logPath);
     assert.equal(log.length, 201, 'verify-log는 상한 초과 시 최근 절반만 유지');
     assert.equal(log[0].i, 200);
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });
 
 test('verify fail + onFail=contested → status contested 패치(파일 보존)', () => {
@@ -183,7 +184,7 @@ test('verify fail + onFail=contested → status contested 패치(파일 보존)'
     assert.match(text, /^status: contested$/m);
     assert.equal(existsSync(join(project, '.auto-context', 'compile', 'verify-deleted.jsonl')), false,
       '삭제하지 않았으면 삭제 원장에 쓰지 않는다');
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });
 
 test('inconclusive + onInconclusive=none → generated 유지 + log 기록 (하위호환)', () => {
@@ -196,7 +197,7 @@ test('inconclusive + onInconclusive=none → generated 유지 + log 기록 (하�
     assert.equal(log[0].result, 'inconclusive');
     assert.equal(jsonl(join(project, '.auto-context', 'compile', 'verify-skipped.jsonl')).length, 0,
       '삭제하지 않았으면 억제 마커도 남기지 않는다');
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });
 
 test('inconclusive + onInconclusive 기본(delete) → 카드 삭제 + 억제 마커 + 삭제 사유 로그', () => {
@@ -228,7 +229,7 @@ test('inconclusive + onInconclusive 기본(delete) → 카드 삭제 + 억제 �
     assert.equal(deleted.length, 1, 'inconclusive 삭제도 삭제 원장에 기록');
     assert.equal(deleted[0].verdict, 'inconclusive');
     assert.equal(deleted[0].reasons[0], 'verifier could not adjudicate');
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });
 
 test('inconclusive delete: reviewed 카드는 삭제되지 않는다 (사람 판단 보호)', () => {
@@ -241,7 +242,7 @@ test('inconclusive delete: reviewed 카드는 삭제되지 않는다 (사람 판
     const log = jsonl(join(project, '.auto-context', 'compile', 'verify-log.jsonl'));
     assert.equal(log[0].reason, 'not_generated');
     assert.equal(jsonl(join(project, '.auto-context', 'compile', 'verify-skipped.jsonl')).length, 0);
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });
 
 test('inconclusive + onInconclusive=contested → 파일 보존 + status contested', () => {
@@ -251,7 +252,7 @@ test('inconclusive + onInconclusive=contested → 파일 보존 + status contest
     runVerifyWorker(project);
     assert.match(readFileSync(join(project, CARD_REL), 'utf8'), /^status: contested$/m);
     assert.equal(jsonl(join(project, '.auto-context', 'compile', 'verify-skipped.jsonl')).length, 0);
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });
 
 test('transient(CLI 부재 127)는 inconclusive로 오분류되지 않는다 — 카드 보존 + 큐 보존', () => {
@@ -262,7 +263,7 @@ test('transient(CLI 부재 127)는 inconclusive로 오분류되지 않는다 —
     assert.match(readFileSync(join(project, '.auto-context', 'compile', 'verify-queue.jsonl'), 'utf8'), /test-card\.md/);
     assert.equal(jsonl(join(project, '.auto-context', 'compile', 'verify-skipped.jsonl')).length, 0,
       'transient은 억제 마커를 남기지 않는다 — CLI 설치 후 재시도되어야 함');
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });
 
 test('transient(timeout)는 inconclusive로 오분류되지 않는다 — 카드 보존 + cooldown', () => {
@@ -276,7 +277,7 @@ test('transient(timeout)는 inconclusive로 오분류되지 않는다 — 카드
     // 프로젝트 전체 검수를 막고 다음 후보로 degrade하지 못했다.
     assert.deepEqual(Object.keys(engineCooldown(project)), ['(unattributed)']);
     assert.equal(jsonl(join(project, '.auto-context', 'compile', 'verify-skipped.jsonl')).length, 0);
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });
 
 test('verifier CLI 부재(127) → 큐 보존(설치 대기)', () => {
@@ -287,7 +288,7 @@ test('verifier CLI 부재(127) → 큐 보존(설치 대기)', () => {
     const queue = readFileSync(join(project, '.auto-context', 'compile', 'verify-queue.jsonl'), 'utf8');
     assert.match(queue, /test-card\.md/, '127이면 잡 보존');
     assert.match(readFileSync(join(project, CARD_REL), 'utf8'), /^status: generated$/m);
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });
 
 test('verifier timeout → 후보 단위 cooldown 생성 + 큐 보존 (compile cooldown과 분리)', () => {
@@ -300,7 +301,7 @@ test('verifier timeout → 후보 단위 cooldown 생성 + 큐 보존 (compile c
     assert.ok(Object.keys(engineCooldown(project)).length > 0);
     assert.equal(existsSync(join(project, '.auto-context', 'compile', 'cooldown')), false, 'compile cooldown은 건드리지 않음');
     assert.match(readFileSync(join(project, '.auto-context', 'compile', 'verify-queue.jsonl'), 'utf8'), /test-card\.md/);
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });
 
 test('verify.enabled=false → 큐 미소비(무동작)', () => {
@@ -309,7 +310,7 @@ test('verify.enabled=false → 큐 미소비(무동작)', () => {
     const out = JSON.parse(runVerifyWorker(project));
     assert.equal(out.processed, 0);
     assert.match(readFileSync(join(project, '.auto-context', 'compile', 'verify-queue.jsonl'), 'utf8'), /test-card\.md/);
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });
 
 test('처리 전 카드가 reviewed 상태로 바뀐 경우 skip (사람 검수 존중)', () => {
@@ -322,7 +323,7 @@ test('처리 전 카드가 reviewed 상태로 바뀐 경우 skip (사람 검수 
     const log = jsonl(join(project, '.auto-context', 'compile', 'verify-log.jsonl'));
     assert.equal(log[0].result, 'skipped');
     assert.equal(log[0].reason, 'not_generated');
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });
 
 test('job sourceHash와 카드 블록 hash 불일치 → stale_job skip', () => {
@@ -333,7 +334,7 @@ test('job sourceHash와 카드 블록 hash 불일치 → stale_job skip', () => 
     assert.match(readFileSync(join(project, CARD_REL), 'utf8'), /^status: generated$/m);
     const log = jsonl(join(project, '.auto-context', 'compile', 'verify-log.jsonl'));
     assert.equal(log[0].reason, 'stale_job');
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });
 
 test('소스 전부 소실 → source_missing skip, generated 유지(미검수 배지 유지)', () => {
@@ -344,7 +345,7 @@ test('소스 전부 소실 → source_missing skip, generated 유지(미검수 �
     assert.match(readFileSync(join(project, CARD_REL), 'utf8'), /^status: generated$/m);
     const log = jsonl(join(project, '.auto-context', 'compile', 'verify-log.jsonl'));
     assert.equal(log[0].reason, 'source_missing');
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });
 
 test('source_missing은 트림되지 않는 원장(source-missing.jsonl)에도 남는다', () => {
@@ -361,7 +362,7 @@ test('source_missing은 트림되지 않는 원장(source-missing.jsonl)에도 �
     assert.deepEqual(rows[0].missingSources, ['docs/source.md']);
     // 카드는 그대로 남는다(삭제·downgrade 없음).
     assert.equal(existsSync(join(project, CARD_REL)), true);
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });
 
 test('소스가 살아 있으면(읽기 실패 등) 원장에 소실로 기록하지 않는다', () => {
@@ -380,7 +381,7 @@ test('소스가 살아 있으면(읽기 실패 등) 원장에 소실로 기록�
     }) + '\n');
     runVerifyWorker(project);
     assert.equal(existsSync(join(project, '.auto-context', 'compile', 'source-missing.jsonl')), false);
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });
 
 test('trim_jsonl: 상한 초과 시 최근 절반만 유지', () => {
@@ -399,7 +400,7 @@ w.trim_jsonl(Path(${JSON.stringify(log)}), max_bytes=1024)
     const rows = jsonl(log);
     assert.equal(rows.length, 50, '절반 유지');
     assert.equal(rows[0].i, 50, '최근 절반(뒤쪽)이 남음');
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 // 루프 방지: inconclusive 삭제는 매번 host CLI 호출(=사용자 과금)을 유발하므로,
@@ -507,8 +508,8 @@ test('루프 방지: 같은 소스·같은 body-hash 재후보는 extractor 호�
     const actions = jsonl(candidates).map((r) => r.action);
     assert.deepEqual(actions, ['created', 'skipped', 'created'], 'tombstoned 없이 재생성');
   } finally {
-    rmSync(dir, { recursive: true, force: true });
-    rmSync(counterDir, { recursive: true, force: true });
+    removeTemp(dir);
+    removeTemp(counterDir);
   }
 });
 
@@ -570,7 +571,7 @@ else:
     assert.match(text, /^status: verified$/m, '한 번의 worker 실행에서 생성 직후 검증·승격');
     assert.match(text, /^verifiedBy: "?claude"?$/m);
     assert.equal(readFileSync(join(dir, '.auto-context', 'compile', 'verify-queue.jsonl'), 'utf8'), '');
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 // ---------------------------------------------------------------------------
@@ -627,7 +628,7 @@ test('cross-engine: 카드를 만든 엔진(claude)이 아닌 codex가 검수하
     assert.equal(log[0].verifiedMode, 'cross-engine');
     assert.equal(log[0].producedBy, 'claude');
     assert.deepEqual(log[0].enginesAttempted, ['codex']);
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });
 
 test('degrade: 다른 엔진 CLI가 없으면(127) 같은 엔진으로 검수하되 self로 기록한다', () => {
@@ -651,7 +652,7 @@ test('degrade: 다른 엔진 CLI가 없으면(127) 같은 엔진으로 검수하
     const log = jsonl(join(project, '.auto-context', 'compile', 'verify-log.jsonl'));
     assert.equal(log[0].verifiedMode, 'self');
     assert.deepEqual(log[0].enginesAttempted, ['codex', 'claude']);
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });
 
 test('crossEngine:require + 다른 엔진 없음 → 검수 안 함, 카드 보존 + 큐 보존', () => {
@@ -674,7 +675,7 @@ test('crossEngine:require + 다른 엔진 없음 → 검수 안 함, 카드 보�
     const log = jsonl(join(project, '.auto-context', 'compile', 'verify-log.jsonl'));
     assert.equal(log[0].reason, 'cross_engine_unavailable');
     assert.equal(log[0].crossEngine, 'require');
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });
 
 test('crossEngine:off → 0.x 동작(카드를 만든 엔진이 검수, mode self)', () => {
@@ -691,7 +692,7 @@ test('crossEngine:off → 0.x 동작(카드를 만든 엔진이 검수, mode sel
     runVerifyWorker(project);
     assert.deepEqual(calls(tracker), ['claude']);
     assert.match(readFileSync(join(project, CARD_REL), 'utf8'), /^verifiedMode: "?self"?$/m);
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });
 
 test('실패 분류 경계: 다른 엔진 timeout은 다음 엔진으로 넘기지 않는다(cooldown + 큐 보존)', () => {
@@ -714,7 +715,7 @@ test('실패 분류 경계: 다른 엔진 timeout은 다음 엔진으로 넘기�
     // transient가 inconclusive(=삭제)로 흐르지 않았음을 확인
     assert.equal(jsonl(join(project, '.auto-context', 'compile', 'verify-skipped.jsonl')).length, 0);
     assert.equal(jsonl(join(project, '.auto-context', 'compile', 'verify-deleted.jsonl')).length, 0);
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });
 
 test('전 후보 CLI 부재(127) → 카드·큐 보존, transient로 처리(삭제 없음)', () => {
@@ -734,7 +735,7 @@ test('전 후보 CLI 부재(127) → 카드·큐 보존, transient로 처리(삭
       readFileSync(join(project, '.auto-context', 'compile', 'verify-queue.jsonl'), 'utf8'),
       /test-card\.md/);
     assert.equal(jsonl(join(project, '.auto-context', 'compile', 'verify-deleted.jsonl')).length, 0);
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });
 
 test('cross-engine fail 삭제 → 원장에 verifiedMode/producedBy가 함께 남는다', () => {
@@ -753,7 +754,7 @@ test('cross-engine fail 삭제 → 원장에 verifiedMode/producedBy가 함께 �
     assert.equal(deleted[0].engine, 'codex');
     assert.equal(deleted[0].verifiedMode, 'cross-engine');
     assert.equal(deleted[0].producedBy, 'claude');
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });
 
 test('legacy extractor.argv는 엔진 귀속이 불가하므로 mode unknown (교차 주장 금지)', () => {
@@ -764,7 +765,7 @@ test('legacy extractor.argv는 엔진 귀속이 불가하므로 mode unknown (�
     const text = readFileSync(join(project, CARD_REL), 'utf8');
     assert.match(text, /^verifiedMode: "?unknown"?$/m);
     assert.match(text, /^verifiedBy: "?claude"?$/m, 'verifiedBy는 기존 동작(job engine) 유지');
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });
 
 test('증명 필드 위생: pass 스탬프는 verifiedBy/verifiedAt/verifiedMode를 항상 함께 쓴다', () => {
@@ -778,7 +779,7 @@ test('증명 필드 위생: pass 스탬프는 verifiedBy/verifiedAt/verifiedMode
     for (const key of ['verifiedBy', 'verifiedAt', 'verifiedMode']) {
       assert.match(fm, new RegExp(`^${key}: .+$`, 'm'), `${key} 결측 금지`);
     }
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });
 
 test('기존 verified 카드는 자동 재검증되지 않는다 (655장 재검증 = 사용자 계정 청구)', () => {
@@ -792,7 +793,7 @@ test('기존 verified 카드는 자동 재검증되지 않는다 (655장 재검�
     assert.deepEqual(calls(tracker), [], '검수된 카드에는 host CLI를 호출하지 않는다');
     assert.equal(existsSync(join(project, CARD_REL)), true);
     assert.equal(jsonl(join(project, '.auto-context', 'compile', 'verify-log.jsonl'))[0].reason, 'not_generated');
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });
 
 test('crossEngine:require는 엔진 귀속 불가 argv(legacy/default)로 만족되지 않는다', () => {
@@ -808,7 +809,7 @@ test('crossEngine:require는 엔진 귀속 불가 argv(legacy/default)로 만족
       assert.match(readFileSync(join(project, CARD_REL), 'utf8'), /^status: generated$/m);
       assert.equal(jsonl(join(project, '.auto-context', 'compile', 'verify-log.jsonl'))[0].reason,
         'cross_engine_unavailable');
-    } finally { rmSync(project, { recursive: true, force: true }); }
+    } finally { removeTemp(project); }
   }
 });
 
@@ -822,7 +823,7 @@ test('후보 엔진이 0건이어도 extractor.default 폴백은 유지된다(pr
     const text = readFileSync(join(project, CARD_REL), 'utf8');
     assert.match(text, /^status: verified$/m);
     assert.match(text, /^verifiedMode: "?unknown"?$/m);
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });
 
 // ---------------------------------------------------------------------------
@@ -860,7 +861,7 @@ test('선호 엔진 non-127 실패 → 다음 run이 다음 후보로 degrade, r
     assert.equal(log[0].cooledKey, 'codex');
     assert.deepEqual(log[1].enginesCooling, ['codex']);
     assert.equal(log[1].result, 'verified');
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });
 
 test('후보 전원 식힘 중 → 잡 보존 + engines_cooling 로그 (드롭 아님)', () => {
@@ -885,7 +886,7 @@ test('후보 전원 식힘 중 → 잡 보존 + engines_cooling 로그 (드롭 �
     assert.equal(log[log.length - 1].reason, 'engines_cooling');
     assert.deepEqual(log[log.length - 1].enginesCooling, ['claude', 'codex']);
     assert.equal(existsSync(join(project, CARD_REL)), true, '삭제되지 않는다');
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });
 
 test('CLI 부재(127)는 로그 1줄을 남기고 후보를 식히지 않는다(과금 0, 설치 즉시 재시도)', () => {
@@ -904,7 +905,7 @@ test('CLI 부재(127)는 로그 1줄을 남기고 후보를 식히지 않는다(
     assert.equal(log[0].reason, 'extractor_unavailable');
     assert.deepEqual(log[0].enginesAttempted, ['codex', 'claude']);
     assert.deepEqual(engineCooldown(project), {}, '127은 식히지 않는다');
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });
 
 test('귀속 불가 라벨(sentinel "unknown"): prefer는 cross-engine을 주장하지 않고 require는 fail-closed', () => {
@@ -932,7 +933,7 @@ test('귀속 불가 라벨(sentinel "unknown"): prefer는 cross-engine을 주장
         assert.match(readFileSync(join(project, CARD_REL), 'utf8'),
           new RegExp(`^verifiedMode: "?${expect}"?$`, 'm'));
       }
-    } finally { rmSync(project, { recursive: true, force: true }); }
+    } finally { removeTemp(project); }
   }
 });
 
@@ -952,7 +953,7 @@ attempts, mode, reason = w.plan_verify_attempts(cfg, {"builtins": ["codex"]}, "c
 print(json.dumps([[a["engine"], a["mode"]] for a in attempts]))
 `], { cwd: process.cwd(), encoding: 'utf8' });
     assert.deepEqual(JSON.parse(plan), [['codex', 'cross-engine'], ['claude', 'self']]);
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });
 
 test('verify.builtins 오타는 영구 drop이 아니라 self 폴백으로 degrade한다', () => {
@@ -968,7 +969,7 @@ test('verify.builtins 오타는 영구 drop이 아니라 self 폴백으로 degra
     assert.match(readFileSync(join(project, CARD_REL), 'utf8'), /^status: verified$/m);
     assert.equal(readFileSync(join(project, '.auto-context', 'compile', 'verify-queue.jsonl'), 'utf8'), '',
       'missing_extractor 영구 drop이 아니다');
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });
 
 test('로그 키 의미 고정: attempt 이전 줄은 producedBy만, 이후 줄은 engine=검수 엔진', () => {
@@ -983,7 +984,7 @@ test('로그 키 의미 고정: attempt 이전 줄은 producedBy만, 이후 줄�
     assert.equal(row.reason, 'not_generated');
     assert.equal(row.producedBy, 'claude');
     assert.equal('engine' in row, false, '검수 엔진이 없는 줄에 engine 키를 쓰지 않는다');
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });
 
 // ---------------------------------------------------------------------------
@@ -1009,7 +1010,7 @@ test('cooldown 쓰기 실패는 로그에 표면화된다 (MAJOR 1 복구 메커
     assert.equal(row.result, 'deferred');
     assert.equal(row.cooldownWriteFailed, true, '식힘 기록 실패 = 다음 run이 같은 후보 재호출');
     assert.equal(existsSync(join(project, CARD_REL)), true);
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });
 
 test('invalid_verdict: 남은 후보가 있으면 degrade, 후보가 다 떨어지면 폐기(과금 루프 방지)', () => {
@@ -1045,7 +1046,7 @@ print("{}")
     assert.equal(readFileSync(queuePath, 'utf8'), '');
     assert.equal(existsSync(join(project, CARD_REL)), true, '폐기해도 카드는 삭제되지 않는다');
     assert.equal(calls(tracker).length, 2, 'run당 유료 호출 1회');
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });
 
 test('crossEngine:off + 귀속 불가 라벨 → 폐기 대신 풀 첫 후보로 폴백(mode unknown)', () => {
@@ -1061,7 +1062,7 @@ test('crossEngine:off + 귀속 불가 라벨 → 폐기 대신 풀 첫 후보로
     const text = readFileSync(join(project, CARD_REL), 'utf8');
     assert.match(text, /^status: verified$/m, '폐기하면 그 카드는 영원히 검수되지 않는다');
     assert.match(text, /^verifiedMode: "?unknown"?$/m, '거짓 교차검증 주장 금지');
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });
 
 test('실패 행은 verifiedMode를 쓰지 않는다 (attemptedMode로 분리 — 노출 집계 오독 방지)', () => {
@@ -1083,7 +1084,7 @@ test('실패 행은 verifiedMode를 쓰지 않는다 (attemptedMode로 분리 �
     assert.equal('verifiedMode' in failed, false, '달성하지 않은 mode를 verifiedMode로 쓰지 않는다');
     assert.equal(passed.verifiedMode, 'self');
     assert.equal(passed.attemptedMode, 'self');
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });
 
 test('0.x 전역 verify-cooldown 파일은 고아로 남지 않고 정리된다', () => {
@@ -1093,7 +1094,7 @@ test('0.x 전역 verify-cooldown 파일은 고아로 남지 않고 정리된다'
     writeFileSync(stale, '99999999999\n');
     runVerifyWorker(project);
     assert.equal(existsSync(stale), false);
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });
 
 test('만료값 상한 클램프: 오염된 만료값은 후보를 영구 배제하지 못한다', () => {
@@ -1107,5 +1108,5 @@ test('만료값 상한 클램프: 오염된 만료값은 후보를 영구 배제
     assert.equal(JSON.parse(runVerifyWorker(project)).processed, 1);
     assert.deepEqual(calls(tracker), ['codex'], '상한 초과 만료값은 식힘으로 보지 않는다');
     assert.match(readFileSync(join(project, CARD_REL), 'utf8'), /^status: verified$/m);
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });

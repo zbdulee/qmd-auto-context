@@ -4,9 +4,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { removeTemp } from './helpers/temp.mjs';
 
 function buildPrompt(payload) {
   return execFileSync('python3', ['-c', `
@@ -136,7 +137,7 @@ print(json.dumps({'candidates': []}))
     assert.equal(seen.contentLen, 100);
     assert.equal(seen.maxLines, 60);
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTemp(dir);
   }
 });
 
@@ -239,6 +240,6 @@ test('wiki_compile writes an identifier-dense technical card but still rejects a
     assert.match(candidates, /secret_like/);
     assert.doesNotMatch(candidates, /ghp_A1b2C3d4/);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });

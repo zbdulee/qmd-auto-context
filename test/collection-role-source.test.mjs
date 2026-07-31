@@ -9,6 +9,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { removeTemp } from './helpers/temp.mjs';
 
 function py(code, args = []) {
   return execFileSync('python3', ['-c', code, ...args], { encoding: 'utf8' });
@@ -141,7 +142,7 @@ test('resolve: source는 entries에 남고 indexEntries에서만 빠진다', () 
     assert.deepEqual(r.sourceEntries.map(e => e.name), ['p-archive']);
     // 항목 모양은 {name, path} 그대로다 — role을 얹으면 downstream이 role을 다시 비교한다.
     assert.deepEqual(Object.keys(r.entries[0]).sort(), ['name', 'path']);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('resolve: role 미사용·미지 role 프로젝트는 indexEntries == entries (하위호환)', () => {
@@ -161,7 +162,7 @@ test('resolve: role 미사용·미지 role 프로젝트는 indexEntries == entri
     r = resolveOnly(dir);
     assert.deepEqual(r.indexEntries, r.entries);
     assert.deepEqual(r.sourceEntries, []);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('resolve: 명시적 미지 role은 fail-closed — entries에만 남고 등록도 해제도 안 한다', () => {
@@ -178,7 +179,7 @@ test('resolve: 명시적 미지 role은 fail-closed — entries에만 남고 등
     assert.deepEqual(r.indexEntries, []);
     // 해제도 하지 않는다 — 오타 하나로 기존 인덱스를 지우는 것은 파괴적이다.
     assert.deepEqual(r.sourceEntries, []);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('resolve: role을 source↔raw로 되돌리면 등록 대상이 그대로 복귀한다 (가역성)', () => {
@@ -201,7 +202,7 @@ test('resolve: role을 source↔raw로 되돌리면 등록 대상이 그대로 �
     r = resolveOnly(dir);
     assert.deepEqual(r.indexEntries.map(e => e.name), ['a']);
     assert.deepEqual(r.sourceEntries, []);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 // SessionStart 본 경로를 돌리되 HOME·PATH·캐시를 전부 샌드박스로 가둔다
@@ -266,7 +267,7 @@ test('update.sh: 미지 role 값은 SessionStart notice로 표면화된다 (조�
       collectionRoles: { a: 'sourse' },
     });
     assert.match(runSessionStart(f, project), /collectionRoles/);
-  } finally { rmSync(f.base, { recursive: true, force: true }); }
+  } finally { removeTemp(f.base); }
 });
 
 // ---------------------------------------------------------------------------
@@ -335,7 +336,7 @@ test('update.sh: role source는 collection add 대상에서 빠지고 이미 등
     // 계속 점유한다 — 8단계가 재려는 것이 그 점유이므로 실제로 지워야 한다.
     assert.match(qmd, /^collection remove p-archive$/m);
     assert.match(hook, /UNREGISTER SOURCE COLLECTION: p-archive/);
-  } finally { rmSync(work, { recursive: true, force: true }); }
+  } finally { removeTemp(work); }
 });
 
 test('update.sh: role을 raw로 되돌리면 다음 세션이 재등록한다 (가역성 — settings 불변)', () => {
@@ -363,7 +364,7 @@ test('update.sh: role을 raw로 되돌리면 다음 세션이 재등록한다 (�
     const qmd = readFileSync(join(work, 'qmd.log'), 'utf8');
     assert.match(qmd, /collection add .*archive --name p-archive/);
     assert.doesNotMatch(qmd, /collection remove/);
-  } finally { rmSync(work, { recursive: true, force: true }); }
+  } finally { removeTemp(work); }
 });
 
 test('update.sh: 미지 role 컬렉션은 qmd에 등록되지 않는다 (경고만 하고 색인하면 소용없다)', () => {
@@ -385,7 +386,7 @@ test('update.sh: 미지 role 컬렉션은 qmd에 등록되지 않는다 (경고�
       `미지 role 컬렉션이 실제로 인덱싱됐다:\n${qmd}`);
     // 해제도 하지 않는다(파괴적 조치 금지).
     assert.doesNotMatch(qmd, /collection remove p-archive/);
-  } finally { rmSync(work, { recursive: true, force: true }); }
+  } finally { removeTemp(work); }
 });
 
 test('update.sh: root 소실 + role source 여도 등록돼 있으면 지운다 (고아 등록 금지)', () => {
@@ -403,7 +404,7 @@ test('update.sh: root 소실 + role source 여도 등록돼 있으면 지운다 
       collectionRoles: { 'p-docs': 'raw', 'p-archive': 'source' },
     });
     // 브랜치 전환·rename 으로 root 가 사라진 상태 + 아직 등록돼 있음.
-    rmSync(join(work, 'archive'), { recursive: true, force: true });
+    removeTemp(join(work, 'archive'));
     writeListingStub(work, ['p-docs', 'p-archive']);
     runWorker(work);
 
@@ -413,7 +414,7 @@ test('update.sh: root 소실 + role source 여도 등록돼 있으면 지운다 
     // settings 정리는 그대로 진행된다.
     const after = JSON.parse(readFileSync(join(work, '.auto-context', 'settings.json'), 'utf8'));
     assert.deepEqual(after.collections, ['p-docs']);
-  } finally { rmSync(work, { recursive: true, force: true }); }
+  } finally { removeTemp(work); }
 });
 
 test('update.sh: 등록된 적 없는 컬렉션의 root 소실은 remove 실패 없이 settings만 정리한다', () => {
@@ -429,7 +430,7 @@ test('update.sh: 등록된 적 없는 컬렉션의 root 소실은 remove 실패 
       collectionPaths: { 'p-docs': 'docs', 'p-gone': 'gone' },
       collectionRoles: { 'p-docs': 'raw', 'p-gone': 'raw' },
     });
-    rmSync(join(work, 'gone'), { recursive: true, force: true });
+    removeTemp(join(work, 'gone'));
     writeListingStub(work, ['p-docs']);   // p-gone 은 등록된 적 없다
     runWorker(work);
 
@@ -440,7 +441,7 @@ test('update.sh: 등록된 적 없는 컬렉션의 root 소실은 remove 실패 
     assert.doesNotMatch(hook, /PRUNE MISSING COLLECTION FAILED: p-gone/);
     const after = JSON.parse(readFileSync(join(work, '.auto-context', 'settings.json'), 'utf8'));
     assert.deepEqual(after.collections, ['p-docs']);
-  } finally { rmSync(work, { recursive: true, force: true }); }
+  } finally { removeTemp(work); }
 });
 
 // 신호 파일은 notice marker와 같은 캐시 디렉터리에 있다. 경로 규칙을 테스트가
@@ -513,7 +514,7 @@ test('update.sh: unregister 실패가 SessionStart notice로 표면화된다 (�
     assert.equal(files.filter(n => n.startsWith(STATE_PREFIX)).length, 1);
     assert.equal(files.filter(n => !n.startsWith(STATE_PREFIX)).length, 1,
       `notice marker가 상태 파일과 같은 경로다: ${files.join(', ')}`);
-  } finally { rmSync(f.base, { recursive: true, force: true }); }
+  } finally { removeTemp(f.base); }
 });
 
 test('update.sh: unregister 성공이면 상태가 지워져 notice가 나지 않는다 (조건 해소 재무장)', () => {
@@ -524,7 +525,7 @@ test('update.sh: unregister 성공이면 상태가 지워져 notice가 나지 �
     assert.doesNotMatch(runSessionStart(f, project), /제거하지 못했습니다/);
     // 실제로 제거를 시도했는지도 확인한다(상태가 없는 이유가 "시도 안 함"이면 안 된다).
     assert.match(readFileSync(join(f.base, 'qmd.log'), 'utf8'), /^collection remove p-archive$/m);
-  } finally { rmSync(f.base, { recursive: true, force: true }); }
+  } finally { removeTemp(f.base); }
 });
 
 test('update.sh: 등록돼 있지 않은 source는 실패로 치지 않는다 (거짓 경보 금지)', () => {
@@ -545,7 +546,7 @@ test('update.sh: 등록돼 있지 않은 source는 실패로 치지 않는다 (�
     assert.deepEqual(unregisterStateFiles(f), []);
     assert.doesNotMatch(readFileSync(join(f.base, 'qmd.log'), 'utf8'), /collection remove p-archive/);
     assert.doesNotMatch(runSessionStart(f, project), /제거하지 못했습니다/);
-  } finally { rmSync(f.base, { recursive: true, force: true }); }
+  } finally { removeTemp(f.base); }
 });
 
 // ---------------------------------------------------------------------------
@@ -605,7 +606,7 @@ test('recall: 컬렉션이 전부 source면 질의 없이 no_indexed_collections
       .map(JSON.parse).filter(e => e.event === 'qmd_recall_selection');
     assert.equal(ev.length, 1);
     assert.equal(ev[0].reason, 'no_indexed_collections');
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('recall: wikiOnly 판정에 source는 포함되지 않는다', () => {
@@ -629,7 +630,7 @@ test('recall: wikiOnly 판정에 source는 포함되지 않는다', () => {
       .map(JSON.parse).filter(e => e.event === 'qmd_recall_selection');
     // source는 wiki가 아니다 — wikiOnly는 surface할 것이 없다고 판정해야 한다.
     assert.equal(ev[0].reason, 'no_wiki_collections');
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 // ---------------------------------------------------------------------------
@@ -671,8 +672,8 @@ test('index_enqueue: source 컬렉션 편집은 dirty 큐에 들어가지 않는
     // raw: 기존대로 적재(하위호환).
     assert.match(enqueueEdit(dir, join('docs', 'a.md'), join(qdir, 'q2')), /^p-docs\t/);
   } finally {
-    rmSync(dir, { recursive: true, force: true });
-    rmSync(qdir, { recursive: true, force: true });
+    removeTemp(dir);
+    removeTemp(qdir);
   }
 });
 
@@ -689,8 +690,8 @@ test('index_enqueue: source를 raw로 되돌리면 같은 편집이 다시 적�
     });
     assert.match(enqueueEdit(dir, join('archive', 'old.md'), join(qdir, 'q2')), /^p-archive\t/);
   } finally {
-    rmSync(dir, { recursive: true, force: true });
-    rmSync(qdir, { recursive: true, force: true });
+    removeTemp(dir);
+    removeTemp(qdir);
   }
 });
 
@@ -740,7 +741,7 @@ test('compile enqueue: source 컬렉션의 .md는 compile 입력으로 큐잉된
     assert.equal(rows.length, 1, 'source 컬렉션이 compile 큐에 들어가야 한다');
     assert.equal(rows[0].source.collection, 'p-archive');
     assert.equal(rows[0].trigger, 'post_tool_source');
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('compile enqueue: wiki 컬렉션은 여전히 compile 입력이 아니다', () => {
@@ -755,7 +756,7 @@ test('compile enqueue: wiki 컬렉션은 여전히 compile 입력이 아니다',
       env: { ...process.env, QMD_ENGINE: 'claude' },
     });
     assert.deepEqual(compileQueue(dir), []);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('compile worker: source 컬렉션 잡을 invalid_source_scope로 버리지 않는다', () => {
@@ -809,7 +810,7 @@ test('compile worker: source 컬렉션 잡을 invalid_source_scope로 버리지 
     assert.doesNotMatch(cands, /invalid_source_scope/);
     // 생성된 wiki 카드는 인덱싱 대상이므로 dirty 큐에는 wiki만 들어간다.
     assert.match(readFileSync(dirtyQueue, 'utf8'), /^p-wiki\t/);
-  } finally { rmSync(project, { recursive: true, force: true }); }
+  } finally { removeTemp(project); }
 });
 
 test('sync: source 변경은 dirty 큐를 건너뛰고 compile 큐에만 들어간다', () => {
@@ -836,8 +837,8 @@ test('sync: source 변경은 dirty 큐를 건너뛰고 compile 큐에만 들어�
     assert.equal(out.compileQueued, 1);
     assert.equal(compileQueue(dir)[0].source.collection, 'p-archive');
   } finally {
-    rmSync(dir, { recursive: true, force: true });
-    rmSync(envBase, { recursive: true, force: true });
+    removeTemp(dir);
+    removeTemp(envBase);
   }
 });
 
@@ -870,5 +871,5 @@ test('여집합 금지: core/에 `role != "wiki"` 형태의 raw 판정이 남아
     const hits = execFileSync('bash', ['-c', cmd], { encoding: 'utf8', cwd: probe }).trim();
     assert.match(hits, /a\.py/, `가드가 큰따옴표 표기를 놓쳤다:\n${hits}`);
     assert.match(hits, /b\.py/, `가드가 작은따옴표 표기를 놓쳤다:\n${hits}`);
-  } finally { rmSync(probe, { recursive: true, force: true }); }
+  } finally { removeTemp(probe); }
 });

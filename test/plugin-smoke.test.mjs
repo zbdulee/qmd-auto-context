@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { removeTemp } from './helpers/temp.mjs';
 
 // hooks.json의 command(${CLAUDE_PLUGIN_ROOT}/hooks/run-hook recall claude)를
 // CLAUDE_PLUGIN_ROOT=repo 로 치환 실행 → 코어 경유 출력 확인
@@ -22,5 +23,5 @@ test('hooks.json command가 CLAUDE_PLUGIN_ROOT로 해석되어 recall 동작', (
       shell: '/bin/bash',
     }).trim();
     assert.match(JSON.parse(out).hookSpecificOutput.additionalContext, /\[sample\]/);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });

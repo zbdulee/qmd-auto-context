@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import { removeTemp } from './helpers/temp.mjs';
 
 function repoTemp(prefix) {
   const base = join(homedir(), '.cache');
@@ -112,7 +113,7 @@ test('wiki_dedup_resolve: merge deletes the named loser, logs full content first
     assert.match(readFileSync(dirtyQueue, 'utf8'), /proj-wiki\t.*\.auto-context\/wiki/);
     assert.deepEqual(readDedupNeeded(work), []);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -131,7 +132,7 @@ test('wiki_dedup_resolve: skip removes the entry, no filesystem change, nothing 
     assert.deepEqual(readDedupDeleted(work), []);
     assert.deepEqual(readDedupNeeded(work), []);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -150,7 +151,7 @@ test('wiki_dedup_resolve: --delete not matching the entry pageA/pageB is rejecte
     assert.equal(existsSync(join(work, '.auto-context', 'wiki', 'entities', 'b.md')), true);
     assert.equal(readDedupNeeded(work).length, 1, 'rejected resolution must restore the queue entry');
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -165,7 +166,7 @@ test('wiki_dedup_resolve: --delete escaping wiki_root is rejected', () => {
     assert.equal(out.action, 'rejected');
     assert.equal(out.reason, 'unsafe_delete_path');
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -182,7 +183,7 @@ test('wiki_dedup_resolve: --delete target already missing degrades to skip, not 
     assert.deepEqual(readDedupNeeded(work), []);
     assert.deepEqual(readDedupSkipped(work), [], 'the merge stale_target degrade must record nothing');
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -204,7 +205,7 @@ test('wiki_dedup_resolve: unresolved entries before/after the resolved index are
     assert.equal(remaining.length, 1);
     assert.equal(remaining[0].pageA, 'entities/p3.md');
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -236,7 +237,7 @@ test('wiki_dedup_resolve: a crash mid-resolve leaves the queue exactly as it was
     assert.equal(threw, true, 'unlink on a read-only directory must raise');
     assert.deepEqual(readDedupNeeded(work), before);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -265,7 +266,7 @@ test('wiki_dedup_resolve: skip on an intact pair records one sorted, hashed supp
     assert.ok(skipped[0].skippedAt);
     assert.deepEqual(readDedupNeeded(work), []);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -282,6 +283,6 @@ test('wiki_dedup_resolve: stale skip (either page missing) records nothing', () 
     assert.deepEqual(readDedupSkipped(work), [], 'a stale skip is not a content judgment; never record it');
     assert.deepEqual(readDedupNeeded(work), []);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });

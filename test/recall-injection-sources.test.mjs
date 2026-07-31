@@ -10,9 +10,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join, isAbsolute, dirname } from 'node:path';
+import { removeTemp } from './helpers/temp.mjs';
 
 const PROMPT = 'config layout decision 내용을 알려줘';
 const SOURCE_PREFIX = '  ↳ ';
@@ -105,7 +106,7 @@ function withProject(opts, fn) {
   try {
     return fn({ dir, fixture, log, write, run });
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTemp(dir);
   }
 }
 
@@ -260,7 +261,7 @@ test('cwd 가 프로젝트 하위 디렉터리여도 원문 경로가 열린다 
       assert.equal(isAbsolute(line), cwd !== dir, `표시 규칙 불일치: ${line}`);
     }
   } finally {
-    rmSync(base, { recursive: true, force: true });
+    removeTemp(base);
   }
 });
 
@@ -441,7 +442,7 @@ test('상한은 실제 주입되는 표시 문자열 기준이다 (절대 표시
     assert.deepEqual(sourceLines(ctx), [], '하위 cwd 에서는 절대 표시가 상한을 넘어 drop');
     assert.equal(selection(log).source_drop_reasons.too_long, 1);
   } finally {
-    rmSync(base, { recursive: true, force: true });
+    removeTemp(base);
   }
 });
 
@@ -466,7 +467,7 @@ test('sources: [ ... ] 한 줄 flow 시퀀스는 사유를 남긴다 (무흔적 
     assert.equal(sel.source_entries, 1, '항목 수가 0 이면 "소스 없는 카드"와 구분되지 않는다');
     assert.deepEqual(sel.source_drop_reasons, { inline_sequence: 1 });
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTemp(dir);
   }
 });
 
@@ -487,7 +488,7 @@ test('sources: [] 는 정상적인 "소스 없음" 표기라 사유를 만들지
     assert.equal(sel.source_entries, 0);
     assert.deepEqual(sel.source_drop_reasons, {});
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTemp(dir);
   }
 });
 
@@ -521,7 +522,7 @@ test('sources: 줄의 잔여 4분기 — 항목이 아닌 것은 사유를 만�
       assert.equal(sel.source_entries, entries, `항목 수 불일치: ${head}`);
       assert.deepEqual(sel.source_drop_reasons, reasons, `사유 불일치: ${head}`);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeTemp(dir);
     }
   }
 });
@@ -766,7 +767,7 @@ test('injectSourcePathsPerCard: 0 이면 sources 유무와 무관하게 출력�
       writeFileSync(fixture, JSON.stringify({ results }));
       return contextOf({ prompt: PROMPT, cwd: dir }, { QMD_QUERY_FIXTURE: fixture });
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeTemp(dir);
     }
   };
   const withSources = render([fileEntry('docs/a.md')]);

@@ -1,12 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
+import { removeTemp } from './helpers/temp.mjs';
 import {
   existsSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
-  rmSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -54,7 +54,7 @@ test("check-qmd manual mode reports missing qmd and exits non-zero", () => {
     assert.match(result.stdout, /qmd is not installed/);
     assert.match(result.stdout, /@tobilu\/qmd@2\.5\.3/);
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    removeTemp(home);
   }
 });
 
@@ -69,7 +69,7 @@ test("check-qmd hook mode stays silent when qmd is missing", () => {
     assert.notEqual(result.status, 0);
     assert.equal(result.stdout, "");
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    removeTemp(home);
   }
 });
 
@@ -85,7 +85,7 @@ test("check-qmd finds qmd through HOME .bun path normalization", () => {
     assert.equal(result.status, 0);
     assert.equal(result.stdout, "");
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    removeTemp(home);
   }
 });
 
@@ -103,7 +103,7 @@ test("check-qmd honors QMD_BIN outside PATH", () => {
     assert.equal(result.status, 0);
     assert.equal(result.stdout, "");
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    removeTemp(home);
   }
 });
 
@@ -119,7 +119,7 @@ test("check-qmd finds qmd through HOME .local bin normalization", () => {
     assert.equal(result.status, 0);
     assert.equal(result.stdout, "");
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    removeTemp(home);
   }
 });
 
@@ -136,7 +136,7 @@ test("check-qmd prefers .bun qmd over older fnm qmd", () => {
     assert.equal(result.status, 0);
     assert.equal(result.stdout, "");
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    removeTemp(home);
   }
 });
 
@@ -153,7 +153,7 @@ test("check-qmd chooses highest semantic fnm version", () => {
     assert.equal(result.status, 0);
     assert.equal(result.stdout, "");
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    removeTemp(home);
   }
 });
 
@@ -180,7 +180,7 @@ test("start ignores a live pid file that is not the qmd daemon", () => {
     }
     assert.ok(existsSync(marker), "daemon script was not started");
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    removeTemp(home);
   }
 });
 
@@ -209,7 +209,7 @@ test("concurrent start calls do not double-start a transitioning daemon", () => 
     const count = existsSync(starts) ? readFileSync(starts, "utf8").trim().split("\n").filter(Boolean).length : 0;
     assert.equal(count, 1);
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    removeTemp(home);
   }
 });
 
@@ -240,7 +240,7 @@ test("start recovers stale start lock and starts daemon", () => {
     }
     assert.ok(existsSync(marker), "daemon was not started after stale lock recovery");
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    removeTemp(home);
   }
 });
 
@@ -263,7 +263,7 @@ test("kick-index starts one-shot worker through a silent background kick", () =>
     }
     assert.ok(existsSync(marker), "worker was not kicked");
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    removeTemp(home);
   }
 });
 
@@ -289,7 +289,7 @@ test("kick-index recovers stale kick lock and starts worker in the same call", (
     }
     assert.ok(existsSync(marker), "worker was not kicked after stale lock recovery");
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    removeTemp(home);
   }
 });
 
@@ -320,7 +320,7 @@ test("legacy cleanup removes only managed launchd and script files", () => {
     assert.equal(existsSync(join(launchAgents, "com.qmd-keepalive.plist")), true);
     assert.equal(existsSync(join(config, "keepalive.sh")), true);
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    removeTemp(home);
   }
 });
 
@@ -338,7 +338,7 @@ test("ensure does not remove legacy launchd files unless cleanup is opted in", (
     assert.equal(result.status, 0);
     assert.equal(existsSync(join(launchAgents, "com.qmd-mcp-daemon.plist")), true);
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    removeTemp(home);
   }
 });
 
@@ -369,7 +369,7 @@ test("kick-wiki-compile runs compile worker with explicit cwd and stays silent",
     }
     assert.equal(readFileSync(log, "utf8").trim(), `--cwd ${cwd}`);
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    removeTemp(home);
   }
 });
 
@@ -405,7 +405,7 @@ test("kick-wiki-compile kicks the index worker after the compile worker finishes
     assert.ok(existsSync(indexLog), "index worker가 kick 되어야 함");
     assert.equal(readFileSync(indexLog, "utf8").trim(), "after-compile");
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    removeTemp(home);
   }
 });
 
@@ -437,7 +437,7 @@ test("kick-index leaves a rekick request when the lock is busy (lost-wakeup guar
     assert.ok(existsSync(join(lockDir, "rekick")), "busy면 rekick 요청 파일을 남겨야 함(lost-wakeup 방지)");
     assert.ok(!existsSync(indexLog), "busy면 worker를 새로 돌리지 않음");
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    removeTemp(home);
   }
 });
 
@@ -463,7 +463,7 @@ test("kick-index re-drains when a rekick request arrives during the worker run",
     }
     assert.equal(readFileSync(counter, "utf8").trim(), "2", "rekick 요청이 있으면 worker가 두 번 돈다");
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    removeTemp(home);
   }
 });
 
@@ -479,7 +479,7 @@ test("kick-wiki-compile --flush passes --flush-all to the worker", () => {
     let content = '';
     for (let i = 0; i < 100 && !content.includes('--flush-all'); i++) { try { content = readFileSync(argsLog, 'utf8'); } catch {} execFileSync('/bin/sleep', ['0.02']); }
     assert.match(content, /--flush-all/);
-  } finally { rmSync(d, { recursive: true, force: true }); }
+  } finally { removeTemp(d); }
 });
 
 test("kick-wiki-compile uses per-project locks so different cwd kicks are not dropped", () => {
@@ -509,6 +509,6 @@ test("kick-wiki-compile uses per-project locks so different cwd kicks are not dr
     const lines = readFileSync(log, "utf8").trim().split("\n").sort();
     assert.deepEqual(lines, [`--cwd ${cwdA}`, `--cwd ${cwdB}`].sort());
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    removeTemp(home);
   }
 });

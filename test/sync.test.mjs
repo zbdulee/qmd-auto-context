@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { removeTemp } from './helpers/temp.mjs';
 import {
   existsSync,
   mkdirSync,
@@ -65,8 +66,8 @@ test("no config exits with no_collections and no queue", () => {
     assert.deepEqual(result.collectionsQueued, []);
     assert.equal(existsSync(envInfo.queue), false);
   } finally {
-    rmSync(envInfo.base, { recursive: true, force: true });
-    rmSync(dir, { recursive: true, force: true });
+    removeTemp(envInfo.base);
+    removeTemp(dir);
   }
 });
 
@@ -91,8 +92,8 @@ test("first run creates snapshot and queues collection once; second run is uncha
     assert.deepEqual(second.collectionsQueued, []);
     assert.deepEqual(queueLines(envInfo), [`sync-smoke\t${join(dir, "docs")}`]);
   } finally {
-    rmSync(envInfo.base, { recursive: true, force: true });
-    rmSync(dir, { recursive: true, force: true });
+    removeTemp(envInfo.base);
+    removeTemp(dir);
   }
 });
 
@@ -122,8 +123,8 @@ test("baseline-only records state without queue, then update and delete enqueue 
       `story\t${join(dir, "docs")}`,
     ]);
   } finally {
-    rmSync(envInfo.base, { recursive: true, force: true });
-    rmSync(dir, { recursive: true, force: true });
+    removeTemp(envInfo.base);
+    removeTemp(dir);
   }
 });
 
@@ -140,8 +141,8 @@ test("multiple changed files in same collection enqueue one line", () => {
     assert.deepEqual(result.collectionsQueued, ["story"]);
     assert.deepEqual(queueLines(envInfo), [`story\t${join(dir, "docs")}`]);
   } finally {
-    rmSync(envInfo.base, { recursive: true, force: true });
-    rmSync(dir, { recursive: true, force: true });
+    removeTemp(envInfo.base);
+    removeTemp(dir);
   }
 });
 
@@ -162,8 +163,8 @@ test("two changed collections enqueue two sorted lines", () => {
       `zeta\t${join(dir, "z")}`,
     ]);
   } finally {
-    rmSync(envInfo.base, { recursive: true, force: true });
-    rmSync(dir, { recursive: true, force: true });
+    removeTemp(envInfo.base);
+    removeTemp(dir);
   }
 });
 
@@ -180,8 +181,8 @@ test("dry-run reports changes without queue or snapshot", () => {
     assert.equal(existsSync(envInfo.queue), false);
     assert.equal(existsSync(result.statePath), false);
   } finally {
-    rmSync(envInfo.base, { recursive: true, force: true });
-    rmSync(dir, { recursive: true, force: true });
+    removeTemp(envInfo.base);
+    removeTemp(dir);
   }
 });
 
@@ -195,8 +196,8 @@ test("missing collection root is reported and not queued", () => {
     assert.deepEqual(result.warnings, [{ collection: "missing", reason: "missing_root" }]);
     assert.equal(existsSync(envInfo.queue), false);
   } finally {
-    rmSync(envInfo.base, { recursive: true, force: true });
-    rmSync(dir, { recursive: true, force: true });
+    removeTemp(envInfo.base);
+    removeTemp(dir);
   }
 });
 
@@ -215,8 +216,8 @@ test("QMD_SANDBOX exits with no output and no side effects", () => {
     assert.equal(existsSync(envInfo.queue), false);
     assert.equal(existsSync(envInfo.state), false);
   } finally {
-    rmSync(envInfo.base, { recursive: true, force: true });
-    rmSync(dir, { recursive: true, force: true });
+    removeTemp(envInfo.base);
+    removeTemp(dir);
   }
 });
 
@@ -235,8 +236,8 @@ test("active lock reports sync_busy without removing lock", () => {
     assert.equal(existsSync(join(envInfo.base, "lock.d")), true);
     assert.equal(existsSync(envInfo.queue), false);
   } finally {
-    rmSync(envInfo.base, { recursive: true, force: true });
-    rmSync(dir, { recursive: true, force: true });
+    removeTemp(envInfo.base);
+    removeTemp(dir);
   }
 });
 
@@ -255,8 +256,8 @@ test("stale lock from dead pid is removed and sync proceeds", () => {
     assert.deepEqual(queueLines(envInfo), [`story\t${join(dir, "docs")}`]);
     assert.equal(existsSync(join(envInfo.base, "lock.d")), false);
   } finally {
-    rmSync(envInfo.base, { recursive: true, force: true });
-    rmSync(dir, { recursive: true, force: true });
+    removeTemp(envInfo.base);
+    removeTemp(dir);
   }
 });
 
@@ -279,8 +280,8 @@ test("stale lock with unexpected content is not recursively deleted", () => {
     assert.equal(existsSync(join(lockDir, "precious.txt")), true);
     assert.equal(readFileSync(join(lockDir, "precious.txt"), "utf8"), "do not delete\n");
   } finally {
-    rmSync(envInfo.base, { recursive: true, force: true });
-    rmSync(dir, { recursive: true, force: true });
+    removeTemp(envInfo.base);
+    removeTemp(dir);
   }
 });
 
@@ -305,7 +306,7 @@ test("pid-less fresh lock stays busy, but old pid-less lock is recovered", () =>
     assert.deepEqual(recovered.collectionsQueued, ["story"]);
     assert.equal(existsSync(lockDir), false);
   } finally {
-    rmSync(envInfo.base, { recursive: true, force: true });
-    rmSync(dir, { recursive: true, force: true });
+    removeTemp(envInfo.base);
+    removeTemp(dir);
   }
 });

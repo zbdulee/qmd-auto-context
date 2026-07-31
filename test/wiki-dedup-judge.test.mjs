@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
+import { removeTemp } from './helpers/temp.mjs';
 
 // LLM dedup judge (core/wiki_dedup_judge.py) wired into both dedup paths.
 //
@@ -107,7 +108,7 @@ test('claude adapter: task=dedup uses the dedup prompt and emits a dedup verdict
   assert.match(prompt, /BODY_B/);
   assert.doesNotMatch(prompt, /REFUTE/, 'verify 프롬프트가 아님');
   assert.doesNotMatch(prompt, /wiki candidates/, 'extraction 프롬프트가 아님');
-  rmSync(d, { recursive: true, force: true });
+  removeTemp(d);
 });
 
 test('resolve_engine: backends-only config resolves without a caller hint (retroactive scan has none)', () => {
@@ -233,7 +234,7 @@ test('write-time gate: an explicit targetPath is judged too (legacy slug-only ga
     // Existing queue contract must survive.
     assert.ok(queued[0].candidate && queued[0].suggestedAction && 'matchedScore' in queued[0]);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -257,7 +258,7 @@ test('write-time gate: a "distinct" verdict lets the page be created (score alon
     assert.equal(callCount(log), 1);
     assert.deepEqual(jsonl(join(work, '.auto-context/compile/merge-needed.jsonl')), []);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -288,7 +289,7 @@ test('write-time gate: judge.maxPairsPerCompile caps how many LLM calls one comp
     assert.equal(out.action, 'created');
     assert.equal(callCount(log), 2, 'maxPairsPerCompile=2 must cap judge calls at 2, not 3');
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -310,7 +311,7 @@ test('write-time gate: with no extractor configured nothing is judged and the da
     assert.equal(out.action, 'created');
     assert.equal(existsSync(join(work, '.auto-context/wiki/entities/no-judge.md')), true);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -334,7 +335,7 @@ test('write-time gate: judge on cooldown falls back to the legacy threshold for 
     assert.equal(out.action, 'queued_for_review');
     assert.equal(out.judgeVerdict, undefined, 'no verdict exists — this is the score fallback');
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -372,7 +373,7 @@ test('write-time gate: a reviewed target is still only queued, never overwritten
     assert.equal(out.action, 'queued_for_review');
     assert.equal(readFileSync(card, 'utf8'), original, 'reviewed card must be byte-identical');
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -438,7 +439,7 @@ function runScan(work, env = {}) {
 }
 
 function clearCooldown(dirs) {
-  rmSync(dirs.cooldownDir, { recursive: true, force: true });
+  removeTemp(dirs.cooldownDir);
 }
 
 function snapshotOf(stateDir) {
@@ -476,7 +477,7 @@ test('retroactive scan: a "duplicate" verdict is queued even though the score is
     assert.ok(queued[0].pageA && queued[0].pageB);
     assert.ok(callCount(log) >= 1);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -509,7 +510,7 @@ test('retroactive scan: a "distinct" verdict is not queued, is recorded as a ski
     assert.equal(callCount(log), first, 'suppressed pair must not be re-judged');
     assert.deepEqual(scanQueue(work), []);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -534,7 +535,7 @@ test('retroactive scan: judge.maxPairsPerScan caps LLM calls and leaves unjudged
     const recorded = Object.keys(snap.files || {});
     assert.ok(recorded.length < 3, `pages beyond the judge budget must stay unadvanced, got ${JSON.stringify(recorded)}`);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -557,7 +558,7 @@ test('retroactive scan: judge timeout sets a cooldown, queues nothing, and leave
     const snap = snapshotOf(dirs.stateDir);
     assert.deepEqual(Object.keys(snap.files || {}), [], 'unjudged pages must be retried, not retired');
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -580,7 +581,7 @@ test('retroactive scan: an absent host CLI degrades to the legacy score threshol
     assert.equal(Object.keys(queued[0]).sort().join(','), 'pageA,pageB,score',
       'unjudged rows must keep the original queue shape');
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -601,7 +602,7 @@ test('retroactive scan: the judge never deletes or edits a card — it only queu
     assert.deepEqual([readFileSync(a, 'utf8'), readFileSync(b, 'utf8')], before);
     assert.equal(scanQueue(work).length, 1);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -622,7 +623,7 @@ test('QMD_DEDUP_JUDGE=off disables judging entirely (legacy threshold behavior)'
     assert.equal(callCount(log), 0, 'kill switch must prevent any LLM call');
     assert.equal(scanQueue(work).length, 1, 'legacy threshold still applies');
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -651,6 +652,6 @@ test('retroactive scan: 억제 원장에 쓸 수 없으면 judge 를 부르지 �
     assert.match(readFileSync(dirs.logFile, 'utf8'), /judge=off:skipped_ledger_unwritable/,
       '무료 게이트로 degrade 한 사실이 로그에 남아야 진단이 가능하다');
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });

@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, symlinkSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, symlinkSync, writeFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { homedir } from 'node:os';
+import { removeTemp, repoTemp, tempCacheDir } from './helpers/temp.mjs';
 
 function resolvePaths(cwd, configJson) {
   // update.sh --resolve-only: qmd 미실행, 컬렉션→경로 매핑 결과만 stdout JSON.
@@ -18,28 +18,13 @@ function resolvePaths(cwd, configJson) {
 // meaningless; the one test that verifies the fork itself opts out below.
 process.env.QMD_SKIP_BACKGROUND_EMBED = '1';
 
-// 정리 자체가 경합에 지지 않게 한다 — 위 가드를 끈 테스트(백그라운드 fork 검증)는 자식이
-// 아직 쓰고 있을 수 있으므로 짧게 재시도한다.
-function removeTemp(dir) {
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    try {
-      rmSync(dir, { recursive: true, force: true });
-      return;
-    } catch (err) {
-      if (err.code !== 'ENOTEMPTY' && err.code !== 'EBUSY') throw err;
-      execFileSync('sleep', ['0.05']);
-    }
-  }
-  rmSync(dir, { recursive: true, force: true, maxRetries: 5 });
-}
+// 정리 재시도(removeTemp)와 임시 디렉터리 base(repoTemp)는 test/helpers/temp.mjs 가 SSOT다
+// — 예전엔 이 파일에만 있어서 나머지 테스트 40여 개가 맨 rmSync 로 같은 경합에 노출됐다.
 
-function repoTemp(prefix) {
-  // HOME 하위(~/.cache)에 생성: repo 루트의 .auto-context.json(dogfooding)을 부모 상속하지
-  // 않도록 repo 밖에 둔다. tmpdir(/private/tmp)는 risky_path라 resolve_paths가 risky를 반환하므로 쓰지 않는다.
-  const base = join(homedir(), '.cache');
-  mkdirSync(base, { recursive: true });
-  return mkdtempSync(join(base, `qmd-test-${prefix}-`));
-}
+// update.sh 를 호출하는 모든 자리에 QMD_CACHE_DIR 을 준다 — 기본값 `$HOME/.cache/qmd` 에
+// notice_once TTL marker/update-status/hook.log 가 떨어져 사용자 홈에 계속 쌓였다(실측 이
+// 파일 1회 실행당 12개, 누적 5,100개). 근거·왜 workdir 밖인지는 tempCacheDir docstring 참고.
+const CACHE_DIR = tempCacheDir('update');
 
 test('collectionPaths 매핑 해석 (story 패턴)', () => {
   const r = resolvePaths('/Users/example/work/novel/my-novel', JSON.stringify({
@@ -76,8 +61,8 @@ test('collectionPaths 절대경로와 traversal 은 cwd 밖이면 skip', () => {
     }));
     assert.deepEqual(r.entries.map(e => e.name), ['ok']);
   } finally {
-    rmSync(cwd, { recursive: true, force: true });
-    rmSync(outside, { recursive: true, force: true });
+    removeTemp(cwd);
+    removeTemp(outside);
   }
 });
 
@@ -92,8 +77,8 @@ test('collectionPaths 명시 allowRoots 하위 절대경로는 허용', () => {
     }));
     assert.deepEqual(r.entries, [{ name: 'allowed', path: allowed }]);
   } finally {
-    rmSync(cwd, { recursive: true, force: true });
-    rmSync(allowed, { recursive: true, force: true });
+    removeTemp(cwd);
+    removeTemp(allowed);
   }
 });
 
@@ -108,12 +93,12 @@ test('update core: sessionStart disabled이면 qmd 실행 없이 skip', () => {
     writeFileSync(join(bin, 'qmd'), `#!/usr/bin/env sh\necho "$@" >> "${qmdLog}"\nexit 0\n`, { mode: 0o755 });
 
     execFileSync('bash', [join(process.cwd(), 'core', 'update.sh'), '--worker', work], {
-      env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, QMD_CACHE_DIR: CACHE_DIR },
     });
 
     assert.throws(() => readFileSync(qmdLog, 'utf8'), 'qmd should not be invoked when sessionStart is disabled');
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -132,14 +117,14 @@ test('update core: sessionStart disabled from .auto-context/settings.json skips 
     writeFileSync(join(bin, 'qmd'), `#!/usr/bin/env sh\necho "$@" >> "${qmdLog}"\nexit 0\n`, { mode: 0o755 });
 
     execFileSync('bash', [join(process.cwd(), 'core', 'update.sh'), '--worker', work], {
-      env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, QMD_CACHE_DIR: CACHE_DIR },
     });
 
     assert.throws(() => readFileSync(qmdLog, 'utf8'), 'qmd should not be invoked when sessionStart is disabled');
     const cfg = JSON.parse(readFileSync(join(work, '.auto-context', 'settings.json'), 'utf8'));
     assert.deepEqual(cfg.collections, ['x'], 'disabled sessionStart must not prune settings');
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -173,7 +158,7 @@ test('update core: missing settings collection root is pruned before qmd update'
         ...process.env,
         PATH: `${bin}:${process.env.PATH}`,
         HOME: fakeHome,
-        QMD_CACHE_DIR: fakeHome,
+        QMD_CACHE_DIR: CACHE_DIR,
         QMD_LOCK_BASE: lockBase,
       },
     });
@@ -187,7 +172,7 @@ test('update core: missing settings collection root is pruned before qmd update'
     assert.doesNotMatch(log, /collection add .*missing --name gone/);
     assert.match(log, /^update$/m);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -224,7 +209,7 @@ test('update core: failed qmd collection remove keeps settings collection for re
         ...process.env,
         PATH: `${bin}:${process.env.PATH}`,
         HOME: fakeHome,
-        QMD_CACHE_DIR: fakeHome,
+        QMD_CACHE_DIR: CACHE_DIR,
         QMD_LOCK_BASE: lockBase,
       },
     });
@@ -235,7 +220,7 @@ test('update core: failed qmd collection remove keeps settings collection for re
     assert.deepEqual(cfg.collectionRoles, { docs: 'raw', gone: 'wiki' });
     assert.match(readFileSync(qmdLog, 'utf8'), /collection remove gone/);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -268,7 +253,7 @@ test('update core: pruning the last settings collection writes indexing false', 
         ...process.env,
         PATH: `${bin}:${process.env.PATH}`,
         HOME: fakeHome,
-        QMD_CACHE_DIR: fakeHome,
+        QMD_CACHE_DIR: CACHE_DIR,
         QMD_LOCK_BASE: lockBase,
       },
     });
@@ -280,7 +265,7 @@ test('update core: pruning the last settings collection writes indexing false', 
     assert.deepEqual(cfg.collectionRoles, {});
     assert.match(readFileSync(qmdLog, 'utf8'), /collection remove gone/);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -311,7 +296,7 @@ test('update core: worker migration does not immediately prune missing legacy co
         ...process.env,
         PATH: `${bin}:${process.env.PATH}`,
         HOME: fakeHome,
-        QMD_CACHE_DIR: fakeHome,
+        QMD_CACHE_DIR: CACHE_DIR,
         QMD_LOCK_BASE: lockBase,
       },
     });
@@ -321,7 +306,7 @@ test('update core: worker migration does not immediately prune missing legacy co
     assert.deepEqual(cfg.collectionPaths, { gone: 'missing' });
     assert.doesNotMatch(readFileSync(qmdLog, 'utf8'), /collection remove gone/);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -354,7 +339,7 @@ test('update core: missing root prune refuses symlinked .auto-context directory'
         ...process.env,
         PATH: `${bin}:${process.env.PATH}`,
         HOME: fakeHome,
-        QMD_CACHE_DIR: fakeHome,
+        QMD_CACHE_DIR: CACHE_DIR,
         QMD_LOCK_BASE: lockBase,
       },
     });
@@ -363,8 +348,8 @@ test('update core: missing root prune refuses symlinked .auto-context directory'
     assert.deepEqual(cfg.collections, ['gone']);
     assert.doesNotMatch(readFileSync(qmdLog, 'utf8'), /collection remove gone/);
   } finally {
-    rmSync(work, { recursive: true, force: true });
-    rmSync(outside, { recursive: true, force: true });
+    removeTemp(work);
+    removeTemp(outside);
   }
 });
 
@@ -400,7 +385,7 @@ test('update core: settings write failure after remove aborts stale update', () 
         ...process.env,
         PATH: `${bin}:${process.env.PATH}`,
         HOME: fakeHome,
-        QMD_CACHE_DIR: fakeHome,
+        QMD_CACHE_DIR: CACHE_DIR,
         QMD_LOCK_BASE: lockBase,
       },
     });
@@ -415,7 +400,7 @@ test('update core: settings write failure after remove aborts stale update', () 
     } catch {
       // ignore cleanup permission repair failures
     }
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -428,7 +413,7 @@ test('update core: --migrate-config migrates legacy config and prints result', (
     assert.equal(existsSync(join(work, '.auto-context.json')), false);
     assert.deepEqual(JSON.parse(readFileSync(join(work, '.auto-context', 'settings.json'), 'utf8')).collections, ['x']);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -443,7 +428,7 @@ test('update core: --migrate-config no-op when settings exists', () => {
     assert.equal(existsSync(join(work, '.auto-context.json')), true);
     assert.deepEqual(JSON.parse(readFileSync(join(work, '.auto-context', 'settings.json'), 'utf8')).collections, ['new']);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -460,8 +445,8 @@ test('update core: --migrate-config refuses symlinked .auto-context directory', 
     assert.equal(existsSync(join(work, '.auto-context.json')), true);
     assert.equal(existsSync(join(outside, 'settings.json')), false);
   } finally {
-    rmSync(work, { recursive: true, force: true });
-    rmSync(outside, { recursive: true, force: true });
+    removeTemp(work);
+    removeTemp(outside);
   }
 });
 
@@ -490,7 +475,7 @@ test('update core: --init-wiki creates scaffold and enables wiki recall without 
     execFileSync('bash', [join(process.cwd(), 'core', 'update.sh'), '--init-wiki', work], { encoding: 'utf8' });
     assert.equal(readFileSync(join(work, '.auto-context', 'wiki', 'index.md'), 'utf8'), '# custom\n');
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -506,7 +491,7 @@ test('update core: --init-wiki without settings creates an opt-in wiki-only conf
     assert.deepEqual(cfg.collectionRoles, { [cfg.collections[0]]: 'wiki' });
     assert.equal(cfg.recallStrategy, 'hierarchical');
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -528,7 +513,7 @@ test('update core: --init-wiki --preset novel creates novel dirs and compile def
     // 카드가 생기지 않는다(post_session_summary는 수동 경로 라벨일 뿐이다).
     assert.ok(cfg.compile.triggers.includes('post_tool_source'));
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -543,7 +528,7 @@ test('update core: --init-wiki preserves invalid existing settings.json', () => 
     assert.equal(readFileSync(join(work, '.auto-context', 'settings.json'), 'utf8'), '{not json');
     assert.equal(existsSync(join(work, '.auto-context', 'wiki')), false);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -558,8 +543,8 @@ test('update core: --init-wiki refuses symlinked .auto-context directory', () =>
     assert.equal(existsSync(join(outside, 'settings.json')), false);
     assert.equal(existsSync(join(outside, 'wiki')), false);
   } finally {
-    rmSync(work, { recursive: true, force: true });
-    rmSync(outside, { recursive: true, force: true });
+    removeTemp(work);
+    removeTemp(outside);
   }
 });
 
@@ -576,8 +561,8 @@ test('update core: --init-wiki refuses symlinked wiki directory', () => {
     assert.equal(existsSync(join(outside, 'decisions')), false);
     assert.equal(existsSync(join(work, '.auto-context', 'settings.json')), false);
   } finally {
-    rmSync(work, { recursive: true, force: true });
-    rmSync(outside, { recursive: true, force: true });
+    removeTemp(work);
+    removeTemp(outside);
   }
 });
 
@@ -601,13 +586,13 @@ test('update core: worker migrates .auto-context.json before loading config', ()
 
     execFileSync('bash', [join(process.cwd(), 'core', 'update.sh'), '--worker', work], {
       encoding: 'utf8',
-      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, HOME: fakeHome, QMD_CACHE_DIR: fakeHome, QMD_LOCK_BASE: join(work, 'locks') },
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, HOME: fakeHome, QMD_CACHE_DIR: CACHE_DIR, QMD_LOCK_BASE: join(work, 'locks') },
     });
 
     assert.equal(existsSync(join(work, '.auto-context.json')), false);
     assert.deepEqual(JSON.parse(readFileSync(join(work, '.auto-context', 'settings.json'), 'utf8')).collections, ['x']);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -640,7 +625,7 @@ test('pending: 안내 메시지에 --recommend/--optin --recommended/.auto-conte
     const out = execFileSync('bash', [join(process.cwd(), 'core', 'update.sh')], {
       encoding: 'utf8',
       input: JSON.stringify({ cwd: work }),
-      env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, QMD_CACHE_DIR: CACHE_DIR },
     });
 
     assert.ok(out.includes('--recommend'), `--recommend 없음: ${out}`);
@@ -649,7 +634,7 @@ test('pending: 안내 메시지에 --recommend/--optin --recommended/.auto-conte
     assert.ok(out.includes('--optout'), `--optout 없음: ${out}`);
     assert.ok(out.includes('--skip'), `--skip 없음: ${out}`);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -688,7 +673,7 @@ test('update core: collection add already-exists exit 1도 update 실행 (BUG-2)
         ...process.env,
         PATH: `${bin}:${process.env.PATH}`,
         HOME: fakeHome,           // normalize_qmd_path가 ~/.bun/bin 등을 PATH에 추가 못 하도록
-        QMD_CACHE_DIR: fakeHome,
+        QMD_CACHE_DIR: CACHE_DIR,
         QMD_LOCK_BASE: lockBase,
       },
     });
@@ -696,7 +681,7 @@ test('update core: collection add already-exists exit 1도 update 실행 (BUG-2)
     const log = readFileSync(qmdLog, 'utf8');
     assert.ok(log.includes('update'), `qmd update가 호출돼야 하는데 qmd.log 내용: ${log}`);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -734,7 +719,7 @@ test('update core: QMD_BIN override may point to a non-qmd filename', () => {
         PATH: `/usr/bin:/bin`,
         HOME: fakeHome,
         QMD_BIN: qmdBin,
-        QMD_CACHE_DIR: fakeHome,
+        QMD_CACHE_DIR: CACHE_DIR,
         QMD_LOCK_BASE: lockBase,
       },
     });
@@ -742,7 +727,7 @@ test('update core: QMD_BIN override may point to a non-qmd filename', () => {
     const log = readFileSync(qmdLog, 'utf8');
     assert.ok(log.includes('update'), `QMD_BIN override가 호출돼야 하는데 qmd.log 내용: ${log}`);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -761,11 +746,11 @@ test('update core: dedup hint absent when dedup-needed.jsonl is empty/missing (r
     const out = execFileSync('bash', [join(process.cwd(), 'core', 'update.sh')], {
       encoding: 'utf8',
       input: JSON.stringify({ cwd: work }),
-      env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, QMD_CACHE_DIR: CACHE_DIR },
     });
     assert.doesNotMatch(out, /wiki-dedup-resolver/);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -788,7 +773,7 @@ test('update core: dedup hint fires with the exact workflow block when the queue
     const out = execFileSync('bash', [join(process.cwd(), 'core', 'update.sh')], {
       encoding: 'utf8',
       input: JSON.stringify({ cwd: work }),
-      env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, QMD_CACHE_DIR: CACHE_DIR },
     });
     assert.match(out, /wiki-dedup-resolver/);
     const agentBody = readFileSync('agents/wiki-dedup-resolver.md', 'utf8');
@@ -797,7 +782,7 @@ test('update core: dedup hint fires with the exact workflow block when the queue
     const block = agentBody.slice(agentBody.indexOf(startMarker) + startMarker.length, agentBody.indexOf(endMarker)).trim();
     assert.ok(out.includes(block), 'hint stdout must contain the exact workflow block, byte-for-byte');
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -822,7 +807,7 @@ test('update core: dedup hint does not shell out to qmd or curl (file test + tex
     execFileSync('bash', [join(process.cwd(), 'core', 'update.sh')], {
       encoding: 'utf8',
       input: JSON.stringify({ cwd: work }),
-      env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, QMD_CACHE_DIR: CACHE_DIR },
     });
     // main() legitimately calls qmd for other reasons (preflight, resolve-only) before
     // forking the worker, so we only assert the hint step itself adds no NEW qmd calls
@@ -830,7 +815,7 @@ test('update core: dedup hint does not shell out to qmd or curl (file test + tex
     // logic must never invoke qmd/curl at all -- verified structurally in the next step.
     assert.equal(existsSync(qmdLog), false, 'this pending-style project makes no qmd calls before the dedup hint runs, so any call here would have come from the hint logic');
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -853,7 +838,7 @@ test('update core: dedup queue surfaces a user-facing notice (count + skill trig
     writeFileSync(join(bin, 'curl'), '#!/usr/bin/env sh\nexit 1\n', { mode: 0o755 });
     writeFileSync(join(bin, 'qmd'), '#!/usr/bin/env sh\nexit 0\n', { mode: 0o755 });
 
-    const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, HOME: fakeHome, QMD_CACHE_DIR: fakeHome };
+    const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, HOME: fakeHome, QMD_CACHE_DIR: CACHE_DIR };
     const out = execFileSync('bash', [join(process.cwd(), 'core', 'update.sh')], {
       encoding: 'utf8', input: JSON.stringify({ cwd: work }), env,
     });
@@ -870,7 +855,7 @@ test('update core: dedup queue surfaces a user-facing notice (count + skill trig
     assert.doesNotMatch(out2, /wiki 중복 후보/);
     assert.match(out2, /wiki-dedup-resolver/);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -899,11 +884,11 @@ test('update core: merge-review hint absent when merge-needed.jsonl is empty/mis
     const out = execFileSync('bash', [join(process.cwd(), 'core', 'update.sh')], {
       encoding: 'utf8',
       input: JSON.stringify({ cwd: work }),
-      env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, QMD_CACHE_DIR: CACHE_DIR },
     });
     assert.doesNotMatch(out, /wiki-review-resolver/);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -926,7 +911,7 @@ test('update core: merge-review hint fires with the exact workflow block when th
     const out = execFileSync('bash', [join(process.cwd(), 'core', 'update.sh')], {
       encoding: 'utf8',
       input: JSON.stringify({ cwd: work }),
-      env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, QMD_CACHE_DIR: CACHE_DIR },
     });
     assert.match(out, /wiki-review-resolver/);
     const agentBody = readFileSync('agents/wiki-review-resolver.md', 'utf8');
@@ -935,7 +920,7 @@ test('update core: merge-review hint fires with the exact workflow block when th
     const block = agentBody.slice(agentBody.indexOf(startMarker) + startMarker.length, agentBody.indexOf(endMarker)).trim();
     assert.ok(out.includes(block), 'hint stdout must contain the exact workflow block, byte-for-byte');
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -958,7 +943,7 @@ test('update core: merge-needed queue surfaces a user-facing notice (count + ski
     writeFileSync(join(bin, 'curl'), '#!/usr/bin/env sh\nexit 1\n', { mode: 0o755 });
     writeFileSync(join(bin, 'qmd'), '#!/usr/bin/env sh\nexit 0\n', { mode: 0o755 });
 
-    const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, HOME: fakeHome, QMD_CACHE_DIR: fakeHome };
+    const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, HOME: fakeHome, QMD_CACHE_DIR: CACHE_DIR };
     const out = execFileSync('bash', [join(process.cwd(), 'core', 'update.sh')], {
       encoding: 'utf8', input: JSON.stringify({ cwd: work }), env,
     });
@@ -972,7 +957,7 @@ test('update core: merge-needed queue surfaces a user-facing notice (count + ski
     assert.doesNotMatch(out2, /wiki 병합 검토 후보/);
     assert.match(out2, /wiki-review-resolver/);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -1000,11 +985,11 @@ test('update core: merge-review hint honors a custom compile.mergeNeededPath ins
     const out = execFileSync('bash', [join(process.cwd(), 'core', 'update.sh')], {
       encoding: 'utf8',
       input: JSON.stringify({ cwd: work }),
-      env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, QMD_CACHE_DIR: CACHE_DIR },
     });
     assert.match(out, /wiki-review-resolver/, 'hint must fire by reading the configured mergeNeededPath, not the hardcoded default');
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -1028,11 +1013,11 @@ test('update core: merge-review hint does not shell out to qmd or curl (file tes
     execFileSync('bash', [join(process.cwd(), 'core', 'update.sh')], {
       encoding: 'utf8',
       input: JSON.stringify({ cwd: work }),
-      env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, QMD_CACHE_DIR: CACHE_DIR },
     });
     assert.equal(existsSync(qmdLog), false, 'this pending-style project makes no qmd calls before the merge hint runs, so any call here would have come from the hint logic');
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -1076,7 +1061,7 @@ test('update core: dedup scanner actually runs inside the embed subshell at runt
         ...process.env,
         PATH: `${bin}:${process.env.PATH}`,
         HOME: fakeHome,
-        QMD_CACHE_DIR: fakeHome,
+        QMD_CACHE_DIR: CACHE_DIR,
         QMD_LOCK_BASE: join(work, 'locks'),
         QMD_DEDUP_LOG: dedupLog,
         QMD_DEDUP_COOLDOWN_DIR: join(work, 'dedup-cooldown'),
@@ -1111,7 +1096,7 @@ test('update.sh main: 빈/비JSON stdin에도 SessionStart hook은 exit 0 (set -
   const env = {
     ...process.env,
     HOME: home,
-    QMD_CACHE_DIR: join(home, 'cache'),
+    QMD_CACHE_DIR: CACHE_DIR,
     QMD_DIRTY_QUEUE: join(home, 'dirty-queue'),
     QMD_LOCK_BASE: join(home, 'locks'),
   };
@@ -1123,7 +1108,7 @@ test('update.sh main: 빈/비JSON stdin에도 SessionStart hook은 exit 0 (set -
       assert.equal(res.status, 0, `input=${JSON.stringify(input)} → exit ${res.status} (stderr: ${res.stderr})`);
     }
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    removeTemp(home);
   }
 });
 
@@ -1153,7 +1138,7 @@ function runWorker(work, extraEnv = {}) {
       ...process.env,
       PATH: `${bin}:${process.env.PATH}`,
       HOME: fakeHome,
-      QMD_CACHE_DIR: fakeHome,
+      QMD_CACHE_DIR: CACHE_DIR,
       QMD_LOCK_BASE: join(work, 'locks'),
       QMD_HOOK_LOG: join(work, 'hook.log'),
       ...extraEnv,
@@ -1200,7 +1185,7 @@ test('update core: resolved entries마다 ADD COLLECTION 로그 + qmd collection
     assert.doesNotMatch(hook, /WARN: no collection entries resolved/);
     assert.match(hook, /END rc=0/);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -1230,7 +1215,7 @@ test('update core: entries가 비면 WARN 로그로 표면화 (조용한 실패 
     assert.doesNotMatch(hook, /ADD COLLECTION/);
     assert.doesNotMatch(readFileSync(qmdLog, 'utf8'), /collection add/);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -1267,7 +1252,7 @@ test('update core: collection add 실패는 qmd update를 건너뛰고 END rc=1�
     assert.match(hook, /END rc=1/, `collection add 실패가 rc=1로 기록되지 않았다:\n${hook}`);
     assert.doesNotMatch(hook, /END rc=0/, 'collection add 실패가 END rc=0으로 위장됐다');
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 

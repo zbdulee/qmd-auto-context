@@ -4,6 +4,11 @@ import { execFileSync, spawn } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { removeTemp, tempCacheDir } from './helpers/temp.mjs';
+
+// update.sh main 의 notice/status/log 는 기본값이 `$HOME/.cache/qmd` 라 사용자 홈에 쌓이고,
+// workdir 안에 두면 detached worker 가 cleanup 뒤에 되살린다 — tempCacheDir docstring 참고.
+const CACHE_DIR = tempCacheDir('source-missing');
 
 const LEDGER_REL = '.auto-context/compile/source-missing.jsonl';
 
@@ -115,7 +120,7 @@ test('source scan: 소스 전부 소실만 감지한다 (verified·generated 구
       assert.equal(existsSync(join(dir, '.auto-context', 'wiki', rel)), true);
     }
     assert.match(readFileSync(join(dir, '.auto-context', 'wiki', 'entities/all-gone-verified.md'), 'utf8'), /^status: verified$/m);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('source scan: 상태가 그대로면 재실행이 원장을 늘리지 않는다', () => {
@@ -126,7 +131,7 @@ test('source scan: 상태가 그대로면 재실행이 원장을 늘리지 않�
     runScan(dir);
     runScan(dir);
     assert.equal(ledger(dir).length, 1);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('source scan: 소실 집합이 바뀌면 새 행을 남긴다', () => {
@@ -139,7 +144,7 @@ test('source scan: 소실 집합이 바뀌면 새 행을 남긴다', () => {
     const rows = ledger(dir);
     assert.equal(rows.length, 2);
     assert.deepEqual(rows[1].missingSources, ['docs/gone-2.md']);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('source scan: 원장은 트림 대상이 아니다 (256KB 초과 이력이 보존된다)', () => {
@@ -169,7 +174,7 @@ test('source scan: 원장은 트림 대상이 아니다 (256KB 초과 이력이 
     assert.equal(rows.length, filler.length + 1, '기존 행이 하나도 잘려나가지 않아야 한다');
     assert.equal(rows[0].targetPath, '.auto-context/wiki/entities/old-0.md');
     assert.equal(rows[rows.length - 1].targetPath, '.auto-context/wiki/entities/new.md');
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('source scan: 비용 상한을 넘는 카드는 다음 회차로 이월된다(순환 커서)', () => {
@@ -192,7 +197,7 @@ test('source scan: 비용 상한을 넘는 카드는 다음 회차로 이월된�
     // 한 바퀴를 더 돌아도 상태가 그대로면 행이 늘지 않는다.
     runScan(dir, { QMD_SOURCE_SCAN_MAX: '1' });
     assert.equal(ledger(dir).length, 3);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('source scan: index.md/log.md와 superseded·discarded 카드는 검사 대상이 아니다', () => {
@@ -205,7 +210,7 @@ test('source scan: index.md/log.md와 superseded·discarded 카드는 검사 대
     const result = runScan(dir);
     assert.equal(result.detected, 0);
     assert.equal(ledger(dir).length, 0);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('source scan: 지원하지 않는 sources 표기는 소실로 오분류하지 않는다', () => {
@@ -220,7 +225,7 @@ test('source scan: 지원하지 않는 sources 표기는 소실로 오분류하�
     ].join('\n'));
     const result = runScan(dir);
     assert.equal(result.detected, 0);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('source scan: opt-out 프로젝트와 sandbox에서는 무동작', () => {
@@ -239,8 +244,8 @@ test('source scan: opt-out 프로젝트와 sandbox에서는 무동작', () => {
       });
       assert.equal(out.trim(), '', 'sandbox는 즉시 무출력 종료');
       assert.equal(existsSync(join(enabled, LEDGER_REL)), false);
-    } finally { rmSync(enabled, { recursive: true, force: true }); }
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+    } finally { removeTemp(enabled); }
+  } finally { removeTemp(dir); }
 });
 
 test('source repair: 개명 후보를 제안하고 사람이 지정한 재지정만 적용한다', () => {
@@ -270,7 +275,7 @@ test('source repair: 개명 후보를 제안하고 사람이 지정한 재지정
     // 고친 뒤 재스캔해도 다시 대기로 올라오지 않는다.
     runScan(dir);
     assert.equal(JSON.parse(runRepair(dir, ['--list'])).pending, 0);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('source repair: 존재하지 않는 대상으로는 재지정하지 않는다', () => {
@@ -287,7 +292,7 @@ test('source repair: 존재하지 않는 대상으로는 재지정하지 않는�
     }
     assert.equal(JSON.parse(out).error, 'new_source_missing');
     assert.match(readFileSync(card, 'utf8'), /docs\/gone\.md/, '카드는 그대로');
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('source repair: dismiss는 소실 집합이 바뀔 때까지 재알림을 멈춘다', () => {
@@ -303,7 +308,7 @@ test('source repair: dismiss는 소실 집합이 바뀔 때까지 재알림을 �
     writeFileSync(card, readFileSync(card, 'utf8').replace('docs/gone.md', 'docs/other-gone.md'));
     runScan(dir);
     assert.equal(JSON.parse(runRepair(dir, ['--list'])).pending, 1);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('source repair: 일부만 재지정하면 대기에서 빠진다(살아 있는 원문이 생겼으므로) — 남은 소실은 보고한다', () => {
@@ -325,7 +330,7 @@ test('source repair: 일부만 재지정하면 대기에서 빠진다(살아 있
     assert.equal(JSON.parse(runRepair(dir, ['--list'])).pending, 0);
     runScan(dir);
     assert.equal(JSON.parse(runRepair(dir, ['--list'])).pending, 0);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('source repair: 미지원 표기는 재작성하지 않고 거부한다', () => {
@@ -344,7 +349,7 @@ test('source repair: 미지원 표기는 재작성하지 않고 거부한다', (
     } catch (err) { out = err.stdout; }
     assert.equal(JSON.parse(out).error, 'source_entry_not_found');
     assert.equal(readFileSync(full, 'utf8'), original, '카드를 재작성하지 않는다');
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('SessionStart: 대기 건수를 1줄 표면화하고 TTL로 억제, 해소되면 재무장한다', () => {
@@ -362,7 +367,7 @@ test('SessionStart: 대기 건수를 1줄 표면화하고 TTL로 억제, 해소�
     ].join('\n') + '\n');
     writeFileSync(join(bin, 'curl'), '#!/usr/bin/env sh\nexit 1\n', { mode: 0o755 });
     writeFileSync(join(bin, 'qmd'), '#!/usr/bin/env sh\nexit 0\n', { mode: 0o755 });
-    const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, HOME: fakeHome, QMD_CACHE_DIR: fakeHome };
+    const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, HOME: fakeHome, QMD_CACHE_DIR: CACHE_DIR };
     const run = () => execFileSync('bash', [join(process.cwd(), 'core', 'update.sh')], {
       encoding: 'utf8', input: JSON.stringify({ cwd: work }), env,
     });
@@ -384,7 +389,7 @@ test('SessionStart: 대기 건수를 1줄 표면화하고 TTL로 억제, 해소�
     writeFileSync(join(work, LEDGER_REL), readFileSync(join(work, LEDGER_REL), 'utf8') +
       JSON.stringify({ targetPath: '.auto-context/wiki/entities/a.md', action: 'detected', status: 'verified', missingSources: ['docs/z.md'], origin: 'scan', ts: '2026-07-29T02:00:00Z' }) + '\n');
     assert.match(run(), /원문 소실 1건 대기\(검수 카드 1건\)/, '조건 재발 시 다시 알린다');
-  } finally { rmSync(work, { recursive: true, force: true }); }
+  } finally { removeTemp(work); }
 });
 
 test('source_missing 판정은 recall의 존재 판정을 재사용한다(두 벌 금지)', () => {
@@ -430,7 +435,7 @@ test('repair 쓰기 실패에서도 원본 카드가 온전히 남는다 (temp +
     const leftovers = readdirSync(join(dir, '.auto-context', 'wiki', 'entities'))
       .filter((name) => name.includes('.repair.tmp'));
     assert.deepEqual(leftovers, []);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('resolved 전이: 소스가 복원되면 대기에서 빠지고, 다시 사라지면 재감지된다', () => {
@@ -460,7 +465,7 @@ test('resolved 전이: 소스가 복원되면 대기에서 빠지고, 다시 사
     runScan(dir);
     runScan(dir);
     assert.equal(ledger(dir).length, rows, '건강한 카드에는 행을 쌓지 않는다');
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('resolved 전이가 dismiss 억제를 재무장한다 (같은 소실 집합이 다시 나타나도 감지)', () => {
@@ -478,7 +483,7 @@ test('resolved 전이가 dismiss 억제를 재무장한다 (같은 소실 집합
     rmSync(source);
     assert.equal(runScan(dir).recorded, 1);
     assert.equal(JSON.parse(runRepair(dir, ['--list'])).pending, 1);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('wiki_root 격리: 심볼릭 링크 wiki와 wikiPath 탈출은 repair도 스캐너와 같이 거절한다', () => {
@@ -490,7 +495,7 @@ test('wiki_root 격리: 심볼릭 링크 wiki와 wikiPath 탈출은 repair도 �
     const linked = setupProject();
     try {
       writeFileSync(join(linked, 'docs', 'live.md'), 'x\n');
-      rmSync(join(linked, '.auto-context', 'wiki'), { recursive: true, force: true });
+      removeTemp(join(linked, '.auto-context', 'wiki'));
       symlinkSync(outside, join(linked, '.auto-context', 'wiki'));
       mkdirSync(join(outside, 'entities'), { recursive: true });
       const external = join(outside, 'entities', 'ext.md');
@@ -507,7 +512,7 @@ test('wiki_root 격리: 심볼릭 링크 wiki와 wikiPath 탈출은 repair도 �
       assert.equal(readFileSync(external, 'utf8'), body, 'root 밖 파일은 수정되지 않는다');
       // 스캐너도 같은 판정이다.
       assert.equal(runScan(linked).cards, 0);
-    } finally { rmSync(linked, { recursive: true, force: true }); }
+    } finally { removeTemp(linked); }
 
     // (b) wikiPath: "../escwiki"
     const esc = setupProject({ compile: {} });
@@ -529,11 +534,11 @@ test('wiki_root 격리: 심볼릭 링크 wiki와 wikiPath 탈출은 repair도 �
       } catch (err) { out = err.stdout; }
       assert.equal(JSON.parse(out).error, 'card_not_found');
       assert.equal(readFileSync(escaped, 'utf8'), body);
-      rmSync(join(esc, '..', 'escwiki'), { recursive: true, force: true });
-    } finally { rmSync(esc, { recursive: true, force: true }); }
+      removeTemp(join(esc, '..', 'escwiki'));
+    } finally { removeTemp(esc); }
   } finally {
-    rmSync(outside, { recursive: true, force: true });
-    rmSync(dir, { recursive: true, force: true });
+    removeTemp(outside);
+    removeTemp(dir);
   }
 });
 
@@ -553,7 +558,7 @@ test('동시 스캔이 같은 카드 행을 중복 append하지 않는다 (원�
     await Promise.all(runs);
     const rows = ledger(dir).filter((r) => r.action === 'detected');
     assert.equal(rows.length, 1, `동시 실행에도 카드당 1행 (실제 ${rows.length})`);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('비 UTF-8 원장에서도 --list/--dismiss가 뜬다 (fail-open, traceback 없음)', () => {
@@ -572,7 +577,7 @@ test('비 UTF-8 원장에서도 --list/--dismiss가 뜬다 (fail-open, traceback
     assert.equal(listed.pending, 1, '손상은 손상된 줄에만 국한된다');
     const dismissed = JSON.parse(runRepair(dir, ['--dismiss', '.auto-context/wiki/entities/a.md']));
     assert.equal(dismissed.ok, true);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('repoint는 옛 sourceHash를 새 경로 옆에 남기지 않는다', () => {
@@ -595,7 +600,7 @@ test('repoint는 옛 sourceHash를 새 경로 옆에 남기지 않는다', () =>
     assert.doesNotMatch(fm, /sourceHash/, '옛 본문 해시는 거짓 기록이 되므로 제거한다');
     assert.match(fm, /collection: "proj-docs"/, '경로와 무관한 키는 보존한다');
     assert.match(text, /qmd:auto:start id="main" sourceHash="abc"/, 'auto 블록 마커는 그대로');
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('injectSourcePathsPerCard:0 에서도 진단 로그가 켜지면 카운터가 산다 / 꺼지면 비용 0', () => {
@@ -635,7 +640,7 @@ test('자동 경로(patch_frontmatter_fields)도 쓰기 실패에서 원본을 �
     assert.equal(after, body, '실패해도 원본이 바이트 그대로 남아야 한다');
     assert.match(after, /^status: generated$/m, '패치가 반영되지 않은 상태여야 한다');
     assert.deepEqual(readdirSync(dir).filter((n) => n.includes('.tmp-')), []);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('verify pass 스탬프(자동, 사람 개입 없음)가 쓰기 실패로 카드를 절단하지 않는다', () => {
@@ -664,7 +669,7 @@ test('verify pass 스탬프(자동, 사람 개입 없음)가 쓰기 실패로 �
       'print("done")',
     ]).trim(), 'done');
     assert.match(readFileSync(card, 'utf8'), /^status: verified$/m);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('원자적 쓰기가 원본 권한을 보존한다 (0600 → 0600)', () => {
@@ -683,7 +688,7 @@ test('원자적 쓰기가 원본 권한을 보존한다 (0600 → 0600)', () => 
       `wc.patch_frontmatter_fields(Path(${JSON.stringify(card)}), {"status": "contested"})`,
     ]);
     assert.equal(statSync(card).mode & 0o777, 0o600);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('전부 소실 판정이 두 경로에서 같은 구현을 쓴다 (예산 절단은 입력 차이로만 남는다)', () => {
@@ -747,7 +752,7 @@ test('resolved 행은 소실 목록을 담지 않는다 (남은 소실은 remain
     assert.equal(last.action, 'resolved');
     assert.deepEqual(last.missingSources, [], 'resolved 행에 소실 목록이 있으면 자기모순이다');
     assert.deepEqual(last.remainingMissing, ['docs/b.md']);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('동시 repoint에서 원장이 거짓 기록을 남기지 않는다 (락 안 read-modify-write)', async () => {
@@ -774,7 +779,7 @@ test('동시 repoint에서 원장이 거짓 기록을 남기지 않는다 (락 �
         `원장은 ${row.to} 재지정을 기록했는데 카드에 없다`);
     }
     assert.ok(rows.length >= 1);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('동시 dismiss는 원장에 한 줄만 남긴다', async () => {
@@ -788,7 +793,7 @@ test('동시 dismiss는 원장에 한 줄만 남긴다', async () => {
       child.on('close', resolve);
     })));
     assert.equal(ledger(dir).filter((r) => r.action === 'dismissed').length, 1);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('repair CLI 예외는 원인을 로그 파일에 남긴다 (stdout은 JSON 한 줄)', () => {
@@ -815,7 +820,7 @@ test('repair CLI 예외는 원인을 로그 파일에 남긴다 (stdout은 JSON 
     assert.equal(parsed.log, logFile);
     assert.match(readFileSync(logFile, 'utf8'), /REPAIR EXCEPTION[\s\S]*boom-detail/);
     assert.doesNotMatch(out, /Traceback/, 'stdout은 JSON 한 줄이어야 한다');
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });
 
 test('index.md 쓰기 실패에서 누적 인덱스가 온전히 남는다 / 정상 append는 불변 / log는 append 그대로', () => {
@@ -858,5 +863,5 @@ test('index.md 쓰기 실패에서 누적 인덱스가 온전히 남는다 / 정
     // log는 호출마다 한 줄씩 늘어난다(append 계약).
     assert.equal(readFileSync(join(wiki, 'log.md'), 'utf8')
       .split('\n').filter((l) => l.includes('created')).length, 3);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeTemp(dir); }
 });

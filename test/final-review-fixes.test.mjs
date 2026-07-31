@@ -2,9 +2,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { readFileSync, mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { removeTemp } from './helpers/temp.mjs';
 
 const PROJ = resolve('test/fixtures/story-proj');
 
@@ -49,7 +50,7 @@ test('MAJOR: cleanup-legacy 깨진 settings.json → 기존 데이터 보존(빈
     assert.ok(threw || brokenPreserved,
       '깨진 설정 파싱 실패 시 abort 하지 않고 진행 → 원본 데이터 유실');
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    removeTemp(home);
   }
 });
 
@@ -62,6 +63,6 @@ test('MAJOR: cleanup-legacy backend 제거 계획 포함', () => {
     });
     assert.match(out, /backend|\.config\/qmd/i, 'backend 제거 계획 없음');
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    removeTemp(home);
   }
 });

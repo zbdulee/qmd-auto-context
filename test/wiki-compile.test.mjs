@@ -5,6 +5,7 @@ import { createServer } from 'node:http';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import { removeTemp } from './helpers/temp.mjs';
 
 function repoTemp(prefix) {
   const base = join(homedir(), '.cache');
@@ -95,7 +96,7 @@ test('wiki_compile: lint-clean candidate writes generated markdown, audit files,
     assert.match(readFileSync(join(work, '.auto-context', 'wiki', 'log.md'), 'utf8'), /created/);
     assert.match(readFileSync(dirtyQueue, 'utf8'), /proj-wiki\t.*\.auto-context\/wiki/);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -120,7 +121,7 @@ test('wiki_compile: writes canonical identity metadata into generated frontmatte
     assert.equal(rows[0].canonicalKey, 'signal-perception-rule');
     assert.deepEqual(rows[0].aliases, ['Signal rule', 'Perception rule']);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -155,7 +156,7 @@ test('wiki_compile: reuses existing page by canonicalKey when title changes and 
     const rows = readJsonl(join(work, '.auto-context', 'compile', 'candidates.jsonl'));
     assert.equal(rows.at(-1).targetPath, '.auto-context/wiki/concepts/signal-rules.md');
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -232,7 +233,7 @@ test('wiki_compile: regenerating a verified page keeps hand-authored content bel
     // Order matters: the manual section stays after the closing marker.
     assert.ok(page.indexOf(mergedSection) > page.indexOf('<!-- qmd:auto:end -->'));
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -262,7 +263,7 @@ test('wiki_compile: reuses existing page by alias or title before creating a tit
     const page = readFileSync(join(work, '.auto-context', 'wiki', 'concepts', 'canonical-signal.md'), 'utf8');
     assert.match(page, /Alias-matched update should reuse canonical-signal\.md/);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -294,7 +295,7 @@ test('wiki_compile: explicit targetPath wins over identity lookup', () => {
     assert.equal(rows.at(-1).targetPath, '.auto-context/wiki/concepts/explicit-signal.md');
     assert.equal(rows.at(-1).targetResolution, 'explicit');
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -339,7 +340,7 @@ test('wiki_compile: ambiguous identity matches record merge-needed without creat
     assert.equal(rows.at(-1).lint.findings[0], 'ambiguous_canonicalKey');
     assert.equal(rows.at(-1).targetMatches.length, 2);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -388,7 +389,7 @@ test('wiki_compile: protected existing identity match records merge-needed witho
     assert.equal(rows.at(-1).action, 'merge-needed');
     assert.equal(rows.at(-1).targetPath, '.auto-context/wiki/concepts/reviewed-signal.md');
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -430,7 +431,7 @@ test('wiki_compile: superseded existing page is protected — records merge-need
     const stillOld = readFileSync(join(work, '.auto-context', 'wiki', 'decisions', 'old-principle.md'), 'utf8');
     assert.match(stillOld, /Old text\./);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -474,7 +475,7 @@ test('wiki_compile: manual status page records merge-needed without overwriting 
     const rows = readJsonl(join(work, '.auto-context', 'compile', 'candidates.jsonl'));
     assert.equal(rows.at(-1).lint.findings.includes('protected_status'), true);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -514,7 +515,7 @@ test('wiki_compile: malformed existing frontmatter is fail-safe merge-needed', (
     const rows = readJsonl(join(work, '.auto-context', 'compile', 'candidates.jsonl'));
     assert.equal(rows.at(-1).lint.findings[0], 'frontmatter_unparseable');
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -557,7 +558,7 @@ test('wiki_compile: tombstone suppresses deleted generated page by canonicalKey'
     const rows = readJsonl(join(work, '.auto-context', 'compile', 'candidates.jsonl'));
     assert.equal(rows.at(-1).action, 'suppressed');
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -579,7 +580,7 @@ test('wiki_compile: rejects transcript-like and secret-like candidates without w
     assert.match(candidate, /rejected/);
     assert.doesNotMatch(candidate, /sk-1234567890abcdef1234567890abcdef/);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -599,7 +600,7 @@ test('wiki_compile: disabled or candidates mode records candidate only', () => {
     assert.equal(existsSync(join(work, '.auto-context', 'wiki', 'concepts', 'candidate-only.md')), false);
     assert.match(readFileSync(join(work, '.auto-context', 'compile', 'candidates.jsonl'), 'utf8'), /candidate-only/);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -621,7 +622,7 @@ test('wiki_compile: mode off is a no-op and writes no candidate audit', () => {
     assert.equal(existsSync(join(work, '.auto-context', 'compile', 'candidates.jsonl')), false);
     assert.equal(existsSync(join(work, '.auto-context', 'wiki', 'concepts', 'mode-off.md')), false);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -644,7 +645,7 @@ test('wiki_compile: missing generated page creates tombstone and suppresses auto
     assert.equal(existsSync(join(work, '.auto-context', 'wiki', 'concepts', 'deleted-page.md')), false);
     assert.match(readFileSync(join(work, '.auto-context', 'compile', 'tombstones.jsonl'), 'utf8'), /deleted-page/);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -670,7 +671,7 @@ test('wiki_compile: compile audit paths are confined to project .auto-context/co
     assert.equal(existsSync(join(work, '..', outsideName.slice(3))), false);
     assert.equal(existsSync(join(work, '.auto-context', 'wiki', 'decisions', 'unsafe-audit.md')), false);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -729,7 +730,7 @@ print(ok)
     ].join('\n');
     assert.equal(text, expectedFullText);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -757,7 +758,7 @@ print(w.patch_frontmatter_fields(Path(${JSON.stringify(page)}), {"status": "need
     assert.equal(result, 'True');
     assert.match(readFileSync(page, 'utf8'), /^status: "needs review"$/m);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -777,7 +778,7 @@ print(w.patch_frontmatter_fields(Path(${JSON.stringify(page)}), {"status": "supe
     assert.equal(result, 'False');
     assert.equal(readFileSync(page, 'utf8'), 'no frontmatter here\n');
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -831,7 +832,7 @@ test('wiki_compile: semantic gate queues merge-needed when no identity match but
 
     assert.equal(existsSync(join(work, '.auto-context', 'wiki', 'entities', 'second-unknown-call-about-luggage.md')), false);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -872,7 +873,7 @@ test('wiki_compile: semantic gate is skipped when identity already matched (no d
     assert.equal(out.action, 'updated');
     assert.equal(existsSync(join(work, '.auto-context', 'compile', 'merge-needed.jsonl')), false);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -917,7 +918,7 @@ test('wiki_compile: semantic gate below threshold writes a new page as before', 
     assert.equal(out.action, 'created');
     assert.equal(existsSync(join(work, '.auto-context', 'wiki', 'entities', 'brand-new-entity.md')), true);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -937,7 +938,7 @@ test('wiki_compile: semantic gate fails open when QMD_QUERY_FIXTURE is malformed
 
     assert.equal(out.action, 'created');
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -957,7 +958,7 @@ test('wiki_compile: semantic gate fails open when QMD_QUERY_FIXTURE returns vali
 
     assert.equal(out.action, 'created');
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -995,7 +996,7 @@ test('wiki_compile: semantic gate queries with rerank=true (find_wiki_semantic_m
     assert.equal(requests[0].rerank, true, 'semantic gate must use rerank=true for a real, threshold-comparable score');
   } finally {
     await new Promise((resolve) => server.close(resolve));
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -1019,7 +1020,7 @@ test('wiki_compile: semantic gate fails open when the daemon result score is non
 
     assert.equal(out.action, 'created');
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -1043,7 +1044,7 @@ test('wiki_compile: semantic gate fails open when the daemon result score is nul
 
     assert.equal(out.action, 'created');
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -1094,7 +1095,7 @@ test('wiki_compile: semantic gate resolves a daemon result path via the project-
     assert.equal(out.matchedPath, '.auto-context/wiki/entities/cctv-request.md');
     assert.equal(out.score, 0.9);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -1122,7 +1123,7 @@ test('wiki_compile: generated 카드 write 성공 시 verify-queue에 잡 enqueu
     assert.equal(queue[0].engine, 'claude');
     assert.ok(queue[0].sourceHash, 'sourceHash 포함');
     assert.equal(queue[0].sources[0].path, 'docs/source.md');
-  } finally { rmSync(work, { recursive: true, force: true }); }
+  } finally { removeTemp(work); }
 });
 
 test('wiki_compile: verify.enabled=false면 enqueue 안 함', () => {
@@ -1139,7 +1140,7 @@ test('wiki_compile: verify.enabled=false면 enqueue 안 함', () => {
     }));
     assert.equal(out.action, 'created');
     assert.equal(existsSync(join(work, '.auto-context', 'compile', 'verify-queue.jsonl')), false);
-  } finally { rmSync(work, { recursive: true, force: true }); }
+  } finally { removeTemp(work); }
 });
 
 test('wiki_compile: verified 카드가 auto-update되면 status가 generated로 리셋 + verify 필드 제거 + 재enqueue', () => {
@@ -1178,7 +1179,7 @@ wc.patch_frontmatter_fields(Path(${JSON.stringify(page)}), {"status": "verified"
     const queue = readFileSync(join(work, '.auto-context', 'compile', 'verify-queue.jsonl'), 'utf8')
       .trim().split('\n').map((l) => JSON.parse(l));
     assert.equal(queue.length, 2, 'created + updated 각각 enqueue');
-  } finally { rmSync(work, { recursive: true, force: true }); }
+  } finally { removeTemp(work); }
 });
 
 test('wiki_compile: normalizes wiki-root-relative targetPath under .auto-context/wiki', () => {
@@ -1202,7 +1203,7 @@ test('wiki_compile: normalizes wiki-root-relative targetPath under .auto-context
     assert.equal(rows.at(-1).targetResolution, 'explicit');
     assert.deepEqual(rows.at(-1).lint.findings, []);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -1233,7 +1234,7 @@ test('wiki_compile: wiki-relative targetPath with type mismatch falls back to id
     const page = readFileSync(join(work, '.auto-context', 'wiki', 'concepts', 'mismatch-signal-rule.md'), 'utf8');
     assert.match(page, /Updated summary arriving/);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -1254,7 +1255,7 @@ test('wiki_compile: wiki-relative targetPath without .md extension is ignored in
     assert.equal(existsSync(join(work, '.auto-context', 'wiki', 'concepts', 'bad-extension.txt')), false);
     assert.equal(existsSync(join(work, '.auto-context', 'wiki', 'concepts', 'bad-extension-rule.md')), true);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -1283,7 +1284,7 @@ test('wiki_compile: traversal, absolute, and hidden-segment targetPath are still
     assert.equal(existsSync(join(work, 'concepts')), false);
     assert.equal(existsSync(join(work, 'outside.md')), false);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTemp(work);
   }
 });
 
@@ -1342,7 +1343,7 @@ print("OK")
   try {
     const out = execFileSync('python3', ['-c', script], { encoding: 'utf8' }).trim();
     assert.equal(out, 'OK');
-  } finally { rmSync(work, { recursive: true, force: true }); }
+  } finally { removeTemp(work); }
 });
 
 test('compact_manifest: O(n) 역방향 스캔이 pairwise oracle과 동일한 결과를 낸다 (explicit 가드 포함, 랜덤)', () => {
@@ -1408,7 +1409,7 @@ print("OK")
   try {
     const out = execFileSync('python3', ['-c', script], { encoding: 'utf8' }).trim();
     assert.equal(out, 'OK');
-  } finally { rmSync(work, { recursive: true, force: true }); }
+  } finally { removeTemp(work); }
 });
 
 test('compact_manifest: 압축해도 줄지 않으면 stamp 사이드카가 다음 호출의 재스캔을 억제한다', () => {
@@ -1457,5 +1458,5 @@ print("OK")
   try {
     const out = execFileSync('python3', ['-c', script], { encoding: 'utf8' }).trim();
     assert.equal(out, 'OK');
-  } finally { rmSync(work, { recursive: true, force: true }); }
+  } finally { removeTemp(work); }
 });

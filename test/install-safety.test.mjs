@@ -2,9 +2,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs';
+import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { removeTemp } from './helpers/temp.mjs';
 
 const CLEANUP = 'scripts/cleanup-legacy.sh';
 
@@ -35,7 +36,7 @@ test('Critical: cleanup dry-run does not touch backend files', () => {
     assert.equal(readFileSync(join(home, '.config', 'qmd', 'daemon.sh'), 'utf8'), '#!/usr/bin/env sh\necho user daemon\n');
     assert.equal(readFileSync(join(home, 'Library', 'LaunchAgents', 'com.qmd-mcp-daemon.plist'), 'utf8'), '<plist><dict><key>User</key></dict></plist>\n');
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    removeTemp(home);
   }
 });
 
@@ -65,6 +66,6 @@ test('Critical: cleanup removes only managed daemon assets', () => {
     assert.equal(existsSync(join(home, 'Library', 'LaunchAgents', 'com.qmd-keepalive.plist')), false);
     assert.equal(existsSync(join(home, 'Library', 'LaunchAgents', 'com.qmd-index-worker.plist')), false);
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    removeTemp(home);
   }
 });

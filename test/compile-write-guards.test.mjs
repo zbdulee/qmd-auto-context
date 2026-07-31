@@ -3,9 +3,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { removeTemp } from './helpers/temp.mjs';
 
 const EXISTING_REL = '.auto-context/wiki/entities/existing-a.md';
 
@@ -95,7 +96,7 @@ test('an unrelated candidate cannot overwrite an existing card; it goes to merge
     assert.equal(rows.at(-1).action, 'merge-needed');
     assert.deepEqual(rows.at(-1).lint.findings, ['identity_mismatch']);
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTemp(dir);
   }
 });
 
@@ -118,7 +119,7 @@ test('a re-extraction of the same document still updates its own card', () => {
     assert.match(text, /revised A decision/);
     assert.match(text, /^status: generated$/m, 'stale verification must be reset');
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTemp(dir);
   }
 });
 
@@ -136,7 +137,7 @@ test('a shared source path counts as agreement even when the identity was rename
     });
     assert.equal(sameSource.action, 'updated');
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTemp(dir);
   }
 });
 
@@ -206,7 +207,7 @@ print(json.dumps({'verdict': 'pass', 'claims': [], 'reasons': []}))
     assert.match(readFileSync(join(dir, cardRel), 'utf8'), /^status: verified$/m);
   } finally {
     try { chmodSync(cardDir, 0o700); } catch { /* already restored */ }
-    rmSync(dir, { recursive: true, force: true });
+    removeTemp(dir);
   }
 });
 
@@ -289,7 +290,7 @@ test('a deletedPath outside the compile dir falls back to the default, like its 
     assert.equal(jsonl(ledger)[0].verdict, 'fail');
     assert.equal(paidCalls(callLog), 1);
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTemp(dir);
   }
 });
 
@@ -309,13 +310,13 @@ test('an unwritable audit ledger stops verification before spending anything', (
     }
     // The job is still queued, so fixing the ledger resumes verification.
     assert.equal(jsonl(join(dir, '.auto-context', 'compile', 'verify-queue.jsonl')).length, 1);
-    rmSync(ledger, { recursive: true, force: true });
+    removeTemp(ledger);
     const after = runVerify(dir);
     assert.equal(after.processed, 1);
     assert.equal(paidCalls(callLog), 1);
     assert.equal(existsSync(join(dir, cardRel)), false);
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTemp(dir);
   }
 });
 
@@ -327,7 +328,7 @@ test('the preflight does not create the ledger when nothing was deleted', () => 
     runVerify(dir);
     assert.equal(existsSync(join(dir, '.auto-context', 'compile', 'verify-deleted.jsonl')), false);
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTemp(dir);
   }
 });
 
@@ -361,7 +362,7 @@ v.main()
     assert.equal(log.at(-1).result, 'delete_blocked');
     assert.equal(log.at(-1).reason, 'audit_ledger_unwritable');
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTemp(dir);
   }
 });
 
@@ -397,7 +398,7 @@ v.main()
     assert.equal(log.at(-1).result, 'delete_blocked');
     assert.equal(log.at(-1).reason, 'suppression_ledger_unwritable');
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTemp(dir);
   }
 });
 
@@ -418,7 +419,7 @@ test('inconclusive 삭제 설정 + 억제 원장 불가 → 유료 호출 0회�
       readFileSync(join(dir, '.auto-context', 'compile', 'verify-queue.jsonl'), 'utf8').trim().length > 0,
       true, '큐를 claim하지 않았으므로 잡이 그대로 있다');
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTemp(dir);
   }
 });
 
@@ -436,7 +437,7 @@ test('onInconclusive=none이면 억제 원장 불가가 검수를 막지 않는�
     assert.equal(parsed.processed, 1);
     assert.equal(existsSync(callLog), true);
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTemp(dir);
   }
 });
 
@@ -488,6 +489,6 @@ print(json.dumps([s['path'] for s in loaded]))
     assert.deepEqual(paths, ['docs/real.md', 'docs/d1.md', 'docs/d2.md'],
       '권위 소스가 예산을 먼저 차지하고 모델 항목이 남은 칸을 채운다');
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTemp(dir);
   }
 });

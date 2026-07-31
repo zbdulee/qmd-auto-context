@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { removeTemp } from './helpers/temp.mjs';
 
 function runPython(source, env = {}) {
   return execFileSync('python3', ['-c', source], {
@@ -64,7 +65,7 @@ print(json.dumps(recall_context(user_message='검색 결과 정렬?', cwd='/tmp/
     assert.equal(payload.cwd, '/tmp/project');
     assert.equal(existsSync(managerLog), false, 'fixture mode should skip backend ensure');
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    removeTemp(root);
   }
 });
 
@@ -82,7 +83,7 @@ session_update(cwd='/tmp/project')
     assert.equal(payload.hook_event_name, 'SessionStart');
     assert.equal(payload.cwd, '/tmp/project');
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    removeTemp(root);
   }
 });
 
@@ -103,7 +104,7 @@ print(json.dumps(pre_edit_gate(tool_name='write_file', args={'path':'docs/a.md',
     assert.equal(payload.tool_input.file_path, 'docs/a.md');
     assert.equal(payload.cwd, '/tmp/project');
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    removeTemp(root);
   }
 });
 
@@ -127,7 +128,7 @@ post_edit_sync(tool_name='patch', args={'mode':'patch','patch':'*** Begin Patch'
     assert.equal(payload.cwd, '/tmp/project');
     assert.deepEqual(JSON.parse(readFileSync(compileLog, 'utf8')), payload);
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    removeTemp(root);
   }
 });
 
@@ -143,7 +144,7 @@ post_edit_sync(tool_name='write_file', args={'path':'docs/a.md','content':'x'}, 
     assert.equal(existsSync(managerLog), false);
     assert.equal(existsSync(compileLog), false);
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    removeTemp(root);
   }
 });
 
@@ -171,7 +172,7 @@ session_update(cwd='/tmp/project')
       assert.equal(existsSync(compileLog), false, `${envName}: compile enqueue should not run`);
       assert.equal(existsSync(updateLog), false, `${envName}: update should not run`);
     } finally {
-      rmSync(root, { recursive: true, force: true });
+      removeTemp(root);
     }
   }
 });

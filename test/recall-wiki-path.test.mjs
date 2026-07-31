@@ -10,9 +10,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { removeTemp } from './helpers/temp.mjs';
 
 function probePath(dir, uri, collection = '') {
   const out = execFileSync('python3', [
@@ -45,7 +46,7 @@ function withProject(fn, extraSettings = {}) {
   try {
     return fn(dir);
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTemp(dir);
   }
 }
 
@@ -123,7 +124,7 @@ test('collectionPaths 미등록 컬렉션도 project_root 상대 후보로 해�
     assert.ok(r.resolved, 'collectionPaths 없이도 root 상대 후보로 해석');
     assert.equal(r.meta.status, 'canon');
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTemp(dir);
   }
 });
 
