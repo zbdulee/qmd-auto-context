@@ -564,7 +564,7 @@ LOG_MAX_BYTES = 256 * 1024
 
 def trim_jsonl(path: Path, max_bytes: int = LOG_MAX_BYTES) -> None:
     """append-only 로그의 무한 누적 방지: 상한 초과 시 최근 절반만 유지.
-    순수 로그(candidates/dedup-deleted/verify-log)용 — 한 줄 유실은 무해.
+    순수 로그(candidates/dedup-deleted/verify-log/extractor.log — 단 extractor.log는 JSONL이 아닌 유일한 소비자)용 — 한 줄 유실은 무해.
     correctness가 걸린 파일(manifest)엔 쓰지 말 것 — compact_manifest 사용.
 
     쓰기는 원자적이다. "절반을 의도적으로 버린다"와 "쓰기가 실패해 임의 지점에서

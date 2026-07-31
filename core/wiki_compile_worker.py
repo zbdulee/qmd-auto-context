@@ -440,6 +440,8 @@ def run_extractor(argv: list[str], payload: dict, timeout: int, root: Path) -> t
         log.parent.mkdir(parents=True, exist_ok=True)
         with log.open("a", encoding="utf-8") as handle:
             handle.write(proc.stderr[-4000:] + "\n")
+        # extractor.log 트림: (1) 감사 원장이 아닌 순수 에러 디버그 로그(한 레코드는 ≤4,000자 유계이나 실패 시 append로 행 수가 무계 누적되어 verify-log.jsonl처럼 비대화), (2) non-JSONL이라 레코드 중간 절단 가능하나 저장소 내 파싱 소비자 0건(인간 독자 전용), (3) stat 1회 선조회로 매 쓰기 호출 비용 경량.
+        wc.trim_jsonl(log)
     if proc.returncode != 0:
         return None, "extractor_failed", proc.returncode
     try:
@@ -730,6 +732,8 @@ def _run_verify_pass(
             log.parent.mkdir(parents=True, exist_ok=True)
             with log.open("a", encoding="utf-8") as handle:
                 handle.write("verify-pass-error: " + traceback.format_exc(limit=5)[-4000:] + "\n")
+            # extractor.log 트림: (1) verify 예외 traceback 누적 순수 에러 로그, (2) non-JSONL이나 파싱 소비자 0건, (3) stat 1회 선조회로 매 쓰기 호출 비용 경량.
+            wc.trim_jsonl(log)
         except OSError:
             pass
 
