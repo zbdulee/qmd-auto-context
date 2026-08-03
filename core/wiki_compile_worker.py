@@ -589,6 +589,15 @@ def run_extractor(argv: list[str], payload: dict, timeout: int, root: Path) -> t
         return None, "invalid_extractor_json", proc.returncode
     if not isinstance(parsed, dict):
         return None, "invalid_extractor_json", proc.returncode
+    effort = payload.get("_qmd", {}).get("reasoningEffort", {}) if isinstance(payload.get("_qmd"), dict) else {}
+    capability_declared = effort.get("capabilityDeclared") is True if isinstance(effort, dict) else False
+    parsed["_qmd"] = {
+        "reasoningEffort": qmd_config.reasoning_effort_audit(
+            parsed.get("_qmd", {}).get("reasoningEffort") if isinstance(parsed.get("_qmd"), dict) else {},
+            effort.get("requested") if isinstance(effort, dict) else None,
+            capability_declared=capability_declared,
+        )
+    }
     return parsed, None, 0
 
 
@@ -752,11 +761,17 @@ def process_job(root: Path, config: dict, compile_cfg: dict, job: dict) -> tuple
         # Prompt states the same line budget the lint enforces, so a verbatim-heavy
         # summary does not overshoot into too_many_lines.
         "maxLines": int(compile_cfg.get("maxAutoPageLines", 120) or 120),
+        "_qmd": {"reasoningEffort": {
+            "requested": qmd_config.resolve_reasoning_effort(compile_cfg, engine, "generation"),
+        }},
     }
     argv = primary if primary is not None else default
+    payload["_qmd"]["reasoningEffort"]["capabilityDeclared"] = argv == _builtin_adapter_argv(engine)
     extracted, reason, returncode = run_extractor(argv, payload, timeout, root)
     if returncode == 127 and primary is not None and default is not None:
-        extracted, reason, returncode = run_extractor(default, payload, timeout, root)
+        argv = default
+        payload["_qmd"]["reasoningEffort"]["capabilityDeclared"] = argv == _builtin_adapter_argv(engine)
+        extracted, reason, returncode = run_extractor(argv, payload, timeout, root)
     if returncode == 127:
         append_jsonl(cpath, bounded_failure("needs_extractor", job, "extractor_unavailable"))
         return False, True, []  # CLI absent: preserve for when it's installed
@@ -797,6 +812,7 @@ def process_job(root: Path, config: dict, compile_cfg: dict, job: dict) -> tuple
         })
         candidates = candidates[:max_cards]
     failed_compile = False
+    extracted_qmd = extracted.get("_qmd") if isinstance(extracted, dict) else None
     verify_targets: list[str] = []
     for candidate in candidates:
         if not isinstance(candidate, dict):
@@ -830,6 +846,13 @@ def process_job(root: Path, config: dict, compile_cfg: dict, job: dict) -> tuple
         # 수 있었던 것과 같은 클래스다. trigger도 큐 잡이 SSOT다.
         candidate["trigger"] = job.get("trigger", "post_tool_source")
         candidate["engine"] = job.get("engine", "")
+        candidate["_qmd"] = {
+            "reasoningEffort": qmd_config.reasoning_effort_audit(
+                extracted_qmd.get("reasoningEffort") if isinstance(extracted_qmd, dict) else {},
+                payload["_qmd"]["reasoningEffort"].get("requested"),
+                capability_declared=payload["_qmd"]["reasoningEffort"].get("capabilityDeclared") is True,
+            )
+        }
         result = compile_candidate(root, candidate)
         if not isinstance(result, dict) or result.get("action") in {"rejected", "conflict"}:
             failed_compile = True

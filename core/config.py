@@ -125,6 +125,12 @@ DEFAULT_CONFIG = {
         "canonSignals": [],
         "maxAutoPageLines": 120,
         "maxSourceChars": 12000,
+        "reasoningEffort": {
+            "generation": "low",
+            "verify": "medium",
+            "semanticDedup": "medium",
+            "engines": {},
+        },
         "extractor": {
             "argv": [],
             "timeout": 30,
@@ -267,6 +273,14 @@ COMPILE_TRIGGERS = {
     "manual",
 }
 BUILTIN_EXTRACTOR_ENGINES = {"claude", "codex", "hermes"}
+REASONING_EFFORTS = frozenset({"low", "medium", "high", "xhigh"})
+REASONING_EFFORT_PHASES = ("generation", "verify", "semanticDedup")
+DEFAULT_REASONING_EFFORT = {
+    "generation": "low",
+    "verify": "medium",
+    "semanticDedup": "medium",
+    "engines": {},
+}
 
 EVENT_ALIASES = {
     "SessionStart": "sessionStart",
@@ -376,6 +390,59 @@ def builtin_extractor_engines(value):
         for item in string_list(value, [])
         if item in BUILTIN_EXTRACTOR_ENGINES
     ]
+
+
+def reasoning_effort_config(value, defaults=None):
+    """Normalize portable phase effort without introducing model configuration."""
+    base = defaults if isinstance(defaults, dict) else DEFAULT_REASONING_EFFORT
+    result = {
+        phase: base.get(phase, DEFAULT_REASONING_EFFORT[phase])
+        if base.get(phase) in REASONING_EFFORTS else DEFAULT_REASONING_EFFORT[phase]
+        for phase in REASONING_EFFORT_PHASES
+    }
+    result["engines"] = {}
+    raw = value if isinstance(value, dict) else {}
+    for phase in REASONING_EFFORT_PHASES:
+        if raw.get(phase) in REASONING_EFFORTS:
+            result[phase] = raw[phase]
+    engines = raw.get("engines") if isinstance(raw.get("engines"), dict) else {}
+    for engine, policy in engines.items():
+        if not isinstance(engine, str) or not engine or not isinstance(policy, dict):
+            continue
+        normalized = {
+            phase: policy[phase]
+            for phase in REASONING_EFFORT_PHASES
+            if policy.get(phase) in REASONING_EFFORTS
+        }
+        if normalized:
+            result["engines"][engine] = normalized
+    return result
+
+
+def resolve_reasoning_effort(compile_cfg, engine, phase):
+    """Resolve engine/phase policy; engine names remain symbolic and portable."""
+    policy = compile_cfg.get("reasoningEffort") if isinstance(compile_cfg, dict) else None
+    normalized = reasoning_effort_config(policy)
+    phase = phase if phase in REASONING_EFFORT_PHASES else "verify"
+    engine_policy = normalized["engines"].get(engine)
+    if isinstance(engine_policy, dict) and engine_policy.get(phase) in REASONING_EFFORTS:
+        return engine_policy[phase]
+    return normalized[phase]
+
+
+def reasoning_effort_audit(raw, requested=None, reason="capability_not_declared", capability_declared=True):
+    """Return bounded, source-free effort audit metadata for persisted records."""
+    requested = requested if requested in REASONING_EFFORTS else None
+    if not capability_declared:
+        return {"requested": requested, "applied": None, "status": "unsupported", "reason": str(reason)[:120]}
+    value = raw if isinstance(raw, dict) else {}
+    if value.get("requested") in REASONING_EFFORTS:
+        requested = value["requested"]
+    applied = value.get("applied") if value.get("applied") in REASONING_EFFORTS else None
+    status = value.get("status") if value.get("status") in {"applied", "unsupported", "retried_without_effort"} else "unsupported"
+    if value.get("reason"):
+        reason = str(value["reason"])[:120]
+    return {"requested": requested, "applied": applied, "status": status, "reason": str(reason)[:120]}
 
 
 def collection_role_map(value, collections):
@@ -523,6 +590,9 @@ def compile_config(value):
     result["canonSignals"] = string_list(value.get("canonSignals"), defaults["canonSignals"])
     result["maxAutoPageLines"] = coerce_int(value.get("maxAutoPageLines", defaults["maxAutoPageLines"]), defaults["maxAutoPageLines"])
     result["maxSourceChars"] = coerce_int(value.get("maxSourceChars", defaults["maxSourceChars"]), defaults["maxSourceChars"])
+    result["reasoningEffort"] = reasoning_effort_config(
+        value.get("reasoningEffort"), defaults.get("reasoningEffort")
+    )
     result["maxCardsPerSource"] = coerce_capped_int(
         value.get("maxCardsPerSource", defaults["maxCardsPerSource"]),
         defaults["maxCardsPerSource"], MAX_CARDS_PER_SOURCE,

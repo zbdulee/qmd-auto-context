@@ -212,6 +212,7 @@ def judge_fields(rel: str, key: tuple[str, str], info: dict | None) -> dict:
         "judgedMode": info.get("mode", ""),
         "uniqueToA": info.get("uniqueToA", []),
         "uniqueToB": info.get("uniqueToB", []),
+        **({"_qmd": info["_qmd"]} if info.get("_qmd") else {}),
     }
 
 

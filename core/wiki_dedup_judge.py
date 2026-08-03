@@ -61,6 +61,7 @@ ATTRIBUTION_NONE = "none"  # 카드 두 장, 둘째 생산자 미기록 (retroac
 DIAGNOSTIC_KEYS = (
     "outcome", "reason", "engine", "mode", "producedBy", "crossEngine", "crossEngineWaived",
     "enginesAttempted", "enginesCooling", "engineCooldown", "cooldownWriteFailed", "unusableOutput",
+    "_qmd",
 )
 # degrade·차단이 실제로 일어났다는 신호. 이게 있으면 판정이 성공했어도 보고한다.
 _NOTABLE_KEYS = ("crossEngineWaived", "engineCooldown", "cooldownWriteFailed", "unusableOutput")
@@ -139,7 +140,7 @@ def diagnostics(info: dict) -> dict:
     바뀐다.
     """
     notable = any(info.get(key) for key in _NOTABLE_KEYS)
-    if info.get("outcome") == OUTCOME_OK and not notable:
+    if info.get("outcome") == OUTCOME_OK and not notable and not info.get("_qmd"):
         return {}
     if not (info.get("enginesAttempted") or info.get("enginesCooling") or notable):
         return {}
@@ -405,6 +406,10 @@ def judge_pair(
         "pageA": {"path": str(page_a.get("path", "")), "content": str(page_a.get("content", ""))[:max_chars]},
         "pageB": {"path": str(page_b.get("path", "")), "content": str(page_b.get("content", ""))[:max_chars]},
         "timeout": timeout,
+        "_qmd": {"reasoningEffort": {
+            "requested": qmd_config.resolve_reasoning_effort(compile_cfg, attempts[0]["engine"], "semanticDedup"),
+            "capabilityDeclared": attempts[0]["argv"] == wcw._builtin_adapter_argv(attempts[0]["engine"]),
+        }},
     }
 
     attempted: list[str] = []
@@ -414,6 +419,12 @@ def judge_pair(
     for index, candidate in enumerate(attempts):
         attempt = candidate
         payload["engine"] = candidate["engine"]
+        payload["_qmd"]["reasoningEffort"]["requested"] = qmd_config.resolve_reasoning_effort(
+            compile_cfg, candidate["engine"], "semanticDedup"
+        )
+        payload["_qmd"]["reasoningEffort"]["capabilityDeclared"] = (
+            candidate["argv"] == wcw._builtin_adapter_argv(candidate["engine"])
+        )
         attempted.append(candidate["engine"])
         parsed, reason, returncode = wcw.run_extractor(candidate["argv"], payload, timeout, root)
         if returncode != 127:
@@ -422,6 +433,11 @@ def judge_pair(
     provenance = {
         **provenance,
         "engine": attempt["engine"], "mode": attempt["mode"], "enginesAttempted": attempted,
+        "_qmd": {"reasoningEffort": qmd_config.reasoning_effort_audit(
+            parsed.get("_qmd", {}).get("reasoningEffort") if isinstance(parsed, dict) and isinstance(parsed.get("_qmd"), dict) else {},
+            payload.get("_qmd", {}).get("reasoningEffort", {}).get("requested"),
+            capability_declared=payload.get("_qmd", {}).get("reasoningEffort", {}).get("capabilityDeclared") is True,
+        )},
     }
     if returncode == 127:
         # 후보 전원 CLI 부재: 이 머신에서는 어떤 judge도 답하지 않는다(과금 0).

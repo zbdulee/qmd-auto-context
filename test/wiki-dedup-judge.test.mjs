@@ -1206,7 +1206,7 @@ test('MAJOR 3 — write-time: 유료 실패가 candidates.jsonl 의 judge 진단
   } finally { removeTemp(work); }
 });
 
-test('정상 판정에는 judge 진단을 남기지 않는다(기존 행 모양 불변)', () => {
+test('정상 판정에도 reasoning-effort audit metadata만 judge 진단으로 남긴다', () => {
   const work = repoTemp('judge-diag-quiet');
   const tracker = trackerFile('diag-quiet');
   try {
@@ -1216,6 +1216,8 @@ test('정상 판정에는 judge 진단을 남기지 않는다(기존 행 모양 
 
     runCrossCompile(work, fixture, 'A genuinely different fact');
     const candidates = jsonl(join(work, '.auto-context/compile/candidates.jsonl'));
-    assert.equal('judge' in candidates.at(-1), false, '보고할 것이 없으면 필드를 만들지 않는다');
+    assert.deepEqual(candidates.at(-1).judge._qmd.reasoningEffort, {
+      requested: 'medium', applied: null, status: 'unsupported', reason: 'capability_not_declared',
+    });
   } finally { removeTemp(work); }
 });

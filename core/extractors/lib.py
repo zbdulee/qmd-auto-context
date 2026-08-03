@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -20,6 +21,19 @@ import tempfile
 from pathlib import Path
 
 CLI_ABSENT = 127
+REASONING_EFFORTS = frozenset({"low", "medium", "high", "xhigh"})
+REASONING_EFFORT_STATUSES = frozenset({"applied", "unsupported", "retried_without_effort"})
+EFFORT_REJECTION_PATTERNS = {
+    "claude": (
+        r"(?i)(?:unknown|unrecognized|unsupported|invalid|unexpected)\s+(?:option|flag|argument).*--effort",
+        r"(?i)--effort.*(?:unknown|unrecognized|unsupported|invalid)",
+    ),
+    "codex": (
+        r"(?i)(?:unknown|unrecognized|unsupported|invalid)\s+(?:field|configuration\s+key|option|flag).*model_reasoning_effort",
+        r"(?i)model_reasoning_effort.*(?:unknown|unrecognized|unsupported|invalid)",
+        r"(?i)unexpected\s+(?:argument|option).*model_reasoning_effort",
+    ),
+}
 
 ALLOWED_TYPES = ("concept", "entity", "decision", "comparison")
 
@@ -281,7 +295,7 @@ def resolve_bin(name: str, env_override: str) -> str | None:
     return shutil.which(name, path=search)
 
 
-def run_isolated(cmd: list[str], timeout: int) -> tuple[str | None, int]:
+def run_isolated_detailed(cmd: list[str], timeout: int) -> tuple[str | None, int, str]:
     workdir = tempfile.mkdtemp(prefix="qmd-extract-")
     # QMD_SANDBOX=1 neuters any qmd hook the nested CLI might fire (the dispatcher
     # and core scripts honor it with an immediate silent exit), so the headless
@@ -300,24 +314,45 @@ def run_isolated(cmd: list[str], timeout: int) -> tuple[str | None, int]:
         )
         if proc.stderr:
             sys.stderr.write(proc.stderr[-4000:])
-        return proc.stdout, proc.returncode
+        return proc.stdout, proc.returncode, proc.stderr[-4000:]
     except subprocess.TimeoutExpired:
-        return None, 1
+        return None, 1, ""
     except FileNotFoundError:
-        return None, CLI_ABSENT
+        return None, CLI_ABSENT, ""
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 
 
-def emit(candidates_obj: dict) -> int:
+def run_isolated(cmd: list[str], timeout: int) -> tuple[str | None, int]:
+    out, code, _stderr = run_isolated_detailed(cmd, timeout)
+    return out, code
+
+
+def _qmd_reasoning_effort(payload: dict, *, applied=None, status="unsupported", reason="not_requested") -> dict:
+    raw = payload.get("_qmd") if isinstance(payload.get("_qmd"), dict) else {}
+    raw_effort = raw.get("reasoningEffort") if isinstance(raw.get("reasoningEffort"), dict) else {}
+    requested = raw_effort.get("requested") if raw_effort.get("requested") in REASONING_EFFORTS else None
+    applied = applied if applied in REASONING_EFFORTS else None
+    status = status if status in REASONING_EFFORT_STATUSES else "unsupported"
+    return {"requested": requested, "applied": applied, "status": status, "reason": str(reason or "")[:120]}
+
+
+def _with_qmd(obj: dict, effort: dict) -> dict:
+    return {**obj, "_qmd": {"reasoningEffort": effort}}
+
+
+def emit(candidates_obj: dict, effort: dict | None = None) -> int:
     candidates = candidates_obj.get("candidates") if isinstance(candidates_obj, dict) else None
     if not isinstance(candidates, list):
         return 1
-    print(json.dumps({"candidates": candidates}, ensure_ascii=False))
+    output = {"candidates": candidates}
+    if effort is not None:
+        output = _with_qmd(output, effort)
+    print(json.dumps(output, ensure_ascii=False))
     return 0
 
 
-def emit_verdict(verdict_obj: dict) -> int:
+def emit_verdict(verdict_obj: dict, effort: dict | None = None) -> int:
     if not isinstance(verdict_obj, dict) or verdict_obj.get("verdict") not in VERDICT_VALUES:
         return 1
     out = {
@@ -325,11 +360,13 @@ def emit_verdict(verdict_obj: dict) -> int:
         "claims": verdict_obj.get("claims") if isinstance(verdict_obj.get("claims"), list) else [],
         "reasons": verdict_obj.get("reasons") if isinstance(verdict_obj.get("reasons"), list) else [],
     }
+    if effort is not None:
+        out = _with_qmd(out, effort)
     print(json.dumps(out, ensure_ascii=False))
     return 0
 
 
-def emit_dedup_verdict(verdict_obj: dict) -> int:
+def emit_dedup_verdict(verdict_obj: dict, effort: dict | None = None) -> int:
     if not isinstance(verdict_obj, dict) or verdict_obj.get("verdict") not in DEDUP_VERDICT_VALUES:
         return 1
 
@@ -337,17 +374,31 @@ def emit_dedup_verdict(verdict_obj: dict) -> int:
         raw = verdict_obj.get(key)
         return [str(item)[:300] for item in raw[:10]] if isinstance(raw, list) else []
 
-    print(json.dumps({
+    output = {
         "verdict": verdict_obj["verdict"],
         "reason": str(verdict_obj.get("reason") or "")[:500],
         "sharedFacts": strings("sharedFacts"),
         "uniqueToA": strings("uniqueToA"),
         "uniqueToB": strings("uniqueToB"),
-    }, ensure_ascii=False))
+    }
+    if effort is not None:
+        output = _with_qmd(output, effort)
+    print(json.dumps(output, ensure_ascii=False))
     return 0
 
 
-def run_adapter(cli_name: str, env_override: str, build_cmd) -> int:
+def effort_option_rejected(engine: str, stderr: str) -> bool:
+    return any(re.search(pattern, stderr or "") for pattern in EFFORT_REJECTION_PATTERNS.get(engine, ()))
+
+
+def run_adapter(
+    cli_name: str,
+    env_override: str,
+    build_cmd,
+    *,
+    engine: str,
+    supports_effort: bool = False,
+) -> int:
     """Full adapter flow shared by all host adapters."""
     payload = read_payload()
     task = payload.get("task")
@@ -361,13 +412,36 @@ def run_adapter(cli_name: str, env_override: str, build_cmd) -> int:
     if not binary:
         return CLI_ABSENT
     timeout = int(payload.get("timeout") or os.environ.get("QMD_EXTRACTOR_TIMEOUT") or 120)
-    out, code = run_isolated(build_cmd(binary, prompt), timeout)
+    requested = _qmd_reasoning_effort(payload)["requested"]
+    effort = _qmd_reasoning_effort(
+        payload,
+        applied=requested if supports_effort and requested else None,
+        status="applied" if supports_effort and requested else "unsupported",
+        reason="capability_flag" if supports_effort and requested else (
+            "no_hermetic_invocation_mechanism" if not supports_effort and requested else "not_requested"
+        ),
+    )
+    out, code, stderr = run_isolated_detailed(
+        build_cmd(binary, prompt, requested if supports_effort else None), timeout
+    )
+    if (
+        requested
+        and supports_effort
+        and code != 0
+        and code != CLI_ABSENT
+        and effort_option_rejected(engine, stderr)
+    ):
+        out, code, _stderr = run_isolated_detailed(build_cmd(binary, prompt, None), timeout)
+        if out is not None and code == 0:
+            effort = _qmd_reasoning_effort(
+                payload, status="retried_without_effort", reason="effort_option_rejected"
+            )
     if out is None:
         return code
     if code != 0:
         return code
     if task == "verify":
-        return emit_verdict(extract_verdict(out))
+        return emit_verdict(extract_verdict(out), effort)
     if task == "dedup":
-        return emit_dedup_verdict(extract_dedup_verdict(out))
-    return emit(extract_candidates(out))
+        return emit_dedup_verdict(extract_dedup_verdict(out), effort)
+    return emit(extract_candidates(out), effort)
