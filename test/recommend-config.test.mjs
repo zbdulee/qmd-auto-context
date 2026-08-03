@@ -69,14 +69,23 @@ test('recommended config wires wiki + compile by default', () => {
     const cfg = JSON.parse(out).config;
     assert.ok(cfg.collections.some((c) => c.endsWith('-wiki')));
     assert.equal(cfg.collectionRoles[cfg.collections.find((c) => c.endsWith('-wiki'))], 'wiki');
-    assert.equal(cfg.recallStrategy, 'hierarchical');
     assert.equal(cfg.compile.extractor.dispatch, 'by-engine');
     assert.deepEqual(cfg.compile.extractor.backends, {});
     assert.deepEqual(cfg.compile.extractor.builtins, ['claude', 'codex', 'hermes']);
-    assert.deepEqual(cfg.compile.reasoningEffort, {
-      generation: 'low', verify: 'medium', semanticDedup: 'medium', engines: {},
-    });
     assert.doesNotMatch(JSON.stringify(cfg.compile), /core\/extractors|_adapter\.py/);
     assert.ok(cfg.compile.triggers.includes('post_tool_source'));
+    // delta-only: 기본값과 같은 recallStrategy/reasoningEffort는 추천 config에 넣지 않는다.
+    // 추천이 실제로 무엇을 켜는지는 normalize_config 통과 결과로 확인한다.
+    assert.equal(cfg.recallStrategy, undefined);
+    assert.equal(cfg.compile.reasoningEffort, undefined);
+    const eff = JSON.parse(execFileSync('python3', ['-c', `import json, sys
+sys.path.insert(0, "core")
+import config as qmd_config
+print(json.dumps(qmd_config.normalize_config(json.loads(sys.argv[1])), ensure_ascii=False))`,
+    JSON.stringify(cfg)], { cwd: process.cwd(), encoding: 'utf8' }));
+    assert.equal(eff.recallStrategy, 'hierarchical');
+    assert.deepEqual(eff.compile.reasoningEffort, {
+      generation: 'low', verify: 'medium', semanticDedup: 'medium', engines: {},
+    });
   } finally { removeTemp(d); }
 });

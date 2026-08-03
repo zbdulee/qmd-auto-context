@@ -258,7 +258,7 @@ test('compile extractor config drops shell strings and invalid timeout', () => {
   }));
   assert.equal(cfg.compile.sourceQueuePath, '.auto-context/compile/source-queue.jsonl');
   assert.equal(cfg.compile.maxSourceChars, 12000);
-  assert.deepEqual(cfg.compile.extractor, { argv: [], timeout: 30, cooldownSeconds: 600 });
+  assert.deepEqual(cfg.compile.extractor, { argv: [], timeout: 120, cooldownSeconds: 600 });
 });
 
 test('compile extractor config preserves valid built-ins and drops invalid values', () => {

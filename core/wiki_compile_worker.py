@@ -763,7 +763,9 @@ def process_job(root: Path, config: dict, compile_cfg: dict, job: dict) -> tuple
         return True, False, []
 
     extractor = compile_cfg.get("extractor") if isinstance(compile_cfg.get("extractor"), dict) else {}
-    timeout = int(extractor.get("timeout", 30) or 30)
+    # 폴백은 qmd_config.DEFAULT_CONFIG["compile"]["extractor"]["timeout"]와 같아야 한다.
+    _default_timeout = qmd_config.DEFAULT_CONFIG["compile"]["extractor"]["timeout"]
+    timeout = int(extractor.get("timeout", _default_timeout) or _default_timeout)
     engine = job.get("engine", qmd_config.UNKNOWN_ENGINE)
     primary, default = resolve_extractor_argv(compile_cfg, engine)
     if primary is None and default is None:

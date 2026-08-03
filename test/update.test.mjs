@@ -5,6 +5,19 @@ import { existsSync, mkdirSync, readdirSync, symlinkSync, utimesSync, writeFileS
 import { join } from 'node:path';
 import { removeTemp, repoTemp, tempCacheDir } from './helpers/temp.mjs';
 
+// 생성기는 delta-only다(기본값과 같은 키는 쓰지 않는다). 따라서 "writer가 설정을 켰는가"는
+// emit된 키가 아니라 **effective config**(= normalize_config 통과 결과)로 봐야 한다.
+// emit을 단정하면 "의도된 축소"와 "우발적 동작 변경"이 구분되지 않는다
+// (test/config-emission-freeze.test.mjs 헤더 주석 참고).
+function effectiveConfig(settingsPath) {
+  const py = `import json, sys
+sys.path.insert(0, "core")
+import config as qmd_config
+with open(sys.argv[1], encoding="utf-8") as fh:
+    print(json.dumps(qmd_config.normalize_config(json.load(fh)), ensure_ascii=False))`;
+  return JSON.parse(execFileSync('python3', ['-c', py, settingsPath], { encoding: 'utf8' }));
+}
+
 function resolvePaths(cwd, configJson) {
   // update.sh --resolve-only: qmd 미실행, 컬렉션→경로 매핑 결과만 stdout JSON.
   // 상태(pending/optout/동의)는 stdin config의 indexing/collections로만 판정(파일/전역 안 읽음).
@@ -469,7 +482,12 @@ test('update core: --init-wiki creates scaffold and enables wiki recall without 
     assert.deepEqual(cfg.collectionPaths, { [wikiCollection]: '.auto-context/wiki' });
     assert.equal(cfg.collectionRoles.docs, 'raw');
     assert.equal(cfg.collectionRoles[wikiCollection], 'wiki');
-    assert.equal(cfg.recallStrategy, 'hierarchical');
+    // hierarchical은 기본값과 같아 emit되지 않는다(delta-only). 켜졌는지는 effective로 본다.
+    assert.equal(cfg.recallStrategy, undefined);
+    assert.equal(
+      effectiveConfig(join(work, '.auto-context', 'settings.json')).recallStrategy,
+      'hierarchical',
+    );
 
     writeFileSync(join(work, '.auto-context', 'wiki', 'index.md'), '# custom\n');
     execFileSync('bash', [join(process.cwd(), 'core', 'update.sh'), '--init-wiki', work], { encoding: 'utf8' });
@@ -489,7 +507,48 @@ test('update core: --init-wiki without settings creates an opt-in wiki-only conf
     assert.match(cfg.collections[0], /-wiki$/);
     assert.deepEqual(cfg.collectionPaths, { [cfg.collections[0]]: '.auto-context/wiki' });
     assert.deepEqual(cfg.collectionRoles, { [cfg.collections[0]]: 'wiki' });
-    assert.equal(cfg.recallStrategy, 'hierarchical');
+    // delta-only: 기본값과 같은 recallStrategy/wikiPath는 쓰지 않고 기본값에 맡긴다.
+    assert.equal(cfg.recallStrategy, undefined);
+    assert.equal(cfg.wikiPath, undefined);
+    const eff = effectiveConfig(join(work, '.auto-context', 'settings.json'));
+    assert.equal(eff.recallStrategy, 'hierarchical');
+    assert.equal(eff.wikiPath, '.auto-context/wiki');
+  } finally {
+    removeTemp(work);
+  }
+});
+
+// recallStrategy는 예전에 **대입**이라 기존 값을 강제로 덮었다. delta-only로 바꾸면서
+// 그냥 안 쓰기만 하면 기존 "flat"이 살아남아 wiki 우선 recall이 켜지지 않는다 — 지워야
+// "키 없음 → 기본값 hierarchical"로 예전과 같은 결과가 된다.
+test('update core: --init-wiki는 기존 recallStrategy: flat을 hierarchical로 되돌린다', () => {
+  const work = repoTemp('qmd-init-wiki-flat');
+  try {
+    mkdirSync(join(work, '.auto-context'), { recursive: true });
+    writeFileSync(join(work, '.auto-context', 'settings.json'), JSON.stringify({
+      indexing: true, collections: ['docs'], recallStrategy: 'flat',
+    }));
+    execFileSync('bash', [join(process.cwd(), 'core', 'update.sh'), '--init-wiki', work], { encoding: 'utf8' });
+    const settings = join(work, '.auto-context', 'settings.json');
+    assert.equal(JSON.parse(readFileSync(settings, 'utf8')).recallStrategy, undefined);
+    assert.equal(effectiveConfig(settings).recallStrategy, 'hierarchical');
+  } finally {
+    removeTemp(work);
+  }
+});
+
+// 반대로 wikiPath는 setdefault였으므로 사용자 커스텀 값을 파괴하면 안 된다.
+test('update core: --init-wiki는 사용자 지정 wikiPath를 보존한다', () => {
+  const work = repoTemp('qmd-init-wiki-custom-path');
+  try {
+    mkdirSync(join(work, '.auto-context'), { recursive: true });
+    writeFileSync(join(work, '.auto-context', 'settings.json'), JSON.stringify({
+      indexing: true, collections: ['docs'], wikiPath: 'notes/wiki',
+    }));
+    execFileSync('bash', [join(process.cwd(), 'core', 'update.sh'), '--init-wiki', work], { encoding: 'utf8' });
+    const settings = join(work, '.auto-context', 'settings.json');
+    assert.equal(JSON.parse(readFileSync(settings, 'utf8')).wikiPath, 'notes/wiki');
+    assert.equal(effectiveConfig(settings).wikiPath, 'notes/wiki');
   } finally {
     removeTemp(work);
   }
@@ -507,11 +566,18 @@ test('update core: --init-wiki --preset novel creates novel dirs and compile def
     assert.equal(cfg.compile.enabled, true);
     assert.equal(cfg.compile.mode, 'auto-wiki');
     assert.equal(cfg.compile.autoWrite, true);
-    assert.equal(cfg.compile.defaultStatus, 'generated');
-    assert.equal(cfg.compile.requireReviewForCanon, true);
     // post_tool_source가 없으면 자동 수집 트리거가 하나도 없어 세션 노트를 채워도
     // 카드가 생기지 않는다(post_session_summary는 수동 경로 라벨일 뿐이다).
     assert.ok(cfg.compile.triggers.includes('post_tool_source'));
+    // delta-only: 기본값과 같은 값은 emit하지 않는다. 실제 적용값은 effective로 확인한다.
+    assert.equal(cfg.compile.defaultStatus, undefined);
+    assert.equal(cfg.compile.requireReviewForCanon, undefined);
+    const eff = effectiveConfig(join(work, '.auto-context', 'settings.json'));
+    assert.equal(eff.compile.defaultStatus, 'generated');
+    assert.equal(eff.compile.requireReviewForCanon, true);
+    // 이 preset은 compile을 켜면서 extractor를 쓰지 않는다 — timeout 기본값이 30이던
+    // 동안 이 경로로 온보딩한 프로젝트는 adapter 호출이 매번 timeout됐다(§6.1).
+    assert.equal(eff.compile.extractor.timeout, 120);
   } finally {
     removeTemp(work);
   }
