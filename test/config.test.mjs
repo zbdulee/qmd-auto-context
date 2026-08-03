@@ -131,6 +131,12 @@ test('wiki recall 신규 필드는 additive로 normalize 된다', () => {
     maxAutoPageLines: 80,
     maxSourceChars: 12000,
     maxCardsPerSource: 10,
+    reasoningEffort: {
+      generation: 'low',
+      verify: 'medium',
+      semanticDedup: 'medium',
+      engines: {},
+    },
     extractor: { argv: ['python3', 'scripts/extract.py'], timeout: 30, cooldownSeconds: 600 },
     batch: { idleSeconds: 90, maxItems: 5, maxPerRun: 10 },
     semanticDedup: { enabled: true, threshold: 0.82, topK: 3, similarPageMaxChars: 12000, autoMergeThreshold: 0.9, maxPairsPerScan: 10, candidateMinScore: 0.3, judge: JUDGE_DEFAULTS },
@@ -148,6 +154,46 @@ test('wiki recall 신규 필드는 additive로 normalize 된다', () => {
       cooldownSeconds: 600,
       maxPerRun: 3,
     },
+  });
+});
+
+test('compile.reasoningEffort resolves phase defaults and symbolic engine overrides, invalid values fall back safely', () => {
+  const cfg = loadConfig(JSON.stringify({
+    compile: {
+      reasoningEffort: {
+        generation: 'bogus',
+        verify: 'high',
+        semanticDedup: 'xhigh',
+        engines: {
+          claude: { verify: 'low', generation: 'invalid' },
+          codex: { generation: 'high' },
+          futureEngine: { semanticDedup: 'medium' },
+          ignored: 'not-an-object',
+        },
+        model: { name: 'must-not-be-supported' },
+      },
+    },
+  }));
+  assert.deepEqual(cfg.compile.reasoningEffort, {
+    generation: 'low',
+    verify: 'high',
+    semanticDedup: 'xhigh',
+    engines: {
+      claude: { verify: 'low' },
+      codex: { generation: 'high' },
+      futureEngine: { semanticDedup: 'medium' },
+    },
+  });
+  const py = `import json,sys; sys.path.insert(0,'core'); import config
+cfg = config.normalize_config(json.loads(${JSON.stringify(JSON.stringify({ compile: { reasoningEffort: { generation: 'low', verify: 'medium', semanticDedup: 'medium', engines: { claude: { verify: 'high' }, codex: { generation: 'high' } } } } }))}))
+print(json.dumps({k: config.resolve_reasoning_effort(cfg['compile'], *pair) for k, pair in {'claudeVerify': ('claude','verify'), 'claudeGeneration': ('claude','generation'), 'codexGeneration': ('codex','generation'), 'hermesDedup': ('hermes','semanticDedup'), 'unknownPhase': ('claude','unknown')}.items()}))`;
+  const resolved = JSON.parse(execFileSync('python3', ['-c', py], { encoding: 'utf8' }));
+  assert.deepEqual(resolved, {
+    claudeVerify: 'high',
+    claudeGeneration: 'low',
+    codexGeneration: 'high',
+    hermesDedup: 'medium',
+    unknownPhase: 'high',
   });
 });
 

@@ -482,6 +482,70 @@ test('dispatch falls back to default only when primary CLI is absent (exit 127)'
   } finally { removeTemp(project); }
 });
 
+test('generation fallback audits the argv that actually ran for builtin/custom switches', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'adapter-effort-fallback-'));
+  const python = execFileSync('python3', ['-c', 'import sys; print(sys.executable)'], {
+    encoding: 'utf8',
+  }).trim();
+  const builtin = join(process.cwd(), 'core', 'extractors', 'claude_adapter.py');
+  const custom = join(dir, 'custom.py');
+  writeFileSync(custom, `#!/usr/bin/env python3
+import json, sys
+title = sys.argv[1]
+print(json.dumps({'candidates': [{'title': title, 'summary': 'Durable: fallback audit records the extractor that actually ran.', 'suggestedType': 'concept', 'confidence': 'high', 'targetPath': '.auto-context/wiki/concepts/' + title.lower().replace(' ', '-') + '.md'}], '_qmd': {'reasoningEffort': {'requested': 'high', 'applied': 'high', 'status': 'applied', 'reason': 'capability_flag'}}}))
+`);
+  const absent = join(dir, 'absent.py');
+  writeFileSync(absent, '#!/usr/bin/env python3\nimport sys\nsys.exit(127)\n');
+  const hostCli = join(dir, 'fake-claude');
+  writeFileSync(hostCli, `#!/usr/bin/env python3
+import json
+print(json.dumps({'candidates': [{'title': 'Custom to Builtin', 'summary': 'Durable: builtin fallback audit preserves capability support.', 'suggestedType': 'concept', 'confidence': 'high', 'targetPath': '.auto-context/wiki/concepts/custom-to-builtin.md'}]}))
+`, { mode: 0o755 });
+
+  const compile = {
+    dispatch: 'by-engine',
+    backends: {},
+    builtins: ['claude'],
+    default: [],
+    timeout: 30,
+  };
+  const reasoningEffort = { generation: 'high', verify: 'medium', semanticDedup: 'medium', engines: {} };
+  const projects = [
+    setupProject({
+      extractor: {
+        ...compile,
+        default: ['python3', custom, 'Builtin to Custom'],
+      },
+      reasoningEffort,
+    }),
+    setupProject({
+      extractor: {
+        ...compile,
+        backends: { claude: ['python3', absent] },
+        default: [python, builtin],
+      },
+      reasoningEffort,
+    }),
+  ];
+  try {
+    runWorker(projects[0], { QMD_EXTRACTOR_CLAUDE_BIN: join(dir, 'missing-claude') });
+    runWorker(projects[1], { QMD_EXTRACTOR_CLAUDE_BIN: hostCli });
+    const first = jsonl(join(projects[0], '.auto-context', 'compile', 'candidates.jsonl'))
+      .find((row) => row.action === 'created');
+    const second = jsonl(join(projects[1], '.auto-context', 'compile', 'candidates.jsonl'))
+      .find((row) => row.action === 'created');
+    assert.ok(first);
+    assert.ok(second);
+    assert.equal(first._qmd.reasoningEffort.status, 'unsupported');
+    assert.equal(first._qmd.reasoningEffort.applied, null);
+    assert.equal(second._qmd.reasoningEffort.status, 'applied');
+    assert.equal(second._qmd.reasoningEffort.applied, 'high');
+  } finally {
+    projects.forEach(removeTemp);
+    removeTemp(dir);
+  }
+});
+
 test('transient extractor failure sets cooldown and preserves the job', () => {
   const ex = join(mkdtempSync(join(tmpdir(), 'extractor-')), 'fail.py');
   writeFileSync(ex, `#!/usr/bin/env python3\nimport sys\nsys.stderr.write('rate limited')\nsys.exit(1)\n`);

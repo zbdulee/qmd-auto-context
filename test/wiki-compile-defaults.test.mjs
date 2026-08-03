@@ -31,8 +31,8 @@ b=d.compile_block('/PR'); print(json.dumps({
  'dispatch':b['extractor']['dispatch'],
  'backends':b['extractor']['backends'],
  'builtins':b['extractor']['builtins'],
- 'serialized':json.dumps(b),
- 'cooldown':b['extractor']['cooldownSeconds'],'batch':b['batch']}))`;
+ 'serialized':json.dumps(b), 'reasoningEffort':b['reasoningEffort'],
+   'cooldown':b['extractor']['cooldownSeconds'],'batch':b['batch']}))`;
   const b = JSON.parse(run(py));
   assert.equal(b.enabled, true);
   assert.equal(b.mode, 'auto-wiki');
@@ -43,6 +43,9 @@ b=d.compile_block('/PR'); print(json.dumps({
   assert.doesNotMatch(b.serialized, /\/PR|core\/extractors|_adapter\.py/);
   assert.equal(b.cooldown, 600);
   assert.deepEqual(b.batch, { idleSeconds: 90, maxItems: 5 });
+  assert.deepEqual(b.reasoningEffort, {
+    generation: 'low', verify: 'medium', semanticDedup: 'medium', engines: {},
+  });
 });
 
 test('compile_block --engines codex limits portable builtins', () => {

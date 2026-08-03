@@ -226,3 +226,89 @@ test('hermes adapter passes safe-mode/no-tools and emits candidates', () => {
   assert.match(args, /--safe-mode/);
   removeTemp(d);
 });
+
+test('built-in adapters apply requested effort and emit bounded _qmd audit metadata', () => {
+  const d = mkdtempSync(join(tmpdir(), 'effort-argv-'));
+  const claudeArgs = join(d, 'claude.args');
+  const codexArgs = join(d, 'codex.args');
+  const hermesArgs = join(d, 'hermes.args');
+  const make = (name, argsLog, output) => {
+    const file = join(d, name);
+    writeFileSync(file, `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > ${JSON.stringify(argsLog)}\nprintf '%s' ${JSON.stringify(output)}\n`, { mode: 0o755 });
+    return file;
+  };
+  const claude = make('claude', claudeArgs, '{"candidates":[]}');
+  const codex = make('codex', codexArgs, '{"candidates":[]}');
+  const hermes = make('hermes', hermesArgs, '{"candidates":[]}');
+  const base = { source: { path: 'docs/x.md', content: 'body' }, wiki: {} };
+  try {
+    const claudeOut = JSON.parse(execFileSync('python3', ['core/extractors/claude_adapter.py'], {
+      cwd: process.cwd(), input: JSON.stringify({ ...base, _qmd: { reasoningEffort: { requested: 'high' } } }), encoding: 'utf8',
+      env: { ...process.env, QMD_EXTRACTOR_CLAUDE_BIN: claude },
+    }));
+    const codexOut = JSON.parse(execFileSync('python3', ['core/extractors/codex_adapter.py'], {
+      cwd: process.cwd(), input: JSON.stringify({ ...base, _qmd: { reasoningEffort: { requested: 'xhigh' } } }), encoding: 'utf8',
+      env: { ...process.env, QMD_EXTRACTOR_CODEX_BIN: codex },
+    }));
+    const hermesOut = JSON.parse(execFileSync('python3', ['core/extractors/hermes_adapter.py'], {
+      cwd: process.cwd(), input: JSON.stringify({ ...base, _qmd: { reasoningEffort: { requested: 'medium' } } }), encoding: 'utf8',
+      env: { ...process.env, QMD_EXTRACTOR_HERMES_BIN: hermes },
+    }));
+    assert.deepEqual(claudeOut._qmd.reasoningEffort, {
+      requested: 'high', applied: 'high', status: 'applied', reason: 'capability_flag',
+    });
+    assert.deepEqual(codexOut._qmd.reasoningEffort, {
+      requested: 'xhigh', applied: 'xhigh', status: 'applied', reason: 'capability_flag',
+    });
+    assert.deepEqual(hermesOut._qmd.reasoningEffort, {
+      requested: 'medium', applied: null, status: 'unsupported', reason: 'no_hermetic_invocation_mechanism',
+    });
+    assert.match(readFileSync(claudeArgs, 'utf8'), /--effort\nhigh/);
+    assert.match(readFileSync(codexArgs, 'utf8'), /-c\nmodel_reasoning_effort=xhigh/);
+    assert.doesNotMatch(readFileSync(hermesArgs, 'utf8'), /effort|model_reasoning_effort/);
+    assert.equal(JSON.stringify(claudeOut).includes('body'), false, 'audit metadata must not contain source content');
+  } finally { removeTemp(d); }
+});
+
+test('effort-option rejection retries exactly once without effort and records retried_without_effort', () => {
+  const d = mkdtempSync(join(tmpdir(), 'effort-retry-'));
+  const count = join(d, 'calls');
+  const fake = join(d, 'claude');
+  writeFileSync(fake, `#!/usr/bin/env bash\ncount=$(cat ${JSON.stringify(count)} 2>/dev/null || echo 0)\ncount=$((count + 1))\nprintf '%s' "$count" > ${JSON.stringify(count)}\nif printf '%s' "$*" | grep -q -- '--effort'; then echo "unknown option '--effort'" >&2; exit 2; fi\nprintf '%s' '{"candidates":[]}'\n`, { mode: 0o755 });
+  try {
+    const out = JSON.parse(execFileSync('python3', ['core/extractors/claude_adapter.py'], {
+      cwd: process.cwd(), input: JSON.stringify({ source: { path: 'x', content: 'y' }, wiki: {}, _qmd: { reasoningEffort: { requested: 'high' } } }), encoding: 'utf8',
+      env: { ...process.env, QMD_EXTRACTOR_CLAUDE_BIN: fake },
+    }));
+    assert.equal(readFileSync(count, 'utf8'), '2');
+    assert.deepEqual(out._qmd.reasoningEffort, {
+      requested: 'high', applied: null, status: 'retried_without_effort', reason: 'effort_option_rejected',
+    });
+  } finally { removeTemp(d); }
+});
+
+test('generic failure and a different engine rejection are never retried', () => {
+  const d = mkdtempSync(join(tmpdir(), 'effort-no-retry-'));
+  const count = join(d, 'calls');
+  const make = (name, stderr) => {
+    const file = join(d, name);
+    writeFileSync(file, `#!/usr/bin/env bash\nn=$(cat ${JSON.stringify(count)} 2>/dev/null || echo 0)\nn=$((n + 1))\nprintf '%s' "$n" > ${JSON.stringify(count)}\necho ${JSON.stringify(stderr)} >&2\nexit 2\n`, { mode: 0o755 });
+    return file;
+  };
+  const run = (adapter, envName, fake) => {
+    try {
+      execFileSync('python3', [adapter], {
+        cwd: process.cwd(), input: JSON.stringify({ source: { path: 'x', content: 'y' }, wiki: {}, _qmd: { reasoningEffort: { requested: 'high' } } }), encoding: 'utf8',
+        env: { ...process.env, [envName]: fake },
+      });
+      assert.fail('expected adapter failure');
+    } catch (error) { assert.equal(error.status, 2); }
+  };
+  try {
+    run('core/extractors/claude_adapter.py', 'QMD_EXTRACTOR_CLAUDE_BIN', make('generic', 'network failure'));
+    assert.equal(readFileSync(count, 'utf8'), '1');
+    writeFileSync(count, '0');
+    run('core/extractors/codex_adapter.py', 'QMD_EXTRACTOR_CODEX_BIN', make('wrong-engine', "unknown option '--effort'"));
+    assert.equal(readFileSync(count, 'utf8'), '1');
+  } finally { removeTemp(d); }
+});

@@ -32,6 +32,9 @@ test('--enable-compile wires compile block with portable built-in engines', () =
     assert.equal(cfg.compile.extractor.dispatch, 'by-engine');
     assert.deepEqual(cfg.compile.extractor.backends, {});
     assert.deepEqual(cfg.compile.extractor.builtins, ['claude', 'codex', 'hermes']);
+    assert.deepEqual(cfg.compile.reasoningEffort, {
+      generation: 'low', verify: 'medium', semanticDedup: 'medium', engines: {},
+    });
     assert.doesNotMatch(JSON.stringify(cfg.compile), new RegExp(`${ROOT}|core/extractors|_adapter\\\\.py`));
     assert.ok(cfg.compile.triggers.includes('post_tool_source'));
     assert.equal(existsSync(join(project, '.auto-context', 'wiki', 'SCHEMA.md')), true); // scaffolded

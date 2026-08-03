@@ -501,6 +501,12 @@ def append_jsonl(path: Path, payload: dict) -> None:
         handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
 
 
+def effort_audit(candidate: dict) -> dict:
+    raw = candidate.get("_qmd") if isinstance(candidate.get("_qmd"), dict) else {}
+    effort = raw.get("reasoningEffort") if isinstance(raw.get("reasoningEffort"), dict) else {}
+    return {"reasoningEffort": qmd_config.reasoning_effort_audit(effort)}
+
+
 def ledger_writable(path: Path) -> bool:
     """이 원장에 append할 수 있는가 — **유료 host CLI 호출 전에** 확인하는 preflight.
 
@@ -1313,6 +1319,7 @@ def main() -> int:
         "sourceHash": h,
         "lint": lint,
         "redactions": redactions,
+        "_qmd": effort_audit(candidate),
     }
 
     if target_reason.startswith("ambiguous_"):

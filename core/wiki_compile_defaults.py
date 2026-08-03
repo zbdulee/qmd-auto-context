@@ -11,6 +11,12 @@ import os
 from pathlib import Path
 
 ENGINES = ("claude", "codex", "hermes")
+REASONING_EFFORT_DEFAULTS = {
+    "generation": "low",
+    "verify": "medium",
+    "semanticDedup": "medium",
+    "engines": {},
+}
 
 
 def plugin_root(explicit: str | None = None) -> Path:
@@ -51,6 +57,12 @@ def compile_block(root, engines=ENGINES) -> dict:
         "excludeStatusesFromRecall": ["discarded", "contested"],
         "lowPriorityStatuses": ["generated", "tentative"],
         "maxAutoPageLines": 120,
+        "reasoningEffort": {
+            "generation": REASONING_EFFORT_DEFAULTS["generation"],
+            "verify": REASONING_EFFORT_DEFAULTS["verify"],
+            "semanticDedup": REASONING_EFFORT_DEFAULTS["semanticDedup"],
+            "engines": {},
+        },
         "extractor": {
             "dispatch": "by-engine",
             "backends": {},

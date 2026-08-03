@@ -609,6 +609,10 @@ def process_verify_job(
         "card": {"path": rel, "content": text},
         "sources": sources,
         "timeout": timeout,
+        "_qmd": {"reasoningEffort": {
+            "requested": qmd_config.resolve_reasoning_effort(compile_cfg, attempts[0]["engine"], "verify"),
+            "capabilityDeclared": attempts[0]["argv"] == wcw._builtin_adapter_argv(attempts[0]["engine"]),
+        }},
     }
     # 실패 분류 경계 — 두 요구를 동시에 만족시켜야 한다:
     #  (1) 한 run 안에서 같은 카드에 **유료 호출은 1회**다. 그래서 다음 후보로 넘어가는
@@ -627,6 +631,12 @@ def process_verify_job(
     parsed = reason = returncode = None
     for index, attempt in enumerate(attempts):
         payload["engine"] = attempt["engine"]
+        payload["_qmd"]["reasoningEffort"]["requested"] = qmd_config.resolve_reasoning_effort(
+            compile_cfg, attempt["engine"], "verify"
+        )
+        payload["_qmd"]["reasoningEffort"]["capabilityDeclared"] = (
+            attempt["argv"] == wcw._builtin_adapter_argv(attempt["engine"])
+        )
         attempted.append(attempt["engine"])
         parsed, reason, returncode = wcw.run_extractor(attempt["argv"], payload, timeout, root)
         if returncode != 127:
@@ -654,6 +664,11 @@ def process_verify_job(
         # 식힘 중인 후보를 판정 줄에도 남긴다 — `self` 통과가 "다른 엔진이 없어서"인지
         # "다른 엔진이 실패해서 degrade한 것"인지 이 필드 없이는 구분되지 않는다.
         "enginesCooling": sorted(cooled),
+        "_qmd": {"reasoningEffort": qmd_config.reasoning_effort_audit(
+            parsed.get("_qmd", {}).get("reasoningEffort") if isinstance(parsed, dict) and isinstance(parsed.get("_qmd"), dict) else {},
+            payload.get("_qmd", {}).get("reasoningEffort", {}).get("requested"),
+            capability_declared=payload.get("_qmd", {}).get("reasoningEffort", {}).get("capabilityDeclared") is True,
+        )},
     }
     if reason:
         return defer_or_drop(root, vcfg, job, attempt, has_more, provenance, reason, log_path)
