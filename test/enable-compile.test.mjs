@@ -13,6 +13,18 @@ function runEnable(project, args = []) {
     { cwd: ROOT, encoding: 'utf8', env: { ...process.env, CLAUDE_PLUGIN_ROOT: ROOT } });
 }
 
+// 생성기가 delta-only라(기본값과 같은 키는 안 쓴다) "무엇이 적용됐나"는 emit이 아니라
+// normalize_config 통과 결과로 봐야 한다.
+function effectiveCompile(project) {
+  const py = `import json, sys
+sys.path.insert(0, "core")
+import config as qmd_config
+with open(sys.argv[1], encoding="utf-8") as fh:
+    print(json.dumps(qmd_config.normalize_config(json.load(fh))["compile"], ensure_ascii=False))`;
+  return JSON.parse(execFileSync('python3',
+    ['-c', py, join(project, '.auto-context', 'settings.json')], { cwd: ROOT, encoding: 'utf8' }));
+}
+
 function optedInProject() {
   const d = mkdtempSync(join(tmpdir(), 'enable-compile-'));
   mkdirSync(join(d, '.auto-context'), { recursive: true });
@@ -32,7 +44,10 @@ test('--enable-compile wires compile block with portable built-in engines', () =
     assert.equal(cfg.compile.extractor.dispatch, 'by-engine');
     assert.deepEqual(cfg.compile.extractor.backends, {});
     assert.deepEqual(cfg.compile.extractor.builtins, ['claude', 'codex', 'hermes']);
-    assert.deepEqual(cfg.compile.reasoningEffort, {
+    // delta-only: reasoningEffort는 전 항목이 기본값과 같아 emit되지 않는다.
+    // 실제 적용값은 effective config로 확인한다(emit 축소 ≠ 동작 변경).
+    assert.equal(cfg.compile.reasoningEffort, undefined);
+    assert.deepEqual(effectiveCompile(project).reasoningEffort, {
       generation: 'low', verify: 'medium', semanticDedup: 'medium', engines: {},
     });
     assert.doesNotMatch(JSON.stringify(cfg.compile), new RegExp(`${ROOT}|core/extractors|_adapter\\\\.py`));
@@ -49,6 +64,29 @@ test('--enable-compile --engines limits built-in engines', () => {
     const cfg = JSON.parse(readFileSync(join(project, '.auto-context', 'settings.json'), 'utf8'));
     assert.deepEqual(cfg.compile.extractor.builtins, ['codex']);
     assert.deepEqual(cfg.compile.extractor.backends, {});
+  } finally { removeTemp(project); }
+});
+
+// 생성기가 delta-only가 되기 전, --enable-compile은 **전체 블록으로 기존 compile을
+// 덮어써서** 기본값과 다른 기존 값을 기본값으로 리셋했다. delta로 바꾸면서 "안 쓰기"만
+// 하면 그 값들이 살아남아 effective가 달라진다 — 그래서 병합 쪽이 생략된 키를 지운다.
+// effective 동결 fixture는 **신규 프로젝트**만 덮으므로 이 경로는 여기서만 잡힌다.
+test('--enable-compile: 생략된 키는 기존 비기본값을 남기지 않는다 (덮어쓰기 의미 보존)', () => {
+  const project = optedInProject();
+  try {
+    const settings = join(project, '.auto-context', 'settings.json');
+    const cfg = JSON.parse(readFileSync(settings, 'utf8'));
+    cfg.compile = { verify: { maxPerRun: 15 }, maxAutoPageLines: 200 };
+    writeFileSync(settings, JSON.stringify(cfg));
+
+    runEnable(project);
+    const updated = JSON.parse(readFileSync(settings, 'utf8'));
+    assert.equal(updated.compile.verify, undefined, 'delta-only: verify는 emit되지 않는다');
+    assert.equal(updated.compile.maxAutoPageLines, undefined);
+    // 예전 동작(블록이 덮어써서 기본값)과 동일한 effective여야 한다.
+    const eff = effectiveCompile(project);
+    assert.equal(eff.verify.maxPerRun, 3);
+    assert.equal(eff.maxAutoPageLines, 120);
   } finally { removeTemp(project); }
 });
 

@@ -1532,20 +1532,21 @@ for collection in collections:
     collection_roles.setdefault(collection, "raw")
 collection_roles[wiki_collection] = "wiki"
 config["collectionRoles"] = collection_roles
-config["recallStrategy"] = "hierarchical"
-config.setdefault("wikiPath", ".auto-context/wiki")
+# recallStrategy "hierarchical"·wikiPath ".auto-context/wiki"는 DEFAULT_CONFIG 기본값과
+# 같으므로 쓰지 않는다(생성기 delta-only). recallStrategy는 예전에 **대입**이라 기존 값을
+# 강제로 덮었으므로, 안 쓰는 것만으로는 부족하고 키를 지워야 같은 결과가 된다
+# ("키 없음 → 기본값 hierarchical"). wikiPath는 setdefault라 지우면 사용자 커스텀 경로를
+# 파괴하므로 **줄만 없앤다**(없으면 기본값, 있으면 그대로).
+config.pop("recallStrategy", None)
 if preset == "novel":
     compile_config = config.get("compile") if isinstance(config.get("compile"), dict) else {}
+    # 기본값과 다른 키만 채운다. defaultStatus·requireReviewForCanon·candidatePath·
+    # tombstonePath·manifestPath·excludeStatusesFromRecall·lowPriorityStatuses·
+    # maxAutoPageLines는 전부 DEFAULT_CONFIG와 같은 값이라 setdefault해도 effective가
+    # 바뀌지 않는다(동결 테스트가 이 등가를 못박는다).
     compile_config.setdefault("enabled", True)
     compile_config.setdefault("mode", "auto-wiki")
     compile_config.setdefault("autoWrite", True)
-    compile_config.setdefault("defaultStatus", "generated")
-    compile_config.setdefault("requireReviewForCanon", True)
-    compile_config.setdefault("candidatePath", ".auto-context/compile/candidates.jsonl")
-    compile_config.setdefault("tombstonePath", ".auto-context/compile/tombstones.jsonl")
-    compile_config.setdefault("manifestPath", ".auto-context/compile/generated-manifest.jsonl")
-    compile_config.setdefault("excludeStatusesFromRecall", ["discarded", "contested"])
-    compile_config.setdefault("lowPriorityStatuses", ["generated", "tentative"])
     # post_session_summary는 host가 compact session summary를 hook에 넘겨줄 때만
     # 자동으로 발화할 수 있고 그런 host가 아직 없다(수동 skills/wiki-compile 경로의
     # 라벨로만 소비된다). 자동 수집을 실제로 담당하는 트리거는 post_tool_source이므로
@@ -1553,7 +1554,6 @@ if preset == "novel":
     compile_config.setdefault(
         "triggers", ["post_tool_source", "manual", "explicit_user_approval", "post_session_summary"]
     )
-    compile_config.setdefault("maxAutoPageLines", 120)
     config["compile"] = compile_config
 if "indexing" not in config:
     config["indexing"] = True
@@ -1640,8 +1640,13 @@ cfg = json.loads(settings.read_text(encoding="utf-8"))
 
 block = d.compile_block(root, engines)
 existing = cfg.get("compile") if isinstance(cfg.get("compile"), dict) else {}
-# Merge: block wins for the keys it sets (extractor/batch/enabled/...); unrelated existing keys are preserved.
+# Merge: block wins for the keys it sets (extractor/enabled/mode/...); unrelated existing keys are preserved.
 merged = {**existing, **block}
+# 생성기가 delta라 "기본값과 같아서 안 쓴 키"는 block에 없다. 그런 키가 기존 설정에
+# 비기본값으로 남아 있으면 예전 동작(전체 블록이 덮어써서 기본값으로 리셋)과 갈리므로
+# 여기서 지운다 — "키 없음 → 기본값"이 예전의 "기본값을 명시"와 같은 결과다.
+for key in d.default_valued_compile_keys(root, engines):
+    merged.pop(key, None)
 existing_extractor = existing.get("extractor") if isinstance(existing.get("extractor"), dict) else {}
 block_extractor = block.get("extractor") if isinstance(block.get("extractor"), dict) else {}
 if existing_extractor:

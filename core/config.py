@@ -133,7 +133,11 @@ DEFAULT_CONFIG = {
         },
         "extractor": {
             "argv": [],
-            "timeout": 30,
+            # 120초. 30이던 동안 이 값을 명시하지 않는 writer(`--init-wiki` novel preset)로
+            # 온보딩한 프로젝트는 compile을 켜 놓고도 adapter 호출이 매번 timeout →
+            # transient → cooldown 루프에 빠졌고, 훅이 무출력이라 증상이 보이지 않았다.
+            # compile을 실제로 쓰는 writer·라이브 프로젝트는 전부 이미 120이다.
+            "timeout": 120,
             "cooldownSeconds": 600,
         },
         # 한 소스에서 컴파일할 후보 카드 수 상한. **candidates 길이는 모델 출력이고 예전에는
@@ -599,7 +603,9 @@ def compile_config(value):
     )
     raw_extractor = value.get("extractor")
     extractor = raw_extractor if isinstance(raw_extractor, dict) else {}
-    default_extractor = defaults.get("extractor") if isinstance(defaults.get("extractor"), dict) else {"argv": [], "timeout": 30}
+    # 이 인라인 폴백은 DEFAULT_CONFIG["compile"]["extractor"]와 반드시 같은 값이어야 한다
+    # (갈리면 "기본값과 다른 폴백 리터럴" 버그 클래스가 그대로 재현된다).
+    default_extractor = defaults.get("extractor") if isinstance(defaults.get("extractor"), dict) else {"argv": [], "timeout": 120}
     normalized_argv = argv_list(extractor.get("argv"), default_extractor["argv"])
     normalized_extractor = {
         "argv": normalized_argv,

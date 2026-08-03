@@ -5,6 +5,7 @@ import os
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import config as qmd_config
 import wiki_compile_defaults as _wcd
 
 # (path, reason, suffix, narrow)  narrow=True면 무조건 채택, False면 크기 가드 적용
@@ -16,6 +17,9 @@ CANDIDATES = [
 ]
 MAX_FILES = 200
 MAX_BYTES = 5 * 1024 * 1024
+# 추천 온보딩이 의도하는 recall 값. 이 중 `topN`·`events`는 DEFAULT_CONFIG와 같아
+# 생성기 delta에서 빠지고(effective 동일), `minScore`·`queryTimeout`·`prefixStyle`만
+# 기본값과 달라 실제로 파일에 남는다.
 DEFAULTS = {"minScore": 0.5, "topN": 3, "queryTimeout": 3,
             "prefixStyle": "tag",
             "events": ["sessionStart", "userPromptSubmit", "postToolUse"]}
@@ -89,6 +93,12 @@ def build_recommendation(cwd):
         "compile": _wcd.compile_block(_wcd.plugin_root()),
         **DEFAULTS,
     }
+    # 생성기 delta-only: 기본값과 같은 키는 쓰지 않는다(`recallStrategy`·`wikiPath`·
+    # `topN`·`events`가 여기 해당한다). 생략된 키는 normalize_config가 같은 값으로 채우므로
+    # effective config는 그대로이고, 사용자가 관리할 표면만 줄어든다.
+    # `--optin --recommended`는 기존 설정이 있으면 아예 거부하므로 이 출력은 항상 신규
+    # 파일이고, 지워야 할 기존 키가 존재하지 않는다.
+    config = _wcd.prune_defaults(config, qmd_config.DEFAULT_CONFIG)
     return {"available": bool(selected), "root": str(root), "selected": selected, "config": config}
 
 
