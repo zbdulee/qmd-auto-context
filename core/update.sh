@@ -1186,6 +1186,36 @@ PY
     notice_clear stale-queue "$workdir"
   fi
 
+  local discard_ledger="$workdir/.auto-context/compile/discard-ledger.jsonl"
+  local discard_cursor="$workdir/.auto-context/compile/.discard-ledger.cursor"
+  if [ -s "$discard_ledger" ]; then
+    local cur_lines last_lines=0
+    cur_lines=$(wc -l < "$discard_ledger" 2>/dev/null || echo 0)
+    cur_lines=$((cur_lines + 0))
+    if [ -f "$discard_cursor" ]; then
+      last_lines=$(cat "$discard_cursor" 2>/dev/null || echo 0)
+      last_lines=$((last_lines + 0))
+    fi
+    if [ "$cur_lines" -gt "$last_lines" ]; then
+      local marker_path="$(_notice_marker discard-ledger "$workdir")"
+      local mtime_before=0
+      if [ -f "$marker_path" ]; then
+        mtime_before=$(stat -f %m "$marker_path" 2>/dev/null || stat -c %Y "$marker_path" 2>/dev/null || echo 0)
+      fi
+      notice_once discard-ledger "$workdir" "[qmd] 고아 배치 회수 중 초과 재시도로 폐기된 잡이 있습니다 — 원장(.auto-context/compile/discard-ledger.jsonl)을 확인하세요."
+      local mtime_after=0
+      if [ -f "$marker_path" ]; then
+        mtime_after=$(stat -f %m "$marker_path" 2>/dev/null || stat -c %Y "$marker_path" 2>/dev/null || echo 0)
+      fi
+      if [ "$mtime_after" -gt "$mtime_before" ]; then
+        echo "$cur_lines" > "$discard_cursor" 2>/dev/null || true
+      fi
+    fi
+  else
+    rm -f "$discard_cursor" 2>/dev/null || true
+    notice_clear discard-ledger "$workdir"
+  fi
+
   # 루트 collectionPath 표면화: collectionPaths가 저장소 루트(".")로 해석되는 컬렉션이
   # 있으면 저장소 전체 Markdown이 색인 대상이 된다. update는 `qmd collection add "$path"`로
   # 디렉터리만 넘기므로(glob·ignore 인수 없음) 색인 범위를 줄이는 유일한 수단이

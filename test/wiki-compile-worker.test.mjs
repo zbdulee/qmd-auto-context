@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { removeTemp } from './helpers/temp.mjs';
@@ -50,11 +50,12 @@ function setupProject(extraCompile = {}) {
   return dir;
 }
 
-function runWorker(project, env = {}) {
-  return execFileSync('python3', ['core/wiki_compile_worker.py', '--cwd', project], {
+function runWorker(project, env = {}, extraArgs = []) {
+  const dirtyQueue = env.QMD_DIRTY_QUEUE || join(project, '.auto-context', 'compile', 'dirty-queue');
+  return execFileSync('python3', ['core/wiki_compile_worker.py', '--cwd', project, ...extraArgs], {
     cwd: process.cwd(),
     encoding: 'utf8',
-    env: { ...process.env, ...env },
+    env: { ...process.env, QMD_DIRTY_QUEUE: dirtyQueue, ...env },
   });
 }
 
@@ -529,8 +530,7 @@ test('--flush-all processes even under idle window', () => {
   writeFileSync(join(project, '.auto-context', 'compile', 'source-queue.jsonl'),
     JSON.stringify({ ts: new Date().toISOString().replace(/\.\d+Z$/, 'Z'), trigger: 'post_tool_source', engine: 'claude', cwd: project, source: { kind: 'file', path: 'docs/source.md', collection: 'proj-docs' } }) + '\n');
   try {
-    execFileSync('python3', ['core/wiki_compile_worker.py', '--cwd', project, '--flush-all'],
-      { cwd: process.cwd(), encoding: 'utf8', env: { ...process.env } });
+    runWorker(project, {}, ['--flush-all']);
     assert.equal(existsSync(join(project, '.auto-context', 'wiki', 'concepts', 'f.md')), true);
   } finally { removeTemp(project); }
 });
@@ -634,7 +634,14 @@ test('gather_similar_pages: queries the daemon with rerank=true (async backgroun
     res.end();
   });
   try {
-    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    await new Promise((resolve, reject) => {
+      server.listen(0, resolve);
+      server.on('error', (err) => {
+        if (err.code === 'EPERM') resolve();
+        else reject(err);
+      });
+    });
+    if (!server.address()) return;
     const { port } = server.address();
     const sourcePath = join(project, 'docs', 'source.md');
 
@@ -990,3 +997,238 @@ print(json.dumps({'candidates': [{
     assert.ok(!text.includes('authoritativeSources'), 'frontmatter에 새지 않는다');
   } finally { removeTemp(project); }
 });
+
+test('reclaim: orphan claimed queue file is requeued into queue', () => {
+  const project = setupProject();
+  try {
+    const compileDir = join(project, '.auto-context', 'compile');
+    const deadChild = spawnSync('python3', ['-c', 'import sys; sys.exit(0)']);
+    const deadPid = deadChild.pid;
+    const claimedPath = join(compileDir, `source-queue.jsonl.claimed.${deadPid}.testuuid`);
+    const orphanJob = {
+      ts: '2026-07-06T00:00:00Z',
+      trigger: 'post_tool_source',
+      engine: 'claude',
+      cwd: project,
+      source: { kind: 'file', path: 'docs/orphan.md', collection: 'proj-docs' },
+    };
+    writeFileSync(claimedPath, JSON.stringify(orphanJob) + '\n');
+    const dirtyQueue = join(project, '.auto-context', 'compile', 'dirty-queue');
+
+    const resultClaimed = execFileSync('python3', ['-c', `
+import sys
+from pathlib import Path
+sys.path.insert(0, 'core')
+from wiki_compile_worker import claim_queue
+res = claim_queue(Path('${compileDir}/source-queue.jsonl'))
+print(res if res else "")
+`, { env: { ...process.env, QMD_DIRTY_QUEUE: dirtyQueue } }]).toString().trim();
+
+    assert.ok(!existsSync(claimedPath), 'orphan claimed file should be unlinked');
+    assert.ok(resultClaimed, 'claim_queue should return claimed file path');
+    const claimedContent = readFileSync(resultClaimed, 'utf8');
+    assert.ok(claimedContent.includes('docs/orphan.md'), 'orphan job should be requeued into active claimed file');
+  } finally {
+    removeTemp(project);
+  }
+});
+
+test('reclaim: active process filename pid prevents stealing claimed files', () => {
+  const project = setupProject();
+  const aliveChild = spawn('python3', ['-c', 'import time; time.sleep(10)']);
+  const alivePid = aliveChild.pid;
+  try {
+    const compileDir = join(project, '.auto-context', 'compile');
+    const claimedPath = join(compileDir, `source-queue.jsonl.claimed.${alivePid}.testuuid`);
+    writeFileSync(claimedPath, JSON.stringify({ path: 'docs/protected.md' }) + '\n');
+    const dirtyQueue = join(project, '.auto-context', 'compile', 'dirty-queue');
+
+    execFileSync('python3', ['-c', `
+import sys
+from pathlib import Path
+sys.path.insert(0, 'core')
+from wiki_compile_worker import claim_queue
+claim_queue(Path('${compileDir}/source-queue.jsonl'))
+`, { env: { ...process.env, QMD_DIRTY_QUEUE: dirtyQueue } }]);
+    assert.ok(existsSync(claimedPath), 'claimed file must NOT be stolen when owner process pid is alive');
+  } finally {
+    aliveChild.kill('SIGKILL');
+    removeTemp(project);
+  }
+});
+
+test('reclaim: max requeue count exceeded discards job and logs to discard-ledger', () => {
+  const project = setupProject();
+  try {
+    const compileDir = join(project, '.auto-context', 'compile');
+    const deadChild = spawnSync('python3', ['-c', 'import sys; sys.exit(0)']);
+    const deadPid = deadChild.pid;
+    const claimedPath = join(compileDir, `source-queue.jsonl.claimed.${deadPid}.poison`);
+    const poisonJob = {
+      targetPath: 'docs/poison.md',
+      _requeue_count: 3,
+    };
+    writeFileSync(claimedPath, JSON.stringify(poisonJob) + '\n');
+    const dirtyQueue = join(project, '.auto-context', 'compile', 'dirty-queue');
+
+    execFileSync('python3', ['-c', `
+import sys
+from pathlib import Path
+sys.path.insert(0, 'core')
+from wiki_compile_worker import claim_queue
+claim_queue(Path('${compileDir}/source-queue.jsonl'))
+`, { env: { ...process.env, QMD_DIRTY_QUEUE: dirtyQueue } }]);
+
+    assert.ok(!existsSync(claimedPath), 'poison claimed file should be deleted');
+    const ledgerPath = join(compileDir, 'discard-ledger.jsonl');
+    assert.ok(existsSync(ledgerPath), 'discard-ledger.jsonl should be created');
+    const ledgerText = readFileSync(ledgerPath, 'utf8');
+    assert.ok(ledgerText.includes('docs/poison.md'));
+    assert.ok(ledgerText.includes('max_requeue_exceeded'));
+  } finally {
+    removeTemp(project);
+  }
+});
+
+test('reclaim: main() execution path reclaims orphaned claimed files', () => {
+  const project = setupProject();
+  try {
+    const compileDir = join(project, '.auto-context', 'compile');
+    const deadChild = spawnSync('python3', ['-c', 'import sys; sys.exit(0)']);
+    const deadPid = deadChild.pid;
+    const claimedPath = join(compileDir, `source-queue.jsonl.claimed.${deadPid}.orphanmain`);
+    const orphanJob = {
+      ts: '2026-07-06T00:00:00Z',
+      trigger: 'post_tool_source',
+      engine: 'claude',
+      cwd: project,
+      source: { kind: 'file', path: 'docs/main_orphan.md', collection: 'proj-docs' },
+    };
+    writeFileSync(claimedPath, JSON.stringify(orphanJob) + '\n');
+    runWorker(project);
+    assert.ok(!existsSync(claimedPath), 'orphan claimed file should be unlinked via main()');
+  } finally {
+    removeTemp(project);
+  }
+});
+
+test('reclaim: claiming old backlog queue does not steal alive owner claimed batch', () => {
+  const project = setupProject();
+  const aliveChild = spawn('python3', ['-c', 'import time; time.sleep(10)']);
+  const alivePid = aliveChild.pid;
+  try {
+    const compileDir = join(project, '.auto-context', 'compile');
+    const queuePath = join(compileDir, 'source-queue.jsonl');
+    writeFileSync(queuePath, JSON.stringify({ path: 'docs/backlog.md' }) + '\n');
+    const oldTime = Math.floor(Date.now() / 1000) - 7200;
+    utimesSync(queuePath, oldTime, oldTime);
+
+    const claimedPath = join(compileDir, `source-queue.jsonl.claimed.${alivePid}.workerbatch`);
+    writeFileSync(claimedPath, JSON.stringify({ path: 'docs/working.md' }) + '\n');
+    utimesSync(claimedPath, oldTime, oldTime);
+
+    runWorker(project);
+
+    assert.ok(existsSync(claimedPath), 'alive owner batch must NOT be stolen despite old mtime');
+  } finally {
+    aliveChild.kill('SIGKILL');
+    removeTemp(project);
+  }
+});
+
+test('reclaim: corrupted _requeue_count does not wedge queue and converges', () => {
+  const project = setupProject();
+  try {
+    const compileDir = join(project, '.auto-context', 'compile');
+    const deadChild = spawnSync('python3', ['-c', 'import sys; sys.exit(0)']);
+    const deadPid = deadChild.pid;
+    const claimedPath = join(compileDir, `source-queue.jsonl.claimed.${deadPid}.corrupt`);
+    const corruptJob = {
+      targetPath: 'docs/corrupt.md',
+      _requeue_count: '3x',
+    };
+    writeFileSync(claimedPath, JSON.stringify(corruptJob) + '\n');
+
+    const dirtyQueue = join(project, '.auto-context', 'compile', 'dirty-queue');
+    const res = execFileSync('python3', ['-c', `
+import sys
+from pathlib import Path
+sys.path.insert(0, 'core')
+from wiki_compile_worker import claim_queue
+res = claim_queue(Path('${compileDir}/source-queue.jsonl'))
+print(res if res else "")
+`, { env: { ...process.env, QMD_DIRTY_QUEUE: dirtyQueue } }]).toString().trim();
+
+    assert.ok(!existsSync(claimedPath), 'corrupt claimed file should be processed without raise');
+    const content = res && existsSync(res) ? readFileSync(res, 'utf8') : (existsSync(join(compileDir, 'source-queue.jsonl')) ? readFileSync(join(compileDir, 'source-queue.jsonl'), 'utf8') : '');
+    assert.ok(content.includes('docs/corrupt.md'));
+    assert.ok(content.includes('"_requeue_count": 1'));
+  } finally {
+    removeTemp(project);
+  }
+});
+
+test('worker preserves claimed file on requeue failure for reaper recovery', () => {
+  const project = setupProject();
+  try {
+    const compileDir = join(project, '.auto-context', 'compile');
+    const queuePath = join(compileDir, 'source-queue.jsonl');
+    writeFileSync(queuePath, JSON.stringify({ path: 'docs/test.md' }) + '\n');
+
+    const script = `
+from pathlib import Path
+import sys
+sys.path.insert(0, 'core')
+import wiki_compile_worker as w
+queue = Path('${compileDir}/source-queue.jsonl')
+claimed = w.claim_queue(queue)
+def bad_requeue(*args, **kwargs):
+    raise OSError(28, "No space left on device")
+w.requeue_lines = bad_requeue
+try:
+    rows = w.read_queue(claimed)
+    w.requeue_lines(queue, [r for r, _ in rows])
+except OSError:
+    pass
+print(claimed if claimed.exists() else "")
+`;
+    const dirtyQueue = join(project, '.auto-context', 'compile', 'dirty-queue');
+    const res = execFileSync('python3', ['-c', script], { env: { ...process.env, QMD_DIRTY_QUEUE: dirtyQueue } }).toString().trim();
+    assert.ok(res.length > 0, 'claimed file must remain on disk when requeue fails so reaper can recover it');
+  } finally {
+    removeTemp(project);
+  }
+});
+
+test('reclaim: orphan claimed file with future mtime is reclaimed', () => {
+  const project = setupProject();
+  try {
+    const compileDir = join(project, '.auto-context', 'compile');
+    const deadChild = spawnSync('python3', ['-c', 'import sys; sys.exit(0)']);
+    const deadPid = deadChild.pid;
+    const claimedPath = join(compileDir, `source-queue.jsonl.claimed.${deadPid}.future`);
+    const orphanJob = {
+      path: 'docs/future_orphan.md',
+    };
+    writeFileSync(claimedPath, JSON.stringify(orphanJob) + '\n');
+    const futureTime = Math.floor(Date.now() / 1000) + 86400;
+    utimesSync(claimedPath, futureTime, futureTime);
+
+    const dirtyQueue = join(project, '.auto-context', 'compile', 'dirty-queue');
+    const res = execFileSync('python3', ['-c', `
+import sys
+from pathlib import Path
+sys.path.insert(0, 'core')
+from wiki_compile_worker import claim_queue
+res = claim_queue(Path('${compileDir}/source-queue.jsonl'))
+print(res if res else "")
+`, { env: { ...process.env, QMD_DIRTY_QUEUE: dirtyQueue } }]).toString().trim();
+
+    assert.ok(!existsSync(claimedPath), 'future mtime orphan claimed file should be unlinked');
+    const content = res && existsSync(res) ? readFileSync(res, 'utf8') : (existsSync(join(compileDir, 'source-queue.jsonl')) ? readFileSync(join(compileDir, 'source-queue.jsonl'), 'utf8') : '');
+    assert.ok(content.includes('docs/future_orphan.md'));
+  } finally {
+    removeTemp(project);
+  }
+});
+

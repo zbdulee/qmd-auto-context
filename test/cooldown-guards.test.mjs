@@ -272,8 +272,8 @@ test('시간 게이트 판정은 cooldown.py 한 벌을 거친다 (판정이 두
     const text = readFileSync(join(CORE, name), 'utf8');
     for (const [index, line] of text.split('\n').entries()) {
       const code = line.split('#')[0];
-      // 주석/문서를 제외한 코드에서 mtime 나이를 직접 계산하는 형태.
-      if (/time\.time\(\)\s*-\s*\S*st_mtime/.test(code) || /st_mtime\s*[<>]/.test(code)) {
+      // 주석/문서를 제외한 코드에서 mtime 나이를 직접 계산/비교하는 형태(로컬 변수 st_mtime 세탁 후 now - mtime, mtime < > 포함).
+      if (/(?:(?:time\.time\(\)|now)\s*-\s*(?:\S*st_mtime|\bmtime\b)|\b(?:st_mtime|\bmtime\b)\s*[<>]=?)/.test(code) && !/qmd_cooldown|cooldown/.test(code)) {
         offenders.push(`${name}:${index + 1}`);
       }
     }

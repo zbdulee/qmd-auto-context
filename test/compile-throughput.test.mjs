@@ -90,8 +90,9 @@ function setupProject({ sources, cardsPerSource = 1, compile: compileOverrides =
 }
 
 function runWorker(project, env = {}) {
+  const dirtyQueue = env.QMD_DIRTY_QUEUE || join(project, '.auto-context', 'compile', 'dirty-queue');
   const out = execFileSync('python3', ['core/wiki_compile_worker.py', '--cwd', project, '--json', '--flush-all'], {
-    cwd: process.cwd(), encoding: 'utf8', env: { ...process.env, ...env },
+    cwd: process.cwd(), encoding: 'utf8', env: { ...process.env, QMD_DIRTY_QUEUE: dirtyQueue, ...env },
   });
   return JSON.parse(out.trim());
 }
@@ -295,7 +296,7 @@ test('batch.maxPerRun is clamped, so a huge value cannot drive a huge run', () =
     const py = `import json,sys; sys.path.insert(0,'core'); import config
 print(json.dumps(config.compile_config({'batch': {'maxPerRun': 99999999}})['batch']['maxPerRun']))`;
     const clamped = JSON.parse(execFileSync('python3', ['-c', py], {
-      cwd: process.cwd(), encoding: 'utf8',
+      cwd: process.cwd(), encoding: 'utf8', env: { ...process.env, QMD_DIRTY_QUEUE: join(dir, 'dirty-queue') },
     }).trim());
     assert.equal(clamped, 50);
   } finally {

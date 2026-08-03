@@ -46,11 +46,143 @@ def append_jsonl(path: Path, payload: dict):
         handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
 
 
+import time
+
+MAX_REQUEUE_COUNT = 3
+REVIEW_DEDUP_IMPLICIT_TTL = 3600  # 1 hour for review / dedup_resolve CLI
+
+
+def _is_pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except PermissionError:
+        return True
+    except (OSError, ProcessLookupError):
+        return False
+
+
+def _write_discard_ledger(compile_dir: Path, queue_name: str, job: dict, requeue_count: int):
+    # 이 원장은 claim_queue 경로에서 쓰여 config 컨텍스트가 없으므로 이름을 고정한다
+    ledger_filename = "discard-ledger.jsonl"
+    ledger_path = compile_dir / ledger_filename
+    source_obj = job.get("source")
+    source_path = source_obj.get("path") if isinstance(source_obj, dict) else None
+    card_obj = job.get("card")
+    card_path = (card_obj.get("targetPath") or card_obj.get("path")) if isinstance(card_obj, dict) else None
+    cand_obj = job.get("candidate")
+    cand_path = (cand_obj.get("targetPath") or cand_obj.get("path")) if isinstance(cand_obj, dict) else None
+
+    target = (
+        job.get("targetPath")
+        or job.get("candidatePath")
+        or job.get("path")
+        or job.get("sourcePath")
+        or source_path
+        or card_path
+        or cand_path
+        or "unknown"
+    )
+    payload = {
+        "timestamp": now_iso(),
+        "queue": queue_name,
+        "targetPath": str(target),
+        "reason": "max_requeue_exceeded",
+        "requeue_count": requeue_count,
+    }
+    append_jsonl(ledger_path, payload)
+
+
+def reclaim_orphaned_claimed(path: Path, max_requeue: int = MAX_REQUEUE_COUNT):
+    """
+    고아 *.claimed.* 파일들을 감지하여 원본 큐(path)로 requeue 하거나,
+    requeue 횟수가 max_requeue 초과시 폐기하고 원장에 남긴다.
+    MUST be called under _queue_lock_path(path) flock.
+    """
+    if not path.parent.exists():
+        return
+    prefix = f"{path.name}.claimed."
+    current_pid = os.getpid()
+    now = time.time()
+
+    for child in list(path.parent.iterdir()):
+        if not child.name.startswith(prefix):
+            continue
+
+        parts = child.name.split(".")
+        file_pid = None
+        if len(parts) >= 4:
+            try:
+                file_pid = int(parts[-2])
+            except ValueError:
+                pass
+
+        if file_pid == current_pid:
+            continue
+
+        # 최우선 신호: claimed 파일명의 pid가 살아있으면 소유자 프로세스가 활성이므로 무조건 넘김.
+        # PID 생존 검사는 모든 큐(source-queue, verify-queue, merge-needed, dedup-needed 등)에 적용된다.
+        if file_pid and _is_pid_alive(file_pid):
+            continue
+
+        # pid가 명시되지 않은 파일에 한해 2차 가드로 mtime cooldown 창을 검사한다.
+        # (pid가 존재하는 경우에는 프로세스 사망 확인만으로 즉시 고아 회수 대상임)
+        if not file_pid:
+            try:
+                mtime = child.stat().st_mtime
+                if not qmd_cooldown.window_elapsed(mtime, now, REVIEW_DEDUP_IMPLICIT_TTL):
+                    continue
+            except OSError:
+                continue
+
+        try:
+            raw_content = child.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+
+        lines_to_requeue = []
+        for line in raw_content.splitlines():
+            if not line.strip():
+                continue
+            try:
+                data = json.loads(line)
+                if isinstance(data, dict):
+                    try:
+                        req_cnt = int(data.get("_requeue_count", 0)) + 1
+                    except (TypeError, ValueError):
+                        # 손상된 _requeue_count 값("3x" 등)은 절대 raise하지 않고 1로 수렴시켜
+                        # 큐가 영구 wedge되는 것을 막고, 다음 회차에서 수렴하여 MAX_REQUEUE_COUNT 도달 시 정리를 보장함.
+                        req_cnt = 1
+                    if req_cnt > max_requeue:
+                        _write_discard_ledger(path.parent, path.name, data, req_cnt)
+                    else:
+                        data["_requeue_count"] = req_cnt
+                        lines_to_requeue.append(json.dumps(data, ensure_ascii=False))
+                else:
+                    lines_to_requeue.append(line)
+            except json.JSONDecodeError:
+                lines_to_requeue.append(line)
+
+        # at-least-once append 후 unlink 사이 장애 시 재시도될 수 있으나 MAX_REQUEUE_COUNT로 상한 유계됨
+        if lines_to_requeue:
+            with path.open("a", encoding="utf-8") as handle:
+                for rline in lines_to_requeue:
+                    handle.write(rline if rline.endswith("\n") else rline + "\n")
+
+        child.unlink(missing_ok=True)
+
+
 def read_queue(path: Path):
     if not path.exists():
         return []
     rows = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    try:
+        content = path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return []
+    for line in content.splitlines():
         if not line.strip():
             continue
         try:
@@ -68,10 +200,17 @@ def claim_queue(path: Path) -> Path | None:
     with open(_queue_lock_path(path), "a", encoding="utf-8") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         try:
+            reclaim_orphaned_claimed(path)
             if not path.exists():
                 return None
             try:
                 os.replace(path, claimed)
+                # os.replace는 mtime을 유지하므로 오래된 backlog 큐 claim 시 claim 시각이 반영되지 않는 병리가 발생함.
+                # os.utime으로 claimed 파일의 mtime을 현재 시각(claim 시각)으로 최신화한다.
+                try:
+                    os.utime(claimed, None)
+                except OSError:
+                    pass
                 path.touch(exist_ok=True)
             except FileNotFoundError:
                 return None

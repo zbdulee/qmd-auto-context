@@ -31,7 +31,11 @@ def load_entries(claimed: Path) -> list[tuple[str, dict | None]]:
     if not claimed.exists():
         return []
     rows = []
-    for line in claimed.read_text(encoding="utf-8").splitlines():
+    try:
+        content = claimed.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return []
+    for line in content.splitlines():
         if not line.strip():
             continue
         try:
@@ -195,8 +199,9 @@ def main() -> int:
     # Ordering invariant: resolve_entry() must complete successfully BEFORE
     # this entry is excluded from the requeue. If resolve_entry() raises
     # (disk full, permission error, unexpected bug), the entry must still be
-    # sitting in the live queue afterward — never lost. Do not move the
-    # requeue_lines(...) call above this try/except.
+    # sitting in the live queue afterward — never lost (requeue_lines fail/crash
+    # leaves claimed file for reaper cleanup, ensuring bounded at-least-once).
+    # Do not move the requeue_lines(...) call above this try/except.
     try:
         result = resolve_entry(root, wiki_root, config, entry, args.action)
     except Exception:

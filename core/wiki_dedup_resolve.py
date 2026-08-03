@@ -38,7 +38,11 @@ def load_entries(claimed: Path) -> list[tuple[str, dict | None]]:
     if not claimed.exists():
         return []
     rows = []
-    for line in claimed.read_text(encoding="utf-8").splitlines():
+    try:
+        content = claimed.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return []
+    for line in content.splitlines():
         if not line.strip():
             continue
         try:
