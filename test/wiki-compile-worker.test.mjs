@@ -1086,7 +1086,7 @@ sys.path.insert(0, 'core')
 from wiki_compile_worker import claim_queue
 res = claim_queue(Path('${compileDir}/source-queue.jsonl'))
 print(res if res else "")
-`, { env: { ...process.env, QMD_DIRTY_QUEUE: dirtyQueue } }]).toString().trim();
+`, { env: { ...process.env, QMD_DIRTY_QUEUE: dirtyQueue, QMD_FORCE_DEAD_PIDS: String(deadPid) } }]).toString().trim();
 
     assert.ok(!existsSync(claimedPath), 'orphan claimed file should be unlinked');
     assert.ok(resultClaimed, 'claim_queue should return claimed file path');
@@ -1141,7 +1141,7 @@ from pathlib import Path
 sys.path.insert(0, 'core')
 from wiki_compile_worker import claim_queue
 claim_queue(Path('${compileDir}/source-queue.jsonl'))
-`, { env: { ...process.env, QMD_DIRTY_QUEUE: dirtyQueue } }]);
+`, { env: { ...process.env, QMD_DIRTY_QUEUE: dirtyQueue, QMD_FORCE_DEAD_PIDS: String(deadPid) } }]);
 
     assert.ok(!existsSync(claimedPath), 'poison claimed file should be deleted');
     const ledgerPath = join(compileDir, 'discard-ledger.jsonl');
@@ -1169,7 +1169,7 @@ test('reclaim: main() execution path reclaims orphaned claimed files', () => {
       source: { kind: 'file', path: 'docs/main_orphan.md', collection: 'proj-docs' },
     };
     writeFileSync(claimedPath, JSON.stringify(orphanJob) + '\n');
-    runWorker(project);
+    runWorker(project, { QMD_FORCE_DEAD_PIDS: String(deadPid) });
     assert.ok(!existsSync(claimedPath), 'orphan claimed file should be unlinked via main()');
   } finally {
     removeTemp(project);
@@ -1221,7 +1221,7 @@ sys.path.insert(0, 'core')
 from wiki_compile_worker import claim_queue
 res = claim_queue(Path('${compileDir}/source-queue.jsonl'))
 print(res if res else "")
-`, { env: { ...process.env, QMD_DIRTY_QUEUE: dirtyQueue } }]).toString().trim();
+`, { env: { ...process.env, QMD_DIRTY_QUEUE: dirtyQueue, QMD_FORCE_DEAD_PIDS: String(deadPid) } }]).toString().trim();
 
     assert.ok(!existsSync(claimedPath), 'corrupt claimed file should be processed without raise');
     const content = res && existsSync(res) ? readFileSync(res, 'utf8') : (existsSync(join(compileDir, 'source-queue.jsonl')) ? readFileSync(join(compileDir, 'source-queue.jsonl'), 'utf8') : '');
@@ -1286,11 +1286,142 @@ sys.path.insert(0, 'core')
 from wiki_compile_worker import claim_queue
 res = claim_queue(Path('${compileDir}/source-queue.jsonl'))
 print(res if res else "")
-`, { env: { ...process.env, QMD_DIRTY_QUEUE: dirtyQueue } }]).toString().trim();
+`, { env: { ...process.env, QMD_DIRTY_QUEUE: dirtyQueue, QMD_FORCE_DEAD_PIDS: String(deadPid) } }]).toString().trim();
 
     assert.ok(!existsSync(claimedPath), 'future mtime orphan claimed file should be unlinked');
     const content = res && existsSync(res) ? readFileSync(res, 'utf8') : (existsSync(join(compileDir, 'source-queue.jsonl')) ? readFileSync(join(compileDir, 'source-queue.jsonl'), 'utf8') : '');
     assert.ok(content.includes('docs/future_orphan.md'));
+  } finally {
+    removeTemp(project);
+  }
+});
+
+test('reclaim: 24h mtime backstop reclaims pid-alive claimed files if stale >= 24h', () => {
+  const project = setupProject();
+  const aliveChild = spawn('python3', ['-c', 'import time; time.sleep(10)']);
+  const alivePid = aliveChild.pid;
+  try {
+    const compileDir = join(project, '.auto-context', 'compile');
+    const claimedPath = join(compileDir, `source-queue.jsonl.claimed.${alivePid}.backstop24h`);
+    writeFileSync(claimedPath, JSON.stringify({ path: 'docs/stale24h.md' }) + '\n');
+    // Set mtime to 25 hours ago (> 24h backstop threshold)
+    const oldTime = Math.floor(Date.now() / 1000) - 90000;
+    utimesSync(claimedPath, oldTime, oldTime);
+
+    const dirtyQueue = join(project, '.auto-context', 'compile', 'dirty-queue');
+    const res = execFileSync('python3', ['-c', `
+import sys
+from pathlib import Path
+sys.path.insert(0, 'core')
+from wiki_compile_worker import claim_queue
+res = claim_queue(Path('${compileDir}/source-queue.jsonl'))
+print(res if res else "")
+`, { env: { ...process.env, QMD_DIRTY_QUEUE: dirtyQueue } }]).toString().trim();
+
+    assert.ok(!existsSync(claimedPath), 'pid-alive claimed file stale >= 24h MUST be reclaimed by backstop');
+  } finally {
+    aliveChild.kill('SIGKILL');
+    removeTemp(project);
+  }
+});
+
+test('reclaim: pid-alive claimed file within 24h is NOT stolen', () => {
+  const project = setupProject();
+  const aliveChild = spawn('python3', ['-c', 'import time; time.sleep(10)']);
+  const alivePid = aliveChild.pid;
+  try {
+    const compileDir = join(project, '.auto-context', 'compile');
+    const claimedPath = join(compileDir, `source-queue.jsonl.claimed.${alivePid}.recent_alive`);
+    writeFileSync(claimedPath, JSON.stringify({ path: 'docs/recent_alive.md' }) + '\n');
+    // Set mtime to 23 hours ago (< 24h backstop threshold)
+    const recentTime = Math.floor(Date.now() / 1000) - 82800;
+    utimesSync(claimedPath, recentTime, recentTime);
+
+    const dirtyQueue = join(project, '.auto-context', 'compile', 'dirty-queue');
+    execFileSync('python3', ['-c', `
+import sys
+from pathlib import Path
+sys.path.insert(0, 'core')
+from wiki_compile_worker import claim_queue
+claim_queue(Path('${compileDir}/source-queue.jsonl'))
+`, { env: { ...process.env, QMD_DIRTY_QUEUE: dirtyQueue } }]);
+
+    assert.ok(existsSync(claimedPath), 'pid-alive claimed file within 24h MUST NOT be stolen');
+  } finally {
+    aliveChild.kill('SIGKILL');
+    removeTemp(project);
+  }
+});
+
+test('reclaim: I/O failure on orphan child does not crash claim_queue', () => {
+  const project = setupProject();
+  try {
+    const compileDir = join(project, '.auto-context', 'compile');
+    const queuePath = join(compileDir, 'source-queue.jsonl');
+    writeFileSync(queuePath, JSON.stringify({ path: 'docs/test_io.md' }) + '\n');
+    const claimedPath = join(compileDir, `source-queue.jsonl.claimed.9999999.testio`);
+    writeFileSync(claimedPath, JSON.stringify({ path: 'docs/orphan_io.md' }) + '\n');
+
+    const script = `
+import sys
+from pathlib import Path
+sys.path.insert(0, 'core')
+import wiki_compile_worker as w
+
+orig_unlink = Path.unlink
+def mock_unlink(self, *args, **kwargs):
+    if "testio" in self.name:
+        raise OSError(13, "Permission denied")
+    return orig_unlink(self, *args, **kwargs)
+
+Path.unlink = mock_unlink
+
+queue = Path('${compileDir}/source-queue.jsonl')
+res = w.claim_queue(queue)
+print(res if res else "")
+`;
+    const dirtyQueue = join(project, '.auto-context', 'compile', 'dirty-queue');
+    const res = execFileSync('python3', ['-c', script], { env: { ...process.env, QMD_DIRTY_QUEUE: dirtyQueue, QMD_FORCE_DEAD_PIDS: "9999999" } }).toString().trim();
+    assert.ok(res.length > 0, 'claim_queue must succeed and return claimed path even if orphan unlink raises OSError');
+  } finally {
+    removeTemp(project);
+  }
+});
+
+test('reclaim: discard ledger extracts targetPath for all 4 queues including dedup-needed pageA/pageB', () => {
+  const project = setupProject();
+  try {
+    const compileDir = join(project, '.auto-context', 'compile');
+    const dirtyQueue = join(project, '.auto-context', 'compile', 'dirty-queue');
+
+    const queues = [
+      { name: 'source-queue.jsonl', payload: { source: { path: 'docs/source_q.md' }, _requeue_count: 3 } },
+      { name: 'verify-queue.jsonl', payload: { card: { targetPath: 'docs/verify_q.md' }, _requeue_count: 3 } },
+      { name: 'merge-needed.jsonl', payload: { candidate: { targetPath: 'docs/merge_q.md' }, _requeue_count: 3 } },
+      { name: 'dedup-needed.jsonl', payload: { pageA: 'docs/dedup_a.md', pageB: 'docs/dedup_b.md', _requeue_count: 3 } },
+    ];
+
+    for (const q of queues) {
+      const claimedPath = join(compileDir, `${q.name}.claimed.9999999.discardtest`);
+      writeFileSync(claimedPath, JSON.stringify(q.payload) + '\n');
+      execFileSync('python3', ['-c', `
+import sys
+from pathlib import Path
+sys.path.insert(0, 'core')
+from wiki_compile_worker import claim_queue
+claim_queue(Path('${compileDir}/${q.name}'))
+`, { env: { ...process.env, QMD_DIRTY_QUEUE: dirtyQueue, QMD_FORCE_DEAD_PIDS: '9999999' } }]);
+    }
+
+    const ledgerPath = join(compileDir, 'discard-ledger.jsonl');
+    assert.ok(existsSync(ledgerPath), 'discard-ledger.jsonl should be created');
+    const ledgerLines = readFileSync(ledgerPath, 'utf8').trim().split('\n').map(l => JSON.parse(l));
+
+    assert.equal(ledgerLines.length, 4);
+    assert.equal(ledgerLines[0].targetPath, 'docs/source_q.md');
+    assert.equal(ledgerLines[1].targetPath, 'docs/verify_q.md');
+    assert.equal(ledgerLines[2].targetPath, 'docs/merge_q.md');
+    assert.equal(ledgerLines[3].targetPath, 'docs/dedup_a.md <-> docs/dedup_b.md');
   } finally {
     removeTemp(project);
   }

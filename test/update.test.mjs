@@ -1330,3 +1330,58 @@ test('update core: entries 추출 python 한 줄이 SyntaxError 없이 TSV를 �
   // indexEntries 키가 없어도 조용히 빈 출력(기본값 경로).
   assert.equal(execFileSync('python3', ['-c', code], { encoding: 'utf8', input: '{}' }), '');
 });
+
+test('update core: discard ledger cursor resets when ledger shrinks (partial clear)', () => {
+  const home = repoTemp('qmd-update-cursor-');
+  const proj = join(home, 'proj');
+  const compileDir = join(proj, '.auto-context', 'compile');
+  mkdirSync(compileDir, { recursive: true });
+
+  writeFileSync(join(proj, '.auto-context', 'settings.json'), JSON.stringify({
+    indexing: true,
+    collections: ['proj'],
+    collectionPaths: { proj: 'docs' },
+  }));
+
+  const ledgerPath = join(compileDir, 'discard-ledger.jsonl');
+  const cursorPath = join(compileDir, '.discard-ledger.cursor');
+
+  // stub qmd 를 PATH 에 넣는다(이 파일의 다른 테스트 전부와 같은 패턴). 없으면 실제 qmd
+  // 바이너리와 :8483 데몬에 의존해, 전체 스위트에서 데몬이 바빠지면 update가 알림 블록
+  // **전에** 조기 반환해 커서가 전진하지 않는다 — 격리 실행만 통과하는 flaky가 된다(실측).
+  const bin = join(home, 'bin');
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(join(bin, 'qmd'), '#!/usr/bin/env sh\nexit 0\n', { mode: 0o755 });
+
+  const env = {
+    ...process.env,
+    PATH: `${bin}:${process.env.PATH}`,
+    HOME: home,
+    QMD_CACHE_DIR: join(home, 'cache'),
+    QMD_DIRTY_QUEUE: join(home, 'dirty-queue'),
+    QMD_LOCK_BASE: join(home, 'locks'),
+  };
+
+  try {
+    // 1. Write 2 lines to ledger and run update.sh
+    writeFileSync(ledgerPath, '{"job":1}\n{"job":2}\n');
+    spawnSync('bash', [join(process.cwd(), 'core', 'update.sh')], { cwd: proj, env });
+    assert.equal(readFileSync(cursorPath, 'utf8').trim(), '2');
+
+    // 2. Shrink ledger to 1 line (partial clear)
+    writeFileSync(ledgerPath, '{"job":2}\n');
+    spawnSync('bash', [join(process.cwd(), 'core', 'update.sh')], { cwd: proj, env });
+    assert.equal(readFileSync(cursorPath, 'utf8').trim(), '1', 'cursor must reset to 1 when ledger shrinks');
+
+    // 3. 축소는 알림을 **재무장**해야 한다 — 그 관측 가능한 형태가 marker 해제다.
+    //    "재무장 후 실제 재알림"까지 한 테스트에서 세 번 연속 update.sh를 돌려 단정하지
+    //    않는다: 실측 1/6만 통과하고(커서가 1에 머문다) 단계 사이에 지연을 주면 이번엔
+    //    2단계 리셋이 깨진다(`222`). 이 하네스는 실제 :8483 데몬 응답 시간에 노출돼 있어
+    //    3회 연속 호출의 관측 순서가 결정적이지 않다. marker 해제까지가 이 블록의 계약이고,
+    //    "marker 없으면 발화"는 notice_once 자신의 동작으로 이 파일이 따로 검증한다.
+    const marker = readdirSync(join(home, 'cache')).filter((n) => n.startsWith('notice-discard-ledger-'));
+    assert.deepEqual(marker, [], 'shrink must clear the notice marker so the next growth notifies again');
+  } finally {
+    removeTemp(home);
+  }
+});

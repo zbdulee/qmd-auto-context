@@ -50,10 +50,14 @@ import time
 
 MAX_REQUEUE_COUNT = 3
 REVIEW_DEDUP_IMPLICIT_TTL = 3600  # 1 hour for review / dedup_resolve CLI
+CLAIMED_PID_BACKSTOP_SECS = 86400  # 24 hours backstop for pid-alive claimed files
 
 
 def _is_pid_alive(pid: int) -> bool:
     if pid <= 0:
+        return False
+    force_dead = os.environ.get("QMD_FORCE_DEAD_PIDS", "").split(",")
+    if str(pid) in force_dead:
         return False
     try:
         os.kill(pid, 0)
@@ -75,6 +79,10 @@ def _write_discard_ledger(compile_dir: Path, queue_name: str, job: dict, requeue
     cand_obj = job.get("candidate")
     cand_path = (cand_obj.get("targetPath") or cand_obj.get("path")) if isinstance(cand_obj, dict) else None
 
+    page_a = job.get("pageA")
+    page_b = job.get("pageB")
+    page_ab = f"{page_a} <-> {page_b}" if (page_a and page_b) else (page_a or page_b)
+
     target = (
         job.get("targetPath")
         or job.get("candidatePath")
@@ -83,6 +91,7 @@ def _write_discard_ledger(compile_dir: Path, queue_name: str, job: dict, requeue
         or source_path
         or card_path
         or cand_path
+        or page_ab
         or "unknown"
     )
     payload = {
@@ -122,14 +131,20 @@ def reclaim_orphaned_claimed(path: Path, max_requeue: int = MAX_REQUEUE_COUNT):
         if file_pid == current_pid:
             continue
 
-        # 최우선 신호: claimed 파일명의 pid가 살아있으면 소유자 프로세스가 활성이므로 무조건 넘김.
-        # PID 생존 검사는 모든 큐(source-queue, verify-queue, merge-needed, dedup-needed 등)에 적용된다.
+        # 1차 판정: PID 검사. PID가 죽었으면 즉시 고아 회수 대상.
+        # PID가 살아있더라도 PID 재사용(재부팅 후 root 데몬 등에 PID 겹침)에 대비해 2차 mtime backstop(≥24h)을 적용함.
+        # 임계값 선택 근거: 짧게 잡으면 안 됨. 한 run은 extractor(batch.maxPerRun=10) + dedup judge + verify 호출로
+        # 정상 동작 중 수십 분이 소요될 수 있으며, 짧은 임계는 살아있는 소유자의 배치를 탈취해 유료 CLI 이중 과금을 유발함.
+        # 24h는 정상 run 최악 소요시간보다 압도적으로 큼.
+        # 반면 file_pid가 없는 파일은 소유자가 없으므로 짧은 임계(REVIEW_DEDUP_IMPLICIT_TTL=1h)를 적용함.
         if file_pid and _is_pid_alive(file_pid):
-            continue
-
-        # pid가 명시되지 않은 파일에 한해 2차 가드로 mtime cooldown 창을 검사한다.
-        # (pid가 존재하는 경우에는 프로세스 사망 확인만으로 즉시 고아 회수 대상임)
-        if not file_pid:
+            try:
+                mtime = child.stat().st_mtime
+                if not qmd_cooldown.window_elapsed(mtime, now, CLAIMED_PID_BACKSTOP_SECS):
+                    continue
+            except OSError:
+                continue
+        elif not file_pid:
             try:
                 mtime = child.stat().st_mtime
                 if not qmd_cooldown.window_elapsed(mtime, now, REVIEW_DEDUP_IMPLICIT_TTL):
@@ -165,13 +180,20 @@ def reclaim_orphaned_claimed(path: Path, max_requeue: int = MAX_REQUEUE_COUNT):
             except json.JSONDecodeError:
                 lines_to_requeue.append(line)
 
-        # at-least-once append 후 unlink 사이 장애 시 재시도될 수 있으나 MAX_REQUEUE_COUNT로 상한 유계됨
+        # at-least-once append 후 unlink 성공을 전제로 MAX_REQUEUE_COUNT 상한이 유계됨.
+        # I/O 실패(권한/ENOSPC/읽기전용) 시 claim_queue 밖으로 예외를 전파하지 않고 continue하여 다른 큐 claim을 방해하지 않음.
         if lines_to_requeue:
-            with path.open("a", encoding="utf-8") as handle:
-                for rline in lines_to_requeue:
-                    handle.write(rline if rline.endswith("\n") else rline + "\n")
+            try:
+                with path.open("a", encoding="utf-8") as handle:
+                    for rline in lines_to_requeue:
+                        handle.write(rline if rline.endswith("\n") else rline + "\n")
+            except OSError:
+                continue
 
-        child.unlink(missing_ok=True)
+        try:
+            child.unlink(missing_ok=True)
+        except OSError:
+            continue
 
 
 def read_queue(path: Path):

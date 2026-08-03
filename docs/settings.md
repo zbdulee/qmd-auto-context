@@ -668,6 +668,9 @@ jq -c 'select(.event=="qmd_recall_shadow" and .verdict.selected_empty_raw_nonemp
 > (기본 1 → 카드당 1회), verify = `max(verify.maxPerRun, min(카드 수, 30)) + 1`입니다.
 > 이 문서의 숫자는 `test/cost-budget-docs.test.mjs`가 **코드 상수에서 다시 계산해 대조**하므로,
 > 기본값이나 클램프가 바뀌면 문서가 아니라 테스트가 먼저 실패합니다.
+>
+> **⚠ 고아 claim 회수(리퍼)의 재추출 승수.** 비정상 종료 등으로 중단된 `*.claimed.*` 잡을 회수(reclaim)할 때 재추출 억제가 없어 회수 1회당 배치 전량이 다시 extractor로 재호출됩니다. `MAX_REQUEUE_COUNT`(3) 제한으로 한 잡은 최초 실행 1회 + 최대 3회 회수 = 최대 **4배**까지 재추출 승수가 적용될 수 있습니다. `MAX_REQUEUE_COUNT` 초과분은 큐에서 폐기되고 원장(`discard-ledger.jsonl`) 기록 및 SessionStart 알림으로 종료됩니다.
+
 
 `maxItems`와 `maxPerRun`을 혼동하지 마십시오. 예전에는 상한이 아예 없어 `maxItems`를 넘겨
 처리가 시작되면 **큐에 든 전량**을 한 워커 프로세스가 순차 실행했습니다. 큐가 수백 건이면

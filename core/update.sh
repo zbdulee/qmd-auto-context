@@ -1196,6 +1196,11 @@ PY
       last_lines=$(cat "$discard_cursor" 2>/dev/null || echo 0)
       last_lines=$((last_lines + 0))
     fi
+    if [ "$cur_lines" -lt "$last_lines" ]; then
+      last_lines=$cur_lines
+      echo "$cur_lines" > "$discard_cursor" 2>/dev/null || true
+      notice_clear discard-ledger "$workdir"
+    fi
     if [ "$cur_lines" -gt "$last_lines" ]; then
       local marker_path="$(_notice_marker discard-ledger "$workdir")"
       local mtime_before=0
