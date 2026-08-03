@@ -70,6 +70,23 @@ test('raw markdown edit enqueues bounded source job silently', () => {
   }
 });
 
+test('Codex apply_patch command payload enqueues the patched markdown source', () => {
+  const project = setupProject();
+  try {
+    runEnqueue(project, {
+      tool_name: 'apply_patch',
+      tool_input: {
+        command: '*** Begin Patch\n*** Update File: docs/source.md\n@@\n-# Source\n+# Source updated\n*** End Patch',
+      },
+    });
+    const jobs = queueLines(project);
+    assert.equal(jobs.length, 1);
+    assert.deepEqual(jobs[0].source, { kind: 'file', path: 'docs/source.md', collection: 'proj-docs' });
+  } finally {
+    removeTemp(project);
+  }
+});
+
 test('non-markdown, outside collection, wiki role, disabled trigger, and sandbox do not enqueue', () => {
   const project = setupProject();
   try {

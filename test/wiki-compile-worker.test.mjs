@@ -587,6 +587,19 @@ test('debounce: recent single edit under idle window is not processed yet', () =
   } finally { removeTemp(project); }
 });
 
+test('debounce: fresh single edit reports the remaining wake delay', () => {
+  const project = setupProject({ batch: { idleSeconds: 9999, maxItems: 5 } });
+  writeFileSync(join(project, '.auto-context', 'compile', 'source-queue.jsonl'),
+    JSON.stringify({ ts: new Date().toISOString().replace(/\.\d+Z$/, 'Z'), trigger: 'post_tool_source', engine: 'claude', cwd: project, source: { kind: 'file', path: 'docs/source.md', collection: 'proj-docs' } }) + '\n');
+  try {
+    const report = JSON.parse(runWorker(project, {}, ['--json']));
+    assert.equal(report.processed, 0);
+    assert.equal(report.remaining, 1);
+    assert.ok(report.wakeAfterSeconds >= 1, '유휴 시간 이후 재기동할 초 단위 delay를 알려야 한다');
+    assert.ok(report.wakeAfterSeconds <= 9999);
+  } finally { removeTemp(project); }
+});
+
 test('--flush-all processes even under idle window', () => {
   const ex = join(mkdtempSync(join(tmpdir(), 'extractor-')), 'ok.py');
   writeFileSync(ex, `#!/usr/bin/env python3\nimport json,sys\nprint(json.dumps({'candidates':[{'title':'F','summary':'Durable: flush-all forced extraction past the idle gate.','suggestedType':'concept','confidence':'high','targetPath':'.auto-context/wiki/concepts/f.md'}]}))\n`);
@@ -1426,4 +1439,3 @@ claim_queue(Path('${compileDir}/${q.name}'))
     removeTemp(project);
   }
 });
-

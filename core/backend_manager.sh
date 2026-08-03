@@ -14,6 +14,7 @@ INDEX_WORKER_SCRIPT="${QMD_INDEX_WORKER_SCRIPT:-$ROOT/backend/index_worker.sh}"
 COMPILE_WORKER_SCRIPT="${QMD_COMPILE_WORKER_SCRIPT:-$ROOT/core/wiki_compile_worker.py}"
 KICK_LOCK="${QMD_WORKER_KICK_LOCKDIR:-$STATE_DIR/index-kick.lock.d}"
 COMPILE_KICK_LOCK="${QMD_COMPILE_WORKER_KICK_LOCKDIR:-$STATE_DIR/wiki-compile-kick.lock.d}"
+COMPILE_RETRY_LOCK="${QMD_COMPILE_RETRY_LOCKDIR:-$STATE_DIR/wiki-compile-retry.lock.d}"
 START_LOCK="${QMD_DAEMON_START_LOCKDIR:-$STATE_DIR/daemon-start.lock.d}"
 REQUIRED_QMD_VERSION="${QMD_REQUIRED_VERSION:-2.5.3}"
 SUPPORTED_QMD_MAJOR="${QMD_SUPPORTED_MAJOR:-2}"
@@ -268,12 +269,68 @@ kick_index() {
   ) >/dev/null 2>&1 &
 }
 
+compile_wake_seconds() {
+  python3 - "$1" <<'PY' 2>/dev/null || true
+import json
+import math
+import sys
+
+try:
+    payload = json.loads(sys.argv[1])
+    value = payload.get("wakeAfterSeconds") if isinstance(payload, dict) else None
+    seconds = int(math.ceil(float(value)))
+    if seconds > 0:
+        # A malformed/custom worker must not leave an unbounded sleeping process.
+        print(min(seconds, 86400))
+except (TypeError, ValueError, json.JSONDecodeError, OverflowError):
+    pass
+PY
+}
+
+schedule_wiki_compile_retry() {
+  local cwd="$1"
+  local lock_hash="$2"
+  local delay="$3"
+  local retry_lock="${COMPILE_RETRY_LOCK}.${lock_hash}"
+  local retry_pid
+  [ -z "$delay" ] && return 0
+  if ! mkdir "$retry_lock" 2>/dev/null; then
+    retry_pid="$(cat "$retry_lock/pid" 2>/dev/null || true)"
+    case "$retry_pid" in
+      ''|*[!0-9]*) retry_pid="" ;;
+    esac
+    if [ -n "$retry_pid" ] && kill -0 "$retry_pid" 2>/dev/null; then
+      # A live retry owns the earliest existing wake-up. When it wakes, the
+      # worker recomputes any newer delay, so no source job is stranded.
+      return 0
+    fi
+    # The sleeper died before clearing its exact, per-project lock. Reclaim
+    # only the marker we own; unexpected directory contents keep the lock.
+    rm -f "$retry_lock/pid" 2>/dev/null || true
+    rmdir "$retry_lock" 2>/dev/null || return 0
+    mkdir "$retry_lock" 2>/dev/null || return 0
+  fi
+  (
+    trap 'rm -f "$retry_lock/pid" 2>/dev/null; rmdir "$retry_lock" 2>/dev/null || true' EXIT
+    sleep "$delay" || exit 0
+    # Release before re-kicking: otherwise a newly deferred worker would see
+    # this predecessor as live and lose its next wake-up.
+    rm -f "$retry_lock/pid" 2>/dev/null || true
+    rmdir "$retry_lock" 2>/dev/null || exit 0
+    trap - EXIT
+    kick_wiki_compile "$cwd"
+  ) >/dev/null 2>&1 &
+  # Bash 3.2's `$$` remains the parent shell in a subshell. `$!` is the
+  # portable PID of the background sleeper whose liveness owns this lock.
+  echo "$!" >"$retry_lock/pid" 2>/dev/null || true
+}
+
 kick_wiki_compile() {
   local cwd="${1:-}"
   local flush="${2:-}"
   local flush_arg=""
   [ "$flush" = "--flush" ] && flush_arg="--flush-all"
-  local lock_hash lock_dir
+  local lock_hash lock_dir worker_report wake_seconds
   [ -z "$cwd" ] && return 0
   lock_hash="$(python3 - "$cwd" <<'PY' 2>/dev/null || true
 import hashlib
@@ -297,8 +354,10 @@ PY
     echo "$$" >"$lock_dir/pid" 2>/dev/null || true
     case "$COMPILE_WORKER_SCRIPT" in
       *.sh|*.bash) bash "$COMPILE_WORKER_SCRIPT" --cwd "$cwd" $flush_arg >>"$MANAGER_LOG" 2>&1 || true ;;
-      *) python3 "$COMPILE_WORKER_SCRIPT" --cwd "$cwd" $flush_arg >>"$MANAGER_LOG" 2>&1 || true ;;
+      *) worker_report="$(python3 "$COMPILE_WORKER_SCRIPT" --cwd "$cwd" $flush_arg --json 2>>"$MANAGER_LOG" || true)" ;;
     esac
+    wake_seconds="$(compile_wake_seconds "$worker_report")"
+    [ -n "$wake_seconds" ] && schedule_wiki_compile_retry "$cwd" "$lock_hash" "$wake_seconds"
     # compile worker(+피기백 verify)가 dirty 큐에 enqueue한 wiki collection을 즉시 drain해
     # 다음 SessionStart 전에 같은 세션에서 recall-visible하게 만든다. 편집 자신의 index
     # kick은 배치/verify 지연 때문에 카드가 큐에 오르기 전에 이미 drain을 마쳐 놓친다.

@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { removeTemp } from './helpers/temp.mjs';
 import {
   existsSync,
@@ -371,6 +372,94 @@ test("kick-wiki-compile runs compile worker with explicit cwd and stays silent",
   } finally {
     removeTemp(home);
   }
+});
+
+test("kick-wiki-compile retries once after the worker reports a debounce wake", () => {
+  const home = mkdtempSync(join(tmpdir(), "qmd-wiki-retry-"));
+  try {
+    const cwd = join(home, "project");
+    const worker = join(home, "wiki-worker.py");
+    const count = join(home, "count");
+    const indexWorker = join(home, "index-worker.sh");
+    const retryBase = join(home, "retry");
+    mkdirSync(cwd, { recursive: true });
+    const retryHash = createHash('sha256').update(cwd).digest('hex').slice(0, 16);
+    mkdirSync(`${retryBase}.${retryHash}`);
+    writeFileSync(join(`${retryBase}.${retryHash}`, 'pid'), '999999');
+    writeFileSync(worker, `#!/usr/bin/env python3
+import json, os
+count = ${JSON.stringify(count)}
+try:
+    n = int(open(count).read())
+except OSError:
+    n = 0
+n += 1
+open(count, 'w').write(str(n))
+print(json.dumps({'wakeAfterSeconds': 1 if n == 1 else 0}))
+`, { mode: 0o755 });
+    writeFileSync(indexWorker, '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
+    const result = run(["kick-wiki-compile", cwd], {
+      HOME: home,
+      QMD_BACKEND_STATE_DIR: home,
+      QMD_COMPILE_WORKER_SCRIPT: worker,
+      QMD_INDEX_WORKER_SCRIPT: indexWorker,
+      QMD_COMPILE_RETRY_LOCKDIR: retryBase,
+    });
+    assert.equal(result.status, 0);
+    for (let i = 0; i < 80 && (!existsSync(count) || readFileSync(count, 'utf8') !== '2'); i++) {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+    }
+    assert.equal(readFileSync(count, 'utf8'), '2', 'young queue should be kicked again after its reported delay');
+  } finally {
+    removeTemp(home);
+  }
+});
+
+test("kick-wiki-compile keeps one live debounce retry across a second immediate kick", () => {
+  const home = mkdtempSync(join(tmpdir(), "qmd-wiki-retry-live-"));
+  try {
+    const cwd = join(home, "project");
+    const worker = join(home, "wiki-worker.py");
+    const count = join(home, "count");
+    const indexWorker = join(home, "index-worker.sh");
+    mkdirSync(cwd, { recursive: true });
+    writeFileSync(worker, `#!/usr/bin/env python3
+import json
+count = ${JSON.stringify(count)}
+try:
+    n = int(open(count).read())
+except OSError:
+    n = 0
+n += 1
+open(count, 'w').write(str(n))
+print(json.dumps({'wakeAfterSeconds': 2 if n < 3 else 0}))
+`, { mode: 0o755 });
+    writeFileSync(indexWorker, '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
+    const env = {
+      HOME: home,
+      QMD_BACKEND_STATE_DIR: home,
+      QMD_COMPILE_WORKER_SCRIPT: worker,
+      QMD_INDEX_WORKER_SCRIPT: indexWorker,
+    };
+    run(["kick-wiki-compile", cwd], env);
+    for (let i = 0; i < 20 && (!existsSync(count) || readFileSync(count, 'utf8') !== '1'); i++) {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+    }
+    run(["kick-wiki-compile", cwd], env);
+    // Let both an original and a wrongly duplicated sleeper reach their wake.
+    for (let i = 0; i < 60; i++) {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+    }
+    assert.equal(readFileSync(count, 'utf8'), '3', 'second kick must reuse the live sleeper instead of scheduling a duplicate');
+  } finally {
+    removeTemp(home);
+  }
+});
+
+test("debounce retry lock records the actual background sleeper PID", () => {
+  const src = readFileSync("core/backend_manager.sh", "utf8");
+  assert.doesNotMatch(src, /echo "\$\$" >"\$retry_lock\/pid"/, 'Bash $$ is the parent shell, not the background retry');
+  assert.match(src, /\) >\/dev\/null 2>&1 &[\s\S]{0,300}?echo "\$!" >"\$retry_lock\/pid"/, 'lock must track the spawned retry process');
 });
 
 
