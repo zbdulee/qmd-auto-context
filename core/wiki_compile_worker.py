@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import json
+import math
 import os
 import subprocess
 import sys
@@ -683,6 +684,20 @@ def batch_ready(kept: list, idle_seconds: int, max_items: int, flush_all: bool) 
     return max(ages, default=0) >= idle_seconds
 
 
+def batch_wake_after_seconds(kept: list, idle_seconds: int, max_items: int, flush_all: bool) -> int:
+    """Return the earliest retry delay for a batch that is not ready yet.
+
+    The batch opens when its oldest queued job reaches the idle threshold, unless
+    it first reaches max_items. A caller cannot predict the latter, so report
+    the former as one bounded wake-up; later edits can still process early.
+    """
+    if batch_ready(kept, idle_seconds, max_items, flush_all):
+        return 0
+    now = datetime.now(timezone.utc).timestamp()
+    oldest_age = max((now - (_parse_ts(job.get("ts")) or now) for _, job in kept), default=0)
+    return max(1, int(math.ceil(idle_seconds - oldest_age)))
+
+
 def is_same_file_source(item, rel: str) -> bool:
     """모델이 준 `sources` 항목이 큐 잡의 실제 소스와 같은 파일을 가리키는가.
 
@@ -965,7 +980,11 @@ def main():
         queue.touch(exist_ok=True)
         _run_verify_pass(root, config, compile_cfg)
         if args.json:
-            print(json.dumps({"processed": 0, "remaining": len(kept) + len(malformed)}, ensure_ascii=False))
+            print(json.dumps({
+                "processed": 0,
+                "remaining": len(kept) + len(malformed),
+                "wakeAfterSeconds": batch_wake_after_seconds(kept, idle_seconds, max_items, args.flush_all),
+            }, ensure_ascii=False))
         return 0
 
     # per-run 상한. `maxItems`(처리 시작 조건)와 다르다 — 이것이 한 run에서 spawn하는

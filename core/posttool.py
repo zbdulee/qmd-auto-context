@@ -115,6 +115,11 @@ def edited_paths(payload: dict) -> list[str]:
         if isinstance(value, str):
             paths.append(value)
     patch = tool_input.get("patch")
+    # Codex PostToolUse reports its canonical `apply_patch` payload in
+    # `tool_input.command`, while Claude-compatible callers use `patch`.
+    # Do not reinterpret arbitrary command tools as patches.
+    if not isinstance(patch, str) and payload.get("tool_name") == "apply_patch":
+        patch = tool_input.get("command")
     if isinstance(patch, str):
         paths.extend(paths_from_patch(patch))
     edits = tool_input.get("edits")
