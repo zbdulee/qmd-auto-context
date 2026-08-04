@@ -26,17 +26,11 @@ function setupProject(extraCompile = {}) {
     },
     wikiPath: '.auto-context/wiki',
     compile: {
-      enabled: true,
       mode: 'guarded',
-      autoWrite: true,
       defaultStatus: 'generated',
       triggers: ['post_tool_source', 'manual'],
-      sourceQueuePath: '.auto-context/compile/source-queue.jsonl',
-      candidatePath: '.auto-context/compile/candidates.jsonl',
-      manifestPath: '.auto-context/compile/generated-manifest.jsonl',
-      tombstonePath: '.auto-context/compile/tombstones.jsonl',
       maxSourceChars: 12000,
-      extractor: { argv: [], timeout: 30 },
+      extractor: { backends: {}, timeout: 30 },
       ...extraCompile,
     },
   }));
@@ -64,7 +58,7 @@ function jsonl(path) {
   return readFileSync(path, 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
 }
 
-test('worker uses extractor argv, writes generated wiki page, and stays silent', () => {
+test('worker runs the engine backend argv, writes generated wiki page, and stays silent', () => {
   const extractor = join(mkdtempSync(join(tmpdir(), 'extractor-')), 'extract.py');
   writeFileSync(extractor, `#!/usr/bin/env python3
 import json, sys
@@ -78,7 +72,7 @@ print(json.dumps({'candidates': [{
   'targetPath': '.auto-context/wiki/decisions/source-compile-decision.md'
 }]}))
 `);
-  const project = setupProject({ extractor: { argv: ['python3', extractor], timeout: 30 } });
+  const project = setupProject({ extractor: { backends: { claude: ['python3', extractor] }, timeout: 30 } });
   const dirtyQueue = join(mkdtempSync(join(tmpdir(), 'dirty-')), 'queue');
   try {
     const out = runWorker(project, { QMD_DIRTY_QUEUE: dirtyQueue });
@@ -109,10 +103,8 @@ print(json.dumps({'candidates': [{
 `, { mode: 0o755 });
   const project = setupProject({
     extractor: {
-      dispatch: 'by-engine',
       backends: {},
       builtins: ['claude'],
-      default: [],
       timeout: 30,
     },
   });
@@ -141,7 +133,7 @@ test('compile mode off prevents worker extractor and candidate writes', () => {
 open(${JSON.stringify(marker)}, 'w').write('ran')
 print('{"candidates": []}')
 `);
-  const project = setupProject({ mode: 'off', extractor: { argv: ['python3', extractor], timeout: 30 } });
+  const project = setupProject({ mode: 'off', extractor: { backends: { claude: ['python3', extractor] }, timeout: 30 } });
   try {
     runWorker(project);
     assert.equal(existsSync(marker), false);
@@ -171,7 +163,7 @@ test('missing extractor writes bounded needs_extractor record without source con
 test('invalid extractor JSON permanently drops source queue job', () => {
   const extractor = join(mkdtempSync(join(tmpdir(), 'extractor-bad-')), 'bad.py');
   writeFileSync(extractor, 'print("not json")\n');
-  const project = setupProject({ extractor: { argv: ['python3', extractor], timeout: 30 } });
+  const project = setupProject({ extractor: { backends: { claude: ['python3', extractor] }, timeout: 30 } });
   try {
     runWorker(project);
     // permanent failure: queue drained (not preserved)
@@ -189,7 +181,7 @@ test('invalid extractor JSON permanently drops source queue job', () => {
 test('worker drops job and audits when extractor returns invalid JSON (permanent)', () => {
   const ex = join(mkdtempSync(join(tmpdir(), 'extractor-')), 'bad.py');
   writeFileSync(ex, `#!/usr/bin/env python3\nprint("not json")\n`);
-  const project = setupProject({ extractor: { argv: ['python3', ex], timeout: 30 } });
+  const project = setupProject({ extractor: { backends: { claude: ['python3', ex] }, timeout: 30 } });
   try {
     runWorker(project);
     const cands = jsonl(join(project, '.auto-context', 'compile', 'candidates.jsonl'));
@@ -208,7 +200,7 @@ test('configured extractor runs without any trust env (install = consent)', () =
 open(${JSON.stringify(marker)}, 'w').write('ran')
 print('{"candidates": []}')
 `);
-  const project = setupProject({ extractor: { argv: ['python3', extractor], timeout: 30 } });
+  const project = setupProject({ extractor: { backends: { claude: ['python3', extractor] }, timeout: 30 } });
   try {
     runWorker(project); // NOTE: no QMD_COMPILE_TRUST_EXTRACTOR
     assert.equal(existsSync(marker), true);
@@ -249,7 +241,7 @@ print(json.dumps({'candidates': [{
   'targetPath': '../outside.md'
 }]}))
 `);
-  const project = setupProject({ extractor: { argv: ['python3', extractor], timeout: 30 } });
+  const project = setupProject({ extractor: { backends: { claude: ['python3', extractor] }, timeout: 30 } });
   try {
     runWorker(project);
     const queue = readFileSync(join(project, '.auto-context', 'compile', 'source-queue.jsonl'), 'utf8');
@@ -274,7 +266,7 @@ print(json.dumps({'candidates': [{
   'canonicalKey': 'signal-perception-rule'
 }]}))
 `);
-  const project = setupProject({ mode: 'auto-wiki', extractor: { argv: ['python3', extractor], timeout: 30 } });
+  const project = setupProject({ mode: 'auto-wiki', extractor: { backends: { claude: ['python3', extractor] }, timeout: 30 } });
   const targetDir = join(project, '.auto-context', 'wiki', 'concepts');
   mkdirSync(targetDir, { recursive: true });
   writeFileSync(join(targetDir, 'reviewed-signal.md'), [
@@ -316,7 +308,7 @@ payload = json.loads(sys.stdin.read())
 open(${JSON.stringify(marker)}, 'w').write(payload['source']['path'])
 print(json.dumps({'candidates': []}))
 `);
-  const project = setupProject({ extractor: { argv: ['python3', extractor], timeout: 30 } });
+  const project = setupProject({ extractor: { backends: { claude: ['python3', extractor] }, timeout: 30 } });
   try {
     writeFileSync(join(project, 'README.md'), '# Outside collection but inside root\n');
     writeFileSync(join(project, '.auto-context', 'compile', 'source-queue.jsonl'), JSON.stringify({
@@ -343,7 +335,7 @@ test('worker rejects queued dot-directory markdown source before extractor', () 
 open(${JSON.stringify(marker)}, 'w').write('ran')
 print('{"candidates": []}')
 `);
-  const project = setupProject({ extractor: { argv: ['python3', extractor], timeout: 30 } });
+  const project = setupProject({ extractor: { backends: { claude: ['python3', extractor] }, timeout: 30 } });
   try {
     mkdirSync(join(project, 'docs', '.draft'), { recursive: true });
     writeFileSync(join(project, 'docs', '.draft', 'idea.md'), '# Hidden draft\n');
@@ -365,7 +357,7 @@ print('{"candidates": []}')
 });
 
 test('worker restores claimed queue if processing raises unexpectedly', () => {
-  const project = setupProject({ extractor: { argv: ['python3', '-c', 'print(1)'], timeout: 30 } });
+  const project = setupProject({ extractor: { backends: { claude: ['python3', '-c', 'print(1)'] }, timeout: 30 } });
   try {
     const queue = join(project, '.auto-context', 'compile', 'source-queue.jsonl');
     const rawLine = readFileSync(queue, 'utf8').trim();
@@ -400,17 +392,29 @@ test('source queue enqueue and claim share fcntl lock to avoid rename/open appen
   assert.match(worker, /os\.replace/);
 });
 
-test('resolver keeps extractor.argv ahead of explicit and built-in backends', () => {
+// Replaces "resolver keeps extractor.argv ahead of explicit and built-in backends".
+// `extractor.argv` (one argv for every engine) and `extractor.default` (engine-agnostic
+// fallback) are gone precisely because neither could be attributed to an engine, and a
+// cross-engine verify/dedup claim needs that attribution. The invariant that took their
+// place: an argv comes ONLY from the named engine, so an engine with nothing configured
+// resolves to None no matter what other engines the project declares.
+test('resolver resolves argv only from the named engine (no global argv, no default)', () => {
   const code = `
 import json, sys
 sys.path.insert(0, 'core')
 import wiki_compile_worker as w
-cfg = {'extractor': {'argv': ['python3', 'legacy.py'], 'dispatch': 'by-engine', 'backends': {'codex': ['python3', 'custom.py']}, 'builtins': ['codex'], 'default': ['python3', 'fallback.py']}}
-print(json.dumps(w.resolve_extractor_argv(cfg, 'codex')))
+# 'argv'/'default' are dead keys; they must not resurrect as a cross-engine override.
+cfg = {'extractor': {'argv': ['python3', 'legacy.py'], 'backends': {'codex': ['python3', 'custom.py']}, 'default': ['python3', 'fallback.py']}}
+print(json.dumps({
+  'codex': w.resolve_extractor_argv(cfg, 'codex'),
+  'claude': w.resolve_extractor_argv(cfg, 'claude'),
+  'unknown': w.resolve_extractor_argv(cfg, 'unknown'),
+}))
 `;
-  const [primary, fallback] = JSON.parse(execFileSync('python3', ['-c', code], { cwd: process.cwd(), encoding: 'utf8' }));
-  assert.deepEqual(primary, ['python3', 'legacy.py']);
-  assert.equal(fallback, null);
+  const out = JSON.parse(execFileSync('python3', ['-c', code], { cwd: process.cwd(), encoding: 'utf8' }));
+  assert.deepEqual(out.codex, ['python3', 'custom.py'], 'the named engine still resolves');
+  assert.equal(out.claude, null, 'a legacy global argv must not run for an unconfigured engine');
+  assert.equal(out.unknown, null, 'the unknown sentinel never inherits somebody else argv');
 });
 
 test('resolver keeps explicit engine backend ahead of built-in backend', () => {
@@ -418,12 +422,11 @@ test('resolver keeps explicit engine backend ahead of built-in backend', () => {
 import json, sys
 sys.path.insert(0, 'core')
 import wiki_compile_worker as w
-cfg = {'extractor': {'dispatch': 'by-engine', 'backends': {'codex': ['python3', 'custom.py']}, 'builtins': ['codex'], 'default': ['python3', 'fallback.py']}}
+cfg = {'extractor': {'backends': {'codex': ['python3', 'custom.py']}, 'builtins': ['codex']}}
 print(json.dumps(w.resolve_extractor_argv(cfg, 'codex')))
 `;
-  const [primary, fallback] = JSON.parse(execFileSync('python3', ['-c', code], { cwd: process.cwd(), encoding: 'utf8' }));
+  const primary = JSON.parse(execFileSync('python3', ['-c', code], { cwd: process.cwd(), encoding: 'utf8' }));
   assert.deepEqual(primary, ['python3', 'custom.py']);
-  assert.deepEqual(fallback, ['python3', 'fallback.py']);
 });
 
 test('resolver maps built-in engine to adapter path from worker location without plugin env', () => {
@@ -433,8 +436,8 @@ os.environ.pop('CLAUDE_PLUGIN_ROOT', None)
 os.environ.pop('PLUGIN_ROOT', None)
 sys.path.insert(0, 'core')
 import wiki_compile_worker as w
-cfg = {'extractor': {'dispatch': 'by-engine', 'backends': {}, 'builtins': ['codex'], 'default': []}}
-print(json.dumps({'primary': w.resolve_extractor_argv(cfg, 'codex')[0], 'executable': sys.executable}))
+cfg = {'extractor': {'backends': {}, 'builtins': ['codex']}}
+print(json.dumps({'primary': w.resolve_extractor_argv(cfg, 'codex'), 'executable': sys.executable}))
 `;
   const out = JSON.parse(execFileSync('python3', ['-c', code], { cwd: process.cwd(), encoding: 'utf8' }));
   assert.deepEqual(out.primary, [out.executable, join(process.cwd(), 'core', 'extractors', 'codex_adapter.py')]);
@@ -445,7 +448,7 @@ test('dispatch picks the adapter for payload.engine', () => {
   const marker = join(dir, 'which.txt');
   const codexAd = join(dir, 'codex.py');
   writeFileSync(codexAd, `#!/usr/bin/env python3\nimport json,sys\nopen(${JSON.stringify(marker)},'w').write('codex')\nprint(json.dumps({'candidates':[{'title':'T','summary':'Durable: dispatch chose codex adapter for this edit.','suggestedType':'concept','confidence':'high','targetPath':'.auto-context/wiki/concepts/t.md'}]}))\n`);
-  const project = setupProject({ extractor: { dispatch: 'by-engine', backends: { codex: ['python3', codexAd] }, default: [], timeout: 30 } });
+  const project = setupProject({ extractor: { backends: { codex: ['python3', codexAd] }, timeout: 30 } });
   // queue row uses engine 'claude' by default in setupProject; rewrite to codex
   writeFileSync(join(project, '.auto-context', 'compile', 'source-queue.jsonl'),
     JSON.stringify({ ts: '2026-06-26T00:00:00Z', trigger: 'post_tool_source', engine: 'codex', cwd: project, source: { kind: 'file', path: 'docs/source.md', collection: 'proj-docs' } }) + '\n');
@@ -455,81 +458,82 @@ test('dispatch picks the adapter for payload.engine', () => {
   } finally { removeTemp(project); }
 });
 
-test('non-executable primary (PermissionError) does NOT trigger fallback', () => {
+// `extractor.default` is gone, so "does the fallback run?" is no longer the question. What
+// still separates these two failures is the DISPOSITION of the job, and getting it wrong is
+// what the 127 sentinel exists for: absent CLI must not burn a cooldown, and a runtime
+// failure must not be retried immediately.
+test('non-executable backend (PermissionError) is transient: cooldown + job preserved', () => {
   const dir = mkdtempSync(join(tmpdir(), 'adapter-'));
   // primary exists but is not executable -> subprocess raises PermissionError, NOT FileNotFoundError
   const nonExec = join(dir, 'primary-noexec');
   writeFileSync(nonExec, '#!/usr/bin/env bash\necho noop\n', { mode: 0o644 });
-  const fallback = join(dir, 'fallback.py');
-  writeFileSync(fallback, `#!/usr/bin/env python3\nimport json\nprint(json.dumps({'candidates':[{'title':'FB','summary':'Durable: fallback must NOT run on a runtime failure.','suggestedType':'concept','confidence':'high','targetPath':'.auto-context/wiki/concepts/fb.md'}]}))\n`);
-  const project = setupProject({ extractor: { dispatch: 'by-engine', backends: { claude: [nonExec] }, default: ['python3', fallback], timeout: 30 } });
+  const project = setupProject({ extractor: { backends: { claude: [nonExec] }, timeout: 30, cooldownSeconds: 600 } });
   try {
     runWorker(project);
-    // fallback must NOT have run (no double LLM call on a non-127 runtime failure)
-    assert.equal(existsSync(join(project, '.auto-context', 'wiki', 'concepts', 'fb.md')), false);
+    assert.equal(existsSync(join(project, '.auto-context', 'wiki', 'concepts')), false, 'no card from a failed run');
+    const rows = jsonl(join(project, '.auto-context', 'compile', 'candidates.jsonl'));
+    assert.equal(rows.at(-1).action, 'extractor_failed');
+    assert.equal(rows.at(-1).reason, 'extractor_failed', 'not classified as "CLI absent"');
+    // Runtime failure: back off before spending again, but keep the job.
+    assert.equal(existsSync(join(project, '.auto-context', 'compile', 'cooldown')), true);
+    assert.match(readFileSync(join(project, '.auto-context', 'compile', 'source-queue.jsonl'), 'utf8'), /docs\/source.md/);
   } finally { removeTemp(project); }
 });
 
-test('dispatch falls back to default only when primary CLI is absent (exit 127)', () => {
+// Replaces "dispatch falls back to default only when primary CLI is absent (exit 127)".
+test('exit 127 preserves the job for when the CLI is installed (no silent drop)', () => {
   const dir = mkdtempSync(join(tmpdir(), 'adapter-'));
   const absent = join(dir, 'absent.py');
   writeFileSync(absent, `#!/usr/bin/env python3\nimport sys\nsys.exit(127)\n`);
-  const fallback = join(dir, 'fallback.py');
-  writeFileSync(fallback, `#!/usr/bin/env python3\nimport json,sys\nprint(json.dumps({'candidates':[{'title':'FB','summary':'Durable: default backend handled the edit after primary was absent.','suggestedType':'concept','confidence':'high','targetPath':'.auto-context/wiki/concepts/fb.md'}]}))\n`);
-  const project = setupProject({ extractor: { dispatch: 'by-engine', backends: { claude: ['python3', absent] }, default: ['python3', fallback], timeout: 30 } });
+  const project = setupProject({ extractor: { backends: { claude: ['python3', absent] }, timeout: 30, cooldownSeconds: 600 } });
   try {
     runWorker(project);
-    assert.equal(existsSync(join(project, '.auto-context', 'wiki', 'concepts', 'fb.md')), true);
+    const rows = jsonl(join(project, '.auto-context', 'compile', 'candidates.jsonl'));
+    assert.equal(rows.at(-1).action, 'needs_extractor');
+    assert.equal(rows.at(-1).reason, 'extractor_unavailable');
+    assert.match(readFileSync(join(project, '.auto-context', 'compile', 'source-queue.jsonl'), 'utf8'), /docs\/source.md/,
+      'the job waits for the CLI instead of being dropped');
+    // A missing CLI is not a rate limit: it must not arm the cooldown, so the run right
+    // after the install picks the job straight up.
+    assert.equal(existsSync(join(project, '.auto-context', 'compile', 'cooldown')), false);
   } finally { removeTemp(project); }
 });
 
-test('generation fallback audits the argv that actually ran for builtin/custom switches', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'adapter-effort-fallback-'));
-  const python = execFileSync('python3', ['-c', 'import sys; print(sys.executable)'], {
-    encoding: 'utf8',
-  }).trim();
-  const builtin = join(process.cwd(), 'core', 'extractors', 'claude_adapter.py');
+// Replaces "generation fallback audits the argv that actually ran for builtin/custom
+// switches". There is no builtin↔default switch left to audit across, but the property the
+// old test protected survives verbatim: `capabilityDeclared` is derived from the argv that
+// is about to run, so a custom backend cannot inherit the bundled adapter's reasoning-effort
+// capability just by claiming it in its output.
+test('effort audit follows the argv that ran: custom backend cannot claim builtin capability', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'adapter-effort-audit-'));
   const custom = join(dir, 'custom.py');
   writeFileSync(custom, `#!/usr/bin/env python3
 import json, sys
 title = sys.argv[1]
-print(json.dumps({'candidates': [{'title': title, 'summary': 'Durable: fallback audit records the extractor that actually ran.', 'suggestedType': 'concept', 'confidence': 'high', 'targetPath': '.auto-context/wiki/concepts/' + title.lower().replace(' ', '-') + '.md'}], '_qmd': {'reasoningEffort': {'requested': 'high', 'applied': 'high', 'status': 'applied', 'reason': 'capability_flag'}}}))
+print(json.dumps({'candidates': [{'title': title, 'summary': 'Durable: the effort audit records the extractor that actually ran.', 'suggestedType': 'concept', 'confidence': 'high', 'targetPath': '.auto-context/wiki/concepts/' + title.lower().replace(' ', '-') + '.md'}], '_qmd': {'reasoningEffort': {'requested': 'high', 'applied': 'high', 'status': 'applied', 'reason': 'capability_flag'}}}))
 `);
-  const absent = join(dir, 'absent.py');
-  writeFileSync(absent, '#!/usr/bin/env python3\nimport sys\nsys.exit(127)\n');
   const hostCli = join(dir, 'fake-claude');
   writeFileSync(hostCli, `#!/usr/bin/env python3
 import json
-print(json.dumps({'candidates': [{'title': 'Custom to Builtin', 'summary': 'Durable: builtin fallback audit preserves capability support.', 'suggestedType': 'concept', 'confidence': 'high', 'targetPath': '.auto-context/wiki/concepts/custom-to-builtin.md'}]}))
+print(json.dumps({'candidates': [{'title': 'Builtin Adapter Card', 'summary': 'Durable: the builtin adapter audit preserves capability support.', 'suggestedType': 'concept', 'confidence': 'high', 'targetPath': '.auto-context/wiki/concepts/builtin-adapter-card.md'}]}))
 `, { mode: 0o755 });
 
-  const compile = {
-    dispatch: 'by-engine',
-    backends: {},
-    builtins: ['claude'],
-    default: [],
-    timeout: 30,
-  };
   const reasoningEffort = { generation: 'high', verify: 'medium', semanticDedup: 'medium', engines: {} };
   const projects = [
+    // Custom backend: it SAYS applied/capability_flag, but the worker never declared the
+    // capability for this argv, so the audit must record `unsupported`.
     setupProject({
-      extractor: {
-        ...compile,
-        default: ['python3', custom, 'Builtin to Custom'],
-      },
+      extractor: { backends: { claude: ['python3', custom, 'Custom Backend Card'] }, timeout: 30 },
       reasoningEffort,
     }),
+    // Bundled adapter for the same engine: capability declared, effort applied.
     setupProject({
-      extractor: {
-        ...compile,
-        backends: { claude: ['python3', absent] },
-        default: [python, builtin],
-      },
+      extractor: { backends: {}, builtins: ['claude'], timeout: 30 },
       reasoningEffort,
     }),
   ];
   try {
-    runWorker(projects[0], { QMD_EXTRACTOR_CLAUDE_BIN: join(dir, 'missing-claude') });
+    runWorker(projects[0]);
     runWorker(projects[1], { QMD_EXTRACTOR_CLAUDE_BIN: hostCli });
     const first = jsonl(join(projects[0], '.auto-context', 'compile', 'candidates.jsonl'))
       .find((row) => row.action === 'created');
@@ -550,7 +554,7 @@ print(json.dumps({'candidates': [{'title': 'Custom to Builtin', 'summary': 'Dura
 test('transient extractor failure sets cooldown and preserves the job', () => {
   const ex = join(mkdtempSync(join(tmpdir(), 'extractor-')), 'fail.py');
   writeFileSync(ex, `#!/usr/bin/env python3\nimport sys\nsys.stderr.write('rate limited')\nsys.exit(1)\n`);
-  const project = setupProject({ extractor: { argv: ['python3', ex], timeout: 30, cooldownSeconds: 600 } });
+  const project = setupProject({ extractor: { backends: { claude: ['python3', ex] }, timeout: 30, cooldownSeconds: 600 } });
   try {
     runWorker(project);
     assert.equal(existsSync(join(project, '.auto-context', 'compile', 'cooldown')), true);
@@ -561,7 +565,7 @@ test('transient extractor failure sets cooldown and preserves the job', () => {
 test('active cooldown skips extraction entirely', () => {
   const ex = join(mkdtempSync(join(tmpdir(), 'extractor-')), 'should-not-run.py');
   writeFileSync(ex, `#!/usr/bin/env python3\nimport sys\nopen('${join(tmpdir(), 'ran-marker-DUMMY')}','w')\nsys.exit(0)\n`);
-  const project = setupProject({ extractor: { argv: ['python3', ex], timeout: 30 } });
+  const project = setupProject({ extractor: { backends: { claude: ['python3', ex] }, timeout: 30 } });
   // pre-write a cooldown far in the future
   writeFileSync(join(project, '.auto-context', 'compile', 'cooldown'), String(Date.now() / 1000 + 9999));
   try {
@@ -575,7 +579,7 @@ test('active cooldown skips extraction entirely', () => {
 test('debounce: recent single edit under idle window is not processed yet', () => {
   const ex = join(mkdtempSync(join(tmpdir(), 'extractor-')), 'ok.py');
   writeFileSync(ex, `#!/usr/bin/env python3\nimport json,sys\nprint(json.dumps({'candidates':[{'title':'X','summary':'Durable: should not run while batch is still settling.','suggestedType':'concept','confidence':'high','targetPath':'.auto-context/wiki/concepts/x.md'}]}))\n`);
-  const project = setupProject({ extractor: { argv: ['python3', ex], timeout: 30 }, batch: { idleSeconds: 9999, maxItems: 5 } });
+  const project = setupProject({ extractor: { backends: { claude: ['python3', ex] }, timeout: 30 }, batch: { idleSeconds: 9999, maxItems: 5 } });
   // overwrite queue row with a fresh ts (now)
   writeFileSync(join(project, '.auto-context', 'compile', 'source-queue.jsonl'),
     JSON.stringify({ ts: new Date().toISOString().replace(/\.\d+Z$/, 'Z'), trigger: 'post_tool_source', engine: 'claude', cwd: project, source: { kind: 'file', path: 'docs/source.md', collection: 'proj-docs' } }) + '\n');
@@ -603,7 +607,7 @@ test('debounce: fresh single edit reports the remaining wake delay', () => {
 test('--flush-all processes even under idle window', () => {
   const ex = join(mkdtempSync(join(tmpdir(), 'extractor-')), 'ok.py');
   writeFileSync(ex, `#!/usr/bin/env python3\nimport json,sys\nprint(json.dumps({'candidates':[{'title':'F','summary':'Durable: flush-all forced extraction past the idle gate.','suggestedType':'concept','confidence':'high','targetPath':'.auto-context/wiki/concepts/f.md'}]}))\n`);
-  const project = setupProject({ extractor: { argv: ['python3', ex], timeout: 30 }, batch: { idleSeconds: 9999, maxItems: 99 } });
+  const project = setupProject({ extractor: { backends: { claude: ['python3', ex] }, timeout: 30 }, batch: { idleSeconds: 9999, maxItems: 99 } });
   writeFileSync(join(project, '.auto-context', 'compile', 'source-queue.jsonl'),
     JSON.stringify({ ts: new Date().toISOString().replace(/\.\d+Z$/, 'Z'), trigger: 'post_tool_source', engine: 'claude', cwd: project, source: { kind: 'file', path: 'docs/source.md', collection: 'proj-docs' } }) + '\n');
   try {
@@ -618,7 +622,7 @@ test('dedup: repeated edits of same path collapse to one extraction', () => {
   writeFileSync(ex, `#!/usr/bin/env python3\nimport json,sys,os\np=${JSON.stringify(counter)}\nn=int(open(p).read()) if os.path.exists(p) else 0\nopen(p,'w').write(str(n+1))\nprint(json.dumps({'candidates':[{'title':'X','summary':'Durable: deduped repeated edits into a single extraction.','suggestedType':'concept','confidence':'high','targetPath':'.auto-context/wiki/concepts/x.md'}]}))\n`);
   // verify 비활성: 이 테스트는 compile dedup 카운트 검증이 목적 — verify 피기백이 같은
   // argv를 verifier로 재호출하면 카운터가 오염된다.
-  const project = setupProject({ extractor: { argv: ['python3', ex], timeout: 30 }, batch: { idleSeconds: 0, maxItems: 1 }, verify: { enabled: false } });
+  const project = setupProject({ extractor: { backends: { claude: ['python3', ex] }, timeout: 30 }, batch: { idleSeconds: 0, maxItems: 1 }, verify: { enabled: false } });
   const row = (ts) => JSON.stringify({ ts, trigger: 'post_tool_source', engine: 'claude', cwd: project, source: { kind: 'file', path: 'docs/source.md', collection: 'proj-docs' } });
   writeFileSync(join(project, '.auto-context', 'compile', 'source-queue.jsonl'),
     row('2026-06-26T00:00:00Z') + '\n' + row('2026-06-26T00:00:01Z') + '\n' + row('2026-06-26T00:00:02Z') + '\n');
@@ -648,8 +652,9 @@ cfg = found['config']
 wiki_root = (root / cfg.get('wikiPath', '.auto-context/wiki')).resolve()
 compile_cfg = cfg.get('compile', {})
 content = Path(${JSON.stringify(contentPath)}).read_text(encoding='utf-8')
-semantic = compile_cfg.get('semanticDedup', {})
-result = w.gather_similar_pages(root, wiki_root, cfg, compile_cfg, content, semantic.get('topK', 3), semantic.get('similarPageMaxChars', 12000))
+# topK/similarPageMaxChars are module constants now, not settings -- call the way
+# process_job does so the probe cannot drift from the production call site.
+result = w.gather_similar_pages(root, wiki_root, cfg, compile_cfg, content, qmd_config.DEDUP_TOP_K, qmd_config.DEDUP_SIMILAR_PAGE_MAX_CHARS)
 print(json.dumps(result, ensure_ascii=False))
 `;
   return execFileSync('python3', ['-c', script], { encoding: 'utf8', env: { ...process.env, ...env } }).trim();
@@ -672,8 +677,9 @@ cfg = found['config']
 wiki_root = (root / cfg.get('wikiPath', '.auto-context/wiki')).resolve()
 compile_cfg = cfg.get('compile', {})
 content = Path(${JSON.stringify(contentPath)}).read_text(encoding='utf-8')
-semantic = compile_cfg.get('semanticDedup', {})
-result = w.gather_similar_pages(root, wiki_root, cfg, compile_cfg, content, semantic.get('topK', 3), semantic.get('similarPageMaxChars', 12000))
+# topK/similarPageMaxChars are module constants now, not settings -- call the way
+# process_job does so the probe cannot drift from the production call site.
+result = w.gather_similar_pages(root, wiki_root, cfg, compile_cfg, content, qmd_config.DEDUP_TOP_K, qmd_config.DEDUP_SIMILAR_PAGE_MAX_CHARS)
 print(json.dumps(result, ensure_ascii=False))
 `;
   return new Promise((resolve, reject) => {
@@ -897,7 +903,7 @@ payload = json.loads(sys.stdin.read())
 open(${JSON.stringify(dump)}, 'w').write(json.dumps(payload['wiki']))
 print(json.dumps({'candidates': []}))
 `);
-  const project = setupProject({ extractor: { argv: ['python3', extractor], timeout: 30 } });
+  const project = setupProject({ extractor: { backends: { claude: ['python3', extractor] }, timeout: 30 } });
   try {
     mkdirSync(join(project, '.auto-context', 'wiki', 'entities'), { recursive: true });
     writeFileSync(join(project, '.auto-context', 'wiki', 'entities', 'known.md'), [
@@ -930,7 +936,7 @@ payload = json.loads(sys.stdin.read())
 open(${JSON.stringify(dump)}, 'w').write(json.dumps(payload['wiki']))
 print(json.dumps({'candidates': []}))
 `);
-  const project = setupProject({ extractor: { argv: ['python3', extractor], timeout: 30 } });
+  const project = setupProject({ extractor: { backends: { claude: ['python3', extractor] }, timeout: 30 } });
   try {
     // No QMD_QUERY_FIXTURE at all and no daemon running: query_wiki_similar fails open to None.
     runWorker(project);
@@ -965,7 +971,7 @@ else:
   // 백엔드는 claude 하나 — 위조가 통하면 producing이 "unknown-x"가 되어 귀속 불가로
   // 읽히고, 통하지 않으면 job의 claude가 그대로 self 자기검증으로 기록된다.
   const project = setupProject({
-    extractor: { dispatch: 'by-engine', backends: { claude: ['python3', forging] }, timeout: 30 },
+    extractor: { backends: { claude: ['python3', forging] }, timeout: 30 },
     semanticDedup: { enabled: false },
     verify: { enabled: true },
   });
@@ -1010,7 +1016,7 @@ else:
     }]}))
 `);
   const project = setupProject({
-    extractor: { dispatch: 'by-engine', backends: { claude: ['python3', dual] }, timeout: 30 },
+    extractor: { backends: { claude: ['python3', dual] }, timeout: 30 },
     semanticDedup: { enabled: false },
     verify: { enabled: true },
   });
@@ -1062,7 +1068,7 @@ print(json.dumps({'candidates': [{
 }]}))
 `);
   const project = setupProject({
-    extractor: { argv: ['python3', extractor], timeout: 30 },
+    extractor: { backends: { claude: ['python3', extractor] }, timeout: 30 },
     semanticDedup: { enabled: false },
     verify: { enabled: false },
   });

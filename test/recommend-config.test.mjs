@@ -69,9 +69,10 @@ test('recommended config wires wiki + compile by default', () => {
     const cfg = JSON.parse(out).config;
     assert.ok(cfg.collections.some((c) => c.endsWith('-wiki')));
     assert.equal(cfg.collectionRoles[cfg.collections.find((c) => c.endsWith('-wiki'))], 'wiki');
-    assert.equal(cfg.compile.extractor.dispatch, 'by-engine');
-    assert.deepEqual(cfg.compile.extractor.backends, {});
+    // 활성화는 mode 하나, 엔진 해석은 builtins 하나 (dispatch 게이트는 제거됐다).
+    assert.equal(cfg.compile.mode, 'auto-wiki');
     assert.deepEqual(cfg.compile.extractor.builtins, ['claude', 'codex', 'hermes']);
+    assert.equal(cfg.compile.extractor.backends, undefined);
     assert.doesNotMatch(JSON.stringify(cfg.compile), /core\/extractors|_adapter\.py/);
     assert.ok(cfg.compile.triggers.includes('post_tool_source'));
     // delta-only: 기본값과 같은 recallStrategy/reasoningEffort는 추천 config에 넣지 않는다.
@@ -84,6 +85,8 @@ import config as qmd_config
 print(json.dumps(qmd_config.normalize_config(json.loads(sys.argv[1])), ensure_ascii=False))`,
     JSON.stringify(cfg)], { cwd: process.cwd(), encoding: 'utf8' }));
     assert.equal(eff.recallStrategy, 'hierarchical');
+    assert.equal(eff.compile.mode, 'auto-wiki');
+    assert.deepEqual(eff.compile.extractor.backends, {});
     assert.deepEqual(eff.compile.reasoningEffort, {
       generation: 'low', verify: 'medium', semanticDedup: 'medium', engines: {},
     });

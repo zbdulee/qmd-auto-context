@@ -21,13 +21,8 @@ function writeSettings(work, compile = {}) {
     collectionRoles: { 'proj-wiki': 'wiki' },
     wikiPath: '.auto-context/wiki',
     compile: {
-      enabled: true,
       mode: 'auto-wiki',
-      autoWrite: true,
       defaultStatus: 'generated',
-      candidatePath: '.auto-context/compile/candidates.jsonl',
-      tombstonePath: '.auto-context/compile/tombstones.jsonl',
-      manifestPath: '.auto-context/compile/generated-manifest.jsonl',
       ...compile,
     },
   }));

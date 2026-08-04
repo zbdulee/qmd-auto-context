@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.resolve()))
+import compile_paths as cp
 import config as qmd_config
 import cooldown as qmd_cooldown
 import dirty_queue
@@ -353,7 +354,7 @@ def enqueue_compile_sources(project_root, config, changed_files, snapshot, previ
     compile_cfg = compile_enqueue.compile_gate(config, COMPILE_ACCEPTED_TRIGGERS)
     if compile_cfg is None:
         return {"queued": 0, "deferred": 0, "reason": "compile_disabled"}
-    queue_path = compile_enqueue._safe_queue_path(project_root, compile_cfg.get("sourceQueuePath"))
+    queue_path = compile_enqueue._safe_queue_path(project_root, cp.rel(cp.SOURCE_QUEUE))
     if queue_path is None:
         return {"queued": 0, "deferred": 0, "reason": "queue_path_rejected"}
     candidates = compile_candidates(project_root, config, compile_cfg, changed_files)

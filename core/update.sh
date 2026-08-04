@@ -1047,21 +1047,13 @@ PY
   # Write-time semantic gate merge-review hint: same shape as the dedup hint
   # above, but for merge-needed.jsonl -- the queue core/wiki_compile.py
   # populates when a new candidate looks similar to an existing page instead
-  # of auto-writing it. Cheap file test + text extraction only, no daemon call.
-  # Unlike dedup-needed.jsonl (intentionally hardcoded), this path is
-  # configurable (compile.mergeNeededPath) and already read as such by both
-  # the producer (wiki_compile.py) and consumer (wiki_review.py) -- reuse the
-  # already-loaded $config_json rather than hardcode the default here too.
-  merge_needed_rel="$(printf '%s' "$config_json" | python3 -c 'import json,sys
-try:
-    cfg = json.load(sys.stdin)
-except Exception:
-    cfg = {}
-compile_cfg = cfg.get("compile") if isinstance(cfg.get("compile"), dict) else {}
-rel = compile_cfg.get("mergeNeededPath")
-print(rel if isinstance(rel, str) and rel else ".auto-context/compile/merge-needed.jsonl")' 2>/dev/null)"
-  [ -z "$merge_needed_rel" ] && merge_needed_rel=".auto-context/compile/merge-needed.jsonl"
-  merge_queue="$workdir/$merge_needed_rel"
+  # of auto-writing it. Cheap file test only, no daemon call and no python.
+  # The location is a constant now (core/compile_paths.py :: MERGE_NEEDED); the
+  # old `compile.mergeNeededPath` setting is gone, so the producer
+  # (wiki_compile.py), the consumer (wiki_review.py) and this hint all read the
+  # same literal. Keep this string in sync with that table -- if it drifts, the
+  # review notice goes silent with no other symptom.
+  merge_queue="$workdir/.auto-context/compile/merge-needed.jsonl"
   if [ -s "$merge_queue" ]; then
     # Symmetric with the dedup hint above: (a) user-facing notice so the human
     # sees the backlog and can trigger the `wiki-review` skill, (b) model-facing
@@ -1118,7 +1110,7 @@ found = c.find_project_config(sys.argv[2])
 cfg = found["config"]
 compile_cfg = cfg.get("compile") if isinstance(cfg.get("compile"), dict) else {}
 vcfg = v.verify_cfg_of(compile_cfg)
-if not compile_cfg.get("enabled") or not vcfg.get("enabled", True):
+if not c.compile_active(compile_cfg) or not vcfg.get("enabled", True):
     print("")
 else:
     import pathlib
@@ -1127,10 +1119,10 @@ else:
 ' "$(dirname "$0")" "$workdir" 2>/dev/null || true)"
     case "$ledger_blocked" in
       audit_ledger_unwritable)
-        notice_once verify-ledger "$workdir" "[qmd] 기계 검수 중단 — 삭제 감사 원장(.auto-context/compile/verify-deleted.jsonl)에 쓸 수 없습니다. 새 wiki 카드가 검수되지 않아 recall에 나오지 않습니다. compile 디렉터리 권한과 compile.verify.deletedPath 설정을 확인하세요."
+        notice_once verify-ledger "$workdir" "[qmd] 기계 검수 중단 — 삭제 감사 원장(.auto-context/compile/verify-deleted.jsonl)에 쓸 수 없습니다. 새 wiki 카드가 검수되지 않아 recall에 나오지 않습니다. compile 디렉터리 권한(.auto-context/compile)을 확인하세요."
         ;;
       suppression_ledger_unwritable)
-        notice_once verify-ledger "$workdir" "[qmd] 기계 검수 중단 — 억제 원장(.auto-context/compile/verify-skipped.jsonl)에 쓸 수 없습니다. 이 원장 없이 inconclusive 삭제를 진행하면 같은 소스가 반복 재컴파일되어 유료 호출이 되풀이됩니다. compile 디렉터리 권한과 compile.verify.skippedPath 설정을 확인하세요."
+        notice_once verify-ledger "$workdir" "[qmd] 기계 검수 중단 — 억제 원장(.auto-context/compile/verify-skipped.jsonl)에 쓸 수 없습니다. 이 원장 없이 inconclusive 삭제를 진행하면 같은 소스가 반복 재컴파일되어 유료 호출이 되풀이됩니다. compile 디렉터리 권한(.auto-context/compile)을 확인하세요."
         ;;
       *)
         notice_clear verify-ledger "$workdir"
@@ -1540,13 +1532,9 @@ config["collectionRoles"] = collection_roles
 config.pop("recallStrategy", None)
 if preset == "novel":
     compile_config = config.get("compile") if isinstance(config.get("compile"), dict) else {}
-    # 기본값과 다른 키만 채운다. defaultStatus·requireReviewForCanon·candidatePath·
-    # tombstonePath·manifestPath·excludeStatusesFromRecall·lowPriorityStatuses·
-    # maxAutoPageLines는 전부 DEFAULT_CONFIG와 같은 값이라 setdefault해도 effective가
-    # 바뀌지 않는다(동결 테스트가 이 등가를 못박는다).
-    compile_config.setdefault("enabled", True)
+    # 기본값과 다른 키만 채운다(생성기 delta-only). 활성화는 `mode` 한 값이 담당한다 —
+    # `enabled`·`autoWrite`는 스키마에서 사라졌으므로 쓰면 정규화에서 무시되는 죽은 키다.
     compile_config.setdefault("mode", "auto-wiki")
-    compile_config.setdefault("autoWrite", True)
     # post_session_summary는 host가 compact session summary를 hook에 넘겨줄 때만
     # 자동으로 발화할 수 있고 그런 host가 아직 없다(수동 skills/wiki-compile 경로의
     # 라벨로만 소비된다). 자동 수집을 실제로 담당하는 트리거는 post_tool_source이므로

@@ -1,16 +1,20 @@
-// compile 활성 게이트 6곳의 **현재** 동작을 입력 조합별로 못박는다.
+// compile 활성 게이트 6곳의 동작을 입력 조합별로 못박는다.
 //
 // 스키마 정리 리팩터(`docs/plans/2026-08-03-settings-schema-consolidation.md` §2)가
-// `compile.enabled` + `compile.autoWrite`를 `compile.mode` 한 값으로 접는다. 게이트는
-// 6곳인데 **판정이 균일하지 않다**:
+// `compile.enabled` + `compile.autoWrite`를 `compile.mode` 한 값으로 접었다. 리팩터 **전**
+// 에는 게이트 6곳의 판정이 균일하지 않았다:
 //
 //   - `wiki_compile_enqueue.py` · `wiki_compile_worker.py` · `wiki_compile.py` ·
 //     `wiki_verify_worker.py` → `enabled` AND `mode != "off"`
 //   - `wiki_dedup_scan.py:310` · `update.sh:1121`(bash) → **`enabled`만** 보고 `mode`는 무시
 //
-// 그 비대칭 때문에 `enabled:true + mode:"off"`에서 뒤 둘은 **돌고** 앞 넷은 멈춘다.
-// 계획이 명시한 유일한 비보존 지점이므로(§2 ※) 여기 표에 그대로 담는다 — 리팩터 후
-// 이 파일을 새 입력으로 갱신했을 때 **그 칸 말고 다른 칸의 답이 바뀌면 회귀**다.
+// 그 비대칭 때문에 `enabled:true + mode:"off"`에서 뒤 둘은 **돌고** 앞 넷은 멈췄다. 이제
+// 판정은 `config.compile_active`(= `mode != "off"`) 하나이므로 그 칸이 전부 skip으로 바뀐다
+// — 계획 §2 ※가 명시한 **유일한** 비보존 지점이다.
+//
+// 이 파일의 계약: 아래 각 행은 `legacy`(리팩터 전 raw 입력)와 `compile`(§2 진리표로
+// 마이그레이션한 새 입력)을 함께 들고, 기대 결과는 리팩터 전 값을 그대로 유지한다.
+// **`legacyOnly` 표시가 붙은 칸 말고 다른 칸의 답이 바뀌면 회귀다.**
 //
 // 판정을 JS로 재구현하지 않는다. 각 게이트는 실제 모듈/스크립트를 임시 프로젝트에 대해
 // 실행하고 "일이 통과했는가"를 관측 가능한 부작용으로 읽는다(큐 줄 · stdout JSON ·
@@ -32,23 +36,34 @@ process.env.QMD_SKIP_BACKGROUND_EMBED = '1';
 
 // --- 입력 조합 ---------------------------------------------------------------
 //
-// `config.compile_config`가 정규화 단계에서 이미 접는 것이 있다(`enabled:false` →
-// `mode:"off"` 강제, `COMPILE_MODES` 밖 값 → `"off"`). 그래서 raw 12조합이 도달하는
-// 정규화 상태는 5개뿐이고, 그 접힘 자체도 리팩터가 건드리는 표면이라 아래 별도
-// 테스트에서 36조합 전수로 따로 단정한다.
+// 행 하나 = 리팩터 전 raw 조합 하나. `legacy`는 그 조합을 그대로 적어 두고(기대 결과가
+// 어느 세계의 관측인지 추적 가능하게), `compile`은 §2 진리표가 지정한 마이그레이션
+// 결과다. 게이트에 실제로 먹이는 것은 `compile`이다.
+//
+// 진리표(§2): enabled false/부재 → off · enabled true + mode off/무효/부재 → off ·
+// enabled true + candidates → candidates · true+guarded/auto-wiki + autoWrite true →
+// 그대로 · autoWrite false → candidates.
 const SCENARIOS = [
-  { id: 'compile-absent', compile: undefined },
-  { id: 'enabled-false', compile: { enabled: false, mode: 'auto-wiki', autoWrite: true } },
-  { id: 'enabled-absent', compile: { mode: 'auto-wiki', autoWrite: true } },
-  { id: 'enabled-true+mode-off', compile: { enabled: true, mode: 'off', autoWrite: true } },
-  { id: 'enabled-true+mode-invalid', compile: { enabled: true, mode: 'bogus', autoWrite: true } },
-  { id: 'enabled-true+mode-absent', compile: { enabled: true, autoWrite: true } },
-  { id: 'candidates+autoWrite-true', compile: { enabled: true, mode: 'candidates', autoWrite: true } },
-  { id: 'candidates+autoWrite-false', compile: { enabled: true, mode: 'candidates', autoWrite: false } },
-  { id: 'guarded+autoWrite-true', compile: { enabled: true, mode: 'guarded', autoWrite: true } },
-  { id: 'guarded+autoWrite-false', compile: { enabled: true, mode: 'guarded', autoWrite: false } },
-  { id: 'auto-wiki+autoWrite-true', compile: { enabled: true, mode: 'auto-wiki', autoWrite: true } },
-  { id: 'auto-wiki+autoWrite-false', compile: { enabled: true, mode: 'auto-wiki', autoWrite: false } },
+  { id: 'compile-absent', legacy: undefined, compile: undefined },
+  { id: 'enabled-false', legacy: { enabled: false, mode: 'auto-wiki', autoWrite: true }, compile: { mode: 'off' } },
+  { id: 'enabled-absent', legacy: { mode: 'auto-wiki', autoWrite: true }, compile: { mode: 'off' } },
+  // ↓ 세 행은 리팩터 전 정규화가 전부 `[enabled:true, mode:"off"]` 한 상태로 접었다
+  //   (`compile_config`가 무효/부재 mode를 off로 강제했다). 즉 §2 ※의 "유일한 비보존
+  //   칸"은 raw 세 줄로 나타나는 **하나의** 정규화 상태다.
+  { id: 'enabled-true+mode-off', legacy: { enabled: true, mode: 'off', autoWrite: true }, compile: { mode: 'off' }, legacyOnly: true },
+  { id: 'enabled-true+mode-invalid', legacy: { enabled: true, mode: 'bogus', autoWrite: true }, compile: { mode: 'off' }, legacyOnly: true },
+  { id: 'enabled-true+mode-absent', legacy: { enabled: true, autoWrite: true }, compile: { mode: 'off' }, legacyOnly: true },
+  { id: 'candidates+autoWrite-true', legacy: { enabled: true, mode: 'candidates', autoWrite: true }, compile: { mode: 'candidates' } },
+  { id: 'candidates+autoWrite-false', legacy: { enabled: true, mode: 'candidates', autoWrite: false }, compile: { mode: 'candidates' } },
+  { id: 'guarded+autoWrite-true', legacy: { enabled: true, mode: 'guarded', autoWrite: true }, compile: { mode: 'guarded' } },
+  { id: 'guarded+autoWrite-false', legacy: { enabled: true, mode: 'guarded', autoWrite: false }, compile: { mode: 'candidates' } },
+  { id: 'auto-wiki+autoWrite-true', legacy: { enabled: true, mode: 'auto-wiki', autoWrite: true }, compile: { mode: 'auto-wiki' } },
+  { id: 'auto-wiki+autoWrite-false', legacy: { enabled: true, mode: 'auto-wiki', autoWrite: false }, compile: { mode: 'candidates' } },
+  // 하위호환은 의도적으로 폐기됐다. 마이그레이션되지 않은 파일이 남아 있을 때 죽은 키가
+  // 게이트를 **되살리거나 죽이지 않는다**는 것을 두 방향으로 못박는다 — 어느 쪽이든
+  // 조용히 틀리면 사용자가 "왜 안 도는가/왜 도는가"를 관측할 방법이 없다.
+  { id: 'dead-keys: enabled-false must not suppress', legacy: null, compile: { enabled: false, autoWrite: false, mode: 'auto-wiki' } },
+  { id: 'dead-keys: enabled-true must not activate', legacy: null, compile: { enabled: true, autoWrite: true, mode: 'off' } },
 ];
 
 // 게이트를 통과했을 때 실제 동작(카드 쓰기·verify 큐잉)까지는 가되, 유료 host CLI가
@@ -176,8 +191,8 @@ const GATES = {
     }
   },
 
-  // 4. core/wiki_dedup_scan.py:310  ← `enabled`만 본다
-  //    관측: dedup.log의 SKIP 줄. 게이트에서 막히면 'compile.enabled is false',
+  // 4. core/wiki_dedup_scan.py:310  ← 리팩터 전에는 `enabled`만 봤다(비대칭의 한쪽)
+  //    관측: dedup.log의 SKIP 줄. 게이트에서 막히면 'compile.mode is off',
   //    통과하면 그 다음 게이트('no wiki collection configured')까지 간다.
   //    wiki collection을 설정하지 않았으므로 데몬에는 닿지 않는다.
   'dedup_scan': (compile) => {
@@ -186,7 +201,7 @@ const GATES = {
     try {
       py('wiki_dedup_scan.py', ['--cwd', dir], childEnv(home, { QMD_DEDUP_LOG: log }));
       const text = existsSync(log) ? readFileSync(log, 'utf8') : '';
-      if (text.includes('SKIP: compile.enabled is false')) return 'skip';
+      if (text.includes('SKIP: compile.mode is off')) return 'skip';
       assert.match(text, /SKIP: no wiki collection configured/, 'dedup scan이 예상 밖 지점에서 멈췄다');
       return 'pass';
     } finally {
@@ -206,7 +221,7 @@ const GATES = {
     }
   },
 
-  // 6. core/update.sh:1121 (bash)  ← `enabled`만 본다
+  // 6. core/update.sh:1121 (bash)  ← 리팩터 전에는 `enabled`만 봤다(비대칭의 다른 쪽)
   //    관측: SessionStart의 verify-ledger notice. compile 디렉터리를 읽기 전용으로 만들면
   //    `preflight_block_reason`이 'audit_ledger_unwritable'을 돌려주고 update.sh가 1줄
   //    알린다. 게이트에서 막히면 python 스니펫이 빈 문자열을 찍어 notice가 없다.
@@ -249,16 +264,21 @@ const EXPECTED = {
   'compile-absent':            ['skip', 'skip', 'skip',      'skip', 'skip', 'skip'],
   'enabled-false':             ['skip', 'skip', 'skip',      'skip', 'skip', 'skip'],
   'enabled-absent':            ['skip', 'skip', 'skip',      'skip', 'skip', 'skip'],
-  // ↓ 계획 §2 ※ — 유일한 비보존 지점. 지금은 뒤 둘만 돈다.
-  'enabled-true+mode-off':     ['skip', 'skip', 'skip',      'pass', 'skip', 'pass'],
-  'enabled-true+mode-invalid': ['skip', 'skip', 'skip',      'pass', 'skip', 'pass'],
-  'enabled-true+mode-absent':  ['skip', 'skip', 'skip',      'pass', 'skip', 'pass'],
+  // ↓ 계획 §2 ※ — 유일한 비보존 칸. 리팩터 전에는 dedup_scan·update_notice만 돌았다
+  //   (`['skip','skip','skip','pass','skip','pass']`). 판정이 하나가 되면서 전부 멈춘다.
+  //   raw 세 줄이지만 리팩터 전 정규화 상태로는 하나(`enabled:true + mode:"off"`)다.
+  'enabled-true+mode-off':     ['skip', 'skip', 'skip',      'skip', 'skip', 'skip'],
+  'enabled-true+mode-invalid': ['skip', 'skip', 'skip',      'skip', 'skip', 'skip'],
+  'enabled-true+mode-absent':  ['skip', 'skip', 'skip',      'skip', 'skip', 'skip'],
   'candidates+autoWrite-true':  ['pass', 'pass', 'candidate', 'pass', 'pass', 'pass'],
   'candidates+autoWrite-false': ['pass', 'pass', 'candidate', 'pass', 'pass', 'pass'],
   'guarded+autoWrite-true':     ['pass', 'pass', 'created',   'pass', 'pass', 'pass'],
   'guarded+autoWrite-false':    ['pass', 'pass', 'candidate', 'pass', 'pass', 'pass'],
   'auto-wiki+autoWrite-true':   ['pass', 'pass', 'created',   'pass', 'pass', 'pass'],
   'auto-wiki+autoWrite-false':  ['pass', 'pass', 'candidate', 'pass', 'pass', 'pass'],
+  // 죽은 키는 어느 방향으로도 게이트를 움직이지 못한다.
+  'dead-keys: enabled-false must not suppress': ['pass', 'pass', 'created', 'pass', 'pass', 'pass'],
+  'dead-keys: enabled-true must not activate':  ['skip', 'skip', 'skip',    'skip', 'skip', 'skip'],
 };
 
 const GATE_NAMES = ['enqueue', 'worker', 'wiki_compile', 'dedup_scan', 'verify_worker', 'update_notice'];
@@ -288,19 +308,20 @@ for (const scenario of SCENARIOS) {
 // `confidence != "high"`인 후보는 auto-write되지 않고 candidate로 강등된다
 // (`wiki_compile.py:1371`). 매트릭스 본체는 confidence='high'로 돌리므로 낮은 쪽을 따로 본다.
 test('guarded는 confidence가 high가 아니면 candidate로 강등한다', () => {
-  const compile = { enabled: true, mode: 'guarded', autoWrite: true };
+  const compile = { mode: 'guarded' };
   assert.equal(GATES.wiki_compile(compile, { confidence: 'high' }), 'created');
   assert.equal(GATES.wiki_compile(compile, { confidence: 'medium' }), 'candidate');
   // auto-wiki는 confidence를 보지 않는다 — 두 모드의 차이가 바로 이것이다.
-  const auto = { enabled: true, mode: 'auto-wiki', autoWrite: true };
-  assert.equal(GATES.wiki_compile(auto, { confidence: 'medium' }), 'created');
+  assert.equal(GATES.wiki_compile({ mode: 'auto-wiki' }, { confidence: 'medium' }), 'created');
 });
 
 // 게이트가 보는 값은 raw가 아니라 `config.compile_config()`가 정규화한 값이다.
-// 그 정규화가 이미 조합을 접고 있으므로(`enabled:false` → mode 강제 off, 무효 mode → off),
-// raw 36조합이 도달하는 상태는 5개뿐이다. 리팩터가 `enabled`를 없애면 이 접힘 로직도
-// 사라지므로, 지금의 접힘을 명시적으로 남겨 마이그레이션 진리표(§2)와 대조할 수 있게 한다.
-test('정규화가 raw 36조합을 5개 상태로 접는다', () => {
+// 리팩터 전에는 이 정규화가 조합을 접었고(`enabled:false` → mode 강제 off, 무효 mode → off)
+// raw 36조합이 도달하는 상태가 5개(× autoWrite 2 = 10줄)였다. 이제 `enabled`·`autoWrite`는
+// 스키마에 없으므로 **mode 하나가 유일한 결정자**이고 도달 상태는 4개다. 두 사실을 함께
+// 단정한다: (1) 제거된 키는 정규화 출력에 존재하지 않고 결과에 영향도 주지 않는다,
+// (2) 마이그레이션 진리표(§2)가 지정한 목표 mode가 실제로 그 mode로 정규화된다.
+test('정규화는 mode 하나만 보고 raw 36조합을 4개 상태로 접는다', () => {
   const script = `import json, sys
 sys.path.insert(0, sys.argv[1])
 import config as qmd_config
@@ -317,35 +338,56 @@ for enabled in (True, False, None):
             n = qmd_config.compile_config(raw)
             out.append({
                 "in": [enabled, mode, auto],
-                "out": [n["enabled"], n["mode"], n["autoWrite"]],
+                "mode": n["mode"],
+                "deadKeys": sorted(k for k in ("enabled", "autoWrite") if k in n),
             })
 print(json.dumps(out))`;
-    const rows = JSON.parse(execFileSync('python3', ['-c', script, CORE], {
-      cwd: REPO_ROOT, encoding: 'utf8',
-    }));
+  const rows = JSON.parse(execFileSync('python3', ['-c', script, CORE], {
+    cwd: REPO_ROOT, encoding: 'utf8',
+  }));
   assert.equal(rows.length, 36);
-  const states = new Set(rows.map((r) => JSON.stringify(r.out)));
-  assert.deepEqual([...states].sort(), [
-    '[false,"off",false]',
-    '[false,"off",true]',
-    '[true,"auto-wiki",false]',
-    '[true,"auto-wiki",true]',
-    '[true,"candidates",false]',
-    '[true,"candidates",true]',
-    '[true,"guarded",false]',
-    '[true,"guarded",true]',
-    '[true,"off",false]',
-    '[true,"off",true]',
-  ].sort());
+  assert.deepEqual(
+    [...new Set(rows.map((r) => r.mode))].sort(),
+    ['auto-wiki', 'candidates', 'guarded', 'off'],
+  );
   for (const row of rows) {
-    const [enabled, mode] = row.in;
-    const expectedMode = enabled === true && ['candidates', 'guarded', 'auto-wiki'].includes(mode)
-      ? mode
-      : 'off';
-    assert.equal(row.out[1], expectedMode, `in=${JSON.stringify(row.in)}`);
-    assert.equal(row.out[0], enabled === true, `in=${JSON.stringify(row.in)} enabled`);
-    // autoWrite는 enabled/mode와 무관하게 그대로 통과한다 — 그래서 `enabled:false`인데
-    // `autoWrite:true`인 상태가 존재하고, 진리표가 그 조합에도 답을 줘야 한다.
-    assert.equal(row.out[2], row.in[2], `in=${JSON.stringify(row.in)} autoWrite`);
+    const [, mode] = row.in;
+    // enabled·autoWrite는 결과에 전혀 관여하지 않는다 — 기대값이 mode만의 함수다.
+    const expectedMode = ['candidates', 'guarded', 'auto-wiki'].includes(mode) ? mode : 'off';
+    assert.equal(row.mode, expectedMode, `in=${JSON.stringify(row.in)}`);
+    // 제거된 키는 정규화 출력에 되살아나지 않는다(되살아나면 소비자가 다시 읽기 시작한다).
+    assert.deepEqual(row.deadKeys, [], `in=${JSON.stringify(row.in)} dead keys leaked`);
+  }
+});
+
+// §2 마이그레이션 진리표 자체를 못박는다. 위 테스트는 "새 스키마가 mode만 본다"이고
+// 이것은 "구 파일을 어떤 mode로 옮겨야 동작이 보존되는가"다 — 후자는 H단계(로컬
+// settings.json 마이그레이션)가 따라야 할 명세이므로 코드와 함께 고정한다.
+test('§2 진리표: 구 (enabled, mode, autoWrite) → 새 mode', () => {
+  const target = (enabled, mode, autoWrite) => {
+    if (enabled !== true) return 'off';
+    if (!['candidates', 'guarded', 'auto-wiki'].includes(mode)) return 'off';
+    if (mode === 'candidates') return 'candidates';
+    return autoWrite === true ? mode : 'candidates';
+  };
+  // 표에 적힌 8행을 그대로 확인한다(대표값 하나씩).
+  assert.equal(target(false, 'auto-wiki', true), 'off');
+  assert.equal(target(undefined, 'auto-wiki', true), 'off');
+  assert.equal(target(true, 'off', true), 'off');
+  assert.equal(target(true, 'bogus', true), 'off');
+  assert.equal(target(true, undefined, true), 'off');
+  assert.equal(target(true, 'candidates', false), 'candidates');
+  assert.equal(target(true, 'auto-wiki', false), 'candidates');
+  assert.equal(target(true, 'auto-wiki', true), 'auto-wiki');
+  assert.equal(target(true, 'guarded', false), 'candidates');
+  assert.equal(target(true, 'guarded', true), 'guarded');
+  // 그리고 SCENARIOS의 legacy → compile 매핑이 표와 어긋나지 않는지 대조한다.
+  for (const s of SCENARIOS) {
+    if (!s.legacy) continue;
+    assert.equal(
+      s.compile.mode,
+      target(s.legacy.enabled, s.legacy.mode, s.legacy.autoWrite),
+      `${s.id}: 마이그레이션 입력이 §2 진리표와 다르다`,
+    );
   }
 });

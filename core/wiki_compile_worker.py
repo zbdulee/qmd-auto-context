@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.resolve()))
+import compile_paths as cp
 import config as qmd_config
 import cooldown as qmd_cooldown
 from collection_match import select_collections
@@ -26,15 +27,27 @@ from wiki_compile_enqueue import _queue_lock_path, _safe_queue_path
 import wiki_compile as wc
 
 
-DEFAULT_SOURCE_QUEUE = ".auto-context/compile/source-queue.jsonl"
+DEFAULT_SOURCE_QUEUE = cp.rel(cp.SOURCE_QUEUE)
 BUILTIN_EXTRACTOR_ENGINES = {"claude", "codex", "hermes"}
 # 후보 식힘 만료의 상한(24h). 손상·주입된 만료값이 후보를 영구히 배제하지 못하게 한다.
 # 정의는 `cooldown.MAX_COOLDOWN_SECS`가 SSOT다(전역 compile/dedup cooldown과 같은 상한 —
 # 리터럴이 두 벌이면 한쪽만 바뀌어 판정이 갈린다). 이 이름은 기존 호출부용 별칭이다.
 MAX_ENGINE_COOLDOWN_SECS = qmd_cooldown.MAX_COOLDOWN_SECS
-# 엔진에 귀속되지 않는 argv(레거시 `extractor.argv`, `extractor.default`)의 cooldown 키.
-# 엔진 라벨로 식히면 실제로 실패한 것은 default argv인데 그 엔진의 adapter까지 막힌다.
+# 엔진 라벨이 없는 후보의 cooldown 키. `extractor.argv`/`extractor.default`(엔진 귀속
+# 불가 argv)가 스키마에서 사라진 뒤 남은 유일한 쓰임은 빈 key에 대한 폴백이다 —
+# `entries[""]`가 되면 그 항목이 "모든 엔진"처럼 읽히므로 이름을 붙여 둔다.
 UNATTRIBUTED_KEY = "(unattributed)"
+
+
+def budget_of(compile_cfg: dict) -> dict:
+    """`compile.budget` (유료 호출 수 상한 블록). dict가 아니면 빈 dict.
+
+    예전에는 이 값들이 `batch.maxPerRun`·`maxCardsPerSource`·`verify.maxPerRun`·
+    `semanticDedup.judge.maxPairs*`로 네 서브트리에 흩어져 있었다. 한 run의 호출
+    총량은 이들의 곱이므로 한 곳에서 읽는다.
+    """
+    raw = compile_cfg.get("budget") if isinstance(compile_cfg, dict) else None
+    return raw if isinstance(raw, dict) else {}
 
 
 def now_iso():
@@ -71,8 +84,7 @@ def _is_pid_alive(pid: int) -> bool:
 
 def _write_discard_ledger(compile_dir: Path, queue_name: str, job: dict, requeue_count: int):
     # 이 원장은 claim_queue 경로에서 쓰여 config 컨텍스트가 없으므로 이름을 고정한다
-    ledger_filename = "discard-ledger.jsonl"
-    ledger_path = compile_dir / ledger_filename
+    ledger_path = compile_dir / cp.DISCARD_LEDGER
     source_obj = job.get("source")
     source_path = source_obj.get("path") if isinstance(source_obj, dict) else None
     card_obj = job.get("card")
@@ -256,25 +268,15 @@ def requeue_lines(path: Path, raw_lines: list[str]):
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
-def safe_compile_file(root: Path, rel: object) -> Path | None:
-    if not isinstance(rel, str) or not rel:
-        return None
-    base = (root / ".auto-context" / "compile").resolve()
-    path = (root / rel).resolve()
-    try:
-        path.relative_to(base)
-    except ValueError:
-        return None
-    return path
-
-
 def candidate_path(root: Path, compile_cfg: dict) -> Path:
-    rel = compile_cfg.get("candidatePath", ".auto-context/compile/candidates.jsonl")
-    return safe_compile_file(root, rel) or (root / ".auto-context" / "compile" / "candidates.jsonl")
+    # `cp.ledger`가 None을 내는 것은 파일 자체가 compile 디렉터리 밖을 가리키는
+    # symlink일 때뿐이다. 그때도 원장이 **한 줄도 남지 않는** 상태는 만들지 않는다
+    # (그것이 과금 루프의 입구였다) — 기본 위치로 떨어뜨려 흔적을 남긴다.
+    return cp.ledger(root, cp.CANDIDATES) or (root / cp.COMPILE_DIR / cp.CANDIDATES)
 
 
 def cooldown_path(root: Path) -> Path:
-    return root / ".auto-context" / "compile" / "cooldown"
+    return root / cp.COMPILE_DIR / cp.COMPILE_COOLDOWN
 
 
 def cooldown_active(root: Path) -> bool:
@@ -317,7 +319,7 @@ def gather_similar_pages(
     results = wc.query_wiki_similar(daemon_url, collection, content, top_k, timeout)
     if not results:
         return None
-    threshold = float(semantic_cfg.get("threshold", 0.82))
+    threshold = qmd_config.DEDUP_SCORE_THRESHOLD
     pages = []
     for result in results:
         if not isinstance(result, dict):
@@ -434,18 +436,6 @@ def _builtin_adapter_argv(engine: str) -> list[str] | None:
     return [sys.executable, str(adapter)]
 
 
-def legacy_extractor_argv(compile_cfg: dict) -> list[str] | None:
-    """compile.extractor.argv (0.x single-argv form) if configured, else None.
-
-    Callers that dispatch by engine need to know when this is set: one argv serves
-    every engine, so the engine label carries no information about which CLI ran
-    (wiki_verify_worker uses this to refuse a cross-engine claim it cannot back).
-    """
-    raw = compile_cfg.get("extractor")
-    extractor = raw if isinstance(raw, dict) else {}
-    return _argv_list(extractor.get("argv"))
-
-
 def extractor_engine_pool(compile_cfg: dict) -> list[str]:
     """Symbolic engines this project can dispatch to, in preference order.
 
@@ -553,28 +543,29 @@ def set_engine_cooldown(path: Path, key: str, seconds: int) -> bool:
 
 def resolve_extractor_argv(
     compile_cfg: dict, engine: str, builtins: list[str] | None = None
-) -> tuple[list[str] | None, list[str] | None]:
-    """engine → (primary argv, default argv). Single rule for every adapter caller.
+) -> list[str] | None:
+    """engine → argv (없으면 None). Single rule for every adapter caller.
 
     `builtins` overrides which symbolic engines may resolve to a bundled adapter, so
     the verifier can consider an engine its own pool allows (compile.verify.builtins)
     without a second copy of this resolution living in wiki_verify_worker.
+
+    **`extractor.dispatch` 게이트는 없다.** 예전에는 `dispatch == "by-engine"`일 때만
+    backends/builtins를 봤고, 그 키를 안 적은 config에서는 여기가 항상 None을 돌려줘
+    `process_job`이 잡을 `missing_extractor`로 **폐기**했다(requeue가 아니다).
+    `extractor.argv`(모든 엔진 공용 단일 argv)와 `extractor.default`(엔진 무관 폴백)도
+    함께 사라졌다 — 둘 다 엔진 귀속이 불가능해 교차검증 주장을 할 수 없었고,
+    `backends[engine]`이 같은 일을 엔진 라벨을 지키면서 한다.
     """
     raw = compile_cfg.get("extractor")
     extractor = raw if isinstance(raw, dict) else {}
-    legacy = _argv_list(extractor.get("argv"))
-    if legacy is not None:
-        return legacy, None
-    if extractor.get("dispatch") != "by-engine":
-        return None, None
     backends = extractor.get("backends") if isinstance(extractor.get("backends"), dict) else {}
     primary = _argv_list(backends.get(engine))
     if builtins is None:
         builtins = extractor.get("builtins") if isinstance(extractor.get("builtins"), list) else []
     if primary is None and engine in {item for item in builtins if isinstance(item, str)}:
         primary = _builtin_adapter_argv(engine)
-    default = _argv_list(extractor.get("default"))
-    return primary, default
+    return primary
 
 
 def run_extractor(argv: list[str], payload: dict, timeout: int, root: Path) -> tuple[dict | None, str | None, int | None]:
@@ -598,7 +589,7 @@ def run_extractor(argv: list[str], payload: dict, timeout: int, root: Path) -> t
     except subprocess.TimeoutExpired:
         return None, "extractor_timeout", None
     if proc.stderr:
-        log = root / ".auto-context" / "compile" / "extractor.log"
+        log = root / cp.COMPILE_DIR / cp.EXTRACTOR_LOG
         log.parent.mkdir(parents=True, exist_ok=True)
         with log.open("a", encoding="utf-8") as handle:
             handle.write(proc.stderr[-4000:] + "\n")
@@ -767,8 +758,8 @@ def process_job(root: Path, config: dict, compile_cfg: dict, job: dict) -> tuple
     _default_timeout = qmd_config.DEFAULT_CONFIG["compile"]["extractor"]["timeout"]
     timeout = int(extractor.get("timeout", _default_timeout) or _default_timeout)
     engine = job.get("engine", qmd_config.UNKNOWN_ENGINE)
-    primary, default = resolve_extractor_argv(compile_cfg, engine)
-    if primary is None and default is None:
+    argv = resolve_extractor_argv(compile_cfg, engine)
+    if argv is None:
         append_jsonl(cpath, bounded_failure("needs_extractor", job, "missing_extractor"))
         return True, False, []
     if cooldown_active(root):
@@ -777,11 +768,12 @@ def process_job(root: Path, config: dict, compile_cfg: dict, job: dict) -> tuple
 
     wiki_root = (root / config.get("wikiPath", ".auto-context/wiki")).resolve()
     wiki_ctx = orientation(root)
-    semantic_cfg = compile_cfg.get("semanticDedup") if isinstance(compile_cfg.get("semanticDedup"), dict) else {}
+    # topK·similarPageMaxChars는 설정이 아니라 상수다(qmd_config) — daemon score가 순위
+    # 기반이라 사용자가 조정할 의미가 없었다.
     similar_pages = gather_similar_pages(
         root, wiki_root, config, compile_cfg, content,
-        int(semantic_cfg.get("topK", 3) or 3),
-        int(semantic_cfg.get("similarPageMaxChars", 12000) or 12000),
+        qmd_config.DEDUP_TOP_K,
+        qmd_config.DEDUP_SIMILAR_PAGE_MAX_CHARS,
     )
     if similar_pages:
         wiki_ctx["similarPages"] = similar_pages
@@ -804,13 +796,8 @@ def process_job(root: Path, config: dict, compile_cfg: dict, job: dict) -> tuple
             "requested": qmd_config.resolve_reasoning_effort(compile_cfg, engine, "generation"),
         }},
     }
-    argv = primary if primary is not None else default
     payload["_qmd"]["reasoningEffort"]["capabilityDeclared"] = argv == _builtin_adapter_argv(engine)
     extracted, reason, returncode = run_extractor(argv, payload, timeout, root)
-    if returncode == 127 and primary is not None and default is not None:
-        argv = default
-        payload["_qmd"]["reasoningEffort"]["capabilityDeclared"] = argv == _builtin_adapter_argv(engine)
-        extracted, reason, returncode = run_extractor(argv, payload, timeout, root)
     if returncode == 127:
         append_jsonl(cpath, bounded_failure("needs_extractor", job, "extractor_unavailable"))
         return False, True, []  # CLI absent: preserve for when it's installed
@@ -836,7 +823,7 @@ def process_job(root: Path, config: dict, compile_cfg: dict, job: dict) -> tuple
     # 되돌리지는 않는다 — 재처리는 extractor를 다시 부르는 것이고 그것은 같은 소스에 대한
     # 이중 과금이다. 소스를 쪼개는 것이 올바른 해법이고 이 레코드가 그 신호다.
     max_cards = max(1, min(
-        int(compile_cfg.get("maxCardsPerSource", 10) or 10), qmd_config.MAX_CARDS_PER_SOURCE
+        int(budget_of(compile_cfg).get("cardsPerSource", 10) or 10), qmd_config.MAX_CARDS_PER_SOURCE
     ))
     if len(candidates) > max_cards:
         overflow = [
@@ -929,7 +916,7 @@ def _run_verify_pass(
         wiki_verify_worker.run(root, config, compile_cfg, produced_targets=produced_targets or [])
     except Exception:
         try:
-            log = root / ".auto-context" / "compile" / "extractor.log"
+            log = root / cp.COMPILE_DIR / cp.EXTRACTOR_LOG
             log.parent.mkdir(parents=True, exist_ok=True)
             with log.open("a", encoding="utf-8") as handle:
                 handle.write("verify-pass-error: " + traceback.format_exc(limit=5)[-4000:] + "\n")
@@ -952,9 +939,9 @@ def main():
     root = Path(found["projectRoot"]).resolve()
     config = found["config"]
     compile_cfg = config.get("compile") if isinstance(config.get("compile"), dict) else {}
-    if config.get("indexing") is not True or not compile_cfg.get("enabled") or compile_cfg.get("mode", "off") == "off":
+    if config.get("indexing") is not True or not qmd_config.compile_active(compile_cfg):
         return 0
-    queue = _safe_queue_path(root, compile_cfg.get("sourceQueuePath", DEFAULT_SOURCE_QUEUE))
+    queue = _safe_queue_path(root, DEFAULT_SOURCE_QUEUE)
     if queue is None:
         return 0
 
@@ -996,7 +983,7 @@ def main():
     # 이 함수는 raw compile_cfg를 받는 호출자(테스트·직접 호출)에도 노출돼 있고, 이 값은
     # 유료 호출 수를 정하므로 상한이 한 층에만 있으면 안 된다.
     max_per_run = max(1, min(
-        int(batch_cfg.get("maxPerRun", 10) or 10), qmd_config.MAX_COMPILE_PER_RUN
+        int(budget_of(compile_cfg).get("extractorPerRun", 10) or 10), qmd_config.MAX_COMPILE_PER_RUN
     ))
     rows = [(raw, job) for raw, job in kept]
     overflow = [raw for raw, _ in rows[max_per_run:]]

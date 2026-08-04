@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.resolve()))
+import compile_paths as cp
 import config as qmd_config
 import wiki_compile as wc
 import wiki_dedup_scan as dedup_scan
@@ -25,9 +26,6 @@ from dirty_queue import enqueue_collections
 from wiki_compile_worker import claim_queue, requeue_lines
 
 ACTIONS = {"merge", "skip"}
-DEDUP_NEEDED_REL = ".auto-context/compile/dedup-needed.jsonl"
-DEDUP_DELETED_REL = ".auto-context/compile/dedup-deleted.jsonl"
-DEDUP_SKIPPED_REL = ".auto-context/compile/dedup-skipped.jsonl"
 
 
 def now_iso() -> str:
@@ -88,7 +86,7 @@ def record_skip(root: Path, wiki_root: Path, compile_dir: Path, entry: dict) -> 
             texts[rel] = target.read_text(encoding="utf-8")
         except OSError:
             return False
-    skipped_path = wc.safe_compile_file(root, compile_dir, DEDUP_SKIPPED_REL)
+    skipped_path = cp.ledger(root, cp.DEDUP_SKIPPED)
     if skipped_path is None:
         return False
     first, second = sorted((page_a, page_b))  # order-independent pair key
@@ -127,7 +125,7 @@ def resolve_entry(root: Path, wiki_root: Path, compile_dir: Path, entry: dict, a
 
         paired_with = page_b if delete_rel == page_a else page_a
         content = target.read_text(encoding="utf-8")
-        deleted_path = wc.safe_compile_file(root, compile_dir, DEDUP_DELETED_REL)
+        deleted_path = cp.ledger(root, cp.DEDUP_DELETED)
         if deleted_path is not None:
             wc.append_jsonl(deleted_path, {
                 "deletedPath": delete_rel,
@@ -158,11 +156,11 @@ def main() -> int:
     config = found["config"]
     wiki_rel = config.get("wikiPath", ".auto-context/wiki")
     wiki_root = wc.safe_managed_dir(root, wiki_rel)
-    compile_dir = wc.safe_managed_dir(root, ".auto-context/compile")
+    compile_dir = cp.compile_dir(root, create=True)
     if wiki_root is None or compile_dir is None:
         print(json.dumps({"action": "rejected", "reason": "unsafe_managed_path"}, ensure_ascii=False))
         return 1
-    queue_path = wc.safe_compile_file(root, compile_dir, DEDUP_NEEDED_REL)
+    queue_path = cp.ledger(root, cp.DEDUP_NEEDED)
     if queue_path is None:
         print(json.dumps({"action": "rejected", "reason": "unsafe_compile_path"}, ensure_ascii=False))
         return 1

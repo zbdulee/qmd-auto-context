@@ -97,34 +97,82 @@ for (const name of fixtureNames) {
 // 아래 두 테스트는 blob 동결이 놓치는 것을 겨냥한다. deep-equal 스냅샷은 "무엇이 바뀌었나"는
 // 잡지만 "이 값이 왜 중요한가"를 남기지 않아, 마이그레이션에서 통째로 재생성되면 조용히
 // 승인된다. 계획 §7.2가 이름을 대고 경고한 값들은 별도로 못박는다.
-test('§7.2 손으로 편집된 budget 값이 정규화를 통과한다', () => {
-  const v = (n) => captured[n].compile.verify.maxPerRun;
-  assert.equal(v('service-engineering.json'), 15);
-  assert.equal(v('ai-proxy.json'), 3);
-  // 원본은 60인데 `MAX_VERIFY_PER_RUN`(50)에 클램프된다 — 즉 "라이브 값 60 보존"이
-  // 목표가 아니라 "effective 50 보존"이 목표다. 새 `budget.verifyPerRun`으로 이관할 때
-  // 클램프까지 함께 옮기지 않으면 여기서 깨진다.
-  assert.equal(v('novel_귀신은_약효가_돌_때_보인다.json'), 50);
-  assert.equal(
-    captured['novel_귀신은_약효가_돌_때_보인다.json'].compile.semanticDedup.maxPairsPerScan,
-    100,
-    'maxPairsPerScan은 무료 score gate라 클램프되지 않고 그대로 남는다',
-  );
+// 하위호환은 의도적으로 폐기됐다(계획 §6 H단계는 파일을 손으로 옮긴다). 그래서 이
+// fixture들은 **아직 마이그레이션되지 않은** 파일이고, 옛 위치에 적힌 값은 이제 읽히지
+// 않는다. 그 사실을 숨기지 않고 두 방향으로 단정한다:
+//   (a) 옛 위치의 값은 실제로 유실된다 — 마이그레이션 부채의 정확한 목록.
+//   (b) §2/§7.2가 지정한 **새 위치**에 옮겨 적으면 클램프까지 포함해 원래 effective가
+//       복원된다 — H단계가 무엇을 써야 하는지의 명세.
+// (b)가 없으면 이 파일은 "값이 사라졌다"만 말하고 복구 방법을 남기지 않는다.
+test('§7.2 마이그레이션 부채: 옛 위치의 손편집 budget 값은 더 이상 읽히지 않는다', () => {
+  const b = (n) => captured[n].compile.budget;
+  const sd = (n) => captured[n].compile.semanticDedup;
+  // verify.maxPerRun 15 / 3 / 60(→50 클램프)이 전부 기본값 3으로 떨어진다.
+  assert.equal(b('service-engineering.json').verifyPerRun, 3);
+  assert.equal(b('ai-proxy.json').verifyPerRun, 3);
+  assert.equal(b('novel_귀신은_약효가_돌_때_보인다.json').verifyPerRun, 3);
+  // 제거된 키는 정규화 출력에 남지 않는다(남으면 소비자가 다시 읽기 시작한다).
+  for (const name of fixtureNames) {
+    assert.equal('maxPerRun' in captured[name].compile.verify, false, `${name}: verify.maxPerRun`);
+    assert.equal('maxPerRun' in captured[name].compile.batch, false, `${name}: batch.maxPerRun`);
+    assert.equal('maxCardsPerSource' in captured[name].compile, false, `${name}: maxCardsPerSource`);
+    for (const k of ['threshold', 'topK', 'similarPageMaxChars', 'autoMergeThreshold']) {
+      assert.equal(k in sd(name), false, `${name}: semanticDedup.${k}`);
+    }
+  }
+  // 반대로 `semanticDedup.maxPairsPerScan`은 **살아 있는 키**다(무료 score gate). 유일한
+  // 손편집 값인 novel/귀신의 100이 클램프 없이 그대로 남는 것이 이 리팩터의 계약이다.
+  assert.equal(sd('novel_귀신은_약효가_돌_때_보인다.json').maxPairsPerScan, 100);
+});
+
+test('§7.2 마이그레이션 명세: 새 위치로 옮기면 클램프까지 포함해 복원된다', () => {
+  const py = `import json, sys
+sys.path.insert(0, sys.argv[1])
+import config as qmd_config
+raw = {"compile": {"mode": "auto-wiki", "budget": json.loads(sys.argv[2])}}
+print(json.dumps(qmd_config.normalize_config(raw)["compile"]["budget"]))`;
+  const budgetOf = (v) => JSON.parse(execFileSync(
+    'python3', ['-c', py, CORE, JSON.stringify(v)], { cwd: REPO_ROOT, encoding: 'utf8' },
+  ));
+  // service-engineering: 15는 MAX_VERIFY_PER_RUN(50) 아래라 그대로.
+  assert.equal(budgetOf({ verifyPerRun: 15 }).verifyPerRun, 15);
+  assert.equal(budgetOf({ verifyPerRun: 3 }).verifyPerRun, 3);
+  // novel/귀신: 원본 60은 클램프돼 50이 된다 — "60 보존"이 아니라 "effective 50 보존"이
+  // 목표다. 클램프가 budget으로 함께 옮겨오지 않았으면 여기서 60이 나와 깨진다.
+  assert.equal(budgetOf({ verifyPerRun: 60 }).verifyPerRun, 50);
+  // 나머지 넷도 옛 위치의 값이 그대로 옮겨진다(전 프로젝트 공통 기본값이라 이관 부채는 없다).
+  assert.deepEqual(budgetOf({}), {
+    extractorPerRun: 10, cardsPerSource: 10, verifyPerRun: 3,
+    dedupPairsPerScan: 8, dedupPairsPerCompile: 1,
+  });
 });
 
 test('compile을 켠 3개 프로젝트의 게이트 입력이 보존된다', () => {
-  // 마이그레이션 진리표(§2)의 입력. 지금 셋 다 `auto-wiki + autoWrite:true`라
-  // 새 `mode`도 `auto-wiki`여야 하고, 나머지 6개는 전부 `off`여야 한다.
+  // 마이그레이션 진리표(§2)의 입력. 셋 다 구 `auto-wiki + autoWrite:true`였으므로 새
+  // `mode`도 `auto-wiki`이고, 나머지 6개는 전부 `off`다. 이 파일들은 아직 구 형식이지만
+  // `mode` 값 자체는 진리표가 지정한 목표와 같아 결과가 보존된다(그 셋의 `enabled:true`가
+  // 무시되는 것과 무관하게).
   const on = ['ai-proxy.json', 'novel_귀신은_약효가_돌_때_보인다.json', 'service-engineering.json'];
   for (const name of fixtureNames) {
     const c = captured[name].compile;
-    if (on.includes(name)) {
-      assert.equal(c.enabled, true, `${name}: enabled`);
-      assert.equal(c.mode, 'auto-wiki', `${name}: mode`);
-      assert.equal(c.autoWrite, true, `${name}: autoWrite`);
-    } else {
-      assert.equal(c.enabled, false, `${name}: enabled`);
-      assert.equal(c.mode, 'off', `${name}: mode`);
-    }
+    assert.equal(c.mode, on.includes(name) ? 'auto-wiki' : 'off', `${name}: mode`);
+    // 죽은 스위치는 정규화 출력에서 사라졌다 — 남아 있으면 게이트가 다시 읽을 수 있다.
+    assert.equal('enabled' in c, false, `${name}: compile.enabled`);
+    assert.equal('autoWrite' in c, false, `${name}: compile.autoWrite`);
+  }
+});
+
+// compile을 켠 3개는 큐에 든 잡을 실제로 처리한다 — `dispatch` 게이트가 사라진 뒤에도
+// 그 셋의 엔진이 **여전히 해석되는지**가 이 리팩터의 원자성 근거였다(해석 실패는
+// `missing_extractor`이고 그것은 requeue가 아니라 **잡 폐기**다).
+test('compile을 켠 3개 프로젝트는 dispatch 키 없이도 엔진이 해석된다', () => {
+  const seng = captured['service-engineering.json'].compile.extractor;
+  assert.deepEqual(Object.keys(seng.backends).sort(), ['claude', 'codex', 'hermes']);
+  for (const name of ['ai-proxy.json', 'novel_귀신은_약효가_돌_때_보인다.json']) {
+    assert.deepEqual(
+      captured[name].compile.extractor.builtins,
+      ['claude', 'codex', 'hermes'],
+      `${name}: builtins`,
+    );
   }
 });

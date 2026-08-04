@@ -100,17 +100,15 @@ function projectMarker(projectRoot) {
 }
 
 const compileWithBuiltins = {
-  enabled: true,
   mode: 'auto-wiki',
   triggers: ['post_tool_source'],
-  extractor: { dispatch: 'by-engine', backends: {}, builtins: ['claude', 'codex'] },
+  extractor: { backends: {}, builtins: ['claude', 'codex'] },
 };
 
 const compileWithoutExtractor = {
-  enabled: true,
   mode: 'auto-wiki',
   triggers: ['post_tool_source'],
-  extractor: { dispatch: 'by-engine', backends: {}, builtins: [] },
+  extractor: { backends: {}, builtins: [] },
 };
 
 test('config 없는 신규 디렉터리는 notice나 프로젝트 파일을 만들지 않는다', () => {

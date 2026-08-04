@@ -40,16 +40,11 @@ function writeSettings(dir, overrides = {}) {
     collectionRoles: { "docs-src": "raw" },
     ...overrides,
     compile: {
-      enabled: true,
       mode: "auto-wiki",
-      autoWrite: true,
       triggers: ["post_tool_source", "post_sync_source", "manual"],
-      sourceQueuePath: ".auto-context/compile/source-queue.jsonl",
       extractor: {
-        dispatch: "by-engine",
         backends: {},
         builtins: BUILTINS,
-        default: [],
         timeout: 120,
       },
       ...(overrides.compile || {}),
@@ -435,7 +430,6 @@ test("engine resolves from extractor.backends when builtins is empty", () => {
   writeSettings(dir, {
     compile: {
       extractor: {
-        dispatch: "by-engine",
         backends: { claude: ["scripts/extract.sh", "claude"], codex: ["scripts/extract.sh", "codex"] },
         builtins: [],
         default: [],

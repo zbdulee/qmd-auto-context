@@ -25,21 +25,27 @@ print(json.dumps([list(d.parse_engines('codex,bogus')), list(d.parse_engines('')
 
 // 생성기가 **의도하는** 값은 full_compile_block()이 SSOT다. 파일로 나가는 것은
 // compile_block()의 delta이므로, 의도는 여기서 보고 delta 여부는 아래 테스트가 본다.
-test('full_compile_block has post_tool_source trigger, portable builtins, by-engine dispatch, batch', () => {
-  const py = `import json,sys; sys.path.insert(0,'core'); import wiki_compile_defaults as d
+test('full_compile_block has post_tool_source trigger, portable builtins (no dispatch gate), batch', () => {
+  const py = `import json,sys; sys.path.insert(0,'core')
+import wiki_compile_defaults as d, wiki_compile_worker as wcw
 b=d.full_compile_block('/PR'); print(json.dumps({
- 'enabled':b['enabled'],'mode':b['mode'],
+ 'mode':b['mode'],
  'trig':'post_tool_source' in b['triggers'],
- 'dispatch':b['extractor']['dispatch'],
  'backends':b['extractor']['backends'],
  'builtins':b['extractor']['builtins'],
+ # dispatch 게이트를 대신하는 불변식: 이 블록만으로 세 엔진이 argv로 해석된다.
+ 'resolved':{e: wcw.resolve_extractor_argv(b, e) for e in ('claude','codex','hermes')},
  'serialized':json.dumps(b), 'reasoningEffort':b['reasoningEffort'],
    'cooldown':b['extractor']['cooldownSeconds'],'batch':b['batch']}))`;
   const b = JSON.parse(run(py));
-  assert.equal(b.enabled, true);
+  // 활성화 스위치는 mode 하나다 (enabled/autoWrite는 스키마에서 제거됐다).
   assert.equal(b.mode, 'auto-wiki');
   assert.equal(b.trig, true);
-  assert.equal(b.dispatch, 'by-engine');
+  for (const engine of ['claude', 'codex', 'hermes']) {
+    assert.ok(Array.isArray(b.resolved[engine]) && b.resolved[engine].length === 2,
+      `${engine} must resolve to an adapter argv without any dispatch key`);
+    assert.match(b.resolved[engine][1], new RegExp(`core/extractors/${engine}_adapter\\.py$`));
+  }
   assert.deepEqual(b.backends, {});
   assert.deepEqual(b.builtins, ['claude', 'codex', 'hermes']);
   assert.doesNotMatch(b.serialized, /\/PR|core\/extractors|_adapter\.py/);
@@ -83,19 +89,27 @@ print(json.dumps({'omittedWrong': omitted_wrong, 'keptWrong': kept_wrong,
   assert.deepEqual(r.omittedWrong, [], '기본값과 다른데 생략된 키 (effective가 조용히 바뀐다)');
   assert.deepEqual(r.keptWrong, [], '기본값과 같은데 남은 키 (delta-only 위반)');
   // 기본값과 다르다는 이유로 반드시 남아야 하는 것들.
-  assert.deepEqual(r.deltaKeys, ['autoWrite', 'enabled', 'extractor', 'mode', 'triggers']);
-  // extractor.dispatch는 기본값에 없는 키라 항상 남아야 한다 — 생략하면 정규화가
-  // backends/builtins/default를 통째로 버려 builtins-only 온보딩이 죽는다.
-  const ext = JSON.parse(run(`import json,sys; sys.path.insert(0,'core'); import wiki_compile_defaults as d
-print(json.dumps(sorted(d.compile_block('/PR')['extractor'])))`));
-  assert.deepEqual(ext, ['backends', 'builtins', 'default', 'dispatch']);
+  assert.deepEqual(r.deltaKeys, ['extractor', 'mode', 'triggers']);
+  // dispatch 게이트가 사라진 뒤 extractor delta에 남아야 하는 것은 builtins 하나뿐이고,
+  // 그것만으로 엔진이 해석돼야 한다(게이트 키를 빠뜨려 죽는 경로가 더는 없다).
+  const ext = JSON.parse(run(`import json,sys; sys.path.insert(0,'core')
+import wiki_compile_defaults as d, wiki_compile_worker as wcw
+delta=d.compile_block('/PR')
+print(json.dumps({'keys':sorted(delta['extractor']),
+                  'resolved':wcw.resolve_extractor_argv(delta,'claude') is not None}))`));
+  assert.deepEqual(ext.keys, ['builtins']);
+  assert.equal(ext.resolved, true);
   assert.ok(r.omitted.includes('verify') && r.omitted.includes('batch'));
 });
 
 test('compile_block --engines codex limits portable builtins', () => {
   const py = `import json,sys; sys.path.insert(0,'core'); import wiki_compile_defaults as d
-b=d.compile_block('/PR', d.parse_engines('codex')); print(json.dumps(b['extractor']))`;
-  const ext = JSON.parse(run(py));
-  assert.deepEqual(ext.builtins, ['codex']);
-  assert.deepEqual(ext.backends, {});
+b=d.compile_block('/PR', d.parse_engines('codex'))
+print(json.dumps({'extractor':b['extractor'],
+                  'fullBackends':d.full_compile_block('/PR', d.parse_engines('codex'))['extractor']['backends']}))`;
+  const r = JSON.parse(run(py));
+  assert.deepEqual(r.extractor.builtins, ['codex']);
+  // delta-only: backends는 기본값 {}과 같아 emit되지 않지만 의도값은 여전히 {}이다.
+  assert.deepEqual(Object.keys(r.extractor), ['builtins']);
+  assert.deepEqual(r.fullBackends, {});
 });

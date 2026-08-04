@@ -9,7 +9,7 @@ import { removeTemp } from './helpers/temp.mjs';
 // LLM dedup judge (core/wiki_dedup_judge.py) wired into both dedup paths.
 //
 // No test here may invoke a real host CLI: every judge is a bash/python stub
-// handed to compile.extractor.argv, exactly like test/wiki-verify-worker.test.mjs
+// handed to compile.extractor.backends, exactly like test/wiki-verify-worker.test.mjs
 // stubs the verifier.
 
 function repoTemp(prefix) {
@@ -72,6 +72,14 @@ print(json.dumps({
 `);
   return ['python3', script];
 }
+
+// 레거시(무료) score 게이트의 임계는 더 이상 설정이 아니라 core/config.py의 상수다.
+// 리터럴을 테스트에 복제하면 상수를 옮기는 순간 이 파일이 조용히 다른 세계를 검증하므로
+// 실제 값을 읽어 픽스처 score가 그 위/아래임을 명시적으로 단정한다.
+const [DEDUP_SCORE_THRESHOLD, DEDUP_AUTO_MERGE_THRESHOLD] = execFileSync('python3', ['-c',
+  "import sys; sys.path.insert(0, 'core'); import config;"
+  + " print(config.DEDUP_SCORE_THRESHOLD); print(config.DEDUP_AUTO_MERGE_THRESHOLD)",
+], { cwd: process.cwd(), encoding: 'utf8' }).trim().split('\n').map(Number);
 
 function callCount(logPath) {
   if (!existsSync(logPath)) return 0;
@@ -147,8 +155,8 @@ test('judge_engine_pool: backends-only config resolves without a producer (retro
   // missed -> judge permanently "unavailable" -> every scan silently degraded to the
   // legacy score gate. Both dogfood projects use exactly that shape.
   const py = `import json,os,sys; sys.path.insert(0,'core'); import wiki_dedup_judge as j
-cfg_backends = {'extractor': {'dispatch': 'by-engine', 'backends': {'codex': ['/x/codex'], 'claude': ['/x/claude']}, 'default': []}}
-cfg_builtins = {'extractor': {'dispatch': 'by-engine', 'builtins': ['codex'], 'backends': {'claude': ['/x/claude']}, 'default': []}}
+cfg_backends = {'extractor': {'backends': {'codex': ['/x/codex'], 'claude': ['/x/claude']}}}
+cfg_builtins = {'extractor': {'builtins': ['codex'], 'backends': {'claude': ['/x/claude']}}}
 out = {}
 out['pool_no_producer'] = j.judge_engine_pool(cfg_backends)
 out['pool_builtins_first'] = j.judge_engine_pool(cfg_builtins)
@@ -193,13 +201,8 @@ function writeCompileSettings(work, compile = {}) {
     collectionRoles: { 'proj-wiki': 'wiki' },
     wikiPath: '.auto-context/wiki',
     compile: {
-      enabled: true,
       mode: 'auto-wiki',
-      autoWrite: true,
       defaultStatus: 'generated',
-      candidatePath: '.auto-context/compile/candidates.jsonl',
-      tombstonePath: '.auto-context/compile/tombstones.jsonl',
-      manifestPath: '.auto-context/compile/generated-manifest.jsonl',
       verify: { enabled: false },
       ...compile,
     },
@@ -251,7 +254,7 @@ test('write-time gate: an explicit targetPath is judged too (legacy slug-only ga
   const work = repoTemp('judge-explicit-target');
   try {
     const log = join(work, 'calls.jsonl');
-    writeCompileSettings(work, { extractor: { argv: judgeStub('duplicate', { callLog: log }), timeout: 30 } });
+    writeCompileSettings(work, { extractor: { backends: { claude: judgeStub('duplicate', { callLog: log }) }, timeout: 30 } });
     writeExistingCard(work, 'entities/existing.md');
     const fixture = fixtureFor(work, [{ file: 'proj-wiki/entities/existing.md', score: 0.56 }]);
 
@@ -285,10 +288,11 @@ test('write-time gate: a "distinct" verdict lets the page be created (score alon
   const work = repoTemp('judge-distinct-creates');
   try {
     const log = join(work, 'calls.jsonl');
-    writeCompileSettings(work, { extractor: { argv: judgeStub('distinct', { callLog: log }), timeout: 30 } });
+    writeCompileSettings(work, { extractor: { backends: { claude: judgeStub('distinct', { callLog: log }) }, timeout: 30 } });
     writeExistingCard(work, 'entities/existing.md');
-    // 0.95 is far above the legacy 0.82 threshold: the judge, not the score, decides.
-    const fixture = fixtureFor(work, [{ file: 'proj-wiki/entities/existing.md', score: 0.95 }]);
+    // Far above the legacy write-time threshold: the judge, not the score, decides.
+    const score = DEDUP_SCORE_THRESHOLD + 0.1;
+    const fixture = fixtureFor(work, [{ file: 'proj-wiki/entities/existing.md', score }]);
 
     const out = runCompile(work, {
       title: 'A genuinely different event',
@@ -305,13 +309,13 @@ test('write-time gate: a "distinct" verdict lets the page be created (score alon
   }
 });
 
-test('write-time gate: judge.maxPairsPerCompile caps how many LLM calls one compile can bill', () => {
+test('write-time gate: budget.dedupPairsPerCompile caps how many LLM calls one compile can bill', () => {
   const work = repoTemp('judge-compile-budget');
   try {
     const log = join(work, 'calls.jsonl');
     writeCompileSettings(work, {
-      extractor: { argv: judgeStub('distinct', { callLog: log }), timeout: 30 },
-      semanticDedup: { judge: { maxPairsPerCompile: 2 } },
+      extractor: { backends: { claude: judgeStub('distinct', { callLog: log }) }, timeout: 30 },
+      budget: { dedupPairsPerCompile: 2 },
     });
     writeExistingCard(work, 'entities/one.md');
     writeExistingCard(work, 'entities/two.md');
@@ -330,7 +334,7 @@ test('write-time gate: judge.maxPairsPerCompile caps how many LLM calls one comp
     }, { QMD_QUERY_FIXTURE: fixture });
 
     assert.equal(out.action, 'created');
-    assert.equal(callCount(log), 2, 'maxPairsPerCompile=2 must cap judge calls at 2, not 3');
+    assert.equal(callCount(log), 2, 'budget.dedupPairsPerCompile=2 must cap judge calls at 2, not 3');
   } finally {
     removeTemp(work);
   }
@@ -361,12 +365,14 @@ test('write-time gate: with no extractor configured nothing is judged and the da
 test('write-time gate: judge on cooldown falls back to the legacy threshold for slug targets', () => {
   const work = repoTemp('judge-cooldown-fallback');
   try {
-    writeCompileSettings(work, { extractor: { argv: judgeStub('duplicate'), timeout: 30 } });
+    writeCompileSettings(work, { extractor: { backends: { claude: judgeStub('duplicate') }, timeout: 30 } });
     writeExistingCard(work, 'entities/existing.md');
     mkdirSync(join(work, '.auto-context', 'compile'), { recursive: true });
     writeFileSync(join(work, '.auto-context', 'compile', 'dedup-judge-cooldown'),
       `${Date.now() / 1000 + 3600}\n`);
-    const fixture = fixtureFor(work, [{ file: 'proj-wiki/entities/existing.md', score: 0.95 }]);
+    const fixture = fixtureFor(work, [
+      { file: 'proj-wiki/entities/existing.md', score: DEDUP_SCORE_THRESHOLD + 0.1 },
+    ]);
 
     const out = runCompile(work, {
       title: 'Slug target while the judge is cooling down',
@@ -385,7 +391,7 @@ test('write-time gate: judge on cooldown falls back to the legacy threshold for 
 test('write-time gate: a reviewed target is still only queued, never overwritten or deleted', () => {
   const work = repoTemp('judge-protected-target');
   try {
-    writeCompileSettings(work, { extractor: { argv: judgeStub('duplicate'), timeout: 30 } });
+    writeCompileSettings(work, { extractor: { backends: { claude: judgeStub('duplicate') }, timeout: 30 } });
     const card = join(work, '.auto-context', 'wiki', 'entities', 'reviewed.md');
     mkdirSync(join(card, '..'), { recursive: true });
     const original = [
@@ -432,7 +438,7 @@ test('write-time gate: a reviewed target is still only queued, never overwritten
 
 function crossEngineSettings(work, backends, judge = {}, extra = {}) {
   writeCompileSettings(work, {
-    extractor: { dispatch: 'by-engine', backends, timeout: 30 },
+    extractor: { backends, timeout: 30 },
     semanticDedup: { judge, ...extra },
   });
 }
@@ -609,9 +615,7 @@ function writeScanSettings(work, semanticDedup = {}, compile = {}) {
     collectionRoles: { 'proj-wiki': 'wiki' },
     wikiPath: '.auto-context/wiki',
     compile: {
-      enabled: true,
       mode: 'auto-wiki',
-      autoWrite: true,
       semanticDedup,
       ...compile,
     },
@@ -675,12 +679,15 @@ const scanSkipped = (work) => jsonl(join(work, '.auto-context/compile/dedup-skip
 // The measured failure: a real duplicate can only ever be retrieved at rank>=2,
 // where the score is capped around 0.625, so autoMergeThreshold's 0.9 default can
 // never fire. The judge has to be what decides.
-test('retroactive scan: a "duplicate" verdict is queued even though the score is far below autoMergeThreshold 0.9', () => {
+test('retroactive scan: a "duplicate" verdict is queued even though the score is far below the auto-merge threshold', () => {
   const work = repoTemp('judge-scan-below-threshold');
   try {
     const log = join(work, 'calls.jsonl');
-    writeScanSettings(work, { judge: { maxPairsPerScan: 4 } }, {
-      extractor: { argv: judgeStub('duplicate', { callLog: log }), timeout: 30 },
+    assert.ok(0.56 < DEDUP_AUTO_MERGE_THRESHOLD,
+      'the fixture score must sit below the free gate, or this proves nothing about the judge');
+    writeScanSettings(work, {}, {
+      extractor: { backends: { claude: judgeStub('duplicate', { callLog: log }) }, timeout: 30 },
+      budget: { dedupPairsPerScan: 4 },
     });
     writePage(work, 'entities/page-a.md', 'The stalker asked for CCTV footage at the front desk.');
     writePage(work, 'entities/page-b.md', 'A restatement of the very same front desk CCTV request.');
@@ -707,7 +714,7 @@ test('retroactive scan: a "distinct" verdict is not queued, is recorded as a ski
   try {
     const log = join(work, 'calls.jsonl');
     writeScanSettings(work, { candidateMinScore: 0.3 }, {
-      extractor: { argv: judgeStub('distinct', { callLog: log, reason: 'different events' }), timeout: 30 },
+      extractor: { backends: { claude: judgeStub('distinct', { callLog: log, reason: 'different events' }) }, timeout: 30 },
     });
     writePage(work, 'entities/page-a.md', 'Content about the front desk.');
     writePage(work, 'entities/page-b.md', 'Content about a different corridor entirely.');
@@ -736,12 +743,15 @@ test('retroactive scan: a "distinct" verdict is not queued, is recorded as a ski
   }
 });
 
-test('retroactive scan: judge.maxPairsPerScan caps LLM calls and leaves unjudged pages for the next scan', () => {
+test('retroactive scan: budget.dedupPairsPerScan caps LLM calls and leaves unjudged pages for the next scan', () => {
   const work = repoTemp('judge-scan-budget');
   try {
     const log = join(work, 'calls.jsonl');
-    writeScanSettings(work, { judge: { maxPairsPerScan: 1 }, maxPairsPerScan: 10 }, {
-      extractor: { argv: judgeStub('distinct', { callLog: log }), timeout: 30 },
+    // semanticDedup.maxPairsPerScan(무료 score 게이트의 쌍 상한)은 여전히 설정이고,
+    // 유료 judge 예산만 compile.budget으로 옮겼다 — 둘을 넉넉히 벌려 판정 주체를 고정한다.
+    writeScanSettings(work, { maxPairsPerScan: 10 }, {
+      extractor: { backends: { claude: judgeStub('distinct', { callLog: log }) }, timeout: 30 },
+      budget: { dedupPairsPerScan: 1 },
     });
     writePage(work, 'entities/page-a.md', 'Body A.');
     writePage(work, 'entities/page-b.md', 'Body B.');
@@ -751,7 +761,7 @@ test('retroactive scan: judge.maxPairsPerScan caps LLM calls and leaves unjudged
     writeFileSync(fixture, JSON.stringify({ results: [{ file: 'proj-wiki/entities/page-c.md', score: 0.6 }] }));
 
     const dirs = runScan(work, { QMD_QUERY_FIXTURE: fixture });
-    assert.equal(callCount(log), 1, 'judge.maxPairsPerScan=1 must allow exactly one call');
+    assert.equal(callCount(log), 1, 'budget.dedupPairsPerScan=1 must allow exactly one call');
 
     const snap = snapshotOf(dirs.stateDir);
     const recorded = Object.keys(snap.files || {});
@@ -765,7 +775,7 @@ test('retroactive scan: judge timeout sets a cooldown, queues nothing, and leave
   const work = repoTemp('judge-scan-transient');
   try {
     writeScanSettings(work, { judge: { timeout: 1, cooldownSeconds: 900 } }, {
-      extractor: { argv: judgeStub('duplicate', { sleep: 5 }), timeout: 30 },
+      extractor: { backends: { claude: judgeStub('duplicate', { sleep: 5 }) }, timeout: 30 },
     });
     writePage(work, 'entities/page-a.md', 'Body A.');
     writePage(work, 'entities/page-b.md', 'Body B.');
@@ -787,13 +797,14 @@ test('retroactive scan: judge timeout sets a cooldown, queues nothing, and leave
 test('retroactive scan: an absent host CLI degrades to the legacy score threshold rather than stalling', () => {
   const work = repoTemp('judge-scan-cli-absent');
   try {
-    writeScanSettings(work, { autoMergeThreshold: 0.9 }, {
-      extractor: { argv: ['/nonexistent/dedup-judge-xyz'], timeout: 30 },
+    writeScanSettings(work, {}, {
+      extractor: { backends: { claude: ['/nonexistent/dedup-judge-xyz'] }, timeout: 30 },
     });
     writePage(work, 'entities/page-a.md', 'Body A.');
     writePage(work, 'entities/page-b.md', 'Body B.');
     const fixture = join(work, 'fixture.json');
-    writeFileSync(fixture, JSON.stringify({ results: [{ file: 'proj-wiki/entities/page-b.md', score: 0.95 }] }));
+    const score = DEDUP_AUTO_MERGE_THRESHOLD + 0.05;   // 무료 게이트 임계 위
+    writeFileSync(fixture, JSON.stringify({ results: [{ file: 'proj-wiki/entities/page-b.md', score }] }));
 
     runScan(work, { QMD_QUERY_FIXTURE: fixture });
 
@@ -810,7 +821,7 @@ test('retroactive scan: an absent host CLI degrades to the legacy score threshol
 test('retroactive scan: the judge never deletes or edits a card — it only queues', () => {
   const work = repoTemp('judge-scan-no-writes');
   try {
-    writeScanSettings(work, {}, { extractor: { argv: judgeStub('duplicate'), timeout: 30 } });
+    writeScanSettings(work, {}, { extractor: { backends: { claude: judgeStub('duplicate') }, timeout: 30 } });
     const a = writePage(work, 'entities/page-a.md', 'Body A.');
     const b = writePage(work, 'entities/page-b.md', 'Body B.');
     const before = [readFileSync(a, 'utf8'), readFileSync(b, 'utf8')];
@@ -838,7 +849,6 @@ test('retroactive scan: 엔진 선택이 예전과 같고 판정 mode 는 unknow
   try {
     writeScanSettings(work, { candidateMinScore: 0.3 }, {
       extractor: {
-        dispatch: 'by-engine',
         timeout: 30,
         backends: {
           claude: engineJudgeStub('claude', 'duplicate', tracker),
@@ -866,13 +876,14 @@ test('QMD_DEDUP_JUDGE=off disables judging entirely (legacy threshold behavior)'
   const work = repoTemp('judge-kill-switch');
   try {
     const log = join(work, 'calls.jsonl');
-    writeScanSettings(work, { autoMergeThreshold: 0.9 }, {
-      extractor: { argv: judgeStub('duplicate', { callLog: log }), timeout: 30 },
+    writeScanSettings(work, {}, {
+      extractor: { backends: { claude: judgeStub('duplicate', { callLog: log }) }, timeout: 30 },
     });
     writePage(work, 'entities/page-a.md', 'Body A.');
     writePage(work, 'entities/page-b.md', 'Body B.');
     const fixture = join(work, 'fixture.json');
-    writeFileSync(fixture, JSON.stringify({ results: [{ file: 'proj-wiki/entities/page-b.md', score: 0.95 }] }));
+    const score = DEDUP_AUTO_MERGE_THRESHOLD + 0.05;   // 무료 게이트 임계 위
+    writeFileSync(fixture, JSON.stringify({ results: [{ file: 'proj-wiki/entities/page-b.md', score }] }));
 
     runScan(work, { QMD_QUERY_FIXTURE: fixture, QMD_DEDUP_JUDGE: 'off' });
 
@@ -891,7 +902,7 @@ test('retroactive scan: 억제 원장에 쓸 수 없으면 judge 를 부르지 �
   try {
     const log = join(work, 'calls.jsonl');
     writeScanSettings(work, { candidateMinScore: 0.3 }, {
-      extractor: { argv: judgeStub('distinct', { callLog: log }), timeout: 30 },
+      extractor: { backends: { claude: judgeStub('distinct', { callLog: log }) }, timeout: 30 },
     });
     writePage(work, 'entities/page-a.md', 'Content about the front desk.');
     writePage(work, 'entities/page-b.md', 'Content about a different corridor entirely.');
@@ -928,7 +939,6 @@ test('MAJOR 1 — scan 은 crossEngine:require 로 게이팅되지 않는다(귀
   try {
     writeScanSettings(work, { candidateMinScore: 0.3, judge: { crossEngine: 'require' } }, {
       extractor: {
-        dispatch: 'by-engine',
         timeout: 30,
         backends: {
           claude: engineJudgeStub('claude', 'duplicate', tracker),
@@ -956,7 +966,7 @@ test('MAJOR 1 — scan 은 crossEngine:require 로 게이팅되지 않는다(귀
 
 test('MAJOR 1 — 귀속 가능성은 경로의 성질이다: scan 은 waive, write-time 은 그대로 fail-closed', () => {
   const py = `import json,sys; sys.path.insert(0,'core'); import wiki_dedup_judge as j
-cfg = {'extractor': {'dispatch': 'by-engine', 'backends': {'claude': ['/x/claude'], 'codex': ['/x/codex']}, 'default': []},
+cfg = {'extractor': {'backends': {'claude': ['/x/claude'], 'codex': ['/x/codex']}},
        'semanticDedup': {'judge': {'crossEngine': 'require'}}}
 out = {}
 # retroactive scan: 생산자라는 사실이 존재하지 않는다 → require 미적용, prefer 와 같은 순서.
@@ -1002,7 +1012,6 @@ test('MAJOR 2 — 쓸 수 없는 출력(invalid_verdict)은 억제되어 2회차
     // 최소값 1초 + sleep). 이 분리가 없으면 이 테스트는 억제가 아니라 식힘을 검증한다.
     writeScanSettings(work, { candidateMinScore: 0.3, judge: { cooldownSeconds: 1 } }, {
       extractor: {
-        dispatch: 'by-engine',
         timeout: 30,
         backends: { claude: engineJudgeStub('claude', 'maybe', tracker) }, // 스키마 밖 verdict
       },
@@ -1045,7 +1054,6 @@ test('MAJOR 2 — 진짜 unclear 판정도 같은 성질이라 함께 억제한�
   try {
     writeScanSettings(work, { candidateMinScore: 0.3 }, {
       extractor: {
-        dispatch: 'by-engine',
         timeout: 30,
         backends: { claude: engineJudgeStub('claude', 'unclear', tracker) },
       },
@@ -1089,7 +1097,6 @@ test('MAJOR 2 — 남은 후보가 있으면 폐기가 아니라 degrade 다(ver
   try {
     writeScanSettings(work, { candidateMinScore: 0.3 }, {
       extractor: {
-        dispatch: 'by-engine',
         timeout: 30,
         backends: {
           claude: engineJudgeStub('claude', 'maybe', tracker),      // 첫 후보: 쓸 수 없는 출력
@@ -1133,7 +1140,6 @@ test('MAJOR 3 — scan: 유료 실패(exit 3)의 사유·엔진·식힘이 로�
   try {
     writeScanSettings(work, { candidateMinScore: 0.3 }, {
       extractor: {
-        dispatch: 'by-engine',
         timeout: 30,
         backends: { claude: engineJudgeStub('claude', 'duplicate', tracker, { exitCode: 3 }) },
       },
@@ -1164,7 +1170,6 @@ test('MAJOR 3 — 식힘 쓰기가 전부 실패하면 cooldownWriteFailed 가 �
   try {
     writeScanSettings(work, { candidateMinScore: 0.3 }, {
       extractor: {
-        dispatch: 'by-engine',
         timeout: 30,
         backends: { claude: engineJudgeStub('claude', 'duplicate', tracker, { exitCode: 3 }) },
       },

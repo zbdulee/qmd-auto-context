@@ -45,6 +45,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.resolve()))
+import compile_paths as cp
 import config as qmd_config
 import wiki_compile as wc
 import wiki_compile_worker as wcw
@@ -52,20 +53,14 @@ import wiki_source_missing as wsm
 from dirty_queue import enqueue_collections
 from wiki_compile_enqueue import _safe_queue_path
 
-VERIFY_QUEUE_DEFAULT = ".auto-context/compile/verify-queue.jsonl"
-VERIFY_LOG_DEFAULT = ".auto-context/compile/verify-log.jsonl"
-VERIFY_SKIPPED_DEFAULT = ".auto-context/compile/verify-skipped.jsonl"
-VERIFY_DELETED_DEFAULT = ".auto-context/compile/verify-deleted.jsonl"
+# 경로는 전부 `compile_paths` 상수 테이블에서 온다(설정 키 4개는 제거됐다 —
+# `skippedPath`/`deletedPath` 오타가 유료 과금 루프의 입구였던 실패 클래스가 함께 사라진다).
+VERIFY_QUEUE_DEFAULT = cp.rel(cp.VERIFY_QUEUE)
 VERDICT_VALUES = {"pass", "fail", "inconclusive"}
 MAX_SOURCES = 3
 # "호출은 됐지만 출력이 판정으로 쓸 수 없다" — 같은 입력에서 재현되는 설정 오류이므로
 # 후보가 다 떨어지면 종점이 있다(defer_or_drop). transient(timeout·실행 실패)와 구분된다.
 UNUSABLE_OUTPUT_REASONS = {"invalid_extractor_json", "invalid_verdict"}
-# 귀속 불가 키·식힘 상한·엔진 식힘 저장소는 dedup judge와 **같은 헬퍼**를 쓴다(wcw가 SSOT).
-# 리터럴이나 read-modify-write를 각자 들고 있으면 한쪽만 고쳐지고 그 사실이 드러나지 않는다.
-UNATTRIBUTED_KEY = wcw.UNATTRIBUTED_KEY
-
-
 def extractor_builtins(compile_cfg: dict) -> list[str]:
     raw = compile_cfg.get("extractor")
     extractor = raw if isinstance(raw, dict) else {}
@@ -124,28 +119,18 @@ def plan_verify_attempts(
 
     **A cross-engine claim requires an attributable producer.** `producing` must resolve
     to a per-engine argv in the current pool; the `"unknown"` sentinel
-    (config.UNKNOWN_ENGINE, what enqueue writes when the host is unknown), a label
-    outside the pool, and cards built through `extractor.default` all fail that test. In
-    that case no candidate can be shown to differ from the producer, so every attempt is
-    mode `unknown` and "require" refuses outright. Unattributable argv — legacy
-    `compile.extractor.argv` (one argv serves every engine) and the `extractor.default`
-    fallback — is likewise `unknown` and is not offered under "require".
+    (config.UNKNOWN_ENGINE, what enqueue writes when the host is unknown) and a label
+    outside the pool both fail that test. In that case no candidate can be shown to
+    differ from the producer, so every attempt is mode `unknown` and "require" refuses
+    outright. (`extractor.argv`/`extractor.default` — the unattributable 0.x forms that
+    used to land here — no longer exist in the schema; every argv now comes from a
+    named engine, so provenance is always expressible.)
     """
     pool = verify_engine_pool(compile_cfg, vcfg)
     mode = vcfg.get("crossEngine", "prefer")
     if mode not in qmd_config.VERIFY_CROSS_ENGINE:
         mode = "prefer"
     cooled = set(cooled)
-    legacy = wcw.legacy_extractor_argv(compile_cfg)
-    if legacy is not None:
-        if mode == "require":
-            return [], mode, "cross_engine_unavailable"
-        if UNATTRIBUTED_KEY in cooled:
-            return [], mode, "engines_cooling"
-        return [{
-            "engine": producing, "argv": legacy,
-            "mode": qmd_config.VERIFIED_MODE_UNKNOWN, "key": UNATTRIBUTED_KEY,
-        }], "off", ""
 
     # 생성 엔진이 builtin adapter로 카드를 만들었다면 그 adapter로 검수할 수 있어야 한다 —
     # verify.builtins가 좁혀져 있어도(또는 오타여도) self 폴백이 사라지면 안 된다.
@@ -154,7 +139,7 @@ def plan_verify_attempts(
         resolve_builtins.append(producing)
     producing_attributable = bool(
         producing and producing != qmd_config.UNKNOWN_ENGINE
-        and wcw.resolve_extractor_argv(compile_cfg, producing, builtins=resolve_builtins)[0] is not None
+        and wcw.resolve_extractor_argv(compile_cfg, producing, builtins=resolve_builtins) is not None
     )
     if mode == "require" and not producing_attributable:
         # 어느 후보도 "생성 엔진과 다르다"를 증명할 수 없다 → 약속을 지킬 수 없으므로 거부.
@@ -167,11 +152,8 @@ def plan_verify_attempts(
     attempts: list[dict] = []
     seen_argv: list[list[str]] = []
     skipped_cooling = 0
-    # extractor.default는 엔진과 무관하므로 후보 순회 밖에서 한 번 구한다 — 후보가 0건인
-    # 설정(builtins/backends 없이 default만)에서도 기존 폴백이 살아 있어야 한다.
-    _, default_argv = wcw.resolve_extractor_argv(compile_cfg, "", builtins=[])
     for engine in order:
-        primary, _ = wcw.resolve_extractor_argv(compile_cfg, engine, builtins=resolve_builtins)
+        primary = wcw.resolve_extractor_argv(compile_cfg, engine, builtins=resolve_builtins)
         if primary is None or primary in seen_argv:
             continue
         seen_argv.append(primary)
@@ -185,19 +167,6 @@ def plan_verify_attempts(
         else:
             attempt_mode = qmd_config.VERIFIED_MODE_CROSS
         attempts.append({"engine": engine, "argv": primary, "mode": attempt_mode, "key": engine})
-    if default_argv is not None and default_argv not in seen_argv and mode != "require":
-        # extractor.default는 엔진에 귀속되지 않는다 — 라벨은 기존 동작(카드를 만든 엔진)을
-        # 유지하되 mode는 unknown이고 cooldown 키도 엔진과 분리한다(엔진 라벨로 식히면
-        # 실제로 실패한 것은 default argv인데 그 엔진의 adapter가 함께 막힌다).
-        if UNATTRIBUTED_KEY in cooled:
-            skipped_cooling += 1
-        else:
-            attempts.append({
-                "engine": producing or (order[0] if order else ""),
-                "argv": default_argv,
-                "mode": qmd_config.VERIFIED_MODE_UNKNOWN,
-                "key": UNATTRIBUTED_KEY,
-            })
     if attempts:
         return attempts, mode, ""
     # 빈 결과의 사유를 구분한다: cooldown(일시적, 큐 보존) / require가 걸러냄(설정·설치
@@ -220,7 +189,7 @@ def engine_cooldown_path(root: Path) -> Path:
     # 모든 카드 검수를 막았고, 선호 엔진이 계속 같은 실패를 반복하는 상태(인증 안 된 CLI 등)에서
     # 다음 후보로 degrade하지 못해 **검수가 영구 정지**했다 — `recallVerifiedOnly` 기본값
     # 아래에서 그것은 wiki가 recall에서 사라지는 것과 같다.
-    return root / ".auto-context" / "compile" / "verify-engine-cooldown.json"
+    return root / cp.COMPILE_DIR / cp.VERIFY_ENGINE_COOLDOWN
 
 
 # 엔진 단위 식힘 저장소의 구현은 `wcw`가 SSOT다(dedup judge가 자기 파일로 같은 헬퍼를
@@ -253,31 +222,25 @@ def verify_skipped_path(root: Path, vcfg: dict) -> Path:
     """inconclusive 삭제의 억제 마커 경로. **`verify_deleted_path`와 같이 폴백한다.**
 
     예전에는 `None`을 돌려줄 수 있었고 그것이 `verify_deleted_path`가 이미 닫은 것과 **같은
-    과금 루프의 입구**였다: compile 디렉터리 밖을 가리키는 `skippedPath`(자연스러운 오타)가
-    config 검증을 통과하고 `safe_compile_file`이 None을 내면 억제 마커가 **한 줄도 기록되지
-    않아** unchanged source가 재컴파일→재검수→재삭제를 반복하고 매 반복이 유료 호출이다.
-    오타가 과금 루프가 되어서는 안 되므로 기본 경로로 떨어진다 — 사용자가 적은 경로가
-    무시되는 것이 더 나은 실패다(그 사실은 원장이 기본 위치에 생기는 것으로 보인다).
+    과금 루프의 입구**였다: 원장이 **한 줄도 기록되지 않으면** unchanged source가
+    재컴파일→재검수→재삭제를 반복하고 매 반복이 유료 호출이다. 그 입구를 만들던 설정 키
+    (`compile.verify.skippedPath` — 오타 한 번이면 compile 디렉터리 밖을 가리켰다)는
+    제거됐지만, 파일 자체가 밖을 가리키는 symlink면 `cp.ledger`가 여전히 None을 낸다.
+    그때도 기본 경로로 떨어져 흔적을 남긴다(마커 없는 삭제보다 나은 실패다).
     """
-    return wcw.safe_compile_file(root, vcfg.get("skippedPath", VERIFY_SKIPPED_DEFAULT)) or (
-        root / ".auto-context" / "compile" / "verify-skipped.jsonl"
-    )
+    return cp.ledger(root, cp.VERIFY_SKIPPED) or (root / cp.COMPILE_DIR / cp.VERIFY_SKIPPED)
 
 
 def verify_deleted_path(root: Path, vcfg: dict) -> Path:
     """삭제 전용 감사 원장 경로. **형제 호출자들과 같이 기본 경로로 폴백한다.**
 
     `candidate_path`·`log_path`는 폴백하는데 이것만 `None`을 돌려주던 것이 유료 무한 루프의
-    입구였다: compile 디렉터리 밖을 가리키는 `deletedPath`(`.auto-context/verify-deleted.jsonl`
-    같은 **자연스러운 오타**)가 config 검증을 통과하고 `safe_compile_file`이 None을 내면
-    `record_verify_deletion`이 실패해 fail-closed 분기로 가고, cooldown도 억제 마커도 없어
-    **매 run 유료 호출 1회 + 잡 영구 잔존 + 카드 영구 비가시**가 됐다(실측 3 run 연속).
-    오타가 과금 루프가 되어서는 안 되므로 기본 경로로 떨어진다 — 사용자가 적은 경로가
-    무시되는 것이 더 나은 실패다(그 사실은 원장이 기본 위치에 생기는 것으로 보인다).
+    입구였다: 경로가 안 잡히면 `record_verify_deletion`이 실패해 fail-closed 분기로 가고,
+    cooldown도 억제 마커도 없어 **매 run 유료 호출 1회 + 잡 영구 잔존 + 카드 영구 비가시**가
+    됐다(실측 3 run 연속). 설정 키(`compile.verify.deletedPath`)는 제거됐지만 symlink escape는
+    남으므로 폴백도 남는다.
     """
-    return wcw.safe_compile_file(root, vcfg.get("deletedPath", VERIFY_DELETED_DEFAULT)) or (
-        root / ".auto-context" / "compile" / "verify-deleted.jsonl"
-    )
+    return cp.ledger(root, cp.VERIFY_DELETED) or (root / cp.COMPILE_DIR / cp.VERIFY_DELETED)
 
 
 # 유료 호출 전 원장 쓰기 가능성 판정. 정의는 `wiki_compile`이 SSOT다 — dedup scan도 같은
@@ -336,7 +299,7 @@ def record_machine_delete(root: Path, compile_cfg: dict, record: dict, verdict: 
     delete is preferable to contested (fix the source, get a fresh card). Fail-open:
     an unwritable manifest degrades to today's tombstone behaviour, never to a crash.
     """
-    path = wcw.safe_compile_file(root, compile_cfg.get("manifestPath", ".auto-context/compile/generated-manifest.jsonl"))
+    path = cp.ledger(root, cp.MANIFEST)
     if path is None:
         return
     # targetPath만 담아 same_generated_identity가 이 카드에만 매칭되게 한다
@@ -861,12 +824,10 @@ def run(
     vcfg = verify_cfg_of(compile_cfg)
     if not vcfg.get("enabled", True):
         return result
-    queue = _safe_queue_path(root, vcfg.get("queuePath", VERIFY_QUEUE_DEFAULT))
+    queue = _safe_queue_path(root, VERIFY_QUEUE_DEFAULT)
     if queue is None or not queue.exists():
         return result
-    log_path = wcw.safe_compile_file(root, vcfg.get("logPath", VERIFY_LOG_DEFAULT))
-    if log_path is None:
-        log_path = root / ".auto-context" / "compile" / "verify-log.jsonl"
+    log_path = cp.ledger(root, cp.VERIFY_LOG) or (root / cp.COMPILE_DIR / cp.VERIFY_LOG)
 
     # **유료 호출 전 preflight: fail-closed 원장에 쓸 수 없으면 검수하지 않는다.**
     # fail-closed 삭제(원장 없이는 지우지 않는다)는 유지하지만 그 실패에 종점이 없으면
@@ -881,7 +842,7 @@ def run(
 
     # 0.x 전역 cooldown 파일의 고아 정리 — 이제 읽지도 쓰지도 않으므로 남아 있으면 "검수가
     # 식힘 중"이라는 잘못된 인상만 준다. 후보 단위 파일로 대체됐다(engine_cooldown_path).
-    (root / ".auto-context" / "compile" / "verify-cooldown").unlink(missing_ok=True)
+    (root / cp.COMPILE_DIR / cp.LEGACY_VERIFY_COOLDOWN).unlink(missing_ok=True)
 
     claimed = wcw.claim_queue(queue)
     if claimed is None:
@@ -895,7 +856,7 @@ def run(
     malformed = [raw for raw, job in rows if job is None]
     kept = _dedup_by_target(rows)
     max_per_run = max(1, min(
-        int(vcfg.get("maxPerRun", 3) or 3), qmd_config.MAX_VERIFY_PER_RUN
+        int(wcw.budget_of(compile_cfg).get("verifyPerRun", 3) or 3), qmd_config.MAX_VERIFY_PER_RUN
     ))
     produced = {t for t in (produced_targets or []) if isinstance(t, str) and t}
     budget = max(max_per_run, min(len(produced), qmd_config.VERIFY_PRODUCED_HARD_CAP))
@@ -956,7 +917,7 @@ def main() -> int:
     root = Path(found["projectRoot"]).resolve()
     config = found["config"]
     compile_cfg = config.get("compile") if isinstance(config.get("compile"), dict) else {}
-    if config.get("indexing") is not True or not compile_cfg.get("enabled") or compile_cfg.get("mode", "off") == "off":
+    if config.get("indexing") is not True or not qmd_config.compile_active(compile_cfg):
         return 0
     result = run(root, config, compile_cfg)
     if args.json:

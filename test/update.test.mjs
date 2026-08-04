@@ -563,18 +563,17 @@ test('update core: --init-wiki --preset novel creates novel dirs and compile def
       assert.equal(existsSync(join(work, '.auto-context', 'wiki', dir)), true, `${dir} should exist`);
     }
     const cfg = JSON.parse(readFileSync(join(work, '.auto-context', 'settings.json'), 'utf8'));
-    assert.equal(cfg.compile.enabled, true);
+    // 활성화 스위치는 mode 하나다(enabled/autoWrite는 스키마에서 제거됐다) — auto-wiki는
+    // 예전 {enabled:true, mode:'auto-wiki', autoWrite:true}와 같은 상태다.
     assert.equal(cfg.compile.mode, 'auto-wiki');
-    assert.equal(cfg.compile.autoWrite, true);
     // post_tool_source가 없으면 자동 수집 트리거가 하나도 없어 세션 노트를 채워도
     // 카드가 생기지 않는다(post_session_summary는 수동 경로 라벨일 뿐이다).
     assert.ok(cfg.compile.triggers.includes('post_tool_source'));
     // delta-only: 기본값과 같은 값은 emit하지 않는다. 실제 적용값은 effective로 확인한다.
     assert.equal(cfg.compile.defaultStatus, undefined);
-    assert.equal(cfg.compile.requireReviewForCanon, undefined);
     const eff = effectiveConfig(join(work, '.auto-context', 'settings.json'));
+    assert.equal(eff.compile.mode, 'auto-wiki');
     assert.equal(eff.compile.defaultStatus, 'generated');
-    assert.equal(eff.compile.requireReviewForCanon, true);
     // 이 preset은 compile을 켜면서 extractor를 쓰지 않는다 — timeout 기본값이 30이던
     // 동안 이 경로로 온보딩한 프로젝트는 adapter 호출이 매번 timeout됐다(§6.1).
     assert.equal(eff.compile.extractor.timeout, 120);
@@ -1069,33 +1068,42 @@ test('update core: merge-needed queue surfaces a user-facing notice (count + ski
   }
 });
 
-test('update core: merge-review hint honors a custom compile.mergeNeededPath instead of the hardcoded default', () => {
-  const work = repoTemp('qmd-merge-hint-custom-path');
+// merge-needed 위치는 더 이상 설정이 아니라 상수다(core/compile_paths.py :: MERGE_NEEDED,
+// update.sh는 그 리터럴을 읽는다). 그래서 "설정한 경로를 읽는가"가 아니라 "상수 경로의
+// 비어있음/차있음만이 힌트를 가르는가"가 살아남은 불변식이다 — 죽은 키를 남겨 둔 설정이
+// 힌트를 딴 파일로 돌리지 못한다는 것까지 함께 못박는다.
+test('update core: merge-review hint keys off the constant merge-needed.jsonl (empty = silent, non-empty = fires; a stale mergeNeededPath setting cannot redirect it)', () => {
+  const work = repoTemp('qmd-merge-hint-constant-path');
   const bin = join(work, 'bin');
+  const constantQueue = join(work, '.auto-context', 'compile', 'merge-needed.jsonl');
+  const entry = JSON.stringify({ candidate: { title: 'a' }, matchedPath: 'entities/b.md', matchedScore: 0.95, suggestedAction: 'merge' }) + '\n';
   try {
     mkdirSync(join(work, '.auto-context', 'compile'), { recursive: true });
     mkdirSync(bin, { recursive: true });
     writeFileSync(join(work, '.auto-context', 'settings.json'), JSON.stringify({
       indexing: true,
       collections: ['x'],
+      // 0.x의 죽은 키. 이것이 다시 존중되면 아래 첫 실행이 발화해 테스트가 깨진다.
       compile: { mergeNeededPath: '.auto-context/compile/custom-merge-queue.jsonl' },
     }));
-    // The default-named file is present but empty -- if the hint reads the hardcoded
-    // default path instead of the configured one, this proves it by staying silent.
-    writeFileSync(join(work, '.auto-context', 'compile', 'merge-needed.jsonl'), '');
-    writeFileSync(
-      join(work, '.auto-context', 'compile', 'custom-merge-queue.jsonl'),
-      JSON.stringify({ candidate: { title: 'a' }, matchedPath: 'entities/b.md', matchedScore: 0.95, suggestedAction: 'merge' }) + '\n',
-    );
+    writeFileSync(constantQueue, '');
+    writeFileSync(join(work, '.auto-context', 'compile', 'custom-merge-queue.jsonl'), entry);
     writeFileSync(join(bin, 'curl'), '#!/usr/bin/env sh\nexit 1\n', { mode: 0o755 });
     writeFileSync(join(bin, 'qmd'), '#!/usr/bin/env sh\nexit 0\n', { mode: 0o755 });
 
-    const out = execFileSync('bash', [join(process.cwd(), 'core', 'update.sh')], {
-      encoding: 'utf8',
-      input: JSON.stringify({ cwd: work }),
-      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, QMD_CACHE_DIR: CACHE_DIR },
+    const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, QMD_CACHE_DIR: CACHE_DIR };
+    const silent = execFileSync('bash', [join(process.cwd(), 'core', 'update.sh')], {
+      encoding: 'utf8', input: JSON.stringify({ cwd: work }), env,
     });
-    assert.match(out, /wiki-review-resolver/, 'hint must fire by reading the configured mergeNeededPath, not the hardcoded default');
+    assert.doesNotMatch(silent, /wiki-review-resolver/,
+      'constant queue is empty -- a mergeNeededPath setting must not redirect the hint to another file');
+
+    writeFileSync(constantQueue, entry);
+    const fired = execFileSync('bash', [join(process.cwd(), 'core', 'update.sh')], {
+      encoding: 'utf8', input: JSON.stringify({ cwd: work }), env,
+    });
+    assert.match(fired, /wiki-review-resolver/,
+      'hint must fire once the constant .auto-context/compile/merge-needed.jsonl is non-empty');
   } finally {
     removeTemp(work);
   }
