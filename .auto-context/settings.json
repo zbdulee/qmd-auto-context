@@ -1,15 +1,7 @@
 {
   "indexing": false,
   "name": "qmd-auto-context",
-  "collections": [],
-  "collectionPaths": {},
   "minScore": 0.5,
-  "topN": 3,
   "queryTimeout": 3,
-  "prefixStyle": "tag",
-  "events": [
-    "sessionStart",
-    "userPromptSubmit",
-    "postToolUse"
-  ]
+  "prefixStyle": "tag"
 }
