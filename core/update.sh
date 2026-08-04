@@ -1019,6 +1019,44 @@ PY
     notice_clear role-invalid "$workdir"
   fi
 
+  # 제거된 설정 키 알림. 스키마 정리로 사라진 키는 normalize_config()가 **조용히**
+  # 무시하므로(하위호환 없음), 사용자는 `verify.maxPerRun: 15`가 여전히 검수 예산인
+  # 줄 안다. 판정도 문구도 python이 SSOT다(config.deprecated_key_notice) — 키 목록과
+  # 행선지가 bash에 복제되면 갈리는 순간 알림이 틀린 행선지를 말한다.
+  #
+  # **marker 쓰기가 여기(update 동기 경로)에만 있는 것이 요점이다.** 감지 함수 자체는
+  # 무해하지만 recall/posttool 같은 blocking hook이 notice_once를 부르면 그 훅이
+  # marker를 선점해 TTL 동안 SessionStart 알림 전체가 삼켜진다(Hermes
+  # QMD_SUPPRESS_NOTICE가 막으려는 것과 같은 클래스).
+  #
+  # 이미 로드된 $config_json(raw, 정규화 전)을 argv로 넘긴다 — heredoc이 stdin을
+  # 차지하므로 파이프는 무시된다(role-invalid·stale-queue와 동일 패턴). 정규화된
+  # config를 보면 제거된 키는 이미 사라진 뒤라 아무것도 감지되지 않는다.
+  deprecated_msg=$(python3 - "$(dirname "$0")" "$config_json" <<'PY' 2>/dev/null || true
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(sys.argv[1]).resolve()))
+import config as qmd_config
+
+try:
+    cfg = json.loads(sys.argv[2] or "{}")
+except Exception:
+    raise SystemExit(0)
+if not isinstance(cfg, dict):
+    raise SystemExit(0)
+message = qmd_config.deprecated_key_notice(cfg)
+if message:
+    print(message)
+PY
+)
+  if [ -n "$deprecated_msg" ]; then
+    notice_once deprecated-keys "$workdir" "$deprecated_msg"
+  else
+    notice_clear deprecated-keys "$workdir"
+  fi
+
   # Retroactive wiki dedup hint: if a scan (this run's or a past one's) queued
   # pairs that haven't been resolved yet, surface it two ways. Cheap file test +
   # text extraction only -- no daemon call -- since this runs in the hot
@@ -1047,21 +1085,13 @@ PY
   # Write-time semantic gate merge-review hint: same shape as the dedup hint
   # above, but for merge-needed.jsonl -- the queue core/wiki_compile.py
   # populates when a new candidate looks similar to an existing page instead
-  # of auto-writing it. Cheap file test + text extraction only, no daemon call.
-  # Unlike dedup-needed.jsonl (intentionally hardcoded), this path is
-  # configurable (compile.mergeNeededPath) and already read as such by both
-  # the producer (wiki_compile.py) and consumer (wiki_review.py) -- reuse the
-  # already-loaded $config_json rather than hardcode the default here too.
-  merge_needed_rel="$(printf '%s' "$config_json" | python3 -c 'import json,sys
-try:
-    cfg = json.load(sys.stdin)
-except Exception:
-    cfg = {}
-compile_cfg = cfg.get("compile") if isinstance(cfg.get("compile"), dict) else {}
-rel = compile_cfg.get("mergeNeededPath")
-print(rel if isinstance(rel, str) and rel else ".auto-context/compile/merge-needed.jsonl")' 2>/dev/null)"
-  [ -z "$merge_needed_rel" ] && merge_needed_rel=".auto-context/compile/merge-needed.jsonl"
-  merge_queue="$workdir/$merge_needed_rel"
+  # of auto-writing it. Cheap file test only, no daemon call and no python.
+  # The location is a constant now (core/compile_paths.py :: MERGE_NEEDED); the
+  # old `compile.mergeNeededPath` setting is gone, so the producer
+  # (wiki_compile.py), the consumer (wiki_review.py) and this hint all read the
+  # same literal. Keep this string in sync with that table -- if it drifts, the
+  # review notice goes silent with no other symptom.
+  merge_queue="$workdir/.auto-context/compile/merge-needed.jsonl"
   if [ -s "$merge_queue" ]; then
     # Symmetric with the dedup hint above: (a) user-facing notice so the human
     # sees the backlog and can trigger the `wiki-review` skill, (b) model-facing
@@ -1118,7 +1148,7 @@ found = c.find_project_config(sys.argv[2])
 cfg = found["config"]
 compile_cfg = cfg.get("compile") if isinstance(cfg.get("compile"), dict) else {}
 vcfg = v.verify_cfg_of(compile_cfg)
-if not compile_cfg.get("enabled") or not vcfg.get("enabled", True):
+if not c.compile_active(compile_cfg) or not vcfg.get("enabled", True):
     print("")
 else:
     import pathlib
@@ -1127,10 +1157,10 @@ else:
 ' "$(dirname "$0")" "$workdir" 2>/dev/null || true)"
     case "$ledger_blocked" in
       audit_ledger_unwritable)
-        notice_once verify-ledger "$workdir" "[qmd] 기계 검수 중단 — 삭제 감사 원장(.auto-context/compile/verify-deleted.jsonl)에 쓸 수 없습니다. 새 wiki 카드가 검수되지 않아 recall에 나오지 않습니다. compile 디렉터리 권한과 compile.verify.deletedPath 설정을 확인하세요."
+        notice_once verify-ledger "$workdir" "[qmd] 기계 검수 중단 — 삭제 감사 원장(.auto-context/compile/verify-deleted.jsonl)에 쓸 수 없습니다. 새 wiki 카드가 검수되지 않아 recall에 나오지 않습니다. compile 디렉터리 권한(.auto-context/compile)을 확인하세요."
         ;;
       suppression_ledger_unwritable)
-        notice_once verify-ledger "$workdir" "[qmd] 기계 검수 중단 — 억제 원장(.auto-context/compile/verify-skipped.jsonl)에 쓸 수 없습니다. 이 원장 없이 inconclusive 삭제를 진행하면 같은 소스가 반복 재컴파일되어 유료 호출이 되풀이됩니다. compile 디렉터리 권한과 compile.verify.skippedPath 설정을 확인하세요."
+        notice_once verify-ledger "$workdir" "[qmd] 기계 검수 중단 — 억제 원장(.auto-context/compile/verify-skipped.jsonl)에 쓸 수 없습니다. 이 원장 없이 inconclusive 삭제를 진행하면 같은 소스가 반복 재컴파일되어 유료 호출이 되풀이됩니다. compile 디렉터리 권한(.auto-context/compile)을 확인하세요."
         ;;
       *)
         notice_clear verify-ledger "$workdir"
@@ -1540,13 +1570,9 @@ config["collectionRoles"] = collection_roles
 config.pop("recallStrategy", None)
 if preset == "novel":
     compile_config = config.get("compile") if isinstance(config.get("compile"), dict) else {}
-    # 기본값과 다른 키만 채운다. defaultStatus·requireReviewForCanon·candidatePath·
-    # tombstonePath·manifestPath·excludeStatusesFromRecall·lowPriorityStatuses·
-    # maxAutoPageLines는 전부 DEFAULT_CONFIG와 같은 값이라 setdefault해도 effective가
-    # 바뀌지 않는다(동결 테스트가 이 등가를 못박는다).
-    compile_config.setdefault("enabled", True)
+    # 기본값과 다른 키만 채운다(생성기 delta-only). 활성화는 `mode` 한 값이 담당한다 —
+    # `enabled`·`autoWrite`는 스키마에서 사라졌으므로 쓰면 정규화에서 무시되는 죽은 키다.
     compile_config.setdefault("mode", "auto-wiki")
-    compile_config.setdefault("autoWrite", True)
     # post_session_summary는 host가 compact session summary를 hook에 넘겨줄 때만
     # 자동으로 발화할 수 있고 그런 host가 아직 없다(수동 skills/wiki-compile 경로의
     # 라벨로만 소비된다). 자동 수집을 실제로 담당하는 트리거는 post_tool_source이므로
@@ -1631,6 +1657,7 @@ import json, os, sys, tempfile
 from pathlib import Path
 sys.path.insert(0, sys.argv[2])
 import wiki_compile_defaults as d
+import config as qmd_config
 
 target = Path(sys.argv[1]).resolve()
 engines = d.parse_engines(sys.argv[3] or None)
@@ -1655,6 +1682,45 @@ if existing_extractor:
     merged["extractor"] = {**block_extractor, **existing_extractor}
 trig = existing.get("triggers") if isinstance(existing.get("triggers"), list) else []
 merged["triggers"] = list(dict.fromkeys(["post_tool_source", *trig, *block["triggers"]]))
+# 스키마에서 사라진 키를 걷어낸다. block(delta)에 없는 키는 기존 파일의 사본이 그대로
+# 살아남고, 그러면 도구가 방금 원자적으로 다시 쓴 자기 출력물에 대해 SessionStart가
+# deprecated 알림을 4h마다 낸다(자기 잔소리 루프). enabled/autoWrite의 의미는
+# compile_config가 이미 mode로 번역했으므로 여기서는 흔적만 지우면 된다.
+# **extractor 병합 뒤에 둔다** — 위에서 지우면 existing_extractor 병합이 dispatch/default를
+# 되살린다(실측).
+def _dig(root_map, dotted, create=False):
+    """"compile." 접두를 뗀 dotted 경로의 (부모 dict, 마지막 키). 없으면 (None, key)."""
+    parts = dotted.split(".")[1:]
+    node = root_map
+    for part in parts[:-1]:
+        child = node.get(part)
+        if not isinstance(child, dict):
+            if not create:
+                return None, parts[-1]
+            child = {}
+            node[part] = child
+        node = child
+    return node, parts[-1]
+
+# 값 읽기는 **원본(existing)** 에서 한다. merged 쪽은 위 default_valued 정리가 verify·batch
+# 서브트리를 통째로 지운 뒤라 relocated 값이 이미 사라져 있다(실측: verifyPerRun 15,
+# extractorPerRun 4가 조용히 유실됐다).
+for record in qmd_config.deprecated_keys({"compile": existing}):
+    src, src_key = _dig(existing, record["key"])
+    value = src.get(src_key) if src is not None else None
+    # 옮겨진 키는 값이 여전히 유효하므로 새 자리로 이식한다. 지우기만 하면 사용자가 적어 둔
+    # verify.maxPerRun 15가 조용히 기본값 3으로 떨어진다. 새 키에 이미 값이 있으면 그쪽이
+    # 사용자의 최신 의사이므로 덮지 않는다.
+    dest = record.get("replacement")
+    if dest and value is not None:
+        parent, dest_key = _dig(merged, dest, create=True)
+        if parent is not None:
+            parent.setdefault(dest_key, value)
+    # 흔적 제거는 merged에서. enabled/autoWrite의 의미는 compile_config가 이미 mode로
+    # 번역했으므로 여기서는 키만 걷어내면 된다.
+    dead, dead_key = _dig(merged, record["key"])
+    if dead is not None:
+        dead.pop(dead_key, None)
 cfg["compile"] = merged
 
 fd, tmp = tempfile.mkstemp(dir=str(settings.parent), prefix="settings.", suffix=".tmp")

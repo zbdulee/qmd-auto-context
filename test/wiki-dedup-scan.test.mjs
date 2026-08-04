@@ -21,7 +21,7 @@ function writeSettings(work, overrides = {}) {
     collectionPaths: { 'proj-wiki': '.auto-context/wiki' },
     collectionRoles: { 'proj-wiki': 'wiki' },
     wikiPath: '.auto-context/wiki',
-    compile: { enabled: true, mode: 'auto-wiki', autoWrite: true, ...overrides },
+    compile: { mode: 'auto-wiki', ...overrides },
   }));
 }
 
@@ -455,18 +455,27 @@ test('wiki_dedup_scan: daemon query failure leaves that page unadvanced for retr
   }
 });
 
-test('wiki_dedup_scan: compile.enabled=false or semanticDedup.enabled=false is a no-op', () => {
-  const work = repoTemp('dedup-scan-disabled');
-  try {
-    writeSettings(work, { enabled: false });
-    writePage(work, 'entities/page-a.md', { body: 'Content A.' });
-    writePage(work, 'entities/page-b.md', { body: 'Content B.' });
-    const fixture = join(work, 'fixture.json');
-    writeFileSync(fixture, JSON.stringify({ results: [{ file: 'proj-wiki/entities/page-b.md', score: 0.99 }] }));
-    runScan(work, { QMD_QUERY_FIXTURE: fixture });
-    assert.deepEqual(readDedupNeeded(work), []);
-  } finally {
-    removeTemp(work);
+// 비활성화의 두 축: compile 자체가 꺼진 경우(`compile.mode: "off"` — 예전 `enabled: false`)와
+// dedup만 꺼진 경우. 둘 다 무동작이어야 하고, 어느 쪽으로 꺼졌는지가 로그로 구분돼야 한다.
+test('wiki_dedup_scan: compile.mode=off or semanticDedup.enabled=false is a no-op', () => {
+  for (const [label, overrides, skipLine] of [
+    ['mode-off', { mode: 'off' }, 'SKIP: compile.mode is off'],
+    ['dedup-off', { semanticDedup: { enabled: false } }, 'SKIP: compile.semanticDedup.enabled is false'],
+  ]) {
+    const work = repoTemp(`dedup-scan-disabled-${label}`);
+    try {
+      writeSettings(work, overrides);
+      writePage(work, 'entities/page-a.md', { body: 'Content A.' });
+      writePage(work, 'entities/page-b.md', { body: 'Content B.' });
+      const fixture = join(work, 'fixture.json');
+      writeFileSync(fixture, JSON.stringify({ results: [{ file: 'proj-wiki/entities/page-b.md', score: 0.99 }] }));
+      const dirs = runScan(work, { QMD_QUERY_FIXTURE: fixture });
+      assert.deepEqual(readDedupNeeded(work), [], `${label}: 0.99는 임계 위지만 스캔 자체가 돌지 않는다`);
+      assert.equal(readFileSync(dirs.logFile, 'utf8').includes(skipLine), true,
+        `${label}: 무동작 사유가 로그에 남아야 "꺼짐"과 "고장"이 구분된다`);
+    } finally {
+      removeTemp(work);
+    }
   }
 });
 

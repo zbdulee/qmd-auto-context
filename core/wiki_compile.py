@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.resolve()))
+import compile_paths as cp
 import config as qmd_config
 import wiki_dedup_judge
 import wiki_markers
@@ -138,17 +139,6 @@ def safe_managed_dir(root: Path, rel: str) -> Path | None:
     if path.exists() and (path.is_symlink() or not path.is_dir()):
         return None
     path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def safe_compile_file(root: Path, compile_dir: Path, rel: object) -> Path | None:
-    if not isinstance(rel, str) or not rel:
-        return None
-    path = (root / rel).resolve()
-    try:
-        path.relative_to(compile_dir)
-    except ValueError:
-        return None
     return path
 
 
@@ -1137,7 +1127,7 @@ def query_wiki_candidates(
         return []
     daemon_url = os.environ.get("QMD_DAEMON_URL", "http://localhost:8483")
     timeout = float(config.get("queryTimeout", 5.0) or 5.0)
-    results = query_wiki_similar(daemon_url, collection, text, int(semantic_cfg.get("topK", 3)), timeout)
+    results = query_wiki_similar(daemon_url, collection, text, qmd_config.DEDUP_TOP_K, timeout)
     if not results:
         return []
     hits: list[tuple[Path, float]] = []
@@ -1159,11 +1149,11 @@ def find_wiki_semantic_match(
     root: Path, wiki_root: Path, config: dict, candidate: dict, summary: str
 ) -> tuple[Path | None, float | None]:
     """Legacy score-threshold gate: (matched_path, score) for the top hit above
-    `semanticDedup.threshold`, else (None, None). Used only when no LLM judge is
-    available on this machine."""
-    compile_cfg = config.get("compile") if isinstance(config.get("compile"), dict) else {}
-    semantic_cfg = compile_cfg.get("semanticDedup") if isinstance(compile_cfg.get("semanticDedup"), dict) else {}
-    threshold = float(semantic_cfg.get("threshold", 0.82))
+    `config.DEDUP_SCORE_THRESHOLD`, else (None, None). Used only when no LLM judge
+    is available on this machine. 임계는 상수다 — daemon score가 순위 기반이라
+    설정으로 조정할 의미가 없었고(wiki_dedup_judge 참조) judge-less 폴백의 동작을
+    예전 기본값 그대로 동결하는 것이 목적이다."""
+    threshold = qmd_config.DEDUP_SCORE_THRESHOLD
     hits = query_wiki_candidates(root, wiki_root, config, candidate, summary, threshold)
     if not hits:
         return None, None
@@ -1267,12 +1257,9 @@ def main() -> int:
     candidate = load_payload()
     root, config = project_paths(args.cwd)
     compile_cfg = config.get("compile") if isinstance(config.get("compile"), dict) else {}
-    if config.get("indexing") is not True or not compile_cfg.get("enabled"):
+    if config.get("indexing") is not True or not qmd_config.compile_active(compile_cfg):
         return 0
-
-    mode = compile_cfg.get("mode", "off")
-    if mode == "off":
-        return 0
+    mode = qmd_config.compile_mode(compile_cfg)
     wiki_rel = config.get("wikiPath", ".auto-context/wiki")
     wiki_root = safe_managed_dir(root, wiki_rel)
     compile_dir = safe_managed_dir(root, ".auto-context/compile")
@@ -1290,10 +1277,10 @@ def main() -> int:
     summary, redactions = redact(str(candidate.get("summary") or "").strip())
     h = source_hash({**candidate, "summary": summary})
 
-    candidate_path = safe_compile_file(root, compile_dir, compile_cfg.get("candidatePath", ".auto-context/compile/candidates.jsonl"))
-    tombstone_path = safe_compile_file(root, compile_dir, compile_cfg.get("tombstonePath", ".auto-context/compile/tombstones.jsonl"))
-    manifest_path = safe_compile_file(root, compile_dir, compile_cfg.get("manifestPath", ".auto-context/compile/generated-manifest.jsonl"))
-    merge_needed_path = safe_compile_file(root, compile_dir, compile_cfg.get("mergeNeededPath", ".auto-context/compile/merge-needed.jsonl"))
+    candidate_path = cp.ledger(root, cp.CANDIDATES)
+    tombstone_path = cp.ledger(root, cp.TOMBSTONES)
+    manifest_path = cp.ledger(root, cp.MANIFEST)
+    merge_needed_path = cp.ledger(root, cp.MERGE_NEEDED)
     if candidate_path is None or tombstone_path is None or manifest_path is None or merge_needed_path is None:
         print(json.dumps({"action": "rejected", "reason": "unsafe_compile_path"}, ensure_ascii=False))
         return 1
@@ -1362,7 +1349,7 @@ def main() -> int:
         print(json.dumps({"action": "tombstoned", "targetPath": record["targetPath"]}, ensure_ascii=False))
         return 0
 
-    if mode == "candidates" or not compile_cfg.get("autoWrite", False):
+    if mode == "candidates":
         record["action"] = "candidate"
         append_jsonl(candidate_path, record)
         print(json.dumps({"action": "candidate", "targetPath": record["targetPath"]}, ensure_ascii=False))
@@ -1530,9 +1517,7 @@ def main() -> int:
     verify_cfg = compile_cfg.get("verify") if isinstance(compile_cfg.get("verify"), dict) else {}
     verify_queued = False
     if verify_cfg.get("enabled", True) and (status == "generated" or status_reset_failed):
-        verify_queue_path = safe_compile_file(
-            root, compile_dir, verify_cfg.get("queuePath", ".auto-context/compile/verify-queue.jsonl")
-        )
+        verify_queue_path = cp.ledger(root, cp.VERIFY_QUEUE)
         if verify_queue_path is not None:
             verify_queued = True
             # 실제 소스를 별도 필드로 넘긴다 — verifier가 `MAX_SOURCES` 상한과 무관하게

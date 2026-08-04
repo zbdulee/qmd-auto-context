@@ -26,11 +26,8 @@ function setupProject(config = {}) {
       'proj-wiki': 'wiki',
     },
     compile: {
-      enabled: true,
       mode: 'guarded',
-      autoWrite: true,
       triggers: ['post_tool_source', 'manual'],
-      sourceQueuePath: '.auto-context/compile/source-queue.jsonl',
       ...config.compile,
     },
     ...config,
@@ -177,11 +174,8 @@ function setupDotProject(extra = {}) {
     collectionPaths: { sessions: '.nova/06_Sessions' },
     collectionRoles: { sessions: 'session' },
     compile: {
-      enabled: true,
       mode: 'auto-wiki',
-      autoWrite: true,
       triggers: ['post_tool_source', 'manual'],
-      sourceQueuePath: '.auto-context/compile/source-queue.jsonl',
     },
     ...extra,
   }));

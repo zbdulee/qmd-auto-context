@@ -25,6 +25,20 @@ with open(sys.argv[1], encoding="utf-8") as fh:
     ['-c', py, join(project, '.auto-context', 'settings.json')], { cwd: ROOT, encoding: 'utf8' }));
 }
 
+// `extractor.dispatch` 게이트는 사라졌다. 그것을 대신하는 불변식은 "builtins/backends만으로
+// 엔진이 실제 argv로 해석된다"이므로, emit된 키를 세는 대신 worker의 해석기를 직접 부른다.
+function resolveArgv(project, engine) {
+  const py = `import json, sys
+sys.path.insert(0, "core")
+import config as qmd_config, wiki_compile_worker as wcw
+with open(sys.argv[1], encoding="utf-8") as fh:
+    compile_cfg = qmd_config.normalize_config(json.load(fh))["compile"]
+print(json.dumps(wcw.resolve_extractor_argv(compile_cfg, sys.argv[2])))`;
+  return JSON.parse(execFileSync('python3',
+    ['-c', py, join(project, '.auto-context', 'settings.json'), engine],
+    { cwd: ROOT, encoding: 'utf8' }));
+}
+
 function optedInProject() {
   const d = mkdtempSync(join(tmpdir(), 'enable-compile-'));
   mkdirSync(join(d, '.auto-context'), { recursive: true });
@@ -40,12 +54,20 @@ test('--enable-compile wires compile block with portable built-in engines', () =
   try {
     const out = runEnable(project);
     const cfg = JSON.parse(readFileSync(join(project, '.auto-context', 'settings.json'), 'utf8'));
-    assert.equal(cfg.compile.enabled, true);
-    assert.equal(cfg.compile.extractor.dispatch, 'by-engine');
-    assert.deepEqual(cfg.compile.extractor.backends, {});
+    // 활성화 스위치는 mode 하나다(enabled/autoWrite는 스키마에서 제거됐다).
+    assert.equal(cfg.compile.mode, 'auto-wiki');
+    assert.equal(effectiveCompile(project).mode, 'auto-wiki');
     assert.deepEqual(cfg.compile.extractor.builtins, ['claude', 'codex', 'hermes']);
-    // delta-only: reasoningEffort는 전 항목이 기본값과 같아 emit되지 않는다.
+    // dispatch 게이트가 사라진 뒤의 불변식: builtins만으로 세 엔진이 전부 해석된다.
+    for (const engine of ['claude', 'codex', 'hermes']) {
+      const argv = resolveArgv(project, engine);
+      assert.ok(Array.isArray(argv) && argv.length === 2, `${engine} must resolve to an adapter argv`);
+      assert.match(argv[1], new RegExp(`core/extractors/${engine}_adapter\\.py$`));
+    }
+    // delta-only: 기본값과 같은 키(backends/reasoningEffort)는 emit되지 않는다.
     // 실제 적용값은 effective config로 확인한다(emit 축소 ≠ 동작 변경).
+    assert.equal(cfg.compile.extractor.backends, undefined);
+    assert.deepEqual(effectiveCompile(project).extractor.backends, {});
     assert.equal(cfg.compile.reasoningEffort, undefined);
     assert.deepEqual(effectiveCompile(project).reasoningEffort, {
       generation: 'low', verify: 'medium', semanticDedup: 'medium', engines: {},
@@ -63,7 +85,10 @@ test('--enable-compile --engines limits built-in engines', () => {
     runEnable(project, ['--engines', 'codex']);
     const cfg = JSON.parse(readFileSync(join(project, '.auto-context', 'settings.json'), 'utf8'));
     assert.deepEqual(cfg.compile.extractor.builtins, ['codex']);
-    assert.deepEqual(cfg.compile.extractor.backends, {});
+    assert.deepEqual(effectiveCompile(project).extractor.backends, {});
+    // 목록 밖 엔진은 해석되지 않아야 한다 (builtins가 유일한 게이트다).
+    assert.ok(Array.isArray(resolveArgv(project, 'codex')));
+    assert.equal(resolveArgv(project, 'claude'), null);
   } finally { removeTemp(project); }
 });
 
@@ -76,7 +101,7 @@ test('--enable-compile: 생략된 키는 기존 비기본값을 남기지 않는
   try {
     const settings = join(project, '.auto-context', 'settings.json');
     const cfg = JSON.parse(readFileSync(settings, 'utf8'));
-    cfg.compile = { verify: { maxPerRun: 15 }, maxAutoPageLines: 200 };
+    cfg.compile = { verify: { timeout: 15 }, maxAutoPageLines: 200 };
     writeFileSync(settings, JSON.stringify(cfg));
 
     runEnable(project);
@@ -85,7 +110,7 @@ test('--enable-compile: 생략된 키는 기존 비기본값을 남기지 않는
     assert.equal(updated.compile.maxAutoPageLines, undefined);
     // 예전 동작(블록이 덮어써서 기본값)과 동일한 effective여야 한다.
     const eff = effectiveCompile(project);
-    assert.equal(eff.verify.maxPerRun, 3);
+    assert.equal(eff.verify.timeout, 120);
     assert.equal(eff.maxAutoPageLines, 120);
   } finally { removeTemp(project); }
 });
@@ -96,12 +121,9 @@ test('--enable-compile preserves existing explicit extractor configuration', () 
     const settings = join(project, '.auto-context', 'settings.json');
     const cfg = JSON.parse(readFileSync(settings, 'utf8'));
     cfg.compile = {
-      enabled: false,
+      mode: 'off',
       extractor: {
-        argv: ['python3', 'custom-extractor.py'],
-        dispatch: 'by-engine',
         backends: { claude: ['python3', 'claude-extractor.py'] },
-        default: ['python3', 'fallback-extractor.py'],
         timeout: 9,
       },
       triggers: ['manual'],
@@ -110,13 +132,16 @@ test('--enable-compile preserves existing explicit extractor configuration', () 
 
     runEnable(project);
     const updated = JSON.parse(readFileSync(settings, 'utf8'));
-    assert.equal(updated.compile.enabled, true);
-    assert.deepEqual(updated.compile.extractor.argv, ['python3', 'custom-extractor.py']);
+    assert.equal(updated.compile.mode, 'auto-wiki');
     assert.deepEqual(updated.compile.extractor.backends, { claude: ['python3', 'claude-extractor.py'] });
-    assert.deepEqual(updated.compile.extractor.default, ['python3', 'fallback-extractor.py']);
     assert.equal(updated.compile.extractor.timeout, 9);
+    assert.deepEqual(updated.compile.extractor.builtins, ['claude', 'codex', 'hermes']);
     assert.ok(updated.compile.triggers.includes('manual'));
     assert.ok(updated.compile.triggers.includes('post_tool_source'));
+    // argv/default가 사라진 뒤의 대체 불변식: 명시 backends[engine]이 번들 adapter를 이긴다.
+    assert.deepEqual(resolveArgv(project, 'claude'), ['python3', 'claude-extractor.py']);
+    // 나머지 엔진은 생성기가 넣은 builtins로 해석된다 (기존 설정이 그것을 막지 않는다).
+    assert.match(resolveArgv(project, 'codex')[1], /core\/extractors\/codex_adapter\.py$/);
   } finally { removeTemp(project); }
 });
 
@@ -187,6 +212,6 @@ test('--enable-compile --engines codex <project> (engines BEFORE path) sets buil
       { cwd: ROOT, encoding: 'utf8', env: { ...process.env, CLAUDE_PLUGIN_ROOT: ROOT } });
     const cfg = JSON.parse(readFileSync(join(project, '.auto-context', 'settings.json'), 'utf8'));
     assert.deepEqual(cfg.compile.extractor.builtins, ['codex']);
-    assert.deepEqual(cfg.compile.extractor.backends, {});
+    assert.deepEqual(effectiveCompile(project).extractor.backends, {});
   } finally { removeTemp(project); }
 });

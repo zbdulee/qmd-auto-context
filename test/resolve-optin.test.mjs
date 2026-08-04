@@ -206,9 +206,20 @@ test('--optin --recommended: 추천 config 기록', () => {
     const cfg = JSON.parse(readFileSync(join(dir, '.auto-context', 'settings.json'), 'utf8'));
     assert.equal(cfg.indexing, true);
     assert.ok(cfg.collections.length >= 1);
-    assert.deepEqual(cfg.compile.extractor.backends, {});
+    // 활성화는 mode 하나. delta-only라 기본값과 같은 backends는 emit되지 않고,
+    // 실제 적용값은 normalize_config 통과 결과로 확인한다.
+    assert.equal(cfg.compile.mode, 'auto-wiki');
     assert.deepEqual(cfg.compile.extractor.builtins, ['claude', 'codex', 'hermes']);
+    assert.equal(cfg.compile.extractor.backends, undefined);
     assert.doesNotMatch(JSON.stringify(cfg.compile), /core\/extractors|_adapter\.py/);
+    const eff = JSON.parse(execFileSync('python3', ['-c', `import json, sys
+sys.path.insert(0, "core")
+import config as qmd_config
+with open(sys.argv[1], encoding="utf-8") as fh:
+    print(json.dumps(qmd_config.normalize_config(json.load(fh))["compile"], ensure_ascii=False))`,
+    join(dir, '.auto-context', 'settings.json')], { cwd: process.cwd(), encoding: 'utf8' }));
+    assert.equal(eff.mode, 'auto-wiki');
+    assert.deepEqual(eff.extractor.backends, {});
   } finally { removeTemp(dir); }
 });
 

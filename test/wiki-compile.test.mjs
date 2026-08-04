@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync, spawn } from 'node:child_process';
 import { createServer } from 'node:http';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { removeTemp } from './helpers/temp.mjs';
@@ -22,13 +22,8 @@ function writeSettings(work, compile = {}) {
     collectionRoles: { 'proj-wiki': 'wiki' },
     wikiPath: '.auto-context/wiki',
     compile: {
-      enabled: true,
       mode: 'auto-wiki',
-      autoWrite: true,
       defaultStatus: 'generated',
-      candidatePath: '.auto-context/compile/candidates.jsonl',
-      tombstonePath: '.auto-context/compile/tombstones.jsonl',
-      manifestPath: '.auto-context/compile/generated-manifest.jsonl',
       ...compile,
     },
   }));
@@ -653,9 +648,16 @@ test('wiki_compile: missing generated page creates tombstone and suppresses auto
 
 test('wiki_compile: compile audit paths are confined to project .auto-context/compile', () => {
   const work = repoTemp('wiki-compile-safe-audit');
+  // `compile.candidatePath` is gone (the names are constants in core/compile_paths.py),
+  // but the containment guard it carried must survive: a constant name can still BE a
+  // symlink out of the project, and then the audit append rewrites an outside file.
+  // cp.ledger() refuses that and wiki_compile rejects before any write.
+  const outside = join(work, '..', `outside-candidates-${work.split('/').pop()}.jsonl`);
   try {
-    const outsideName = `../outside-candidates-${work.split('/').pop()}.jsonl`;
-    writeSettings(work, { candidatePath: outsideName });
+    writeFileSync(outside, '');
+    writeSettings(work);
+    mkdirSync(join(work, '.auto-context', 'compile'), { recursive: true });
+    symlinkSync(outside, join(work, '.auto-context', 'compile', 'candidates.jsonl'));
     const result = spawnSync('python3', ['core/wiki_compile.py', '--cwd', work], {
       encoding: 'utf8',
       input: JSON.stringify({
@@ -669,9 +671,10 @@ test('wiki_compile: compile audit paths are confined to project .auto-context/co
     });
     assert.equal(result.status, 1);
     assert.match(result.stdout, /unsafe_managed_path|unsafe_compile_path/);
-    assert.equal(existsSync(join(work, '..', outsideName.slice(3))), false);
+    assert.equal(readFileSync(outside, 'utf8'), '', 'nothing may be written through the escape');
     assert.equal(existsSync(join(work, '.auto-context', 'wiki', 'decisions', 'unsafe-audit.md')), false);
   } finally {
+    rmSync(outside, { force: true });
     removeTemp(work);
   }
 });

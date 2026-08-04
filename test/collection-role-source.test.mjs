@@ -708,12 +708,9 @@ function compileProject(role) {
     collectionPaths: { 'p-archive': 'archive' },
     collectionRoles: { 'p-archive': role },
     compile: {
-      enabled: true,
       mode: 'auto-wiki',
-      autoWrite: true,
       triggers: ['post_tool_source', 'post_sync_source', 'manual'],
-      sourceQueuePath: '.auto-context/compile/source-queue.jsonl',
-      extractor: { dispatch: 'by-engine', backends: {}, builtins: ['claude'], default: [], timeout: 30 },
+      extractor: { backends: {}, builtins: ['claude'], timeout: 30 },
     },
   });
   writeFileSync(join(dir, 'archive', 'old.md'), '# 오래된 결정\n\n본문.\n');
@@ -786,12 +783,10 @@ test('compile worker: source 컬렉션 잡을 invalid_source_scope로 버리지 
       collectionRoles: { 'p-archive': 'source', 'p-wiki': 'wiki' },
       wikiPath: '.auto-context/wiki',
       compile: {
-        enabled: true, mode: 'guarded', autoWrite: true, defaultStatus: 'generated',
+        mode: 'guarded', defaultStatus: 'generated',
         triggers: ['post_tool_source', 'manual'],
-        sourceQueuePath: '.auto-context/compile/source-queue.jsonl',
-        candidatePath: '.auto-context/compile/candidates.jsonl',
         maxSourceChars: 12000,
-        extractor: { argv: ['python3', extractor], timeout: 30 },
+        extractor: { backends: { claude: ['python3', extractor] }, timeout: 30 },
       },
     }));
     writeFileSync(join(project, '.auto-context', 'compile', 'source-queue.jsonl'),

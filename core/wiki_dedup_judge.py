@@ -28,6 +28,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.resolve()))
+import compile_paths as cp
 import config as qmd_config
 import cooldown as qmd_cooldown
 
@@ -87,12 +88,18 @@ def is_enabled(compile_cfg: dict) -> bool:
     return judge_cfg_of(compile_cfg).get("enabled", True) is not False
 
 
+def _budget(compile_cfg: dict) -> dict:
+    raw = compile_cfg.get("budget") if isinstance(compile_cfg, dict) else None
+    return raw if isinstance(raw, dict) else {}
+
+
 def max_pairs_per_scan(compile_cfg: dict) -> int:
-    return max(0, _int(judge_cfg_of(compile_cfg).get("maxPairsPerScan"), DEFAULT_MAX_PAIRS_PER_SCAN))
+    # 유료 호출 예산은 `compile.budget`이 SSOT다(예전 `semanticDedup.judge.maxPairsPerScan`).
+    return max(0, _int(_budget(compile_cfg).get("dedupPairsPerScan"), DEFAULT_MAX_PAIRS_PER_SCAN))
 
 
 def max_pairs_per_compile(compile_cfg: dict) -> int:
-    return max(0, _int(judge_cfg_of(compile_cfg).get("maxPairsPerCompile"), DEFAULT_MAX_PAIRS_PER_COMPILE))
+    return max(0, _int(_budget(compile_cfg).get("dedupPairsPerCompile"), DEFAULT_MAX_PAIRS_PER_COMPILE))
 
 
 def _int(value, fallback: int) -> int:
@@ -150,7 +157,7 @@ def diagnostics(info: dict) -> dict:
 def cooldown_path(root: Path) -> Path:
     # Separate from the compile and verify cooldowns: an extractor outage must not
     # silence dedup judging, and vice versa.
-    return root / ".auto-context" / "compile" / "dedup-judge-cooldown"
+    return root / cp.COMPILE_DIR / cp.DEDUP_JUDGE_COOLDOWN
 
 
 def engine_cooldown_path(root: Path) -> Path:
@@ -160,7 +167,7 @@ def engine_cooldown_path(root: Path) -> Path:
     있으면 만료마다 같은 후보를 다시 불러 **판정이 영구 정지**한다 — verify가 0.x 전역 식힘에서
     겪은 것과 같은 클래스라 같은 처방(엔진 단위 기록)을 쓴다. 파일은 verify와 분리한다.
     """
-    return root / ".auto-context" / "compile" / "dedup-judge-engine-cooldown.json"
+    return root / cp.COMPILE_DIR / cp.DEDUP_JUDGE_ENGINE_COOLDOWN
 
 
 def cooldown_active(root: Path) -> bool:
@@ -251,22 +258,13 @@ def plan_judge_attempts(
     enforce_require = mode == "require" and attribution != ATTRIBUTION_NONE
     order_mode = mode if (mode != "require" or enforce_require) else "prefer"
     cooled = set(cooled)
-    legacy = wcw.legacy_extractor_argv(compile_cfg)
-    if legacy is not None:
-        # 하나의 argv가 모든 엔진을 담당하므로 엔진 귀속이 불가하다 → 교차 주장을 하지 않는다.
-        if enforce_require:
-            return [], mode, "cross_engine_unavailable"
-        if wcw.UNATTRIBUTED_KEY in cooled:
-            return [], mode, "engines_cooling"
-        return [{
-            "engine": producing, "argv": legacy,
-            "mode": qmd_config.VERIFIED_MODE_UNKNOWN, "key": wcw.UNATTRIBUTED_KEY,
-        }], "off", ""
-
+    # `extractor.argv`(모든 엔진 공용 단일 argv)·`extractor.default`(엔진 무관 폴백)는
+    # 스키마에서 제거됐다 — 둘 다 엔진 귀속이 불가해 교차 주장을 할 수 없었고, 그 분기가
+    # 여기와 `plan_verify_attempts`에 각각 있었다. 이제 모든 argv는 이름 있는 엔진에서 온다.
     pool = judge_engine_pool(compile_cfg)
     attributable = bool(
         producing and producing != qmd_config.UNKNOWN_ENGINE
-        and wcw.resolve_extractor_argv(compile_cfg, producing)[0] is not None
+        and wcw.resolve_extractor_argv(compile_cfg, producing) is not None
     )
     if enforce_require and not attributable:
         # 어느 후보도 "생성 엔진과 다르다"를 증명할 수 없다 → 약속을 지킬 수 없으므로 거부.
@@ -276,11 +274,8 @@ def plan_judge_attempts(
     attempts: list[dict] = []
     seen_argv: list[list[str]] = []
     skipped_cooling = 0
-    # extractor.default는 엔진과 무관하므로 후보 순회 밖에서 한 번 구한다 — 후보가 0건인
-    # 설정(builtins/backends 없이 default만)에서도 기존 폴백이 살아 있어야 한다.
-    _, default_argv = wcw.resolve_extractor_argv(compile_cfg, "", builtins=[])
     for engine in order:
-        primary, _ = wcw.resolve_extractor_argv(compile_cfg, engine)
+        primary = wcw.resolve_extractor_argv(compile_cfg, engine)
         # 두 라벨이 **같은 argv**를 가리키면 뒤 라벨이 탈락하고, 남은 라벨이 교차를 주장한다.
         # 그대로 둔다(판정 2026-07-31): payload `engine`이 그 argv에 전달되므로 by-engine
         # dispatch wrapper 에서는 실제로 다른 엔진이 돌고, 같은 스크립트라면 틀리는 것은
@@ -300,16 +295,6 @@ def plan_judge_attempts(
         else:
             attempt_mode = qmd_config.VERIFIED_MODE_CROSS
         attempts.append({"engine": engine, "argv": primary, "mode": attempt_mode, "key": engine})
-    if default_argv is not None and default_argv not in seen_argv and not enforce_require:
-        if wcw.UNATTRIBUTED_KEY in cooled:
-            skipped_cooling += 1
-        else:
-            attempts.append({
-                "engine": producing or (order[0] if order else ""),
-                "argv": default_argv,
-                "mode": qmd_config.VERIFIED_MODE_UNKNOWN,
-                "key": wcw.UNATTRIBUTED_KEY,
-            })
     if attempts:
         return attempts, mode, ""
     if skipped_cooling:

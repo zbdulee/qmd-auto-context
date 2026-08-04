@@ -20,7 +20,7 @@ function writeSettings(work) {
     collectionPaths: { 'proj-wiki': '.auto-context/wiki' },
     collectionRoles: { 'proj-wiki': 'wiki' },
     wikiPath: '.auto-context/wiki',
-    compile: { enabled: true, mode: 'auto-wiki', autoWrite: true },
+    compile: { mode: 'auto-wiki' },
   }));
 }
 

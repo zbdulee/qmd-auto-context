@@ -33,12 +33,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.resolve()))
+import compile_paths as cp
 import recall as qmd_recall
 import resolve_paths as qmd_resolve_paths
 import wiki_compile as wc
 
-LEDGER_DEFAULT = ".auto-context/compile/source-missing.jsonl"
-COMPILE_DIR = ".auto-context/compile"
 ACTION_DETECTED = "detected"
 ACTION_REPOINTED = "repointed"
 ACTION_DISMISSED = "dismissed"
@@ -81,14 +80,14 @@ def now_iso() -> str:
 
 
 def ledger_path(root: Path, compile_cfg: dict) -> Path | None:
-    """원장 경로. compile 디렉터리 안이어야 한다(경로 주입 방어는 wiki_compile SSOT)."""
-    compile_dir = wc.safe_managed_dir(root, COMPILE_DIR)
-    if compile_dir is None:
+    """원장 경로. 이름은 상수(`compile_paths`)이고 위치 검증은 `cp.ledger`가 한다.
+
+    `compile_cfg`는 시그니처 호환을 위해 남는다(호출부 4곳) — 예전의
+    `compile.sourceMissingPath`는 정규화 화이트리스트 밖이라 설정해도 항상 기본값이었다.
+    """
+    if wc.safe_managed_dir(root, cp.COMPILE_DIR) is None:
         return None
-    rel = compile_cfg.get("sourceMissingPath")
-    if not isinstance(rel, str) or not rel:
-        rel = LEDGER_DEFAULT
-    return wc.safe_compile_file(root, compile_dir, rel)
+    return cp.ledger(root, cp.SOURCE_MISSING)
 
 
 def ledger_lock_path(path: Path) -> Path:

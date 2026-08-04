@@ -112,15 +112,11 @@ print(json.dumps({'candidates': []}))
       collectionRoles: { 'proj-docs': 'raw', 'proj-wiki': 'wiki' },
       wikiPath: '.auto-context/wiki',
       compile: {
-        enabled: true, mode: 'guarded', autoWrite: true, defaultStatus: 'generated',
+        mode: 'guarded', defaultStatus: 'generated',
         triggers: ['post_tool_source'],
-        sourceQueuePath: '.auto-context/compile/source-queue.jsonl',
-        candidatePath: '.auto-context/compile/candidates.jsonl',
-        manifestPath: '.auto-context/compile/generated-manifest.jsonl',
-        tombstonePath: '.auto-context/compile/tombstones.jsonl',
         maxSourceChars: 100,
         maxAutoPageLines: 60,
-        extractor: { argv: ['python3', extractor], timeout: 30 },
+        extractor: { backends: { claude: ['python3', extractor] }, timeout: 30 },
       },
     }));
     writeFileSync(join(dir, '.auto-context', 'compile', 'source-queue.jsonl'), JSON.stringify({
@@ -195,10 +191,7 @@ test('wiki_compile writes an identifier-dense technical card but still rejects a
     collectionRoles: { 'proj-wiki': 'wiki' },
     wikiPath: '.auto-context/wiki',
     compile: {
-      enabled: true, mode: 'auto-wiki', autoWrite: true, defaultStatus: 'generated',
-      candidatePath: '.auto-context/compile/candidates.jsonl',
-      tombstonePath: '.auto-context/compile/tombstones.jsonl',
-      manifestPath: '.auto-context/compile/generated-manifest.jsonl',
+      mode: 'auto-wiki', defaultStatus: 'generated',
     },
   };
   const run = (payload) => execFileSync('python3', ['core/wiki_compile.py', '--cwd', work], {

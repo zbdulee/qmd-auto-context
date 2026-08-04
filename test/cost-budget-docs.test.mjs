@@ -31,13 +31,15 @@ function worstCase({ batchMaxPerRun, cardsPerSource, verifyMaxPerRun, producedCa
 }
 
 test('문서의 기본값 최악 유료 호출 수가 코드 상수와 일치한다', () => {
+  // 유료 호출 상한은 전부 `compile.budget.*`가 SSOT다(예전 batch.maxPerRun /
+  // maxCardsPerSource / verify.maxPerRun). 클램프 상수 이름은 그대로다.
   const k = pyJson(`{
-    "batchMaxPerRun": c.DEFAULT_CONFIG["compile"]["batch"]["maxPerRun"],
-    "cardsPerSource": c.DEFAULT_CONFIG["compile"]["maxCardsPerSource"],
-    "verifyMaxPerRun": c.DEFAULT_CONFIG["compile"]["verify"]["maxPerRun"],
+    "batchMaxPerRun": c.DEFAULT_CONFIG["compile"]["budget"]["extractorPerRun"],
+    "cardsPerSource": c.DEFAULT_CONFIG["compile"]["budget"]["cardsPerSource"],
+    "verifyMaxPerRun": c.DEFAULT_CONFIG["compile"]["budget"]["verifyPerRun"],
     "producedCap": c.VERIFY_PRODUCED_HARD_CAP,
     "maxCards": c.MAX_CARDS_PER_SOURCE,
-    "maxBatch": c.MAX_BATCH_PER_RUN if hasattr(c, "MAX_BATCH_PER_RUN") else 50,
+    "maxBatch": c.MAX_COMPILE_PER_RUN,
   }`);
   const dflt = worstCase(k);
   assert.equal(dflt, 141, '기본값(10 × 10)의 최악 = 10 + 100 + 31');

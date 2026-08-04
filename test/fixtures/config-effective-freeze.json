@@ -5,22 +5,23 @@
     "collectionRoles": {},
     "collections": [],
     "compile": {
-      "autoWrite": true,
       "batch": {
         "idleSeconds": 90,
-        "maxItems": 5,
-        "maxPerRun": 10
+        "maxItems": 5
       },
-      "candidatePath": ".auto-context/compile/candidates.jsonl",
-      "canonSignals": [],
+      "budget": {
+        "cardsPerSource": 10,
+        "dedupPairsPerCompile": 1,
+        "dedupPairsPerScan": 8,
+        "extractorPerRun": 10,
+        "verifyPerRun": 3
+      },
       "defaultStatus": "generated",
-      "enabled": true,
       "excludeStatusesFromRecall": [
         "discarded",
         "contested"
       ],
       "extractor": {
-        "argv": [],
         "backends": {},
         "builtins": [
           "claude",
@@ -28,19 +29,14 @@
           "hermes"
         ],
         "cooldownSeconds": 600,
-        "default": [],
-        "dispatch": "by-engine",
         "timeout": 120
       },
       "lowPriorityStatuses": [
         "generated",
         "tentative"
       ],
-      "manifestPath": ".auto-context/compile/generated-manifest.jsonl",
       "maxAutoPageLines": 120,
-      "maxCardsPerSource": 10,
       "maxSourceChars": 12000,
-      "mergeNeededPath": ".auto-context/compile/merge-needed.jsonl",
       "mode": "auto-wiki",
       "reasoningEffort": {
         "engines": {},
@@ -49,9 +45,7 @@
         "verify": "medium"
       },
       "recallVerifiedOnly": true,
-      "requireReviewForCanon": true,
       "semanticDedup": {
-        "autoMergeThreshold": 0.9,
         "candidateMinScore": 0.3,
         "enabled": true,
         "judge": {
@@ -59,17 +53,10 @@
           "crossEngine": "prefer",
           "enabled": true,
           "maxCharsPerPage": 6000,
-          "maxPairsPerCompile": 1,
-          "maxPairsPerScan": 8,
           "timeout": 120
         },
-        "maxPairsPerScan": 10,
-        "similarPageMaxChars": 12000,
-        "threshold": 0.82,
-        "topK": 3
+        "maxPairsPerScan": 10
       },
-      "sourceQueuePath": ".auto-context/compile/source-queue.jsonl",
-      "tombstonePath": ".auto-context/compile/tombstones.jsonl",
       "triggers": [
         "post_tool_source",
         "post_sync_source",
@@ -79,14 +66,9 @@
         "builtins": [],
         "cooldownSeconds": 600,
         "crossEngine": "prefer",
-        "deletedPath": ".auto-context/compile/verify-deleted.jsonl",
         "enabled": true,
-        "logPath": ".auto-context/compile/verify-log.jsonl",
-        "maxPerRun": 3,
         "onFail": "delete",
         "onInconclusive": "delete",
-        "queuePath": ".auto-context/compile/verify-queue.jsonl",
-        "skippedPath": ".auto-context/compile/verify-skipped.jsonl",
         "timeout": 120
       }
     },
@@ -130,22 +112,25 @@
       "freezeproj-wiki"
     ],
     "compile": {
-      "autoWrite": false,
       "batch": {
         "idleSeconds": 90,
-        "maxItems": 5,
-        "maxPerRun": 10
+        "maxItems": 5
       },
-      "candidatePath": ".auto-context/compile/candidates.jsonl",
-      "canonSignals": [],
+      "budget": {
+        "cardsPerSource": 10,
+        "dedupPairsPerCompile": 1,
+        "dedupPairsPerScan": 8,
+        "extractorPerRun": 10,
+        "verifyPerRun": 3
+      },
       "defaultStatus": "generated",
-      "enabled": false,
       "excludeStatusesFromRecall": [
         "discarded",
         "contested"
       ],
       "extractor": {
-        "argv": [],
+        "backends": {},
+        "builtins": [],
         "cooldownSeconds": 600,
         "timeout": 120
       },
@@ -153,11 +138,8 @@
         "generated",
         "tentative"
       ],
-      "manifestPath": ".auto-context/compile/generated-manifest.jsonl",
       "maxAutoPageLines": 120,
-      "maxCardsPerSource": 10,
       "maxSourceChars": 12000,
-      "mergeNeededPath": ".auto-context/compile/merge-needed.jsonl",
       "mode": "off",
       "reasoningEffort": {
         "engines": {},
@@ -166,9 +148,7 @@
         "verify": "medium"
       },
       "recallVerifiedOnly": true,
-      "requireReviewForCanon": true,
       "semanticDedup": {
-        "autoMergeThreshold": 0.9,
         "candidateMinScore": 0.3,
         "enabled": true,
         "judge": {
@@ -176,30 +156,18 @@
           "crossEngine": "prefer",
           "enabled": true,
           "maxCharsPerPage": 6000,
-          "maxPairsPerCompile": 1,
-          "maxPairsPerScan": 8,
           "timeout": 120
         },
-        "maxPairsPerScan": 10,
-        "similarPageMaxChars": 12000,
-        "threshold": 0.82,
-        "topK": 3
+        "maxPairsPerScan": 10
       },
-      "sourceQueuePath": ".auto-context/compile/source-queue.jsonl",
-      "tombstonePath": ".auto-context/compile/tombstones.jsonl",
       "triggers": [],
       "verify": {
         "builtins": [],
         "cooldownSeconds": 600,
         "crossEngine": "prefer",
-        "deletedPath": ".auto-context/compile/verify-deleted.jsonl",
         "enabled": true,
-        "logPath": ".auto-context/compile/verify-log.jsonl",
-        "maxPerRun": 3,
         "onFail": "delete",
         "onInconclusive": "delete",
-        "queuePath": ".auto-context/compile/verify-queue.jsonl",
-        "skippedPath": ".auto-context/compile/verify-skipped.jsonl",
         "timeout": 120
       }
     },
@@ -243,22 +211,25 @@
       "freezeproj-wiki"
     ],
     "compile": {
-      "autoWrite": true,
       "batch": {
         "idleSeconds": 90,
-        "maxItems": 5,
-        "maxPerRun": 10
+        "maxItems": 5
       },
-      "candidatePath": ".auto-context/compile/candidates.jsonl",
-      "canonSignals": [],
+      "budget": {
+        "cardsPerSource": 10,
+        "dedupPairsPerCompile": 1,
+        "dedupPairsPerScan": 8,
+        "extractorPerRun": 10,
+        "verifyPerRun": 3
+      },
       "defaultStatus": "generated",
-      "enabled": true,
       "excludeStatusesFromRecall": [
         "discarded",
         "contested"
       ],
       "extractor": {
-        "argv": [],
+        "backends": {},
+        "builtins": [],
         "cooldownSeconds": 600,
         "timeout": 120
       },
@@ -266,11 +237,8 @@
         "generated",
         "tentative"
       ],
-      "manifestPath": ".auto-context/compile/generated-manifest.jsonl",
       "maxAutoPageLines": 120,
-      "maxCardsPerSource": 10,
       "maxSourceChars": 12000,
-      "mergeNeededPath": ".auto-context/compile/merge-needed.jsonl",
       "mode": "auto-wiki",
       "reasoningEffort": {
         "engines": {},
@@ -279,9 +247,7 @@
         "verify": "medium"
       },
       "recallVerifiedOnly": true,
-      "requireReviewForCanon": true,
       "semanticDedup": {
-        "autoMergeThreshold": 0.9,
         "candidateMinScore": 0.3,
         "enabled": true,
         "judge": {
@@ -289,17 +255,10 @@
           "crossEngine": "prefer",
           "enabled": true,
           "maxCharsPerPage": 6000,
-          "maxPairsPerCompile": 1,
-          "maxPairsPerScan": 8,
           "timeout": 120
         },
-        "maxPairsPerScan": 10,
-        "similarPageMaxChars": 12000,
-        "threshold": 0.82,
-        "topK": 3
+        "maxPairsPerScan": 10
       },
-      "sourceQueuePath": ".auto-context/compile/source-queue.jsonl",
-      "tombstonePath": ".auto-context/compile/tombstones.jsonl",
       "triggers": [
         "post_tool_source",
         "manual",
@@ -310,14 +269,9 @@
         "builtins": [],
         "cooldownSeconds": 600,
         "crossEngine": "prefer",
-        "deletedPath": ".auto-context/compile/verify-deleted.jsonl",
         "enabled": true,
-        "logPath": ".auto-context/compile/verify-log.jsonl",
-        "maxPerRun": 3,
         "onFail": "delete",
         "onInconclusive": "delete",
-        "queuePath": ".auto-context/compile/verify-queue.jsonl",
-        "skippedPath": ".auto-context/compile/verify-skipped.jsonl",
         "timeout": 120
       }
     },
@@ -364,22 +318,23 @@
       "freezeproj-wiki"
     ],
     "compile": {
-      "autoWrite": true,
       "batch": {
         "idleSeconds": 90,
-        "maxItems": 5,
-        "maxPerRun": 10
+        "maxItems": 5
       },
-      "candidatePath": ".auto-context/compile/candidates.jsonl",
-      "canonSignals": [],
+      "budget": {
+        "cardsPerSource": 10,
+        "dedupPairsPerCompile": 1,
+        "dedupPairsPerScan": 8,
+        "extractorPerRun": 10,
+        "verifyPerRun": 3
+      },
       "defaultStatus": "generated",
-      "enabled": true,
       "excludeStatusesFromRecall": [
         "discarded",
         "contested"
       ],
       "extractor": {
-        "argv": [],
         "backends": {},
         "builtins": [
           "claude",
@@ -387,19 +342,14 @@
           "hermes"
         ],
         "cooldownSeconds": 600,
-        "default": [],
-        "dispatch": "by-engine",
         "timeout": 120
       },
       "lowPriorityStatuses": [
         "generated",
         "tentative"
       ],
-      "manifestPath": ".auto-context/compile/generated-manifest.jsonl",
       "maxAutoPageLines": 120,
-      "maxCardsPerSource": 10,
       "maxSourceChars": 12000,
-      "mergeNeededPath": ".auto-context/compile/merge-needed.jsonl",
       "mode": "auto-wiki",
       "reasoningEffort": {
         "engines": {},
@@ -408,9 +358,7 @@
         "verify": "medium"
       },
       "recallVerifiedOnly": true,
-      "requireReviewForCanon": true,
       "semanticDedup": {
-        "autoMergeThreshold": 0.9,
         "candidateMinScore": 0.3,
         "enabled": true,
         "judge": {
@@ -418,17 +366,10 @@
           "crossEngine": "prefer",
           "enabled": true,
           "maxCharsPerPage": 6000,
-          "maxPairsPerCompile": 1,
-          "maxPairsPerScan": 8,
           "timeout": 120
         },
-        "maxPairsPerScan": 10,
-        "similarPageMaxChars": 12000,
-        "threshold": 0.82,
-        "topK": 3
+        "maxPairsPerScan": 10
       },
-      "sourceQueuePath": ".auto-context/compile/source-queue.jsonl",
-      "tombstonePath": ".auto-context/compile/tombstones.jsonl",
       "triggers": [
         "post_tool_source",
         "post_sync_source",
@@ -438,14 +379,9 @@
         "builtins": [],
         "cooldownSeconds": 600,
         "crossEngine": "prefer",
-        "deletedPath": ".auto-context/compile/verify-deleted.jsonl",
         "enabled": true,
-        "logPath": ".auto-context/compile/verify-log.jsonl",
-        "maxPerRun": 3,
         "onFail": "delete",
         "onInconclusive": "delete",
-        "queuePath": ".auto-context/compile/verify-queue.jsonl",
-        "skippedPath": ".auto-context/compile/verify-skipped.jsonl",
         "timeout": 120
       }
     },
@@ -495,22 +431,23 @@
       "freezeproj-wiki"
     ],
     "compile": {
-      "autoWrite": true,
       "batch": {
         "idleSeconds": 90,
-        "maxItems": 5,
-        "maxPerRun": 10
+        "maxItems": 5
       },
-      "candidatePath": ".auto-context/compile/candidates.jsonl",
-      "canonSignals": [],
+      "budget": {
+        "cardsPerSource": 10,
+        "dedupPairsPerCompile": 1,
+        "dedupPairsPerScan": 8,
+        "extractorPerRun": 10,
+        "verifyPerRun": 3
+      },
       "defaultStatus": "generated",
-      "enabled": true,
       "excludeStatusesFromRecall": [
         "discarded",
         "contested"
       ],
       "extractor": {
-        "argv": [],
         "backends": {},
         "builtins": [
           "claude",
@@ -518,19 +455,14 @@
           "hermes"
         ],
         "cooldownSeconds": 600,
-        "default": [],
-        "dispatch": "by-engine",
         "timeout": 120
       },
       "lowPriorityStatuses": [
         "generated",
         "tentative"
       ],
-      "manifestPath": ".auto-context/compile/generated-manifest.jsonl",
       "maxAutoPageLines": 120,
-      "maxCardsPerSource": 10,
       "maxSourceChars": 12000,
-      "mergeNeededPath": ".auto-context/compile/merge-needed.jsonl",
       "mode": "auto-wiki",
       "reasoningEffort": {
         "engines": {},
@@ -539,9 +471,7 @@
         "verify": "medium"
       },
       "recallVerifiedOnly": true,
-      "requireReviewForCanon": true,
       "semanticDedup": {
-        "autoMergeThreshold": 0.9,
         "candidateMinScore": 0.3,
         "enabled": true,
         "judge": {
@@ -549,17 +479,10 @@
           "crossEngine": "prefer",
           "enabled": true,
           "maxCharsPerPage": 6000,
-          "maxPairsPerCompile": 1,
-          "maxPairsPerScan": 8,
           "timeout": 120
         },
-        "maxPairsPerScan": 10,
-        "similarPageMaxChars": 12000,
-        "threshold": 0.82,
-        "topK": 3
+        "maxPairsPerScan": 10
       },
-      "sourceQueuePath": ".auto-context/compile/source-queue.jsonl",
-      "tombstonePath": ".auto-context/compile/tombstones.jsonl",
       "triggers": [
         "post_tool_source",
         "post_sync_source",
@@ -569,14 +492,9 @@
         "builtins": [],
         "cooldownSeconds": 600,
         "crossEngine": "prefer",
-        "deletedPath": ".auto-context/compile/verify-deleted.jsonl",
         "enabled": true,
-        "logPath": ".auto-context/compile/verify-log.jsonl",
-        "maxPerRun": 3,
         "onFail": "delete",
         "onInconclusive": "delete",
-        "queuePath": ".auto-context/compile/verify-queue.jsonl",
-        "skippedPath": ".auto-context/compile/verify-skipped.jsonl",
         "timeout": 120
       }
     },

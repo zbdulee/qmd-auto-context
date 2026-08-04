@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { removeTemp } from './helpers/temp.mjs';
@@ -35,7 +35,7 @@ function setupProject({ compile: compileOverrides = {} } = {}) {
     collectionRoles: { 'proj-docs': 'raw', 'proj-wiki': 'wiki' },
     wikiPath: '.auto-context/wiki',
     compile: {
-      enabled: true, mode: 'auto-wiki', autoWrite: true, defaultStatus: 'generated',
+      mode: 'auto-wiki', defaultStatus: 'generated',
       triggers: ['post_tool_source', 'manual'], maxSourceChars: 12000,
       semanticDedup: { enabled: false },
       verify: { enabled: false },
@@ -165,10 +165,11 @@ print(json.dumps({'verdict': 'pass', 'claims': [], 'reasons': []}))
     collectionRoles: { 'proj-docs': 'raw', 'proj-wiki': 'wiki' },
     wikiPath: '.auto-context/wiki',
     compile: {
-      enabled: true, mode: 'auto-wiki', autoWrite: true, defaultStatus: 'generated',
+      mode: 'auto-wiki', defaultStatus: 'generated',
       triggers: ['post_tool_source'], maxSourceChars: 12000,
-      extractor: { argv: ['python3', verifier], timeout: 60 },
-      verify: { enabled: true, timeout: 60, maxPerRun: 3 },
+      extractor: { backends: { claude: ['python3', verifier] }, timeout: 60 },
+      budget: { verifyPerRun: 3 },
+      verify: { enabled: true, timeout: 60 },
     },
   }));
   writeFileSync(join(dir, cardRel), [
@@ -216,7 +217,7 @@ print(json.dumps({'verdict': 'pass', 'claims': [], 'reasons': []}))
 // failed, the job was preserved, and the next run paid again. Measured: 3 runs, 3 paid
 // verify calls, card still `generated` (invisible under recallVerifiedOnly), no cooldown and
 // no suppression marker, and the only trace was in a log that gets trimmed.
-function stampProject({ deletedPath, skippedPath, onFail = 'delete', onInconclusive, verdict = 'fail' } = {}) {
+function stampProject({ onFail = 'delete', onInconclusive, verdict = 'fail' } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'qwiki-ledger-'));
   const cardRel = '.auto-context/wiki/concepts/ledger-card.md';
   mkdirSync(join(dir, '.auto-context', 'compile'), { recursive: true });
@@ -239,14 +240,13 @@ print(json.dumps({'verdict': ${JSON.stringify(verdict)}, 'claims': [], 'reasons'
     collectionRoles: { 'proj-docs': 'raw', 'proj-wiki': 'wiki' },
     wikiPath: '.auto-context/wiki',
     compile: {
-      enabled: true, mode: 'auto-wiki', autoWrite: true, defaultStatus: 'generated',
+      mode: 'auto-wiki', defaultStatus: 'generated',
       triggers: ['post_tool_source'], maxSourceChars: 12000,
-      extractor: { argv: ['python3', verifier], timeout: 60 },
+      extractor: { backends: { claude: ['python3', verifier] }, timeout: 60 },
+      budget: { verifyPerRun: 3 },
       verify: {
-        enabled: true, timeout: 60, maxPerRun: 3, onFail,
+        enabled: true, timeout: 60, onFail,
         ...(onInconclusive ? { onInconclusive } : {}),
-        ...(deletedPath ? { deletedPath } : {}),
-        ...(skippedPath ? { skippedPath } : {}),
       },
     },
   }));
@@ -276,11 +276,12 @@ function paidCalls(log) {
   return readFileSync(log, 'utf8').trim().split('\n').filter(Boolean).length;
 }
 
-test('a deletedPath outside the compile dir falls back to the default, like its siblings', () => {
-  // candidate_path and log_path both fall back; only this one returned None, and that None
-  // was the entrance to the billing loop. `.auto-context/verify-deleted.jsonl` (one segment
-  // short) is a natural typo that passes config validation.
-  const { dir, cardRel, callLog } = stampProject({ deletedPath: '.auto-context/verify-deleted.jsonl' });
+test('the deletion audit row always lands in the fixed compile-dir ledger', () => {
+  // `compile.verify.deletedPath` is gone: the path is a constant in core/compile_paths.py,
+  // so the typo that used to return None (and open the billing loop) is unspellable. What
+  // still has to hold is the destination — every machine deletion is auditable at exactly
+  // `<root>/.auto-context/compile/verify-deleted.jsonl`, for one paid call.
+  const { dir, cardRel, callLog } = stampProject();
   try {
     const out = runVerify(dir);
     assert.equal(out.processed, 1, 'the verdict is applied, not blocked');
@@ -289,6 +290,42 @@ test('a deletedPath outside the compile dir falls back to the default, like its 
     assert.equal(jsonl(ledger).length, 1, 'the row lands in the default location');
     assert.equal(jsonl(ledger)[0].verdict, 'fail');
     assert.equal(paidCalls(callLog), 1);
+  } finally {
+    removeTemp(dir);
+  }
+});
+
+// The removed `*Path` settings each carried a containment check (`safe_compile_file`).
+// Constant names removed the typo, not the escape: the file itself can be a symlink out of
+// the project, and then an append rewrites something outside `.auto-context/compile`.
+// `compile_paths.ledger()` is now the single place that refuses that.
+test('compile_paths.ledger refuses a symlink escape out of the compile dir', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'qwiki-escape-'));
+  try {
+    mkdirSync(join(dir, '.auto-context', 'compile'), { recursive: true });
+    writeFileSync(join(dir, 'outside.jsonl'), '');
+    symlinkSync(join(dir, 'outside.jsonl'), join(dir, '.auto-context', 'compile', 'verify-deleted.jsonl'));
+    mkdirSync(join(dir, 'elsewhere'), { recursive: true });
+
+    const probe = execFileSync('python3', ['-c', `import sys, json, pathlib
+sys.path.insert(0, ${JSON.stringify(process.cwd() + '/core')})
+import compile_paths as cp
+root = pathlib.Path(${JSON.stringify(dir)}).resolve()
+out = {
+  'escaped': cp.ledger(root, cp.VERIFY_DELETED),
+  'contained': cp.ledger(root, cp.VERIFY_SKIPPED),
+  'dir': cp.compile_dir(root),
+}
+print(json.dumps({k: (str(v) if v is not None else None) for k, v in out.items()}))
+`], { cwd: process.cwd(), encoding: 'utf8' });
+    const r = JSON.parse(probe.trim());
+    assert.equal(r.escaped, null, 'a ledger symlinked outside the compile dir is refused');
+    const compileDir = execFileSync('python3', ['-c',
+      `import pathlib; print(pathlib.Path(${JSON.stringify(dir)}).resolve() / '.auto-context/compile')`],
+      { cwd: process.cwd(), encoding: 'utf8' }).trim();
+    assert.equal(r.dir, compileDir);
+    assert.equal(r.contained, join(compileDir, 'verify-skipped.jsonl'), 'ordinary names resolve normally');
+    assert.equal(readFileSync(join(dir, 'outside.jsonl'), 'utf8'), '', 'probing never writes through the symlink');
   } finally {
     removeTemp(dir);
   }
@@ -405,12 +442,11 @@ v.main()
 // 종점: fail-closed 만으로는 "판정(유료) → 원장 실패 → 잡 보존 → 재판정(유료)" 루프가
 // 남는다. 유료 호출 **전에** 막아야 호출 0회가 된다.
 test('inconclusive 삭제 설정 + 억제 원장 불가 → 유료 호출 0회로 선차단', () => {
-  const { dir, callLog } = stampProject({
-    verdict: 'inconclusive', skippedPath: '.auto-context/compile/skip-as-dir',
-  });
+  const { dir, callLog } = stampProject({ verdict: 'inconclusive' });
   try {
-    // 경로는 안전영역 안이지만 **디렉터리**다 → append 불가(실측된 실패 모드).
-    mkdirSync(join(dir, '.auto-context', 'compile', 'skip-as-dir'), { recursive: true });
+    // 억제 원장 자리에 **디렉터리**가 있으면 append 불가(실측된 실패 모드). 경로는 이제
+    // 상수이므로 오타로는 못 만들지만 쓰기 불가 상태 자체는 그대로 발생한다.
+    mkdirSync(join(dir, '.auto-context', 'compile', 'verify-skipped.jsonl'), { recursive: true });
     const parsed = runVerify(dir);
     assert.equal(parsed.reason, 'suppression_ledger_unwritable');
     assert.equal(parsed.processed, 0);
@@ -426,12 +462,9 @@ test('inconclusive 삭제 설정 + 억제 원장 불가 → 유료 호출 0회�
 // `onInconclusive`가 삭제가 아니면 억제 마커가 필요 없다 — 무조건 검사하면 그 프로젝트의
 // 검수를 이유 없이 막는다.
 test('onInconclusive=none이면 억제 원장 불가가 검수를 막지 않는다', () => {
-  const { dir, callLog } = stampProject({
-    verdict: 'inconclusive', onInconclusive: 'none',
-    skippedPath: '.auto-context/compile/skip-as-dir',
-  });
+  const { dir, callLog } = stampProject({ verdict: 'inconclusive', onInconclusive: 'none' });
   try {
-    mkdirSync(join(dir, '.auto-context', 'compile', 'skip-as-dir'), { recursive: true });
+    mkdirSync(join(dir, '.auto-context', 'compile', 'verify-skipped.jsonl'), { recursive: true });
     const parsed = runVerify(dir);
     assert.equal(parsed.reason, undefined, '선차단되지 않는다');
     assert.equal(parsed.processed, 1);
@@ -441,18 +474,36 @@ test('onInconclusive=none이면 억제 원장 불가가 검수를 막지 않는�
   }
 });
 
-// `verify_deleted_path`가 이미 닫은 것과 같은 오타→과금 루프 입구. skippedPath 오타가
-// "마커가 한 줄도 안 남는" 상태를 만들면 안 된다.
-test('안전영역 밖 skippedPath는 None이 아니라 기본 경로로 폴백한다', () => {
-  const out = execFileSync('python3', ['-c', `import sys, pathlib, json
+// `verify_deleted_path`가 이미 닫은 것과 같은 과금 루프 입구: 억제 마커 경로가 `None`이
+// 되면 "마커가 한 줄도 안 남는" 상태가 된다. 설정 키(`skippedPath`)는 사라졌지만
+// `cp.ledger`는 symlink escape에서 여전히 None을 내므로 두 경로 다 기본값으로 떨어져야 한다.
+test('cp.ledger가 None을 내도 verify 원장 경로는 None이 아니라 기본 경로다', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'qwiki-fallback-'));
+  try {
+    mkdirSync(join(dir, '.auto-context', 'compile'), { recursive: true });
+    writeFileSync(join(dir, 'outside.jsonl'), '');
+    for (const name of ['verify-skipped.jsonl', 'verify-deleted.jsonl']) {
+      symlinkSync(join(dir, 'outside.jsonl'), join(dir, '.auto-context', 'compile', name));
+    }
+    const out = execFileSync('python3', ['-c', `import sys, pathlib, json
 sys.path.insert(0, ${JSON.stringify(process.cwd() + '/core')})
+import compile_paths as cp
 import wiki_verify_worker as v
-root = pathlib.Path('/tmp/qmd-skipped-fallback')
-p = v.verify_skipped_path(root, {'skippedPath': '../../outside.jsonl'})
-print(json.dumps({'path': str(p)}))
+root = pathlib.Path(${JSON.stringify(dir)}).resolve()
+print(json.dumps({
+  'ledgerRefused': cp.ledger(root, cp.VERIFY_SKIPPED) is None and cp.ledger(root, cp.VERIFY_DELETED) is None,
+  'skipped': str(v.verify_skipped_path(root, {})),
+  'deleted': str(v.verify_deleted_path(root, {})),
+  'root': str(root),
+}))
 `], { cwd: process.cwd(), encoding: 'utf8' });
-  const r = JSON.parse(out.trim());
-  assert.equal(r.path, '/tmp/qmd-skipped-fallback/.auto-context/compile/verify-skipped.jsonl');
+    const r = JSON.parse(out.trim());
+    assert.equal(r.ledgerRefused, true, 'the escape is what forces the fallback');
+    assert.equal(r.skipped, `${r.root}/.auto-context/compile/verify-skipped.jsonl`);
+    assert.equal(r.deleted, `${r.root}/.auto-context/compile/verify-deleted.jsonl`);
+  } finally {
+    removeTemp(dir);
+  }
 });
 
 // MAJOR 1 층 2: 순서가 아니라 **필드**가 보장이어야 한다. 모델 항목이 MAX_SOURCES를 채워도

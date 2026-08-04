@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.resolve()))
+import compile_paths as cp
 import config as qmd_config
 import posttool
 from collection_match import select_collections
@@ -46,9 +47,15 @@ def _engine(payload):
     return value if isinstance(value, str) and value.strip() else DEFAULT_ENGINE
 
 
-def _safe_queue_path(project_root, configured_path):
+def _safe_queue_path(project_root, configured_path=None):
+    """`.auto-context/compile/<name>` 아래 큐 파일. 밖을 가리키면 None.
+
+    `configured_path`는 이제 **설정이 아니라 상수 이름**이다(`compile_paths.rel(...)`) —
+    호출부가 verify 큐/ source 큐를 구분해 넘긴다. 검증은 그대로 유지한다: 파일 자체가
+    compile 디렉터리 밖을 가리키는 symlink일 수 있다.
+    """
     if not isinstance(configured_path, str) or not configured_path:
-        configured_path = ".auto-context/compile/source-queue.jsonl"
+        configured_path = cp.rel(cp.SOURCE_QUEUE)
     rel = Path(configured_path)
     if rel.is_absolute() or ".." in rel.parts:
         return None
@@ -103,7 +110,7 @@ def compile_gate(config, accepted_triggers):
     if not config.get("collections"):
         return None
     compile_cfg = config.get("compile") if isinstance(config.get("compile"), dict) else {}
-    if not compile_cfg.get("enabled") or compile_cfg.get("mode", "off") == "off":
+    if not qmd_config.compile_active(compile_cfg):
         return None
     raw_triggers = compile_cfg.get("triggers")
     triggers = raw_triggers if isinstance(raw_triggers, list) else []
@@ -186,7 +193,7 @@ def main():
     if compile_cfg is None:
         return 0
 
-    queue_path = _safe_queue_path(project_root, compile_cfg.get("sourceQueuePath"))
+    queue_path = _safe_queue_path(project_root, cp.rel(cp.SOURCE_QUEUE))
     if queue_path is None:
         return 0
 

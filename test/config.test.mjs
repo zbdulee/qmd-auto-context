@@ -13,9 +13,15 @@ const JUDGE_DEFAULTS = {
   crossEngine: 'prefer',
   timeout: 120,
   cooldownSeconds: 600,
-  maxPairsPerScan: 8,
-  maxPairsPerCompile: 1,
   maxCharsPerPage: 6000,
+};
+// 유료 호출 수 상한은 전부 compile.budget 한 블록이다(core/config.py DEFAULTS).
+const BUDGET_DEFAULTS = {
+  extractorPerRun: 10,
+  cardsPerSource: 10,
+  verifyPerRun: 3,
+  dedupPairsPerScan: 8,
+  dedupPairsPerCompile: 1,
 };
 
 function loadConfig(json, cwd = '/tmp/x') {
@@ -91,55 +97,50 @@ test('wiki recall 신규 필드는 additive로 normalize 된다', () => {
     recallStrategy: 'hierarchical',
     wikiPath: '.auto-context/wiki',
     compile: {
-      enabled: true,
       mode: 'auto-wiki',
-      autoWrite: true,
       defaultStatus: 'generated',
-      requireReviewForCanon: true,
-      candidatePath: '.auto-context/compile/candidates.jsonl',
-      sourceQueuePath: '.auto-context/compile/source-queue.jsonl',
-      tombstonePath: '.auto-context/compile/tombstones.jsonl',
-      manifestPath: '.auto-context/compile/generated-manifest.jsonl',
+      // 제거된 키를 그대로 남겨 둔다 — 정규화가 **무시**하는지(effective에 안 나타나는지)를
+      // 같은 자리에서 단정하기 위해서다. 예전에는 이 값들이 effective에 실렸다.
+      enabled: true,
+      autoWrite: true,
       excludeStatusesFromRecall: ['discarded', 'contested', 'bogus'],
       lowPriorityStatuses: ['generated', 'tentative', 'canon'],
       triggers: ['manual', 'post_session_summary', 'post_tool_source', 'bad'],
-      canonSignals: ['확정'],
       maxAutoPageLines: '80',
       maxSourceChars: '12000',
-      extractor: { argv: ['python3', 'scripts/extract.py'], timeout: '30' },
+      extractor: { backends: { claude: ['python3', 'scripts/extract.py'] }, timeout: '30' },
     },
   }));
   assert.deepEqual(cfg.collectionRoles, { 'proj-docs': 'raw', 'proj-wiki': 'wiki' });
   assert.equal(cfg.recallStrategy, 'hierarchical');
   assert.equal(cfg.wikiPath, '.auto-context/wiki');
+  // deepEqual이라 이 표가 곧 "스키마 전수"다 — 제거된 9개 경로 키와
+  // enabled/autoWrite/requireReviewForCanon/canonSignals/maxCardsPerSource가
+  // effective에 **없다**는 것을 여기서 단정한다(입력에는 그대로 들어 있었다).
   assert.deepEqual(cfg.compile, {
-    enabled: true,
     mode: 'auto-wiki',
-    autoWrite: true,
     defaultStatus: 'generated',
-    requireReviewForCanon: true,
-    candidatePath: '.auto-context/compile/candidates.jsonl',
-    sourceQueuePath: '.auto-context/compile/source-queue.jsonl',
-    tombstonePath: '.auto-context/compile/tombstones.jsonl',
-    manifestPath: '.auto-context/compile/generated-manifest.jsonl',
-    mergeNeededPath: '.auto-context/compile/merge-needed.jsonl',
     excludeStatusesFromRecall: ['discarded', 'contested'],
     lowPriorityStatuses: ['generated', 'tentative'],
     recallVerifiedOnly: true,
     triggers: ['manual', 'post_session_summary', 'post_tool_source'],
-    canonSignals: ['확정'],
     maxAutoPageLines: 80,
     maxSourceChars: 12000,
-    maxCardsPerSource: 10,
     reasoningEffort: {
       generation: 'low',
       verify: 'medium',
       semanticDedup: 'medium',
       engines: {},
     },
-    extractor: { argv: ['python3', 'scripts/extract.py'], timeout: 30, cooldownSeconds: 600 },
-    batch: { idleSeconds: 90, maxItems: 5, maxPerRun: 10 },
-    semanticDedup: { enabled: true, threshold: 0.82, topK: 3, similarPageMaxChars: 12000, autoMergeThreshold: 0.9, maxPairsPerScan: 10, candidateMinScore: 0.3, judge: JUDGE_DEFAULTS },
+    extractor: {
+      backends: { claude: ['python3', 'scripts/extract.py'] },
+      builtins: [],
+      timeout: 30,
+      cooldownSeconds: 600,
+    },
+    budget: BUDGET_DEFAULTS,
+    batch: { idleSeconds: 90, maxItems: 5 },
+    semanticDedup: { enabled: true, maxPairsPerScan: 10, candidateMinScore: 0.3, judge: JUDGE_DEFAULTS },
     verify: {
       enabled: true,
       timeout: 120,
@@ -147,12 +148,7 @@ test('wiki recall 신규 필드는 additive로 normalize 된다', () => {
       onInconclusive: 'delete',
       crossEngine: 'prefer',
       builtins: [],
-      queuePath: '.auto-context/compile/verify-queue.jsonl',
-      logPath: '.auto-context/compile/verify-log.jsonl',
-      skippedPath: '.auto-context/compile/verify-skipped.jsonl',
-      deletedPath: '.auto-context/compile/verify-deleted.jsonl',
       cooldownSeconds: 600,
-      maxPerRun: 3,
     },
   });
 });
@@ -211,7 +207,8 @@ test('compile verify config: 커스텀 값 정규화 + 불량 값은 기본값 �
     compile: {
       enabled: true,
       mode: 'auto-wiki',
-      verify: { enabled: false, timeout: 60, onFail: 'contested', onInconclusive: 'none', maxPerRun: 5 },
+      verify: { enabled: false, timeout: 60, onFail: 'contested', onInconclusive: 'none' },
+      budget: { verifyPerRun: 5 },
     },
   }));
   assert.equal(cfg.compile.verify.enabled, false);
@@ -219,7 +216,7 @@ test('compile verify config: 커스텀 값 정규화 + 불량 값은 기본값 �
   assert.equal(cfg.compile.verify.onFail, 'contested');
   // 'none' = 0.x 하위호환("generated 유지") — 파괴적 기본값을 끄는 유일한 경로
   assert.equal(cfg.compile.verify.onInconclusive, 'none');
-  assert.equal(cfg.compile.verify.maxPerRun, 5);
+  assert.equal(cfg.compile.budget.verifyPerRun, 5, 'verify 예산은 compile.budget로 이관됐다');
 
   const bad = loadConfig(JSON.stringify({
     compile: {
@@ -231,59 +228,66 @@ test('compile verify config: 커스텀 값 정규화 + 불량 값은 기본값 �
   assert.equal(bad.compile.verify.timeout, 120);
   assert.equal(bad.compile.verify.onFail, 'delete');
   assert.equal(bad.compile.verify.onInconclusive, 'delete', 'onFail과 같은 값 집합 — 불량 값은 기본값 폴백');
-  assert.equal(bad.compile.verify.queuePath, '.auto-context/compile/verify-queue.jsonl');
+  assert.equal(bad.compile.verify.queuePath, undefined, 'verify 경로 4개는 상수화돼 스키마에 없다');
 });
 
-test('WIKI_STATUSES에 verified 포함: defaultStatus/excludeStatusesFromRecall에 지정 가능', () => {
+// `excludeStatusesFromRecall`은 여전히 WIKI_STATUSES 전체를 받는다(필터 대상이라 넓어도
+// 안전하다). 반면 `defaultStatus`는 **신규 카드에 찍히는 값**이라 집합이 좁다 —
+// `verified`를 허용하면 기계 검수를 거치지 않은 카드가 `recallVerifiedOnly` 기본값 아래에서
+// 캐논 근거가 된다. 예전 테스트는 `verified`가 **통과하는 것**을 단정했다(구멍의 동결).
+test('defaultStatus는 generated/tentative만 받는다 (verified는 검수 우회라 거부)', () => {
   const cfg = loadConfig(JSON.stringify({
     compile: {
-      enabled: true,
       defaultStatus: 'verified',
       excludeStatusesFromRecall: ['discarded', 'verified'],
     },
   }));
-  assert.equal(cfg.compile.defaultStatus, 'verified');
-  assert.deepEqual(cfg.compile.excludeStatusesFromRecall, ['discarded', 'verified']);
+  assert.equal(cfg.compile.defaultStatus, 'generated', 'verified는 집합 밖 → 기본값');
+  assert.deepEqual(cfg.compile.excludeStatusesFromRecall, ['discarded', 'verified'],
+    'excludeStatuses는 필터라 WIKI_STATUSES 전체를 그대로 받는다');
+  assert.equal(loadConfig(JSON.stringify({ compile: { defaultStatus: 'tentative' } })).compile.defaultStatus, 'tentative');
 });
 
 test('compile extractor config drops shell strings and invalid timeout', () => {
   const cfg = loadConfig(JSON.stringify({
     compile: {
-      enabled: true,
       mode: 'guarded',
-      sourceQueuePath: 123,
       maxSourceChars: 'NaN',
       extractor: { command: 'python3 script.py', argv: 'python3 script.py', timeout: 'Infinity' },
     },
   }));
-  assert.equal(cfg.compile.sourceQueuePath, '.auto-context/compile/source-queue.jsonl');
+  assert.equal(cfg.compile.sourceQueuePath, undefined, '경로 키는 상수화돼 스키마에 없다');
   assert.equal(cfg.compile.maxSourceChars, 12000);
-  assert.deepEqual(cfg.compile.extractor, { argv: [], timeout: 120, cooldownSeconds: 600 });
+  // `argv`/`command`는 둘 다 스키마 밖이라 흔적이 남지 않는다(예전에는 argv가 [] 로 남았다).
+  assert.deepEqual(cfg.compile.extractor, { backends: {}, builtins: [], timeout: 120, cooldownSeconds: 600 });
 });
 
-test('compile extractor config preserves valid built-ins and drops invalid values', () => {
+// **회귀 가드 (T5)**: `dispatch` 키가 **없어도** backends/builtins가 해석된다.
+// 게이트가 있던 동안 이 config는 엔진을 하나도 해석하지 못했고, 그 실패는 큐 잡을
+// requeue가 아니라 **폐기**했다(wiki_compile_worker.process_job → missing_extractor).
+test('compile extractor config preserves valid built-ins and drops invalid values (dispatch 키 없이)', () => {
   const cfg = loadConfig(JSON.stringify({
     compile: {
-      enabled: true,
       mode: 'auto-wiki',
       extractor: {
-        dispatch: 'by-engine',
-        argv: [],
         backends: { codex: ['python3', 'custom.py'], bogus: 'python3 bad.py' },
         builtins: ['codex', 'bogus', 42, 'hermes'],
-        default: ['python3', 'fallback.py'],
         timeout: 120,
       },
     },
   }));
   assert.deepEqual(cfg.compile.extractor, {
-    argv: [],
     timeout: 120,
     cooldownSeconds: 600,
-    dispatch: 'by-engine',
     backends: { codex: ['python3', 'custom.py'] },
     builtins: ['codex', 'hermes'],
-    default: ['python3', 'fallback.py'],
+  });
+  // 예전 스키마의 dispatch/default/argv를 그대로 적어도 무시된다(흡수되거나 남지 않는다).
+  const legacy = loadConfig(JSON.stringify({
+    compile: { extractor: { dispatch: 'by-engine', default: ['python3', 'f.py'], argv: ['python3', 'a.py'], builtins: ['claude'] } },
+  }));
+  assert.deepEqual(legacy.compile.extractor, {
+    timeout: 120, cooldownSeconds: 600, backends: {}, builtins: ['claude'],
   });
 });
 
@@ -567,7 +571,7 @@ test('compile extractor cooldownSeconds is preserved and defaults to 600', () =>
     compile: {
       enabled: true,
       mode: 'guarded',
-      extractor: { argv: ['python3', 'extract.py'], timeout: 30, cooldownSeconds: 300 },
+      extractor: { backends: { claude: ['python3', 'extract.py'] }, timeout: 30, cooldownSeconds: 300 },
     },
   }));
   assert.equal(withCooldown.compile.extractor.cooldownSeconds, 300);
@@ -576,44 +580,66 @@ test('compile extractor cooldownSeconds is preserved and defaults to 600', () =>
     compile: {
       enabled: true,
       mode: 'guarded',
-      extractor: { argv: ['python3', 'extract.py'], timeout: 30 },
+      extractor: { backends: { claude: ['python3', 'extract.py'] }, timeout: 30 },
     },
   }));
   assert.equal(withDefault.compile.extractor.cooldownSeconds, 600);
 });
 
-test('compile.batch normalizes idleSeconds/maxItems/maxPerRun; defaults to 90/5/10 when omitted', () => {
+// `batch`에는 **시작 조건만** 남는다. `maxPerRun`(run당 extractor 상한)은 compile.budget로
+// 옮겨졌다 — 같은 서브트리에 "이만큼 모이면 시작"과 "이보다 많이 돌리지 마라"가 동거하던
+// 것이 혼동원이었다. 클램프(MAX_COMPILE_PER_RUN)는 함께 이동했고 아래에서 단정한다.
+test('compile.batch는 시작 조건만 정규화한다 (maxPerRun은 budget으로 이동)', () => {
   const withBatch = loadConfig(JSON.stringify({
     compile: {
-      enabled: true,
       mode: 'guarded',
       batch: { idleSeconds: 10, maxItems: 2, maxPerRun: '4' },
     },
   }));
-  assert.deepEqual(withBatch.compile.batch, { idleSeconds: 10, maxItems: 2, maxPerRun: 4 });
+  assert.deepEqual(withBatch.compile.batch, { idleSeconds: 10, maxItems: 2 });
+  assert.equal(withBatch.compile.budget.extractorPerRun, 10, 'batch.maxPerRun은 더 이상 읽히지 않는다');
 
-  const withDefaults = loadConfig(JSON.stringify({
-    compile: {
-      enabled: true,
-      mode: 'guarded',
-    },
-  }));
-  assert.deepEqual(withDefaults.compile.batch, { idleSeconds: 90, maxItems: 5, maxPerRun: 10 });
+  const withDefaults = loadConfig(JSON.stringify({ compile: { mode: 'guarded' } }));
+  assert.deepEqual(withDefaults.compile.batch, { idleSeconds: 90, maxItems: 5 });
 });
 
-test('compile.semanticDedup normalizes enabled/threshold/topK; defaults to true/0.82/3 when omitted', () => {
+test('compile.budget: 값 정규화 + 유료 호출 클램프가 함께 이동했다', () => {
+  const custom = loadConfig(JSON.stringify({
+    compile: { budget: { extractorPerRun: '4', cardsPerSource: 7, verifyPerRun: 15, dedupPairsPerScan: 3, dedupPairsPerCompile: 2 } },
+  }));
+  assert.deepEqual(custom.compile.budget, {
+    extractorPerRun: 4, cardsPerSource: 7, verifyPerRun: 15, dedupPairsPerScan: 3, dedupPairsPerCompile: 2,
+  });
+
+  // MAX_COMPILE_PER_RUN / MAX_CARDS_PER_SOURCE / MAX_VERIFY_PER_RUN = 50 (core/config.py)
+  const clamped = loadConfig(JSON.stringify({
+    compile: { budget: { extractorPerRun: 99999999, cardsPerSource: '100', verifyPerRun: 60 } },
+  }));
+  assert.equal(clamped.compile.budget.extractorPerRun, 50);
+  assert.equal(clamped.compile.budget.cardsPerSource, 50);
+  assert.equal(clamped.compile.budget.verifyPerRun, 50);
+
+  const bad = loadConfig(JSON.stringify({ compile: { budget: { extractorPerRun: 'nope', verifyPerRun: -1 } } }));
+  assert.deepEqual(bad.compile.budget, BUDGET_DEFAULTS);
+  assert.deepEqual(loadConfig(JSON.stringify({ compile: {} })).compile.budget, BUDGET_DEFAULTS);
+});
+
+// score 레버 4개(threshold·topK·similarPageMaxChars·autoMergeThreshold)는 상수가 됐다 —
+// daemon score가 순위 기반이라 어떤 값도 "같은 사실"을 표현하지 못했고, judge-less 폴백
+// 동작은 예전 기본값 그대로 동결됐다(config.DEDUP_* 상수 + judge-less 동작 테스트).
+test('compile.semanticDedup는 enabled/maxPairsPerScan/candidateMinScore만 정규화한다', () => {
   const withSemantic = loadConfig(JSON.stringify({
     compile: { semanticDedup: { enabled: false, threshold: '0.5', topK: 7 } },
   }));
-  assert.deepEqual(withSemantic.compile.semanticDedup, { enabled: false, threshold: 0.5, topK: 7, similarPageMaxChars: 12000, autoMergeThreshold: 0.9, maxPairsPerScan: 10, candidateMinScore: 0.3, judge: JUDGE_DEFAULTS });
+  assert.deepEqual(withSemantic.compile.semanticDedup, { enabled: false, maxPairsPerScan: 10, candidateMinScore: 0.3, judge: JUDGE_DEFAULTS });
 
   const withDefaults = loadConfig(JSON.stringify({ compile: {} }));
-  assert.deepEqual(withDefaults.compile.semanticDedup, { enabled: true, threshold: 0.82, topK: 3, similarPageMaxChars: 12000, autoMergeThreshold: 0.9, maxPairsPerScan: 10, candidateMinScore: 0.3, judge: JUDGE_DEFAULTS });
+  assert.deepEqual(withDefaults.compile.semanticDedup, { enabled: true, maxPairsPerScan: 10, candidateMinScore: 0.3, judge: JUDGE_DEFAULTS });
 
   const withBadValues = loadConfig(JSON.stringify({
     compile: { semanticDedup: { enabled: 'nope', threshold: 'nan', topK: -1 } },
   }));
-  assert.deepEqual(withBadValues.compile.semanticDedup, { enabled: true, threshold: 0.82, topK: 3, similarPageMaxChars: 12000, autoMergeThreshold: 0.9, maxPairsPerScan: 10, candidateMinScore: 0.3, judge: JUDGE_DEFAULTS });
+  assert.deepEqual(withBadValues.compile.semanticDedup, { enabled: true, maxPairsPerScan: 10, candidateMinScore: 0.3, judge: JUDGE_DEFAULTS });
 
   // judge.crossEngine은 verify.crossEngine과 **같은 닫힌 집합**이다(CROSS_ENGINE_MODES).
   const withCross = loadConfig(JSON.stringify({ compile: { semanticDedup: { judge: { crossEngine: 'require' } } } }));
@@ -622,34 +648,28 @@ test('compile.semanticDedup normalizes enabled/threshold/topK; defaults to true/
   assert.equal(withBadCross.compile.semanticDedup.judge.crossEngine, 'prefer', '집합 밖 값은 기본값으로');
 });
 
-test('compile.semanticDedup.similarPageMaxChars normalizes with a 12000 default', () => {
-  const withValue = loadConfig(JSON.stringify({
-    compile: { semanticDedup: { similarPageMaxChars: '8000' } },
+// 상수화된 4개 레버의 **값 자체**는 예전 기본값과 같아야 한다 — judge 없는 머신의 레거시
+// score 게이트 동작이 이 리팩터로 바뀌면 안 된다. 설정으로 덮을 수 없다는 것도 함께 본다.
+test('dedup score 레버 4개는 상수이고 값은 예전 기본값과 동일하다', () => {
+  const consts = JSON.parse(execFileSync('python3', ['-c', [
+    'import json, sys',
+    "sys.path.insert(0, 'core')",
+    'import config as c',
+    'print(json.dumps({',
+    '  "threshold": c.DEDUP_SCORE_THRESHOLD,',
+    '  "autoMerge": c.DEDUP_AUTO_MERGE_THRESHOLD,',
+    '  "topK": c.DEDUP_TOP_K,',
+    '  "similarPageMaxChars": c.DEDUP_SIMILAR_PAGE_MAX_CHARS,',
+    '}))',
+  ].join('\n')], { encoding: 'utf8' }));
+  assert.deepEqual(consts, { threshold: 0.82, autoMerge: 0.9, topK: 3, similarPageMaxChars: 12000 });
+
+  const overridden = loadConfig(JSON.stringify({
+    compile: { semanticDedup: { threshold: 0.1, topK: 99, similarPageMaxChars: 1, autoMergeThreshold: 0.1 } },
   }));
-  assert.equal(withValue.compile.semanticDedup.similarPageMaxChars, 8000);
-
-  const withDefaults = loadConfig(JSON.stringify({ compile: {} }));
-  assert.equal(withDefaults.compile.semanticDedup.similarPageMaxChars, 12000);
-
-  const withBadValue = loadConfig(JSON.stringify({
-    compile: { semanticDedup: { similarPageMaxChars: 'not-a-number' } },
-  }));
-  assert.equal(withBadValue.compile.semanticDedup.similarPageMaxChars, 12000);
-});
-
-test('compile.semanticDedup.autoMergeThreshold normalizes with a 0.9 default', () => {
-  const withValue = loadConfig(JSON.stringify({
-    compile: { semanticDedup: { autoMergeThreshold: '0.95' } },
-  }));
-  assert.equal(withValue.compile.semanticDedup.autoMergeThreshold, 0.95);
-
-  const withDefaults = loadConfig(JSON.stringify({ compile: {} }));
-  assert.equal(withDefaults.compile.semanticDedup.autoMergeThreshold, 0.9);
-
-  const withBadValue = loadConfig(JSON.stringify({
-    compile: { semanticDedup: { autoMergeThreshold: 'nan' } },
-  }));
-  assert.equal(withBadValue.compile.semanticDedup.autoMergeThreshold, 0.9);
+  for (const key of ['threshold', 'topK', 'similarPageMaxChars', 'autoMergeThreshold']) {
+    assert.equal(overridden.compile.semanticDedup[key], undefined, `${key}는 설정으로 남지 않는다`);
+  }
 });
 
 test('compile.semanticDedup.maxPairsPerScan normalizes with a 10 default', () => {
@@ -673,6 +693,8 @@ test('WIKI_STATUSES / lowPriorityStatuses accept superseded', () => {
   }));
   assert.deepEqual(withSuperseded.compile.lowPriorityStatuses, ['generated', 'tentative', 'superseded']);
 
-  const defaultStatusAccepted = loadConfig(JSON.stringify({ compile: { defaultStatus: 'superseded' } }));
-  assert.equal(defaultStatusAccepted.compile.defaultStatus, 'superseded');
+  // `superseded`는 lowPriorityStatuses에서는 유효하지만 defaultStatus 집합 밖이다
+  // (신규 카드를 superseded로 만드는 것은 의미가 없고, 좁힌 집합의 부수 효과다).
+  const defaultStatusRejected = loadConfig(JSON.stringify({ compile: { defaultStatus: 'superseded' } }));
+  assert.equal(defaultStatusRejected.compile.defaultStatus, 'generated');
 });

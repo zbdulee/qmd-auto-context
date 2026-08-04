@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.resolve()))
+import compile_paths as cp
 import config as qmd_config
 import wiki_compile as wc
 from dirty_queue import enqueue_collections
@@ -21,10 +22,9 @@ ACTIONS = {"merge", "supersede", "separate", "discard"}
 
 
 def merge_needed_path(root: Path, config: dict) -> Path:
-    compile_cfg = config.get("compile") if isinstance(config.get("compile"), dict) else {}
-    rel = compile_cfg.get("mergeNeededPath", ".auto-context/compile/merge-needed.jsonl")
-    compile_dir = wc.safe_managed_dir(root, ".auto-context/compile")
-    return wc.safe_compile_file(root, compile_dir, rel) if compile_dir else None
+    # 위치는 상수다(`compile.mergeNeededPath` 제거). `config`는 호출부 호환으로 남는다.
+    compile_dir = cp.compile_dir(root, create=True)
+    return cp.ledger(root, cp.MERGE_NEEDED) if compile_dir else None
 
 
 def load_entries(claimed: Path) -> list[tuple[str, dict | None]]:

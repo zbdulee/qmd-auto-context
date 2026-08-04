@@ -18,7 +18,7 @@ try:
     (root / 'docs').mkdir()
     (root / '.auto-context' / 'wiki').mkdir(parents=True)
     (root / 'docs' / 'source.md').write_text('# source\\n', encoding='utf-8')
-    cfg = config.normalize_config({'collections':['docs','wiki'], 'collectionPaths':{'docs':'docs','wiki':'.auto-context/wiki'}, 'collectionRoles':{'docs':'raw','wiki':'wiki'}, 'wikiPath':'.auto-context/wiki', 'compile': {'enabled':True, 'mode':'auto-wiki', 'extractor': {'argv':['python3','stub']}, 'reasoningEffort': {'generation':'low','verify':'medium','semanticDedup':'medium','engines': {'claude': {'generation':'high'}}}}})
+    cfg = config.normalize_config({'collections':['docs','wiki'], 'collectionPaths':{'docs':'docs','wiki':'.auto-context/wiki'}, 'collectionRoles':{'docs':'raw','wiki':'wiki'}, 'wikiPath':'.auto-context/wiki', 'compile': {'mode':'auto-wiki', 'extractor': {'backends': {'claude': ['python3','stub']}}, 'reasoningEffort': {'generation':'low','verify':'medium','semanticDedup':'medium','engines': {'claude': {'generation':'high'}}}}})
     seen = {}
     def fake_run(argv, payload, timeout, project):
         seen['payload'] = payload
@@ -53,7 +53,7 @@ try:
     (root / 'docs' / 'source.md').write_text('# source\\nDurable claim.\\n', encoding='utf-8')
     card = root / '.auto-context' / 'wiki' / 'concepts' / 'test.md'
     card.write_text('---\\ntitle: Test\\nstatus: generated\\ncreatedBy: qmd-auto-context\\nreviewed: false\\n---\\n<!-- qmd:auto:start id="main" sourceHash="h" -->\\n## Summary\\nClaim.\\n<!-- qmd:auto:end -->\\n', encoding='utf-8')
-    cfg = config.normalize_config({'collections':['docs','wiki'], 'collectionPaths':{'docs':'docs','wiki':'.auto-context/wiki'}, 'collectionRoles':{'docs':'raw','wiki':'wiki'}, 'wikiPath':'.auto-context/wiki', 'compile': {'enabled':True, 'mode':'auto-wiki', 'extractor': {'argv':['python3','stub']}, 'reasoningEffort': {'generation':'low','verify':'medium','semanticDedup':'medium','engines': {'claude': {'verify':'high'}}}, 'verify': {'enabled':True, 'timeout':30}}})
+    cfg = config.normalize_config({'collections':['docs','wiki'], 'collectionPaths':{'docs':'docs','wiki':'.auto-context/wiki'}, 'collectionRoles':{'docs':'raw','wiki':'wiki'}, 'wikiPath':'.auto-context/wiki', 'compile': {'mode':'auto-wiki', 'extractor': {'backends': {'claude': ['python3','stub']}}, 'reasoningEffort': {'generation':'low','verify':'medium','semanticDedup':'medium','engines': {'claude': {'verify':'high'}}}, 'verify': {'enabled':True, 'timeout':30}}})
     seen = {}
     def fake_run(argv, payload, timeout, project):
         seen['payload'] = payload
@@ -81,7 +81,7 @@ from pathlib import Path
 import config, wiki_dedup_judge as j
 root = Path(tempfile.mkdtemp(prefix='effort-dedup-')).resolve()
 try:
-    cfg = config.normalize_config({'compile': {'enabled':True, 'mode':'auto-wiki', 'extractor': {'argv':['python3','stub']}, 'reasoningEffort': {'generation':'low','verify':'medium','semanticDedup':'low','engines': {'claude': {'semanticDedup':'xhigh'}}}, 'semanticDedup': {'judge': {'enabled':True}}}})['compile']
+    cfg = config.normalize_config({'compile': {'mode':'auto-wiki', 'extractor': {'backends': {'claude': ['python3','stub']}}, 'reasoningEffort': {'generation':'low','verify':'medium','semanticDedup':'low','engines': {'claude': {'semanticDedup':'xhigh'}}}, 'semanticDedup': {'judge': {'enabled':True}}}})['compile']
     seen = {}
     def fake_run(argv, payload, timeout, project):
         seen['payload'] = payload

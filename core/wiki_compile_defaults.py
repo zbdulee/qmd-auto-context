@@ -12,9 +12,10 @@ compile defaults. The worker resolves built-in adapter paths at runtime.
 생성기가 기본값을 통째로 복사해 두면 나중에 기본값을 고쳐도 온보딩한 프로젝트만 옛 값에
 고정돼, "기본값과 다른 리터럴"이 파일 안에 박제된다 — 이 파일이 그 클래스의 발생원이었다.
 
-기본값에 **없는** 키(`extractor.dispatch`/`backends`/`builtins`/`default`)는 비교 대상이
-없으므로 항상 남긴다. 특히 `dispatch: "by-engine"`은 정규화에서 나머지 셋의 해석을 여는
-게이트라(`config.py`의 extractor 정규화) 생략하면 builtins가 통째로 사라진다.
+활성화는 `compile.mode` 한 값이 담당한다(`enabled`·`autoWrite`는 스키마에서 제거됐다).
+`extractor.builtins`는 기본값이 `[]`라 delta에 남고, `dispatch`/`default`/`argv`는 더 이상
+존재하지 않는다 — `dispatch` 게이트가 있던 동안 그 키를 빠뜨린 생성기 출력은 엔진이 하나도
+해석되지 않아 큐에 든 잡이 `missing_extractor`로 **폐기**됐다.
 """
 from __future__ import annotations
 
@@ -121,15 +122,8 @@ def full_compile_block(root, engines=ENGINES) -> dict:
     한 곳에 적어 두고 delta를 계산하기 위한 입력이다.
     """
     return {
-        "enabled": True,
         "mode": "auto-wiki",
-        "autoWrite": True,
         "defaultStatus": "generated",
-        "requireReviewForCanon": True,
-        "candidatePath": ".auto-context/compile/candidates.jsonl",
-        "sourceQueuePath": ".auto-context/compile/source-queue.jsonl",
-        "manifestPath": ".auto-context/compile/generated-manifest.jsonl",
-        "tombstonePath": ".auto-context/compile/tombstones.jsonl",
         "triggers": ["post_tool_source", "post_sync_source", "manual"],
         "maxSourceChars": 12000,
         "excludeStatusesFromRecall": ["discarded", "contested"],
@@ -142,10 +136,8 @@ def full_compile_block(root, engines=ENGINES) -> dict:
             "engines": {},
         },
         "extractor": {
-            "dispatch": "by-engine",
             "backends": {},
             "builtins": builtin_engines(engines),
-            "default": [],
             "timeout": 120,
             "cooldownSeconds": 600,
         },
@@ -161,11 +153,6 @@ def full_compile_block(root, engines=ENGINES) -> dict:
             # 여기에 목록을 복제하면 사용자가 extractor.builtins를 고친 뒤 검수 후보만
             # 낡기 때문이다 — 비워 두면 extractor 풀을 그대로 물려받는다.
             "crossEngine": "prefer",
-            "queuePath": ".auto-context/compile/verify-queue.jsonl",
-            "logPath": ".auto-context/compile/verify-log.jsonl",
-            "skippedPath": ".auto-context/compile/verify-skipped.jsonl",
-            "deletedPath": ".auto-context/compile/verify-deleted.jsonl",
             "cooldownSeconds": 600,
-            "maxPerRun": 3,
         },
     }

@@ -26,7 +26,7 @@ Durable claim: the source documents cite markdown.
 `;
 }
 
-function setupProject({ verify = {}, extractorArgv = [], extractor = null, cardStatus = 'generated', jobOverrides = {}, withSource = true } = {}) {
+function setupProject({ verify = {}, extractorArgv = null, extractor = null, cardStatus = 'generated', jobOverrides = {}, withSource = true } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'qwiki-verify-'));
   mkdirSync(join(dir, '.auto-context', 'compile'), { recursive: true });
   mkdirSync(join(dir, '.auto-context', 'wiki', 'concepts'), { recursive: true });
@@ -41,13 +41,13 @@ function setupProject({ verify = {}, extractorArgv = [], extractor = null, cardS
     collectionRoles: { 'proj-docs': 'raw', 'proj-wiki': 'wiki' },
     wikiPath: '.auto-context/wiki',
     compile: {
-      enabled: true,
       mode: 'auto-wiki',
-      autoWrite: true,
       defaultStatus: 'generated',
       triggers: ['post_tool_source', 'manual'],
       maxSourceChars: 12000,
-      extractor: extractor || { argv: extractorArgv, timeout: 30 },
+      // 단일 argv(`extractor.argv`)는 스키마에서 사라졌다 — 모든 argv는 엔진 라벨을
+      // 통해서만 온다. 잡의 생성 엔진이 'claude'이므로 그 라벨 아래에 둔다.
+      extractor: extractor || { backends: extractorArgv ? { claude: extractorArgv } : {}, timeout: 30 },
       verify: { enabled: true, timeout: 30, ...verify },
     },
   }));
@@ -276,7 +276,7 @@ test('transient(timeout)는 inconclusive로 오분류되지 않는다 — 카드
     assert.equal(existsSync(join(project, CARD_REL)), true);
     // 실패한 후보만 식힌다(0.x의 전역 verify-cooldown 대체) — 전역이면 한 엔진 실패가
     // 프로젝트 전체 검수를 막고 다음 후보로 degrade하지 못했다.
-    assert.deepEqual(Object.keys(engineCooldown(project)), ['(unattributed)']);
+    assert.deepEqual(Object.keys(engineCooldown(project)), ['claude']);
     assert.equal(jsonl(join(project, '.auto-context', 'compile', 'verify-skipped.jsonl')).length, 0);
   } finally { removeTemp(project); }
 });
@@ -418,13 +418,11 @@ function setupLoopProject(dual) {
     collectionRoles: { 'proj-docs': 'raw', 'proj-wiki': 'wiki' },
     wikiPath: '.auto-context/wiki',
     compile: {
-      enabled: true,
       mode: 'auto-wiki',
-      autoWrite: true,
       defaultStatus: 'generated',
       triggers: ['post_tool_source', 'manual'],
       semanticDedup: { enabled: false },
-      extractor: { argv: ['python3', dual], timeout: 30 },
+      extractor: { backends: { claude: ['python3', dual] }, timeout: 30 },
       verify: { enabled: true, timeout: 30 },
     },
   }));
@@ -543,13 +541,11 @@ else:
     collectionRoles: { 'proj-docs': 'raw', 'proj-wiki': 'wiki' },
     wikiPath: '.auto-context/wiki',
     compile: {
-      enabled: true,
       mode: 'auto-wiki',
-      autoWrite: true,
       defaultStatus: 'generated',
       triggers: ['post_tool_source', 'manual'],
       semanticDedup: { enabled: false },
-      extractor: { argv: ['python3', dual], timeout: 30 },
+      extractor: { backends: { claude: ['python3', dual] }, timeout: 30 },
       verify: { enabled: true, timeout: 30 },
     },
   }));
@@ -611,7 +607,6 @@ test('cross-engine: 카드를 만든 엔진(claude)이 아닌 codex가 검수하
   const tracker = trackerFile('cross');
   const project = setupProject({
     extractor: {
-      dispatch: 'by-engine',
       timeout: 30,
       backends: { claude: mockEngine('claude', tracker, 'pass'), codex: mockEngine('codex', tracker, 'pass') },
     },
@@ -636,7 +631,6 @@ test('degrade: 다른 엔진 CLI가 없으면(127) 같은 엔진으로 검수하
   const tracker = trackerFile('degrade');
   const project = setupProject({
     extractor: {
-      dispatch: 'by-engine',
       timeout: 30,
       backends: { claude: mockEngine('claude', tracker, 'pass'), codex: mockEngine('codex', tracker, 'absent') },
     },
@@ -661,7 +655,6 @@ test('crossEngine:require + 다른 엔진 없음 → 검수 안 함, 카드 보�
   const project = setupProject({
     verify: { crossEngine: 'require' },
     extractor: {
-      dispatch: 'by-engine',
       timeout: 30,
       backends: { claude: mockEngine('claude', tracker, 'pass') },
     },
@@ -684,7 +677,6 @@ test('crossEngine:off → 0.x 동작(카드를 만든 엔진이 검수, mode sel
   const project = setupProject({
     verify: { crossEngine: 'off' },
     extractor: {
-      dispatch: 'by-engine',
       timeout: 30,
       backends: { claude: mockEngine('claude', tracker, 'pass'), codex: mockEngine('codex', tracker, 'pass') },
     },
@@ -701,7 +693,6 @@ test('실패 분류 경계: 다른 엔진 timeout은 다음 엔진으로 넘기�
   const project = setupProject({
     verify: { timeout: 1 },
     extractor: {
-      dispatch: 'by-engine',
       timeout: 30,
       backends: { claude: mockEngine('claude', tracker, 'pass'), codex: mockEngine('codex', tracker, 'slow') },
     },
@@ -723,7 +714,6 @@ test('전 후보 CLI 부재(127) → 카드·큐 보존, transient로 처리(삭
   const tracker = trackerFile('all-absent');
   const project = setupProject({
     extractor: {
-      dispatch: 'by-engine',
       timeout: 30,
       backends: { claude: mockEngine('claude', tracker, 'absent'), codex: mockEngine('codex', tracker, 'absent') },
     },
@@ -743,7 +733,6 @@ test('cross-engine fail 삭제 → 원장에 verifiedMode/producedBy가 함께 �
   const tracker = trackerFile('cross-fail');
   const project = setupProject({
     extractor: {
-      dispatch: 'by-engine',
       timeout: 30,
       backends: { claude: mockEngine('claude', tracker, 'pass'), codex: mockEngine('codex', tracker, 'fail') },
     },
@@ -758,21 +747,31 @@ test('cross-engine fail 삭제 → 원장에 verifiedMode/producedBy가 함께 �
   } finally { removeTemp(project); }
 });
 
-test('legacy extractor.argv는 엔진 귀속이 불가하므로 mode unknown (교차 주장 금지)', () => {
-  const verifier = mockVerifier({ verdict: 'pass', claims: [], reasons: [] });
-  const project = setupProject({ extractorArgv: ['python3', verifier] });
+// 귀속 불가의 두 형태 중 "풀 밖 라벨". sentinel `unknown`은 아래 별도 테스트가 덮는다.
+// (0.x의 `extractor.argv`/`extractor.default`도 귀속 불가였지만 스키마에서 사라졌다 —
+// 이제 모든 argv가 엔진 라벨을 통해 오므로 남은 귀속 불가는 이 두 가지뿐이다.)
+test('풀 밖 라벨이 만든 카드는 엔진 귀속이 불가하므로 mode unknown (교차 주장 금지)', () => {
+  const tracker = trackerFile('outside-pool-prefer');
+  const project = setupProject({
+    jobOverrides: { engine: 'hermes' },   // 풀에 없는 라벨 → argv가 해석되지 않는다
+    extractor: { timeout: 30, backends: { codex: mockEngine('codex', tracker, 'pass') } },
+  });
   try {
-    runVerifyWorker(project);
+    assert.equal(JSON.parse(runVerifyWorker(project)).processed, 1);
+    assert.deepEqual(calls(tracker), ['codex'], '검수는 계속된다(폐기하면 영원히 미검수)');
     const text = readFileSync(join(project, CARD_REL), 'utf8');
-    assert.match(text, /^verifiedMode: "?unknown"?$/m);
-    assert.match(text, /^verifiedBy: "?claude"?$/m, 'verifiedBy는 기존 동작(job engine) 유지');
+    assert.match(text, /^status: verified$/m);
+    assert.match(text, /^verifiedMode: "?unknown"?$/m, '생성 엔진과 다름을 증명할 수 없다');
+    const log = jsonl(join(project, '.auto-context', 'compile', 'verify-log.jsonl'));
+    assert.equal(log[0].verifiedMode, 'unknown');
+    assert.equal(log[0].producedBy, 'hermes');
   } finally { removeTemp(project); }
 });
 
 test('증명 필드 위생: pass 스탬프는 verifiedBy/verifiedAt/verifiedMode를 항상 함께 쓴다', () => {
   const tracker = trackerFile('proof');
   const project = setupProject({
-    extractor: { dispatch: 'by-engine', timeout: 30, backends: { codex: mockEngine('codex', tracker, 'pass') } },
+    extractor: { timeout: 30, backends: { codex: mockEngine('codex', tracker, 'pass') } },
   });
   try {
     runVerifyWorker(project);
@@ -787,7 +786,7 @@ test('기존 verified 카드는 자동 재검증되지 않는다 (655장 재검�
   const tracker = trackerFile('no-reverify');
   const project = setupProject({
     cardStatus: 'verified',
-    extractor: { dispatch: 'by-engine', timeout: 30, backends: { codex: mockEngine('codex', tracker, 'fail') } },
+    extractor: { timeout: 30, backends: { codex: mockEngine('codex', tracker, 'fail') } },
   });
   try {
     assert.equal(JSON.parse(runVerifyWorker(project)).processed, 1);
@@ -797,33 +796,44 @@ test('기존 verified 카드는 자동 재검증되지 않는다 (655장 재검�
   } finally { removeTemp(project); }
 });
 
-test('crossEngine:require는 엔진 귀속 불가 argv(legacy/default)로 만족되지 않는다', () => {
-  const verifier = mockVerifier({ verdict: 'pass', claims: [], reasons: [] });
-  for (const extractorCfg of [
-    { argv: ['python3', verifier], timeout: 30 },                                  // legacy 단일 argv
-    { dispatch: 'by-engine', timeout: 30, backends: {}, default: ['python3', verifier] },
-  ]) {
-    const project = setupProject({ verify: { crossEngine: 'require' }, extractor: extractorCfg });
-    try {
-      assert.equal(JSON.parse(runVerifyWorker(project)).processed, 0);
-      // "never self-verify" 약속은 엔진을 알 수 없는 argv로는 지킬 수 없다.
-      assert.match(readFileSync(join(project, CARD_REL), 'utf8'), /^status: generated$/m);
-      assert.equal(jsonl(join(project, '.auto-context', 'compile', 'verify-log.jsonl'))[0].reason,
-        'cross_engine_unavailable');
-    } finally { removeTemp(project); }
-  }
+test('crossEngine:require는 풀 밖 라벨(귀속 불가)로 만족되지 않는다', () => {
+  const tracker = trackerFile('outside-pool-require');
+  const project = setupProject({
+    jobOverrides: { engine: 'hermes' },
+    verify: { crossEngine: 'require' },
+    extractor: { timeout: 30, backends: { codex: mockEngine('codex', tracker, 'pass') } },
+  });
+  try {
+    assert.equal(JSON.parse(runVerifyWorker(project)).processed, 0);
+    // "never self-verify" 약속은 생성 엔진을 특정할 수 없으면 지킬 수 없다 → fail-closed.
+    assert.deepEqual(calls(tracker), [], '증명할 수 없으면 유료 호출도 하지 않는다');
+    assert.match(readFileSync(join(project, CARD_REL), 'utf8'), /^status: generated$/m);
+    assert.equal(jsonl(join(project, '.auto-context', 'compile', 'verify-log.jsonl'))[0].reason,
+      'cross_engine_unavailable');
+    assert.match(readFileSync(join(project, '.auto-context', 'compile', 'verify-queue.jsonl'), 'utf8'),
+      /test-card\.md/, '거부는 폐기가 아니다 — 잡 보존');
+  } finally { removeTemp(project); }
 });
 
-test('후보 엔진이 0건이어도 extractor.default 폴백은 유지된다(prefer)', () => {
-  const verifier = mockVerifier({ verdict: 'pass', claims: [], reasons: [] });
+// verify.builtins가 생성 엔진을 제외해도 self 폴백은 사라지면 안 된다. plan 단위 단정은
+// 아래 'verify.builtins를 좁혀도…' 테스트가 하고, 여기서는 worker 실행 전체를 본다:
+// 선호 후보(codex)가 127로 빠지면 풀 밖인 생성 엔진(claude)이 실제로 검수를 끝낸다.
+test('verify.builtins가 생성 엔진을 제외해도 최후 후보로 남아 검수가 완료된다(prefer)', () => {
+  const tracker = trackerFile('builtins-exclude-producer');
   const project = setupProject({
-    extractor: { dispatch: 'by-engine', timeout: 30, backends: {}, default: ['python3', verifier] },
+    verify: { builtins: ['codex'] },
+    extractor: {
+      timeout: 30,
+      backends: { claude: mockEngine('claude', tracker, 'pass'), codex: mockEngine('codex', tracker, 'absent') },
+    },
   });
   try {
     assert.equal(JSON.parse(runVerifyWorker(project)).processed, 1);
+    assert.deepEqual(calls(tracker), ['codex', 'claude'], '풀 밖이어도 생성 엔진이 최후 후보');
     const text = readFileSync(join(project, CARD_REL), 'utf8');
-    assert.match(text, /^status: verified$/m);
-    assert.match(text, /^verifiedMode: "?unknown"?$/m);
+    assert.match(text, /^status: verified$/m, 'missing_extractor로 영구 drop되지 않는다');
+    assert.match(text, /^verifiedMode: "?self"?$/m);
+    assert.equal(readFileSync(join(project, '.auto-context', 'compile', 'verify-queue.jsonl'), 'utf8'), '');
   } finally { removeTemp(project); }
 });
 
@@ -835,7 +845,6 @@ test('선호 엔진 non-127 실패 → 다음 run이 다음 후보로 degrade, r
   const tracker = trackerFile('degrade-runs');
   const project = setupProject({
     extractor: {
-      dispatch: 'by-engine',
       timeout: 30,
       // codex는 인증 안 된 CLI처럼 exit 1(비127)로 죽는다 — lib.py가 CLI 비0을 그대로
       // 전파하는 경로이므로 실제로 흔한 상태다.
@@ -869,7 +878,6 @@ test('후보 전원 식힘 중 → 잡 보존 + engines_cooling 로그 (드롭 �
   const tracker = trackerFile('all-cooling');
   const project = setupProject({
     extractor: {
-      dispatch: 'by-engine',
       timeout: 30,
       backends: { claude: mockEngine('claude', tracker, 'exit1'), codex: mockEngine('codex', tracker, 'exit1') },
     },
@@ -894,7 +902,6 @@ test('CLI 부재(127)는 로그 1줄을 남기고 후보를 식히지 않는다(
   const tracker = trackerFile('absent-log');
   const project = setupProject({
     extractor: {
-      dispatch: 'by-engine',
       timeout: 30,
       backends: { claude: mockEngine('claude', tracker, 'absent'), codex: mockEngine('codex', tracker, 'absent') },
     },
@@ -916,7 +923,6 @@ test('귀속 불가 라벨(sentinel "unknown"): prefer는 cross-engine을 주장
       jobOverrides: { engine: 'unknown' },
       verify: { crossEngine: mode },
       extractor: {
-        dispatch: 'by-engine',
         timeout: 30,
         backends: { claude: mockEngine('claude', tracker, 'pass'), codex: mockEngine('codex', tracker, 'pass') },
       },
@@ -943,13 +949,13 @@ test('verify.builtins를 좁혀도 prefer에서 생성 엔진은 최후 후보�
   const project = setupProject({
     // builtins-only(--enable-compile 기본형) + verify.builtins가 codex만 지정.
     verify: { builtins: ['codex'] },
-    extractor: { dispatch: 'by-engine', timeout: 30, builtins: ['claude', 'codex'], backends: {} },
+    extractor: { timeout: 30, builtins: ['claude', 'codex'], backends: {} },
   });
   try {
     const plan = execFileSync('python3', ['-c', `
 import json, sys; sys.path.insert(0, 'core')
 import wiki_verify_worker as w
-cfg = {"extractor": {"dispatch": "by-engine", "builtins": ["claude", "codex"], "backends": {}}}
+cfg = {"extractor": {"builtins": ["claude", "codex"], "backends": {}}}
 attempts, mode, reason = w.plan_verify_attempts(cfg, {"builtins": ["codex"]}, "claude")
 print(json.dumps([[a["engine"], a["mode"]] for a in attempts]))
 `], { cwd: process.cwd(), encoding: 'utf8' });
@@ -962,7 +968,7 @@ test('verify.builtins 오타는 영구 drop이 아니라 self 폴백으로 degra
   const adapter = mockEngine('claude', tracker, 'pass');
   const project = setupProject({
     verify: { builtins: ['codexx'] },   // 오타 — 해석되는 argv가 없다
-    extractor: { dispatch: 'by-engine', timeout: 30, backends: { claude: adapter } },
+    extractor: { timeout: 30, backends: { claude: adapter } },
   });
   try {
     assert.equal(JSON.parse(runVerifyWorker(project)).processed, 1);
@@ -977,7 +983,7 @@ test('로그 키 의미 고정: attempt 이전 줄은 producedBy만, 이후 줄�
   const tracker = trackerFile('log-keys');
   const project = setupProject({
     cardStatus: 'verified',   // attempt 이전 skip(not_generated)
-    extractor: { dispatch: 'by-engine', timeout: 30, backends: { codex: mockEngine('codex', tracker, 'pass') } },
+    extractor: { timeout: 30, backends: { codex: mockEngine('codex', tracker, 'pass') } },
   });
   try {
     runVerifyWorker(project);
@@ -997,7 +1003,6 @@ test('cooldown 쓰기 실패는 로그에 표면화된다 (MAJOR 1 복구 메커
   const project = setupProject({
     verify: { timeout: 1 },
     extractor: {
-      dispatch: 'by-engine',
       timeout: 30,
       backends: { claude: mockEngine('claude', tracker, 'pass'), codex: mockEngine('codex', tracker, 'slow') },
     },
@@ -1027,7 +1032,6 @@ print("{}")
 `);
   const project = setupProject({
     extractor: {
-      dispatch: 'by-engine',
       timeout: 30,
       backends: { claude: ['python3', garbage], codex: ['python3', garbage].concat(['--codex']) },
     },
@@ -1055,7 +1059,7 @@ test('crossEngine:off + 귀속 불가 라벨 → 폐기 대신 풀 첫 후보로
   const project = setupProject({
     jobOverrides: { engine: 'unknown' },
     verify: { crossEngine: 'off' },
-    extractor: { dispatch: 'by-engine', timeout: 30, backends: { codex: mockEngine('codex', tracker, 'pass') } },
+    extractor: { timeout: 30, backends: { codex: mockEngine('codex', tracker, 'pass') } },
   });
   try {
     assert.equal(JSON.parse(runVerifyWorker(project)).processed, 1);
@@ -1071,7 +1075,6 @@ test('실패 행은 verifiedMode를 쓰지 않는다 (attemptedMode로 분리 �
   const project = setupProject({
     verify: { timeout: 1 },
     extractor: {
-      dispatch: 'by-engine',
       timeout: 30,
       backends: { claude: mockEngine('claude', tracker, 'pass'), codex: mockEngine('codex', tracker, 'slow') },
     },
@@ -1101,7 +1104,7 @@ test('0.x 전역 verify-cooldown 파일은 고아로 남지 않고 정리된다'
 test('만료값 상한 클램프: 오염된 만료값은 후보를 영구 배제하지 못한다', () => {
   const tracker = trackerFile('clamp');
   const project = setupProject({
-    extractor: { dispatch: 'by-engine', timeout: 30, backends: { codex: mockEngine('codex', tracker, 'pass') } },
+    extractor: { timeout: 30, backends: { codex: mockEngine('codex', tracker, 'pass') } },
   });
   const cooldown = join(project, '.auto-context', 'compile', 'verify-engine-cooldown.json');
   try {

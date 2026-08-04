@@ -108,21 +108,19 @@ DEFAULT_CONFIG = {
         },
     },
     "compile": {
-        "enabled": False,
+        # **활성 스위치는 이 값 하나다.** 예전에는 `enabled`(bool) + `mode`(4값) +
+        # `autoWrite`(bool)가 같은 사실을 세 곳에서 표현했고, 게이트 6곳의 판정이
+        # 균일하지 않아 `enabled:true + mode:"off"`에서 dedup scan과 SessionStart
+        # notice만 도는 비대칭이 있었다. `mode != "off"`가 곧 활성이다.
         "mode": "off",
-        "autoWrite": False,
+        # 값 집합은 `COMPILE_DEFAULT_STATUSES`(generated|tentative)로 좁다 —
+        # `verified`를 넣으면 검수되지 않은 카드가 `recallVerifiedOnly` 기본값 아래에서
+        # 캐논으로 인용된다(기계 검수를 우회하는 유일한 구멍이었다).
         "defaultStatus": "generated",
-        "requireReviewForCanon": True,
-        "candidatePath": ".auto-context/compile/candidates.jsonl",
-        "sourceQueuePath": ".auto-context/compile/source-queue.jsonl",
-        "tombstonePath": ".auto-context/compile/tombstones.jsonl",
-        "manifestPath": ".auto-context/compile/generated-manifest.jsonl",
-        "mergeNeededPath": ".auto-context/compile/merge-needed.jsonl",
         "excludeStatusesFromRecall": ["discarded", "contested"],
         "lowPriorityStatuses": ["generated", "tentative"],
         "recallVerifiedOnly": True,
         "triggers": [],
-        "canonSignals": [],
         "maxAutoPageLines": 120,
         "maxSourceChars": 12000,
         "reasoningEffort": {
@@ -132,7 +130,12 @@ DEFAULT_CONFIG = {
             "engines": {},
         },
         "extractor": {
-            "argv": [],
+            # 심볼릭 엔진 이름만 (adapter 경로 금지 — worker가 런타임에 해석한다).
+            # `dispatch: "by-engine"` 게이트는 제거됐다: 그 키가 없으면 builtins/backends가
+            # 통째로 무시돼 잡이 `missing_extractor`로 **폐기**됐고(requeue 아님),
+            # "by-engine이 아닌 dispatch"라는 다른 값은 존재한 적이 없다.
+            "backends": {},
+            "builtins": [],
             # 120초. 30이던 동안 이 값을 명시하지 않는 writer(`--init-wiki` novel preset)로
             # 온보딩한 프로젝트는 compile을 켜 놓고도 adapter 호출이 매번 timeout →
             # transient → cooldown 루프에 빠졌고, 훅이 무출력이라 증상이 보이지 않았다.
@@ -140,34 +143,27 @@ DEFAULT_CONFIG = {
             "timeout": 120,
             "cooldownSeconds": 600,
         },
-        # 한 소스에서 컴파일할 후보 카드 수 상한. **candidates 길이는 모델 출력이고 예전에는
-        # 어디에도 상한이 없었다** — worker가 `for candidate in candidates:`로 전량을 순회했고,
-        # 신규 카드마다 write-time dedup judge(유료)가 붙고 각 카드가 verify 큐(유료)로 가므로
-        # 모델이 한 run의 과금 규모를 정하는 구조였다(실측: 소스 5건 + 모델이 카드 40장 →
-        # 한 run 유료 호출 205회). 프롬프트의 "쪼개지 말라"는 요청이지 한계가 아니다.
-        "maxCardsPerSource": 10,
+        # **유료 host CLI 호출 수를 정하는 값을 한 블록에 모은다.** 한 run의 호출 총량은
+        # 이들의 **곱**인데(extractorPerRun × cardsPerSource가 카드 수 = judge 호출 수)
+        # 예전에는 4개 서브트리에 흩어져 있었고, 특히 `batch.maxItems`(시작 조건)와
+        # `batch.maxPerRun`(상한)의 동거가 혼동원이었다. 곱 자체의 총량 상한은 두지
+        # 않는다(두 값을 함께 올리는 것은 사용자의 명시적 선택이다 — docs/settings.md).
+        "budget": {
+            "extractorPerRun": 10,   # run당 extractor spawn 상한 (초과분은 requeue)
+            "cardsPerSource": 10,    # 소스당 카드 수 상한 (모델 출력 상한)
+            "verifyPerRun": 3,       # 사람이 정하는 검수 예산의 하한
+            "dedupPairsPerScan": 8,  # retroactive scan 1회의 judge 호출 상한
+            "dedupPairsPerCompile": 1,  # write-time gate 1회의 judge 호출 상한
+        },
+        # **처리 시작 조건만 남는다**(상한은 budget). maxItems는 "이만큼 모이면 지금
+        # 돌려라"이고 idleSeconds는 "가장 오래된 잡이 이만큼 묵으면 돌려라"다.
         "batch": {
             "idleSeconds": 90,
             "maxItems": 5,
-            # **처리 시작 조건(maxItems)과 다르다.** maxItems는 "이만큼 모이면 지금 돌려라"이고
-            # 이 값은 "한 run에서 extractor를 이보다 많이 spawn하지 마라"는 상한이다. 예전에는
-            # 상한이 아예 없어 큐에 든 전량을 한 워커가 연속 실행했다(큐 수백 건 = 유료 호출
-            # 수백 회 직렬). 초과분은 큐에 되돌려(requeue) 다음 kick이 집어 가므로 조용히
-            # 유실되지 않는다.
-            #
-            # **이 값이 보장하는 것은 extractor 호출 수뿐이다.** 한 run의 유료 호출 총량은
-            # extractor(≤ maxPerRun) + dedup judge(≤ 쓰인 카드 수) + verify(아래 예산)이고,
-            # 카드 수는 `compile.maxCardsPerSource`가, verify는 `VERIFY_PRODUCED_HARD_CAP`이
-            # 각각 유계로 만든다. 예전 주석은 "extractor 10회 + verify 10회로 유계"라고
-            # 적었지만 verify는 카드 수를 따르므로 실측과 어긋난 거짓 계약이었다.
-            "maxPerRun": 10,
         },
         "semanticDedup": {
             "enabled": True,
-            "threshold": 0.82,
-            "topK": 3,
-            "similarPageMaxChars": 12000,
-            "autoMergeThreshold": 0.9,
+            # 무료 score gate의 scan당 쌍 상한(유료 judge 예산은 budget.dedupPairsPerScan).
             "maxPairsPerScan": 10,
             # Retrieval floor for LLM judging. The daemon score is rank-bounded, not a
             # similarity (see wiki_dedup_judge.py), so it may only narrow the candidate
@@ -181,8 +177,6 @@ DEFAULT_CONFIG = {
                 "crossEngine": "prefer",
                 "timeout": 120,
                 "cooldownSeconds": 600,
-                "maxPairsPerScan": 8,
-                "maxPairsPerCompile": 1,
                 "maxCharsPerPage": 6000,
             },
         },
@@ -196,13 +190,7 @@ DEFAULT_CONFIG = {
             # (wiki_compile_worker.resolve_extractor_argv)이다.
             "crossEngine": "prefer",
             "builtins": [],
-            "queuePath": ".auto-context/compile/verify-queue.jsonl",
-            "logPath": ".auto-context/compile/verify-log.jsonl",
-            "skippedPath": ".auto-context/compile/verify-skipped.jsonl",
-            # 삭제 전용 감사 원장. logPath는 pass까지 담아 트림되므로 삭제 이력을 보존하지 못한다.
-            "deletedPath": ".auto-context/compile/verify-deleted.jsonl",
             "cooldownSeconds": 600,
-            "maxPerRun": 3,
         },
     },
 }
@@ -235,6 +223,22 @@ VERIFY_PRODUCED_HARD_CAP = 30
 
 COMPILE_MODES = {"off", "candidates", "guarded", "auto-wiki"}
 WIKI_STATUSES = {"generated", "verified", "reviewed", "canon", "tentative", "contested", "discarded", "superseded"}
+# `compile.defaultStatus`가 받는 값. `WIKI_STATUSES` 전체가 아니다 — `verified`/`canon`을
+# 넣으면 기계 검수를 거치지 않은 신규 카드가 `recallVerifiedOnly` 기본값 아래에서 곧바로
+# 캐논 근거로 인용된다(검수 파이프라인 전체를 설정 한 줄로 우회하는 구멍이었다).
+COMPILE_DEFAULT_STATUSES = {"generated", "tentative"}
+
+# --- dedup score 레버 (설정에서 상수로) ---------------------------------------
+# daemon score는 유사도가 아니라 **RRF 순위의 함수**라(rerank 경로도 blendedScore가 순위를
+# 섞는다 — wiki_dedup_judge 모듈 docstring의 실측 참조) 어떤 임계도 "두 카드가 같은 사실을
+# 말한다"를 표현할 수 없다. 판정은 LLM judge가 하고 score는 후보 retrieval floor
+# (`semanticDedup.candidateMinScore`)로만 남는다. 아래 넷은 judge가 **없는** 머신의 레거시
+# 무료 게이트 동작을 예전 기본값 그대로 동결한 것이다 — 설정으로 다시 열지 않는다(도달
+# 불가능한 값을 사용자가 조정하게 두는 것이 이 정리의 제거 대상이었다).
+DEDUP_SCORE_THRESHOLD = 0.82        # ← semanticDedup.threshold (write-time 레거시 게이트)
+DEDUP_AUTO_MERGE_THRESHOLD = 0.9    # ← semanticDedup.autoMergeThreshold (scan 레거시 게이트)
+DEDUP_TOP_K = 3                     # ← semanticDedup.topK (유사 카드 retrieval 개수)
+DEDUP_SIMILAR_PAGE_MAX_CHARS = 12000  # ← semanticDedup.similarPageMaxChars
 # onFail과 onInconclusive가 공유하는 값 집합. "none"이 유일한 "현행 유지"(카드를
 # generated로 남김) 표현이므로, 기본값을 delete로 올려도 기존 동작을 명시 선택할 수 있다.
 VERIFY_ON_FAIL = {"delete", "contested", "none"}
@@ -365,14 +369,6 @@ def string_map(value):
         for key, item in value.items()
         if isinstance(key, str) and isinstance(item, str)
     }
-
-
-def argv_list(value, default=None):
-    if default is None:
-        default = []
-    if isinstance(value, list) and all(isinstance(item, str) for item in value):
-        return value
-    return list(default)
 
 
 def extractor_backends(value):
@@ -559,21 +555,50 @@ def recall_raw_collections(collections, roles):
     ]
 
 
+def compile_mode(compile_cfg):
+    """정규화된 compile 블록의 유효 mode. 미지 값은 `off`(fail-closed)."""
+    if not isinstance(compile_cfg, dict):
+        return "off"
+    mode = compile_cfg.get("mode")
+    return mode if mode in COMPILE_MODES else "off"
+
+
+def compile_active(compile_cfg):
+    """compile 파이프라인(enqueue·worker·write·verify·dedup·notice)이 도는가.
+
+    **판정의 SSOT다.** 예전에는 `enabled` + `mode`를 각 게이트가 제각기 조합했고
+    (`wiki_dedup_scan`·`update.sh`는 `enabled`만 봤다) 그 비대칭이 "enabled인데 mode off"
+    라는 관측 불가능한 반쯤 켜진 상태를 만들었다. 스위치는 하나이고 판정도 하나다.
+    """
+    return compile_mode(compile_cfg) != "off"
+
+
 def compile_config(value):
     if not isinstance(value, dict):
-        return dict(DEFAULT_CONFIG["compile"])
+        value = {}
     defaults = DEFAULT_CONFIG["compile"]
     result = dict(defaults)
-    result["enabled"] = value.get("enabled") if isinstance(value.get("enabled"), bool) else defaults["enabled"]
     result["mode"] = value.get("mode") if value.get("mode") in COMPILE_MODES else defaults["mode"]
-    if not result["enabled"]:
+    # 제거된 off 스위치는 **끄는 방향으로만** 존중한다(켜는 방향은 무시).
+    #
+    # `enabled`/`autoWrite`는 mode로 접혀 스키마에서 사라졌고, 나머지 제거 키처럼 무시하는
+    # 것이 일관돼 보인다. 그러나 이 둘의 실패 방향은 비대칭이다: `enabled:true`를 무시하면
+    # 카드가 안 생길 뿐이지만(복구 가능), **`enabled:false`를 무시하면 사용자가 기록해 둔
+    # opt-out을 어기고 유료 host CLI가 돈다**(사용자 계정 청구, 복구 불가). 0.26.0의
+    # docs/settings.md가 `enabled:false`를 문서화된 off 스위치로 안내했으므로, 그 형태로
+    # 꺼 둔 프로젝트가 플러그인 업그레이드만으로 조용히 재무장하면 안 된다.
+    # 알림(SessionStart deprecated-keys)은 이 구멍을 못 덮는다 — TTL 4h 1줄이고 Hermes는
+    # notice 채널이 아예 없는데 편집 훅 enqueue는 돈다.
+    #
+    # 그래서 "죽은 키는 무시한다"의 예외는 딱 두 개이고 방향도 하나다.
+    if value.get("enabled") is False:
         result["mode"] = "off"
-    result["autoWrite"] = value.get("autoWrite") if isinstance(value.get("autoWrite"), bool) else defaults["autoWrite"]
-    result["defaultStatus"] = value.get("defaultStatus") if value.get("defaultStatus") in WIKI_STATUSES else defaults["defaultStatus"]
-    result["requireReviewForCanon"] = value.get("requireReviewForCanon") if isinstance(value.get("requireReviewForCanon"), bool) else defaults["requireReviewForCanon"]
-    for key in ("candidatePath", "sourceQueuePath", "tombstonePath", "manifestPath", "mergeNeededPath"):
-        if isinstance(value.get(key), str):
-            result[key] = value[key]
+    elif value.get("autoWrite") is False and result["mode"] in ("auto-wiki", "guarded"):
+        # 구버전 `wiki_compile.py`의 쓰기 분기는 `mode == "candidates" or not autoWrite`라
+        # autoWrite:false면 **mode와 무관하게** candidate 큐잉까지만 했다. guarded도 같다 —
+        # auto-wiki만 접으면 §2 진리표(guarded + autoWrite:false → candidates)와 갈린다.
+        result["mode"] = "candidates"
+    result["defaultStatus"] = value.get("defaultStatus") if value.get("defaultStatus") in COMPILE_DEFAULT_STATUSES else defaults["defaultStatus"]
     result["excludeStatusesFromRecall"] = [
         status for status in string_list(value.get("excludeStatusesFromRecall"), defaults["excludeStatusesFromRecall"])
         if status in WIKI_STATUSES
@@ -591,70 +616,78 @@ def compile_config(value):
         trigger for trigger in string_list(value.get("triggers"), defaults["triggers"])
         if trigger in COMPILE_TRIGGERS
     ]
-    result["canonSignals"] = string_list(value.get("canonSignals"), defaults["canonSignals"])
     result["maxAutoPageLines"] = coerce_int(value.get("maxAutoPageLines", defaults["maxAutoPageLines"]), defaults["maxAutoPageLines"])
     result["maxSourceChars"] = coerce_int(value.get("maxSourceChars", defaults["maxSourceChars"]), defaults["maxSourceChars"])
     result["reasoningEffort"] = reasoning_effort_config(
         value.get("reasoningEffort"), defaults.get("reasoningEffort")
     )
-    result["maxCardsPerSource"] = coerce_capped_int(
-        value.get("maxCardsPerSource", defaults["maxCardsPerSource"]),
-        defaults["maxCardsPerSource"], MAX_CARDS_PER_SOURCE,
-    )
     raw_extractor = value.get("extractor")
     extractor = raw_extractor if isinstance(raw_extractor, dict) else {}
-    # 이 인라인 폴백은 DEFAULT_CONFIG["compile"]["extractor"]와 반드시 같은 값이어야 한다
-    # (갈리면 "기본값과 다른 폴백 리터럴" 버그 클래스가 그대로 재현된다).
-    default_extractor = defaults.get("extractor") if isinstance(defaults.get("extractor"), dict) else {"argv": [], "timeout": 120}
-    normalized_argv = argv_list(extractor.get("argv"), default_extractor["argv"])
-    normalized_extractor = {
-        "argv": normalized_argv,
+    default_extractor = defaults["extractor"]
+    result["extractor"] = {
+        # `dispatch` 게이트가 사라졌으므로 backends/builtins는 **무조건** 해석된다.
+        # 게이트가 있던 동안 그 키를 안 적은 config는 엔진이 하나도 해석되지 않아
+        # `wiki_compile_worker.process_job`이 잡을 폐기했다(`missing_extractor`).
+        "backends": extractor_backends(extractor.get("backends")),
+        "builtins": builtin_extractor_engines(extractor.get("builtins")),
         "timeout": coerce_int(extractor.get("timeout", default_extractor["timeout"]), default_extractor["timeout"]),
-        "cooldownSeconds": coerce_int(extractor.get("cooldownSeconds", default_extractor.get("cooldownSeconds", 600)), 600),
+        "cooldownSeconds": coerce_int(extractor.get("cooldownSeconds", default_extractor["cooldownSeconds"]), default_extractor["cooldownSeconds"]),
     }
-    if extractor.get("dispatch") == "by-engine":
-        normalized_extractor["dispatch"] = "by-engine"
-        normalized_extractor["backends"] = extractor_backends(extractor.get("backends"))
-        normalized_extractor["builtins"] = builtin_extractor_engines(extractor.get("builtins"))
-        normalized_extractor["default"] = argv_list(extractor.get("default"), [])
-    result["extractor"] = normalized_extractor
+    # **상한이 있는 값은 여기서 클램프된다.** 클램프를 budget으로 함께 옮기지 않으면
+    # `"100"`·`99999999`가 다시 통과한다(worker 쪽 클램프는 2차 방어다).
+    #
+    # `dedupPairsPerScan`/`dedupPairsPerCompile`에는 상한이 없다 — 구버전
+    # (`judge.maxPairs*`)과 같고, 의도된 상태다. 코드가 자르는 것은 **모델 출력에서 유도된**
+    # 값뿐이고(`cardsPerSource`·`VERIFY_PRODUCED_HARD_CAP`), 사람이 명시한 쌍 수는 그 사람의
+    # 선택이다. 곱이 커지는 경우는 docs/settings.md의 budget 절이 셈과 함께 경고한다.
+    raw_budget = value.get("budget")
+    budget = raw_budget if isinstance(raw_budget, dict) else {}
+    default_budget = defaults["budget"]
+    result["budget"] = {
+        "extractorPerRun": coerce_capped_int(
+            budget.get("extractorPerRun", default_budget["extractorPerRun"]),
+            default_budget["extractorPerRun"], MAX_COMPILE_PER_RUN,
+        ),
+        "cardsPerSource": coerce_capped_int(
+            budget.get("cardsPerSource", default_budget["cardsPerSource"]),
+            default_budget["cardsPerSource"], MAX_CARDS_PER_SOURCE,
+        ),
+        "verifyPerRun": coerce_capped_int(
+            budget.get("verifyPerRun", default_budget["verifyPerRun"]),
+            default_budget["verifyPerRun"], MAX_VERIFY_PER_RUN,
+        ),
+        "dedupPairsPerScan": coerce_int(
+            budget.get("dedupPairsPerScan", default_budget["dedupPairsPerScan"]),
+            default_budget["dedupPairsPerScan"],
+        ),
+        "dedupPairsPerCompile": coerce_int(
+            budget.get("dedupPairsPerCompile", default_budget["dedupPairsPerCompile"]),
+            default_budget["dedupPairsPerCompile"],
+        ),
+    }
     raw_batch = value.get("batch")
     batch = raw_batch if isinstance(raw_batch, dict) else {}
-    default_batch = defaults.get("batch") if isinstance(defaults.get("batch"), dict) else {}
+    default_batch = defaults["batch"]
     result["batch"] = {
-        "idleSeconds": coerce_int(batch.get("idleSeconds", 90), 90),
-        "maxItems": coerce_int(batch.get("maxItems", 5), 5),
-        "maxPerRun": coerce_capped_int(
-            batch.get("maxPerRun", default_batch.get("maxPerRun", 10)),
-            default_batch.get("maxPerRun", 10), MAX_COMPILE_PER_RUN,
-        ),
+        "idleSeconds": coerce_int(batch.get("idleSeconds", default_batch["idleSeconds"]), default_batch["idleSeconds"]),
+        "maxItems": coerce_int(batch.get("maxItems", default_batch["maxItems"]), default_batch["maxItems"]),
     }
     raw_semantic = value.get("semanticDedup")
     semantic = raw_semantic if isinstance(raw_semantic, dict) else {}
-    default_semantic = defaults.get("semanticDedup", {
-        "enabled": True, "threshold": 0.82, "topK": 3, "similarPageMaxChars": 12000,
-        "autoMergeThreshold": 0.9, "maxPairsPerScan": 10, "candidateMinScore": 0.3,
-        "judge": {},
-    })
+    default_semantic = defaults["semanticDedup"]
     raw_judge = semantic.get("judge")
     judge = raw_judge if isinstance(raw_judge, dict) else {}
-    default_judge = default_semantic.get("judge") if isinstance(default_semantic.get("judge"), dict) else {}
+    default_judge = default_semantic["judge"]
     result["semanticDedup"] = {
         "enabled": semantic.get("enabled") if isinstance(semantic.get("enabled"), bool) else default_semantic["enabled"],
-        "threshold": coerce_float(semantic.get("threshold", default_semantic["threshold"]), default_semantic["threshold"]),
-        "topK": coerce_int(semantic.get("topK", default_semantic["topK"]), default_semantic["topK"]),
-        "similarPageMaxChars": coerce_int(semantic.get("similarPageMaxChars", default_semantic["similarPageMaxChars"]), default_semantic["similarPageMaxChars"]),
-        "autoMergeThreshold": coerce_float(semantic.get("autoMergeThreshold", default_semantic["autoMergeThreshold"]), default_semantic["autoMergeThreshold"]),
         "maxPairsPerScan": coerce_int(semantic.get("maxPairsPerScan", default_semantic["maxPairsPerScan"]), default_semantic["maxPairsPerScan"]),
         "candidateMinScore": coerce_float(semantic.get("candidateMinScore", default_semantic["candidateMinScore"]), default_semantic["candidateMinScore"]),
         "judge": {
-            "enabled": judge.get("enabled") if isinstance(judge.get("enabled"), bool) else default_judge.get("enabled", True),
-            "crossEngine": judge.get("crossEngine") if judge.get("crossEngine") in CROSS_ENGINE_MODES else default_judge.get("crossEngine", "prefer"),
-            "timeout": coerce_int(judge.get("timeout", default_judge.get("timeout", 120)), default_judge.get("timeout", 120)),
-            "cooldownSeconds": coerce_int(judge.get("cooldownSeconds", default_judge.get("cooldownSeconds", 600)), default_judge.get("cooldownSeconds", 600)),
-            "maxPairsPerScan": coerce_int(judge.get("maxPairsPerScan", default_judge.get("maxPairsPerScan", 8)), default_judge.get("maxPairsPerScan", 8)),
-            "maxPairsPerCompile": coerce_int(judge.get("maxPairsPerCompile", default_judge.get("maxPairsPerCompile", 1)), default_judge.get("maxPairsPerCompile", 1)),
-            "maxCharsPerPage": coerce_int(judge.get("maxCharsPerPage", default_judge.get("maxCharsPerPage", 6000)), default_judge.get("maxCharsPerPage", 6000)),
+            "enabled": judge.get("enabled") if isinstance(judge.get("enabled"), bool) else default_judge["enabled"],
+            "crossEngine": judge.get("crossEngine") if judge.get("crossEngine") in CROSS_ENGINE_MODES else default_judge["crossEngine"],
+            "timeout": coerce_int(judge.get("timeout", default_judge["timeout"]), default_judge["timeout"]),
+            "cooldownSeconds": coerce_int(judge.get("cooldownSeconds", default_judge["cooldownSeconds"]), default_judge["cooldownSeconds"]),
+            "maxCharsPerPage": coerce_int(judge.get("maxCharsPerPage", default_judge["maxCharsPerPage"]), default_judge["maxCharsPerPage"]),
         },
     }
     raw_verify = value.get("verify")
@@ -668,15 +701,7 @@ def compile_config(value):
         "crossEngine": verify.get("crossEngine") if verify.get("crossEngine") in VERIFY_CROSS_ENGINE else default_verify["crossEngine"],
         # 심볼릭 엔진 이름만 받는다(adapter 경로 금지). 빈 목록 = extractor 풀 상속.
         "builtins": string_list(verify.get("builtins"), default_verify["builtins"]),
-        "queuePath": verify.get("queuePath") if isinstance(verify.get("queuePath"), str) and verify.get("queuePath") else default_verify["queuePath"],
-        "logPath": verify.get("logPath") if isinstance(verify.get("logPath"), str) and verify.get("logPath") else default_verify["logPath"],
-        "skippedPath": verify.get("skippedPath") if isinstance(verify.get("skippedPath"), str) and verify.get("skippedPath") else default_verify["skippedPath"],
-        "deletedPath": verify.get("deletedPath") if isinstance(verify.get("deletedPath"), str) and verify.get("deletedPath") else default_verify["deletedPath"],
         "cooldownSeconds": coerce_int(verify.get("cooldownSeconds", default_verify["cooldownSeconds"]), default_verify["cooldownSeconds"]),
-        "maxPerRun": coerce_capped_int(
-            verify.get("maxPerRun", default_verify["maxPerRun"]),
-            default_verify["maxPerRun"], MAX_VERIFY_PER_RUN,
-        ),
     }
     return result
 
@@ -737,6 +762,121 @@ def load_input_config():
     except json.JSONDecodeError:
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+# ---------------------------------------------------------------------------
+# 제거된 설정 키 감지 (deprecated key notice)
+#
+# 스키마 정리로 사라진 키는 `normalize_config()`가 **조용히 무시한다**(하위호환 없음).
+# 조용한 무시는 제거보다 나쁘다 — `verify.maxPerRun: 15`를 적어 둔 사용자는 그 값이
+# 여전히 검수 예산이라고 믿는데 코드는 `budget.verifyPerRun`을 읽는다. 종점은
+# SessionStart의 `notice_once` 1줄이다(`core/update.sh`).
+#
+# **감지는 `normalize_config()` 안에서 하지 않고 이 함수들로 분리한다.** 이유는 비용이
+# 아니라 **반환 계약**이다: `normalize_config`는 UserPromptSubmit·PostToolUse·enqueue
+# 같은 blocking hook에서 프롬프트마다 돌고 그 반환 dict는 effective config로서
+# 동결 테스트(`config-emission-freeze` · `live-settings-freeze`)·`--raw` 출력·
+# recall/worker 소비자가 그대로 읽는다. 거기에 `deprecatedKeys`를 얹으면 모든 소비자가
+# 무시해야 할 키가 하나 늘고 두 동결 스냅샷이 통째로 흔들린다. 분리해 두면 호출자가
+# **update 경로 하나**로 고정되므로, marker 쓰기가 hook 경로로 새지 않는다는 성질도
+# 코드 구조로 보장된다(Hermes 등 stdout이 없는 호스트가 marker를 선점하면 이후
+# Claude/Codex 세션의 알림이 통째로 삼켜진다 — notice_once의 알려진 함정).
+#
+# 값이 옮겨간 키. 사용자 값이 여전히 의미를 가지므로 **행선지를 알려준다**.
+DEPRECATED_RELOCATED_KEYS = {
+    "compile.batch.maxPerRun": "compile.budget.extractorPerRun",
+    "compile.maxCardsPerSource": "compile.budget.cardsPerSource",
+    "compile.verify.maxPerRun": "compile.budget.verifyPerRun",
+    "compile.semanticDedup.judge.maxPairsPerScan": "compile.budget.dedupPairsPerScan",
+    "compile.semanticDedup.judge.maxPairsPerCompile": "compile.budget.dedupPairsPerCompile",
+}
+
+# `compile.mode`로 흡수된 스위치. "사라졌다"가 아니라 "한 값으로 합쳐졌다"라서 문구가
+# 따로다 — 사용자는 지우는 것이 아니라 `mode`를 다시 정해야 한다(진리표는 계획 §2).
+DEPRECATED_FOLDED_KEYS = ("compile.enabled", "compile.autoWrite")
+
+# 대체가 없는 키. 경로 9종은 상수화됐고(`core/compile_paths.py`) 위치는 그대로이므로
+# 지우기만 하면 된다. dedup 레버 4종은 daemon score가 순위 기반이라 도달 불가였고
+# extractor 3종은 backends/builtins로 일원화됐다. 선언 순서가 곧 알림 문구의 순서다
+# (알림이 실행마다 흔들리지 않게 — dict/tuple 순회 순서를 그대로 쓴다).
+DEPRECATED_REMOVED_KEYS = (
+    "compile.canonSignals",
+    "compile.requireReviewForCanon",
+    "compile.candidatePath",
+    "compile.sourceQueuePath",
+    "compile.tombstonePath",
+    "compile.manifestPath",
+    "compile.mergeNeededPath",
+    "compile.verify.queuePath",
+    "compile.verify.logPath",
+    "compile.verify.skippedPath",
+    "compile.verify.deletedPath",
+    "compile.extractor.argv",
+    "compile.extractor.dispatch",
+    "compile.extractor.default",
+    "compile.semanticDedup.threshold",
+    "compile.semanticDedup.autoMergeThreshold",
+    "compile.semanticDedup.topK",
+    "compile.semanticDedup.similarPageMaxChars",
+)
+
+
+def _has_key_path(node, dotted):
+    """`a.b.c`가 중첩 dict에 **키로** 존재하는가. 값은 보지 않는다(`null`도 존재다)."""
+    for part in dotted.split("."):
+        if not isinstance(node, dict) or part not in node:
+            return False
+        node = node[part]
+    return True
+
+
+def deprecated_keys(input_config):
+    """raw(정규화 전) config에 남아 있는 제거된 키 목록.
+
+    반환은 `{"key", "kind", "replacement"}` 레코드 목록이고 kind는
+    `relocated`(행선지 있음) / `folded`(mode로 흡수) / `removed`(대체 없음)다.
+    호출자는 `core/update.sh`의 SessionStart 경로 하나다 — hook에서 부르지 말 것.
+    """
+    if not isinstance(input_config, dict):
+        return []
+    found = []
+    for key, replacement in DEPRECATED_RELOCATED_KEYS.items():
+        if _has_key_path(input_config, key):
+            found.append({"key": key, "kind": "relocated", "replacement": replacement})
+    for key in DEPRECATED_FOLDED_KEYS:
+        if _has_key_path(input_config, key):
+            found.append({"key": key, "kind": "folded", "replacement": "compile.mode"})
+    for key in DEPRECATED_REMOVED_KEYS:
+        if _has_key_path(input_config, key):
+            found.append({"key": key, "kind": "removed", "replacement": None})
+    return found
+
+
+def deprecated_key_notice(input_config):
+    """SessionStart 알림 1줄. 제거된 키가 없으면 빈 문자열.
+
+    문구를 bash가 아니라 여기서 만드는 것은 형제 알림(role-invalid·source-missing)과
+    다르다 — 저쪽은 python이 숫자/이름만 주고 bash가 문장을 만든다. 여기서는 문장이
+    **세 갈래로 갈리고** 각 갈래가 키 목록을 끼고 있어 bash에서 조립하면 세 벌의
+    분기가 생기고, 그 분기가 위 세 상수와 갈리는 순간 알림이 틀린 행선지를 말한다.
+    """
+    records = deprecated_keys(input_config)
+    if not records:
+        return ""
+    parts = []
+    relocated = ["%s → %s" % (r["key"], r["replacement"]) for r in records if r["kind"] == "relocated"]
+    if relocated:
+        parts.append("옮겨짐(값을 새 키로 다시 적으세요): " + ", ".join(relocated))
+    folded = [r["key"] for r in records if r["kind"] == "folded"]
+    if folded:
+        parts.append("compile.mode로 통합(mode 값 하나로 지정하세요): " + ", ".join(folded))
+    removed = [r["key"] for r in records if r["kind"] == "removed"]
+    if removed:
+        parts.append("제거됨(대체 없음, 지우세요): " + ", ".join(removed))
+    return (
+        "[qmd] .auto-context/settings.json에 더 이상 읽지 않는 설정 키 %d개가 있습니다 — "
+        "적어 둔 값은 무시됩니다. %s" % (len(records), " / ".join(parts))
+    )
 
 
 def normalize_config(input_config):
