@@ -579,6 +579,25 @@ def compile_config(value):
     defaults = DEFAULT_CONFIG["compile"]
     result = dict(defaults)
     result["mode"] = value.get("mode") if value.get("mode") in COMPILE_MODES else defaults["mode"]
+    # 제거된 off 스위치는 **끄는 방향으로만** 존중한다(켜는 방향은 무시).
+    #
+    # `enabled`/`autoWrite`는 mode로 접혀 스키마에서 사라졌고, 나머지 제거 키처럼 무시하는
+    # 것이 일관돼 보인다. 그러나 이 둘의 실패 방향은 비대칭이다: `enabled:true`를 무시하면
+    # 카드가 안 생길 뿐이지만(복구 가능), **`enabled:false`를 무시하면 사용자가 기록해 둔
+    # opt-out을 어기고 유료 host CLI가 돈다**(사용자 계정 청구, 복구 불가). 0.26.0의
+    # docs/settings.md가 `enabled:false`를 문서화된 off 스위치로 안내했으므로, 그 형태로
+    # 꺼 둔 프로젝트가 플러그인 업그레이드만으로 조용히 재무장하면 안 된다.
+    # 알림(SessionStart deprecated-keys)은 이 구멍을 못 덮는다 — TTL 4h 1줄이고 Hermes는
+    # notice 채널이 아예 없는데 편집 훅 enqueue는 돈다.
+    #
+    # 그래서 "죽은 키는 무시한다"의 예외는 딱 두 개이고 방향도 하나다.
+    if value.get("enabled") is False:
+        result["mode"] = "off"
+    elif value.get("autoWrite") is False and result["mode"] in ("auto-wiki", "guarded"):
+        # 구버전 `wiki_compile.py`의 쓰기 분기는 `mode == "candidates" or not autoWrite`라
+        # autoWrite:false면 **mode와 무관하게** candidate 큐잉까지만 했다. guarded도 같다 —
+        # auto-wiki만 접으면 §2 진리표(guarded + autoWrite:false → candidates)와 갈린다.
+        result["mode"] = "candidates"
     result["defaultStatus"] = value.get("defaultStatus") if value.get("defaultStatus") in COMPILE_DEFAULT_STATUSES else defaults["defaultStatus"]
     result["excludeStatusesFromRecall"] = [
         status for status in string_list(value.get("excludeStatusesFromRecall"), defaults["excludeStatusesFromRecall"])
@@ -614,8 +633,13 @@ def compile_config(value):
         "timeout": coerce_int(extractor.get("timeout", default_extractor["timeout"]), default_extractor["timeout"]),
         "cooldownSeconds": coerce_int(extractor.get("cooldownSeconds", default_extractor["cooldownSeconds"]), default_extractor["cooldownSeconds"]),
     }
-    # **유료 호출 수를 정하는 값은 전부 여기서 클램프된다.** 클램프를 budget으로 함께
-    # 옮기지 않으면 `"100"`·`99999999`가 다시 통과한다(worker 쪽 클램프는 2차 방어다).
+    # **상한이 있는 값은 여기서 클램프된다.** 클램프를 budget으로 함께 옮기지 않으면
+    # `"100"`·`99999999`가 다시 통과한다(worker 쪽 클램프는 2차 방어다).
+    #
+    # `dedupPairsPerScan`/`dedupPairsPerCompile`에는 상한이 없다 — 구버전
+    # (`judge.maxPairs*`)과 같고, 의도된 상태다. 코드가 자르는 것은 **모델 출력에서 유도된**
+    # 값뿐이고(`cardsPerSource`·`VERIFY_PRODUCED_HARD_CAP`), 사람이 명시한 쌍 수는 그 사람의
+    # 선택이다. 곱이 커지는 경우는 docs/settings.md의 budget 절이 셈과 함께 경고한다.
     raw_budget = value.get("budget")
     budget = raw_budget if isinstance(raw_budget, dict) else {}
     default_budget = defaults["budget"]

@@ -1657,6 +1657,7 @@ import json, os, sys, tempfile
 from pathlib import Path
 sys.path.insert(0, sys.argv[2])
 import wiki_compile_defaults as d
+import config as qmd_config
 
 target = Path(sys.argv[1]).resolve()
 engines = d.parse_engines(sys.argv[3] or None)
@@ -1681,6 +1682,45 @@ if existing_extractor:
     merged["extractor"] = {**block_extractor, **existing_extractor}
 trig = existing.get("triggers") if isinstance(existing.get("triggers"), list) else []
 merged["triggers"] = list(dict.fromkeys(["post_tool_source", *trig, *block["triggers"]]))
+# 스키마에서 사라진 키를 걷어낸다. block(delta)에 없는 키는 기존 파일의 사본이 그대로
+# 살아남고, 그러면 도구가 방금 원자적으로 다시 쓴 자기 출력물에 대해 SessionStart가
+# deprecated 알림을 4h마다 낸다(자기 잔소리 루프). enabled/autoWrite의 의미는
+# compile_config가 이미 mode로 번역했으므로 여기서는 흔적만 지우면 된다.
+# **extractor 병합 뒤에 둔다** — 위에서 지우면 existing_extractor 병합이 dispatch/default를
+# 되살린다(실측).
+def _dig(root_map, dotted, create=False):
+    """"compile." 접두를 뗀 dotted 경로의 (부모 dict, 마지막 키). 없으면 (None, key)."""
+    parts = dotted.split(".")[1:]
+    node = root_map
+    for part in parts[:-1]:
+        child = node.get(part)
+        if not isinstance(child, dict):
+            if not create:
+                return None, parts[-1]
+            child = {}
+            node[part] = child
+        node = child
+    return node, parts[-1]
+
+# 값 읽기는 **원본(existing)** 에서 한다. merged 쪽은 위 default_valued 정리가 verify·batch
+# 서브트리를 통째로 지운 뒤라 relocated 값이 이미 사라져 있다(실측: verifyPerRun 15,
+# extractorPerRun 4가 조용히 유실됐다).
+for record in qmd_config.deprecated_keys({"compile": existing}):
+    src, src_key = _dig(existing, record["key"])
+    value = src.get(src_key) if src is not None else None
+    # 옮겨진 키는 값이 여전히 유효하므로 새 자리로 이식한다. 지우기만 하면 사용자가 적어 둔
+    # verify.maxPerRun 15가 조용히 기본값 3으로 떨어진다. 새 키에 이미 값이 있으면 그쪽이
+    # 사용자의 최신 의사이므로 덮지 않는다.
+    dest = record.get("replacement")
+    if dest and value is not None:
+        parent, dest_key = _dig(merged, dest, create=True)
+        if parent is not None:
+            parent.setdefault(dest_key, value)
+    # 흔적 제거는 merged에서. enabled/autoWrite의 의미는 compile_config가 이미 mode로
+    # 번역했으므로 여기서는 키만 걷어내면 된다.
+    dead, dead_key = _dig(merged, record["key"])
+    if dead is not None:
+        dead.pop(dead_key, None)
 cfg["compile"] = merged
 
 fd, tmp = tempfile.mkstemp(dir=str(settings.parent), prefix="settings.", suffix=".tmp")

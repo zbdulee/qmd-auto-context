@@ -59,10 +59,12 @@ const SCENARIOS = [
   { id: 'guarded+autoWrite-false', legacy: { enabled: true, mode: 'guarded', autoWrite: false }, compile: { mode: 'candidates' } },
   { id: 'auto-wiki+autoWrite-true', legacy: { enabled: true, mode: 'auto-wiki', autoWrite: true }, compile: { mode: 'auto-wiki' } },
   { id: 'auto-wiki+autoWrite-false', legacy: { enabled: true, mode: 'auto-wiki', autoWrite: false }, compile: { mode: 'candidates' } },
-  // 하위호환은 의도적으로 폐기됐다. 마이그레이션되지 않은 파일이 남아 있을 때 죽은 키가
-  // 게이트를 **되살리거나 죽이지 않는다**는 것을 두 방향으로 못박는다 — 어느 쪽이든
-  // 조용히 틀리면 사용자가 "왜 안 도는가/왜 도는가"를 관측할 방법이 없다.
-  { id: 'dead-keys: enabled-false must not suppress', legacy: null, compile: { enabled: false, autoWrite: false, mode: 'auto-wiki' } },
+  // 하위호환은 폐기됐지만 **끄는 방향은 예외다**. 실패 방향이 비대칭이기 때문이다:
+  // `enabled:true`를 무시하면 카드가 안 생길 뿐이지만(복구 가능), `enabled:false`를 무시하면
+  // 사용자가 기록해 둔 opt-out을 어기고 유료 host CLI가 돈다(계정 청구, 복구 불가).
+  // 0.26.0 문서가 `enabled:false`를 off 스위치로 안내했으므로 그 형태로 꺼 둔 프로젝트가
+  // 업그레이드만으로 재무장해서는 안 된다. 그래서 off 방향만 존중하고 on 방향은 무시한다.
+  { id: 'legacy off switch: enabled-false suppresses', legacy: null, compile: { enabled: false, autoWrite: false, mode: 'auto-wiki' } },
   { id: 'dead-keys: enabled-true must not activate', legacy: null, compile: { enabled: true, autoWrite: true, mode: 'off' } },
 ];
 
@@ -276,9 +278,9 @@ const EXPECTED = {
   'guarded+autoWrite-false':    ['pass', 'pass', 'candidate', 'pass', 'pass', 'pass'],
   'auto-wiki+autoWrite-true':   ['pass', 'pass', 'created',   'pass', 'pass', 'pass'],
   'auto-wiki+autoWrite-false':  ['pass', 'pass', 'candidate', 'pass', 'pass', 'pass'],
-  // 죽은 키는 어느 방향으로도 게이트를 움직이지 못한다.
-  'dead-keys: enabled-false must not suppress': ['pass', 'pass', 'created', 'pass', 'pass', 'pass'],
-  'dead-keys: enabled-true must not activate':  ['skip', 'skip', 'skip',    'skip', 'skip', 'skip'],
+  // 레거시 off 스위치는 존중하고(전 게이트 정지), 켜는 방향은 무시한다.
+  'legacy off switch: enabled-false suppresses': ['skip', 'skip', 'skip',    'skip', 'skip', 'skip'],
+  'dead-keys: enabled-true must not activate':   ['skip', 'skip', 'skip',    'skip', 'skip', 'skip'],
 };
 
 const GATE_NAMES = ['enqueue', 'worker', 'wiki_compile', 'dedup_scan', 'verify_worker', 'update_notice'];
@@ -321,7 +323,7 @@ test('guarded는 confidence가 high가 아니면 candidate로 강등한다', () 
 // 스키마에 없으므로 **mode 하나가 유일한 결정자**이고 도달 상태는 4개다. 두 사실을 함께
 // 단정한다: (1) 제거된 키는 정규화 출력에 존재하지 않고 결과에 영향도 주지 않는다,
 // (2) 마이그레이션 진리표(§2)가 지정한 목표 mode가 실제로 그 mode로 정규화된다.
-test('정규화는 mode 하나만 보고 raw 36조합을 4개 상태로 접는다', () => {
+test('정규화는 raw 36조합을 4개 상태로 접는다 (레거시 off 스위치는 존중)', () => {
   const script = `import json, sys
 sys.path.insert(0, sys.argv[1])
 import config as qmd_config
@@ -351,9 +353,14 @@ print(json.dumps(out))`;
     ['auto-wiki', 'candidates', 'guarded', 'off'],
   );
   for (const row of rows) {
-    const [, mode] = row.in;
-    // enabled·autoWrite는 결과에 전혀 관여하지 않는다 — 기대값이 mode만의 함수다.
-    const expectedMode = ['candidates', 'guarded', 'auto-wiki'].includes(mode) ? mode : 'off';
+    const [enabled, mode, autoWrite] = row.in;
+    // mode가 활성 판정의 주 스위치이되, 레거시 **off 방향** 두 개는 존중한다: `enabled:false`는
+    // 문서화됐던 off 스위치이고 `autoWrite:false`는 "카드를 자동으로 쓰지 말라"는 선택이라,
+    // 무시하면 사용자가 기록해 둔 opt-out을 어기고 유료 호출이 난다. 켜는 방향(enabled:true)은
+    // 여전히 무시한다 — 그쪽으로 틀리면 손해가 "카드가 안 생김"뿐이다.
+    let expectedMode = ['candidates', 'guarded', 'auto-wiki'].includes(mode) ? mode : 'off';
+    if (enabled === false) expectedMode = 'off';
+    else if (autoWrite === false && ['auto-wiki', 'guarded'].includes(expectedMode)) expectedMode = 'candidates';
     assert.equal(row.mode, expectedMode, `in=${JSON.stringify(row.in)}`);
     // 제거된 키는 정규화 출력에 되살아나지 않는다(되살아나면 소비자가 다시 읽기 시작한다).
     assert.deepEqual(row.deadKeys, [], `in=${JSON.stringify(row.in)} dead keys leaked`);
