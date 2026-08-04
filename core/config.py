@@ -740,6 +740,121 @@ def load_input_config():
     return parsed if isinstance(parsed, dict) else {}
 
 
+# ---------------------------------------------------------------------------
+# 제거된 설정 키 감지 (deprecated key notice)
+#
+# 스키마 정리로 사라진 키는 `normalize_config()`가 **조용히 무시한다**(하위호환 없음).
+# 조용한 무시는 제거보다 나쁘다 — `verify.maxPerRun: 15`를 적어 둔 사용자는 그 값이
+# 여전히 검수 예산이라고 믿는데 코드는 `budget.verifyPerRun`을 읽는다. 종점은
+# SessionStart의 `notice_once` 1줄이다(`core/update.sh`).
+#
+# **감지는 `normalize_config()` 안에서 하지 않고 이 함수들로 분리한다.** 이유는 비용이
+# 아니라 **반환 계약**이다: `normalize_config`는 UserPromptSubmit·PostToolUse·enqueue
+# 같은 blocking hook에서 프롬프트마다 돌고 그 반환 dict는 effective config로서
+# 동결 테스트(`config-emission-freeze` · `live-settings-freeze`)·`--raw` 출력·
+# recall/worker 소비자가 그대로 읽는다. 거기에 `deprecatedKeys`를 얹으면 모든 소비자가
+# 무시해야 할 키가 하나 늘고 두 동결 스냅샷이 통째로 흔들린다. 분리해 두면 호출자가
+# **update 경로 하나**로 고정되므로, marker 쓰기가 hook 경로로 새지 않는다는 성질도
+# 코드 구조로 보장된다(Hermes 등 stdout이 없는 호스트가 marker를 선점하면 이후
+# Claude/Codex 세션의 알림이 통째로 삼켜진다 — notice_once의 알려진 함정).
+#
+# 값이 옮겨간 키. 사용자 값이 여전히 의미를 가지므로 **행선지를 알려준다**.
+DEPRECATED_RELOCATED_KEYS = {
+    "compile.batch.maxPerRun": "compile.budget.extractorPerRun",
+    "compile.maxCardsPerSource": "compile.budget.cardsPerSource",
+    "compile.verify.maxPerRun": "compile.budget.verifyPerRun",
+    "compile.semanticDedup.judge.maxPairsPerScan": "compile.budget.dedupPairsPerScan",
+    "compile.semanticDedup.judge.maxPairsPerCompile": "compile.budget.dedupPairsPerCompile",
+}
+
+# `compile.mode`로 흡수된 스위치. "사라졌다"가 아니라 "한 값으로 합쳐졌다"라서 문구가
+# 따로다 — 사용자는 지우는 것이 아니라 `mode`를 다시 정해야 한다(진리표는 계획 §2).
+DEPRECATED_FOLDED_KEYS = ("compile.enabled", "compile.autoWrite")
+
+# 대체가 없는 키. 경로 9종은 상수화됐고(`core/compile_paths.py`) 위치는 그대로이므로
+# 지우기만 하면 된다. dedup 레버 4종은 daemon score가 순위 기반이라 도달 불가였고
+# extractor 3종은 backends/builtins로 일원화됐다. 선언 순서가 곧 알림 문구의 순서다
+# (알림이 실행마다 흔들리지 않게 — dict/tuple 순회 순서를 그대로 쓴다).
+DEPRECATED_REMOVED_KEYS = (
+    "compile.canonSignals",
+    "compile.requireReviewForCanon",
+    "compile.candidatePath",
+    "compile.sourceQueuePath",
+    "compile.tombstonePath",
+    "compile.manifestPath",
+    "compile.mergeNeededPath",
+    "compile.verify.queuePath",
+    "compile.verify.logPath",
+    "compile.verify.skippedPath",
+    "compile.verify.deletedPath",
+    "compile.extractor.argv",
+    "compile.extractor.dispatch",
+    "compile.extractor.default",
+    "compile.semanticDedup.threshold",
+    "compile.semanticDedup.autoMergeThreshold",
+    "compile.semanticDedup.topK",
+    "compile.semanticDedup.similarPageMaxChars",
+)
+
+
+def _has_key_path(node, dotted):
+    """`a.b.c`가 중첩 dict에 **키로** 존재하는가. 값은 보지 않는다(`null`도 존재다)."""
+    for part in dotted.split("."):
+        if not isinstance(node, dict) or part not in node:
+            return False
+        node = node[part]
+    return True
+
+
+def deprecated_keys(input_config):
+    """raw(정규화 전) config에 남아 있는 제거된 키 목록.
+
+    반환은 `{"key", "kind", "replacement"}` 레코드 목록이고 kind는
+    `relocated`(행선지 있음) / `folded`(mode로 흡수) / `removed`(대체 없음)다.
+    호출자는 `core/update.sh`의 SessionStart 경로 하나다 — hook에서 부르지 말 것.
+    """
+    if not isinstance(input_config, dict):
+        return []
+    found = []
+    for key, replacement in DEPRECATED_RELOCATED_KEYS.items():
+        if _has_key_path(input_config, key):
+            found.append({"key": key, "kind": "relocated", "replacement": replacement})
+    for key in DEPRECATED_FOLDED_KEYS:
+        if _has_key_path(input_config, key):
+            found.append({"key": key, "kind": "folded", "replacement": "compile.mode"})
+    for key in DEPRECATED_REMOVED_KEYS:
+        if _has_key_path(input_config, key):
+            found.append({"key": key, "kind": "removed", "replacement": None})
+    return found
+
+
+def deprecated_key_notice(input_config):
+    """SessionStart 알림 1줄. 제거된 키가 없으면 빈 문자열.
+
+    문구를 bash가 아니라 여기서 만드는 것은 형제 알림(role-invalid·source-missing)과
+    다르다 — 저쪽은 python이 숫자/이름만 주고 bash가 문장을 만든다. 여기서는 문장이
+    **세 갈래로 갈리고** 각 갈래가 키 목록을 끼고 있어 bash에서 조립하면 세 벌의
+    분기가 생기고, 그 분기가 위 세 상수와 갈리는 순간 알림이 틀린 행선지를 말한다.
+    """
+    records = deprecated_keys(input_config)
+    if not records:
+        return ""
+    parts = []
+    relocated = ["%s → %s" % (r["key"], r["replacement"]) for r in records if r["kind"] == "relocated"]
+    if relocated:
+        parts.append("옮겨짐(값을 새 키로 다시 적으세요): " + ", ".join(relocated))
+    folded = [r["key"] for r in records if r["kind"] == "folded"]
+    if folded:
+        parts.append("compile.mode로 통합(mode 값 하나로 지정하세요): " + ", ".join(folded))
+    removed = [r["key"] for r in records if r["kind"] == "removed"]
+    if removed:
+        parts.append("제거됨(대체 없음, 지우세요): " + ", ".join(removed))
+    return (
+        "[qmd] .auto-context/settings.json에 더 이상 읽지 않는 설정 키 %d개가 있습니다 — "
+        "적어 둔 값은 무시됩니다. %s" % (len(records), " / ".join(parts))
+    )
+
+
 def normalize_config(input_config):
     config = dict(DEFAULT_CONFIG)
     config["name"] = input_config.get("name", DEFAULT_CONFIG["name"]) if isinstance(input_config.get("name", ""), str) else DEFAULT_CONFIG["name"]

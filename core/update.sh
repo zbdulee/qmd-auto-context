@@ -1019,6 +1019,44 @@ PY
     notice_clear role-invalid "$workdir"
   fi
 
+  # 제거된 설정 키 알림. 스키마 정리로 사라진 키는 normalize_config()가 **조용히**
+  # 무시하므로(하위호환 없음), 사용자는 `verify.maxPerRun: 15`가 여전히 검수 예산인
+  # 줄 안다. 판정도 문구도 python이 SSOT다(config.deprecated_key_notice) — 키 목록과
+  # 행선지가 bash에 복제되면 갈리는 순간 알림이 틀린 행선지를 말한다.
+  #
+  # **marker 쓰기가 여기(update 동기 경로)에만 있는 것이 요점이다.** 감지 함수 자체는
+  # 무해하지만 recall/posttool 같은 blocking hook이 notice_once를 부르면 그 훅이
+  # marker를 선점해 TTL 동안 SessionStart 알림 전체가 삼켜진다(Hermes
+  # QMD_SUPPRESS_NOTICE가 막으려는 것과 같은 클래스).
+  #
+  # 이미 로드된 $config_json(raw, 정규화 전)을 argv로 넘긴다 — heredoc이 stdin을
+  # 차지하므로 파이프는 무시된다(role-invalid·stale-queue와 동일 패턴). 정규화된
+  # config를 보면 제거된 키는 이미 사라진 뒤라 아무것도 감지되지 않는다.
+  deprecated_msg=$(python3 - "$(dirname "$0")" "$config_json" <<'PY' 2>/dev/null || true
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(sys.argv[1]).resolve()))
+import config as qmd_config
+
+try:
+    cfg = json.loads(sys.argv[2] or "{}")
+except Exception:
+    raise SystemExit(0)
+if not isinstance(cfg, dict):
+    raise SystemExit(0)
+message = qmd_config.deprecated_key_notice(cfg)
+if message:
+    print(message)
+PY
+)
+  if [ -n "$deprecated_msg" ]; then
+    notice_once deprecated-keys "$workdir" "$deprecated_msg"
+  else
+    notice_clear deprecated-keys "$workdir"
+  fi
+
   # Retroactive wiki dedup hint: if a scan (this run's or a past one's) queued
   # pairs that haven't been resolved yet, surface it two ways. Cheap file test +
   # text extraction only -- no daemon call -- since this runs in the hot
