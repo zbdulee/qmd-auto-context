@@ -14,7 +14,12 @@ KO_STOPWORDS = {
     "하나요", "할까요", "하지", "할까", "하면", "하려면",
     "나는데", "있는데", "되는데", "하는데", "인데", "건데",
     "그런데", "그래서", "그러면", "그러니", "그러나",
-    "때문에", "대해서", "관해서", "대한", "위해", "통해", "따라",
+    # 연결어미 계열. `관련해서`는 이미 있던 `관해서`·`대해서`와 같은 부류의 누락이었다
+    # (활용형 추가가 아니라 **기존 범주의 완성**이므로 어간 판정 문제와 무관하다).
+    # 라이브 근거: `"이 부분 관련해서 sendbird 장애 원인"`에서 이 토큰이 AND 에 남아
+    # 질의를 0건으로 만들었고, DF 필터는 이 토큰을 못 뺀다 — 코퍼스 871장 중 1장에
+    # 실제로 등장하기 때문이다(DF 0 이 아니다). 빼면 같은 프롬프트가 3건을 낸다.
+    "때문에", "대해서", "관해서", "관련해서", "대한", "위해", "통해", "따라",
     # 단독 토큰으로 떨어진 조사. `strip_ko_suffix`가 접미로는 이미 떼는 형태들인데
     # 사용자가 띄어 쓰면("EP12 에서 …") 토큰 하나로 남아 term 예산(5개)을 먹고
     # AND 조건만 좁힌다. 접미로 떼는 것과 단독일 때 버리는 것은 같은 정책이다.
@@ -288,6 +293,11 @@ EP_SEARCH_BUDGET = 6
 
 # 일반 lex 문자열(`lexQueries[0]`)에 넣을 AND term 수 상한.
 #
+# **이 상한은 이제 1차 선택 기준이 아니다** — 데몬이 있는 경로에서는 `select_general_terms`
+# 가 먼저 "코퍼스에 존재하는 term"만 남기고 그 뒤에 이 상한이 걸린다. 아래 표는 상한
+# 도입 당시의 근거(위치 컷 단독)이며, 위치 컷이 무엇을 고치고 무엇을 망쳤는지는
+# `select_general_terms` docstring 이 SSOT 다.
+#
 # **AND 를 OR 로 바꾸는 것이 아니다.** 남는 term 은 여전히 AND 로 결합되고, 검색을
 # 좁히는 그 동작은 의도된 것이다(CLAUDE.md "일반 키워드의 AND 결합은 유지한다").
 # 이 상한이 막는 것은 하나뿐이다: **어미 한 토큰이 질의 전체를 0건으로 만드는 것.**
@@ -315,6 +325,90 @@ EP_SEARCH_BUDGET = 6
 # 이 값은 **EP 변형(`lexQueries[1:]`)에 적용되지 않는다** — EP 는 독립 lex search 로
 # 나가 AND 가 아니라 RRF 융합(OR 효과)이고, 그쪽 상한은 `EP_SEARCH_BUDGET` 이다.
 GENERAL_LEX_TERM_CAP = 3
+
+
+# DF 필터 결과를 채택하기 위한 최소 term 수.
+#
+# 1개짜리 질의는 **연접이 아니다** — "이 토큰을 가진 아무 문서"이고, 871장 한국어
+# 코퍼스에서는 거의 항상 만족된다. lex 게이트의 변별력은 연접에서 나오므로, DF 필터가
+# 연접을 한 토큰으로 줄여 버리면 게이트가 판정할 근거 자체가 사라진다.
+#
+# 라이브 실측이 정확히 그 형태를 냈다: `"오늘 점심 뭐 먹을까 고민이네"` → 점심·먹을까·
+# 고민이네가 DF 0 이라 `오늘`(871장 중 1장에 등장) 하나만 남고, 그 1건 히트로 **무관
+# 프롬프트에 게이트가 열렸다**(주입 727자 부활 = 이번 커밋이 고친 바로 그 회귀).
+# 그래서 남은 term 이 2개 미만이면 좁히기를 채택하지 않고 원래(=불만족) 질의를 그대로
+# 쓴다. 필터가 잔여물에서 히트를 **만들어내지** 않게 하는 규칙이고, 그때의 동작은
+# 오늘과 완전히 같다(개선이 없을 뿐 악화도 없다).
+MIN_PRESENT_TERMS = 2
+
+# select_general_terms_explained 의 mode 값.
+LEX_TERMS_POSITIONAL = "positional"        # DF 를 모른다 → 위치 컷(기존 동작)
+LEX_TERMS_PRESENT = "present"              # DF 필터 채택
+LEX_TERMS_LONE_SURVIVOR = "lone_survivor"  # 남은 term < 2 → 위치 컷 유지
+
+
+def select_general_terms(terms: list[str], present: set[str] | None = None) -> list[str]:
+    """`select_general_terms_explained` 의 term 목록만."""
+    return select_general_terms_explained(terms, present)[0]
+
+
+def select_general_terms_explained(
+    terms: list[str], present: set[str] | None = None
+) -> tuple[list[str], str]:
+    """일반 lex 문자열에 넣을 AND term 을 고른다 — **선택 규칙의 SSOT**.
+
+    반환은 ``(terms, mode)`` 이고 mode 는 진단 로그가 그대로 쓴다(조용한 동작 변경 금지).
+
+    호출자는 둘이고 차이는 ``present`` 하나다:
+
+    - ``build_lexical_terms``(데몬을 못 쓰는 경로: CLI·fixture·recall 폴백)
+      → ``present=None`` → 예전 그대로의 **위치 컷**.
+    - ``recall.narrow_general_lex``(데몬이 있는 경로) → ``present`` = 코퍼스에 실제로
+      존재하는(lex 히트 ≥1, 즉 document frequency > 0) term 집합(소문자).
+
+    이 모듈은 순수 함수로 남는다 — DF 는 **데이터로 주입**받고 여기서 조회하지 않는다
+    (keywords.py 는 데몬 없는 hook 경로에서도 import 된다).
+
+    **왜 위치가 아니라 존재로 고르는가.** 위치 컷은 문장 *앞*의 군더더기가 실제 내용어를
+    밀어낸다. 라이브 실측(service-engineering wiki 871장, 2026-08-05):
+
+        | 프롬프트                              | 위치 컷 질의 → 히트      | 이 규칙 → 히트         |
+        |---------------------------------------|--------------------------|------------------------|
+        | 이 부분 관련해서 sendbird 장애 원인…  | `부분 관련해서 sendbird` 0 | `부분 sendbird 장애` 3 |
+        | 아까 말한 그거 있잖아 VN 콜백 이벤트  | `아까 말한 있잖아`      0 | `VN 콜백`            8 |
+        | sendbird 장애 원인이 뭐였지?          | `sendbird 장애 원인`    8 | 동일                 8 |
+        | VN 콜백 이벤트 언제 발생해?           | `VN 콜백 이벤트`        7 | 동일                 7 |
+        | 중복 판정은 어떻게 하나요?            | `중복 판정`             8 | 동일                 8 |
+        | python list comprehension 문법 알려줘 | 0                         | 0 (lone survivor 폴백) |
+        | 리액트 useEffect 의존성 배열 규칙     | 0                         | `의존성 배열 규칙`   0 |
+        | 오늘 점심 뭐 먹을까 고민이네          | 0                         | 0 (lone survivor 폴백) |
+        | 이 함수 이름을 뭐로 지을까 고민       | 0                         | `함수 이름 고민`     0 |
+
+    무관 4/4 차단 유지 · 직접 질의 3/3 무변화. 1행의 회복은 DF 필터가 아니라
+    ``KO_STOPWORDS`` 에 `관련해서` 를 더한 몫이다(그 토큰은 DF 0 이 아니다 — 주석 참고).
+
+    **변별력이 죽지 않는 이유**: 개별 토큰은 DF>0 이어도(`list`=20, `의존성`=10,
+    `규칙`=20) 그 AND 결합은 여전히 0건이다. 걸러지는 것은 코퍼스에 **아예 없는**
+    토큰뿐이고, 그 토큰이 있는 한 연접은 **만족 불가능**하다(FTS 가 그 자리에서 0건을
+    보장한다). 즉 이 필터는 "질의를 넓히는" 것이 아니라 **정보량이 0으로 확정된 질의를
+    복구**하는 것이다. 실측상 그 집합은 활용형 어미(`뭐였지`·`발생해`·`먹을까`)와 구어체
+    군더더기(`아까`·`말한`·`있잖아`)와 코퍼스 밖 주제어(`useEffect`·`리액트`·`점심`)다 —
+    위치 컷이 우회로 노렸던 대상을 이쪽이 원인 기준으로 덮는다.
+
+    **상한을 폐기하지 않고 DF 필터 뒤의 backstop 으로 남기는 이유 둘.**
+    (1) DF>0 토큰이 많은 긴 프롬프트는 여전히 AND 를 과하게 좁힌다 — 토큰이 개별로
+    존재해도 한 문서가 전부 갖고 있을 확률은 term 수에 따라 급감하고, DF 필터는 그
+    조합 효과에 대해 아무 말도 하지 않는다. (2) DF 조회가 실패하면 ``present=None``
+    으로 폴백하는데, 그때 상한이 없으면 폴백 경로가 상한 도입 전 상태로 — 어미 한
+    토큰이 질의를 통째로 0건으로 만드는 상태로 — 되돌아간다. 상한은 그 폴백의 안전망이다.
+    """
+    if present is None:
+        return (terms[:GENERAL_LEX_TERM_CAP], LEX_TERMS_POSITIONAL)
+    kept = [t for t in terms if t.lower() in present]
+    if len(kept) < MIN_PRESENT_TERMS:
+        # 연접이 남지 않았다 → 좁히기를 채택하지 않는다(근거는 MIN_PRESENT_TERMS).
+        return (terms[:GENERAL_LEX_TERM_CAP], LEX_TERMS_LONE_SURVIVOR)
+    return (kept[:GENERAL_LEX_TERM_CAP], LEX_TERMS_PRESENT)
 
 
 _EP_MENTION_RE = re.compile(
@@ -448,13 +542,18 @@ def build_lexical_terms(prompt: str, patterns: list[str]) -> dict:
     # 근거·실측표는 그 상수 주석. `lexicalTerms`/`keywords` 계약은 건드리지 않는다
     # (상한은 lex **문자열**에만 걸린다. shadow 진단의 `lex_terms` 집계도 그대로다).
     general_terms = [t for t in deduped if t.lower() not in ep_set]
-    general_query = " ".join(general_terms[:GENERAL_LEX_TERM_CAP])
+    # `present` 없이 부르므로 위치 컷이다 — 데몬을 못 쓰는 경로(CLI·fixture)와 DF 조회
+    # 실패 시의 폴백이 **같은 함수**를 거치게 해서 선택 규칙이 두 벌이 되지 않게 한다.
+    general_query = " ".join(select_general_terms(general_terms))
 
     return {
         "keywords": keywords,
         "identifiers": identifiers,
         "lexicalTerms": deduped,
         "epTerms": ep_searches,
+        # 상한 **전**의 일반 term 목록. recall 이 DF 로 좁힐 때 입력으로 쓴다
+        # (좁히기는 데몬이 필요하고 이 모듈은 순수 함수로 남아야 하므로 목록만 넘긴다).
+        "generalTerms": general_terms,
         "lexQueries": [general_query] + ep_searches,
     }
 

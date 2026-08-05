@@ -12,14 +12,18 @@ Usage: shadow_probe.py '<options json>'
     "prompt": str,
     "scenario": "default" | "lex-dead" | "wiki-empty" | "filtered-out"
                 | "all-unverified" | "ep-deep" | "ep-rescue" | "raw-ranked"
-                | "fail-after-first" | "slow-after-first",
+                | "fail-after-first" | "slow-after-first"
+                | "df-absent" | "df-mixed" | "df-fail" | "df-slow",
     "shadow": bool,      # set QMD_SHADOW_QUERY=1
     "log": bool,         # set QMD_RECALL_LOG to a temp file
     "fixture": bool,     # run through QMD_QUERY_FIXTURE instead of the daemon
     "settings": {...},   # .auto-context/settings.json overrides
     "env": {...}         # extra env overrides
   }
-Output: {"queries": [...], "stdout": str, "exit_code": int, "log": [line, ...]}
+Output: {"queries": [...], "df_probes": [...], "stdout": str,
+         "exit_code": int, "log": [line, ...]}
+  queries  = 본 recall / lex 게이트 / shadow 질의 (DF 좁히기 프로브 제외)
+  df_probes = DF(존재) 좁히기 프로브 payload
 """
 import http.server
 import json
@@ -77,10 +81,40 @@ EP_DEEP_WIKI = [
 ]
 
 payloads: list[dict] = []
+df_probes: list[dict] = []
 scenario = "default"
 
 
+def _is_df_probe(payload: dict) -> bool:
+    """DF(존재) 좁히기 프로브인가 — term 하나짜리 lex 질의 + limit 1.
+
+    recall 이 보내는 질의 중 이 모양은 DF 프로브뿐이다(lex 게이트 프로브는 같은
+    DAEMON_QUERY_LIMIT=8 을 쓰고 본 질의는 vec 을 포함한다). payload 에 테스트 전용
+    표식을 넣지 않는 이유: 라이브 데몬 스키마와 갈리면 안 된다.
+    """
+    searches = payload.get("searches") or []
+    return (
+        payload.get("limit") == 1
+        and len(searches) == 1
+        and searches[0].get("type") == "lex"
+    )
+
+
+# df-mixed 에서 "코퍼스에 없는" term. 라이브 실측의 구어체 군더더기 그대로다
+# (`아까 말한 그거 있잖아 VN 콜백 이벤트` → 앞 3개가 DF 0).
+DF_ABSENT_TERMS = {"아까", "말한", "있잖아"}
+
+
 def _results_for(payload: dict) -> list[dict]:
+    if _is_df_probe(payload):
+        # 기본은 "모든 term 이 코퍼스에 있다" — 그래야 본 질의의 lex 문자열이 위치 컷
+        # 기대값과 같아지고, 기존 테스트가 term 선택이 아니라 진단 계약만 계속 본다.
+        if scenario == "df-absent":
+            return []
+        if scenario == "df-mixed":
+            term = (payload.get("searches") or [{}])[0].get("query", "")
+            return [] if term in DF_ABSENT_TERMS else WIKI_HIT
+        return WIKI_HIT
     kinds = "+".join(s.get("type", "") for s in payload.get("searches", []))
     is_wiki = "proj-wiki" in (payload.get("collections") or [])
     if scenario == "lex-dead" and kinds == "lex":
@@ -114,18 +148,33 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             payload = json.loads(raw)
         except json.JSONDecodeError:
             payload = {"_unparsed": raw.decode("utf-8", "replace")}
-        payloads.append(payload)
-        first = len(payloads) == 1
-        if not first and scenario == "fail-after-first":
-            self.send_response(500)
-            self.send_header("Content-Length", "0")
-            self.end_headers()
-            return
-        if not first and scenario == "slow-after-first":
-            # shadow per-query timeout보다 확실히 길게 — 매 shadow 질의가 timeout으로
-            # 예산을 소모하게 만든다. ThreadingHTTPServer라 클라이언트가 포기해도
-            # 다음 요청이 이 sleep에 직렬로 묶이지 않는다(예산 계산이 깨끗해진다).
-            time.sleep(2.0)
+        # DF 프로브는 별도 목록에 담는다 — 호출자의 queries 인덱스(본 recall 0,
+        # 게이트 프로브 1, shadow 2~)를 프로브가 밀지 않게 하기 위함이고, 시나리오의
+        # "첫 질의"도 본 recall 질의를 뜻해야 하기 때문이다.
+        if _is_df_probe(payload):
+            df_probes.append(payload)
+            if scenario == "df-slow":
+                # per-probe 지연. DF 패스 **전체**가 lex_probe_timeout 안에 들어가는지
+                # (= N 개가 곱해지지 않는지) 보는 시나리오다.
+                time.sleep(0.5)
+            if scenario == "df-fail":
+                self.send_response(500)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+        else:
+            payloads.append(payload)
+            first = len(payloads) == 1
+            if not first and scenario == "fail-after-first":
+                self.send_response(500)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            if not first and scenario == "slow-after-first":
+                # shadow per-query timeout보다 확실히 길게 — 매 shadow 질의가 timeout으로
+                # 예산을 소모하게 만든다. ThreadingHTTPServer라 클라이언트가 포기해도
+                # 다음 요청이 이 sleep에 직렬로 묶이지 않는다(예산 계산이 깨끗해진다).
+                time.sleep(2.0)
         body = json.dumps({"results": _results_for(payload)}).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -218,6 +267,7 @@ def main() -> int:
                     lines.append(json.loads(line))
         result = {
             "queries": payloads,
+            "df_probes": df_probes,
             "stdout": proc.stdout,
             "stderr": proc.stderr,
             "exit_code": proc.returncode,

@@ -296,3 +296,110 @@ test('안내문 고정비가 축약된다 (본문 있음 / 본문 없음)', () =
   assert.ok(r.with_body <= 110, `본문 있을 때 안내문 ${r.with_body}자 (목표 ~90)`);
   assert.ok(r.no_body <= 45, `본문 없을 때 안내문 ${r.no_body}자 (목표 ~40)`);
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// D. DF(존재) 기반 lex term 좁히기
+//
+// 위치 컷은 문장 **앞**의 군더더기가 실제 내용어를 밀어냈다: 같은 질문을 구어체로
+// 물었다는 이유만으로 lex 가 0건이 되고, 위 게이트가 본문을 걷어냈다(838자 → 134자).
+// 선택 기준을 위치에서 코퍼스 존재로 바꾸면 그 실패가 원인 수준에서 사라진다.
+// 여기서는 **recall 배선**만 본다(선택 규칙 자체의 동결은 keywords-lex-query-freeze).
+// ─────────────────────────────────────────────────────────────────────────────
+
+// 라이브 실측 프롬프트. shadow_probe 의 df-mixed 가 앞 3개를 "코퍼스에 없음"으로 답한다.
+const DF_PROMPT = '아까 말한 그거 있잖아 VN 콜백 이벤트';
+
+function dfProbe(options = {}) {
+  const out = execFileSync('python3', [
+    'test/helpers/shadow_probe.py',
+    JSON.stringify({ prompt: DF_PROMPT, log: true, ...options }),
+  ], { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 });
+  return JSON.parse(out);
+}
+
+function selectionOf(r) {
+  return r.log.filter((l) => l.event === 'qmd_recall_selection').pop();
+}
+
+// 본 recall 질의가 실제로 보낸 일반 lex 문자열.
+function mainLexQuery(r) {
+  return r.queries[0].searches.filter((s) => s.type === 'lex')[0].query;
+}
+
+test('D: 코퍼스에 없는 term 을 빼고 그 질의를 본 recall 이 그대로 쓴다', () => {
+  const r = dfProbe({ scenario: 'df-mixed' });
+  assert.equal(r.exit_code, 0);
+  assert.deepEqual(r.df_probes.map((q) => q.searches[0].query),
+    ['아까', '말한', '있잖아', 'VN', '콜백'], 'term 당 1회, 상한 전 목록 순서대로');
+  for (const q of r.df_probes) {
+    assert.equal(q.limit, 1, '존재 여부만 보므로 limit 1');
+    assert.equal(q.searches.length, 1, 'term 하나짜리 lex 단독 질의');
+    assert.deepEqual(q.collections, ['proj-wiki'], '본 질의와 같은 컬렉션에 대해 잰다');
+  }
+  assert.equal(mainLexQuery(r), 'VN 콜백', '군더더기가 빠진 질의가 본 recall 에 쓰인다');
+
+  const sel = selectionOf(r);
+  assert.equal(sel.lex_df, 'present');
+  assert.equal(sel.lex_terms_absent, 3, '뺀 term 수가 로그에서 읽혀야 한다');
+  assert.equal(sel.lex_query, 'VN 콜백', '게이트가 판정한 문자열과 같은 값이 남는다');
+});
+
+test('D: 게이트 프로브와 본 질의가 같은 문자열을 쓴다 (갈리면 안 된다)', () => {
+  // 갈리면 게이트가 recall 이 돌리지도 않은 질의를 판정한다.
+  const r = dfProbe({ scenario: 'df-mixed' });
+  const gate = r.queries[1];
+  assert.ok(gate, '게이트 프로브가 존재한다');
+  assert.deepEqual(gate.searches.map((s) => s.type), ['lex']);
+  assert.equal(gate.searches[0].query, mainLexQuery(r));
+});
+
+test('D: DF 조회가 실패하면 위치 컷으로 폴백한다 (fail-open)', () => {
+  const r = dfProbe({ scenario: 'df-fail' });
+  assert.equal(r.exit_code, 0);
+  assert.match(r.stdout, /card\.md/, '본 recall 은 그대로 동작한다');
+  assert.equal(mainLexQuery(r), '아까 말한 있잖아', '좁히기 전 = 오늘의 동작');
+  const sel = selectionOf(r);
+  assert.equal(sel.lex_df, 'probe_failed', '"히트 0"과 구분되는 값이어야 한다');
+  assert.equal(sel.lex_terms_absent, 0);
+});
+
+test('D: 전 term 부재여도 빈 lex 질의를 만들지 않는다', () => {
+  // 남은 term 이 2개 미만이면 좁히기를 채택하지 않는다(잔여물로 히트를 만들지 않는다).
+  const r = dfProbe({ scenario: 'df-absent' });
+  assert.equal(mainLexQuery(r), '아까 말한 있잖아');
+  assert.equal(selectionOf(r).lex_df, 'lone_survivor');
+  assert.equal(selectionOf(r).lex_terms_absent, 5);
+});
+
+test('D: fixture 모드는 DF 조회를 하지 않는다 (결정성)', () => {
+  const r = dfProbe({ fixture: true });
+  assert.equal(r.df_probes.length, 0);
+  assert.equal(r.queries.length, 0, '데몬을 전혀 건드리지 않는다');
+  assert.equal(selectionOf(r).lex_df, 'skipped_fixture');
+});
+
+test('D: 조회 term 수는 상한(6)으로 유계다', () => {
+  // 일반 term 은 식별자 4 + 키워드 5 까지 가능하다. 상한 밖 tail 은 위치 컷(3)이
+  // 오늘도 도달하지 못하던 자리이므로 잃는 재현율이 없다.
+  const r = dfProbe({
+    prompt: 'alpha_one beta-two gamma.three delta_four 하나 둘 셋 넷 다섯 확인해줘',
+    scenario: 'df-mixed',
+  });
+  assert.ok(r.df_probes.length <= 6, `DF 프로브 ${r.df_probes.length}건`);
+  assert.ok(r.df_probes.length >= 4, '상한까지는 실제로 조회한다');
+});
+
+test('D: DF 패스 전체가 프로브 예산 안에 머문다 (N 개가 곱해지지 않는다)', () => {
+  const started = Date.now();
+  const r = dfProbe({ scenario: 'df-slow', settings: { queryTimeout: 1.25 } });
+  const elapsed = Date.now() - started;
+  assert.equal(r.exit_code, 0);
+  assert.match(r.stdout, /card\.md/, '예산 소진이 본 recall 을 막으면 안 된다');
+  // 프로브당 0.5s × 5 term = 2.5s 이지만 패스 전체 예산은 LEX_PROBE_TIMEOUT(1.0s)이다.
+  // 예산을 넘기면 조회를 포기하고 위치 컷으로 폴백한다.
+  assert.equal(selectionOf(r).lex_df, 'probe_failed');
+  assert.ok(r.df_probes.length <= 3, `예산 소진 후에도 계속 조회했다 (${r.df_probes.length}건)`);
+  // python 기동 + DF 패스 1.0s + 본 질의 + 게이트 프로브(0.5s 지연). CI 여유를 둬도
+  // 4s 안이어야 하고, 이 값이면 예산이 곱해질 때(0.5s × 5 = 2.5s) 반드시 실패한다.
+  assert.ok(elapsed < 4000, `DF 패스 예산 초과 (${elapsed}ms)`);
+});

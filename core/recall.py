@@ -1140,6 +1140,97 @@ def run_lex_probe(daemon_url: str, collections: list[str], searches: list[dict],
         return None
 
 
+# ── DF(존재) 기반 lex term 좁히기 ─────────────────────────────────────────────
+# 위치 컷(`keywords.GENERAL_LEX_TERM_CAP`)은 문장 **앞**의 군더더기가 실제 내용어를
+# 밀어내는 실패가 있었다: `"이 부분 관련해서 sendbird 장애 원인 알려줘"` → `부분 관련해서
+# sendbird` → lex 0건 → 위 게이트가 본문을 걷어냈다(838자 → 134자). 같은 질문을 구어체로
+# 물었다는 이유만으로 카드 본문을 잃는다. 선택 기준을 위치가 아니라 **코퍼스 존재 여부**로
+# 바꾸면 이 실패가 원인 수준에서 사라진다 — 근거·실측표는 `keywords.select_general_terms`.
+#
+# 조회는 term 당 lex 단독 질의 1회(limit 1)다. **여기(recall)에 두는 이유**: 조회에
+# 데몬이 필요하지만 `keywords.py`는 데몬 없는 hook 경로에서도 import 되는 순수 모듈이라
+# 의존을 들일 수 없다. 그래서 keywords 는 term 목록(`generalTerms`)만 내고 선택 **규칙**은
+# `select_general_terms` 한 곳에 두며, recall 은 그 함수에 DF 를 데이터로 넘긴다.
+#
+# 비용 상한 둘: term 수와 총 시간. 실측 5토큰 62ms(단건 18ms)라 여유가 크지만, 상한이
+# 없으면 긴 프롬프트에서 왕복 수가 그대로 blocking hook 예산이 된다.
+#   - term 수 6: 위치 컷이 오늘 도달할 수 있는 최대 위치(3)보다 크므로, 조회 대상 밖으로
+#     밀린 tail 은 **오늘도 쓰이지 않던** term 이다(이 상한으로 잃는 재현율은 0).
+#   - 총 시간: `lex_probe_timeout(config)`(≤ LEX_PROBE_TIMEOUT = 1.0s)을 **패스 전체**에
+#     건다. per-query 가 아니다 — N 개가 곱해지면 그것이 곧 예산 초과다.
+DF_PROBE_MAX_TERMS = 6
+
+
+def run_df_probe(daemon_url: str, collections: list[str], terms: list[str],
+                 budget: float) -> set | None:
+    """코퍼스에 존재하는(lex 히트 ≥1) term 집합(소문자). 실패·예산 소진이면 None.
+
+    None 은 "없다"가 아니라 **"모른다"**이고, 호출부는 위치 컷으로 폴백한다(fail-open).
+    한 term 이라도 조회에 실패하면 부분 결과를 쓰지 않고 전체를 포기한다 — 실패한 term 을
+    '있다'로 치면 좁히기가 조용히 약해지고 '없다'로 치면 있는 term 을 버린다. 둘 다
+    틀리는 것보다 오늘의 동작으로 되돌아가는 편이 설명 가능하다(`lex_df=probe_failed`).
+    """
+    if not collections or not terms:
+        return None
+    deadline = time.monotonic() + budget
+    present = set()
+    for term in terms:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        payload = {
+            "searches": [{"type": "lex", "query": term}],
+            "collections": collections,
+            # 존재 여부만 알면 되므로 1건. 데몬 작업량을 최소로 유지한다.
+            "limit": 1,
+            "minScore": 0,
+            "timeout": remaining,
+            "rerank": False,
+        }
+        try:
+            req = urllib.request.Request(
+                f"{daemon_url}/query",
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=remaining) as resp:
+                body = resp.read().decode("utf-8")
+            results = json.loads(body).get("results", [])
+        except Exception:  # noqa: BLE001 - 정밀도 최적화가 본 흐름을 깨면 안 된다
+            return None
+        if not isinstance(results, list):
+            return None
+        if results:
+            present.add(term.lower())
+    return present
+
+
+def narrow_general_lex(lex_searches: list[dict], general_terms: list[str], *,
+                       daemon_url: str, collections: list[str],
+                       budget: float) -> tuple:
+    """일반 lex 문자열(`lex_searches[0]`)을 코퍼스에 존재하는 term 으로 좁힌다.
+
+    **본 질의 전에, 한 곳에서만 부른다.** 게이트 프로브는 `lex_searches`에서 파생하므로
+    여기서 한 번 좁히면 게이트가 판정하는 문자열과 recall 이 실제로 보낸 문자열이
+    구조적으로 같아진다 — 갈리면 게이트가 돌지도 않은 질의를 판정하게 된다.
+
+    반환: `(status, dropped_absent)`. status 는 `not_needed`|`probe_failed`, 또는
+    `keywords.select_general_terms_explained`의 mode(`present`|`lone_survivor`)다 —
+    선택 결과를 로그가 그대로 말하게 해서 "왜 이 문자열인가"가 한 줄에서 읽히게 한다.
+    """
+    if not lex_searches or not general_terms:
+        return ("not_needed", 0)
+    probed = general_terms[:DF_PROBE_MAX_TERMS]
+    present = run_df_probe(daemon_url, collections, probed, budget)
+    if present is None:
+        # 위치 컷 결과가 이미 lex_searches[0]에 들어 있다 — 손대지 않는 것이 폴백이다.
+        return ("probe_failed", 0)
+    terms, mode = qmd_keywords.select_general_terms_explained(probed, present)
+    lex_searches[0]["query"] = " ".join(terms)
+    return (mode, sum(1 for t in probed if t.lower() not in present))
+
+
 def strip_gated_injection(results: list[dict]) -> None:
     """게이트 발동: 본문 인용과 원문 경로를 걷어내고 링크+title만 남긴다."""
     for result in results:
@@ -1664,6 +1755,11 @@ def main():
         {"type": "lex", "query": q} for q in built_terms["lexQueries"]
     ]
     vector_query = re.sub(r"\s+", " ", prompt).strip()
+    # DF 좁히기 상태(진단). 여기 값은 "좁히기를 시도하지 않았다"이고, 라이브 경로가
+    # 아래에서 덮어쓴다. fixture 경로는 데몬 왕복을 하지 않으므로 이 값을 유지한다 —
+    # fixture 테스트의 결정성은 데몬 유무에 의존하지 않는 데서 나온다.
+    lex_df = "skipped_fixture" if fixture_path else "not_needed"
+    lex_terms_absent = 0
 
     def query_daemon(query_collections: list[str]) -> list[dict] | None:
         return None
@@ -1733,16 +1829,24 @@ def main():
                 if wiki_collections:
                     queried_wiki_first = True
                     queried_collections = list(wiki_collections)
-                    results = query_daemon(wiki_collections)
-                    if results is None:
-                        log_recall_event(log_path, "query_failed", daemon=daemon_url)
-                        return 0
                 else:
                     # hierarchical without wiki role → flat처럼 전 컬렉션 query.
                     # (wikiOnly + wiki role 없음은 상단에서 이미 조기 종료됨)
-                    results = query_daemon(collections)
+                    queried_collections = list(collections)
             else:
-                results = query_daemon(collections)
+                queried_collections = list(collections)
+
+            # lex term 좁히기는 **본 질의를 보내기 전에, 여기 한 곳에서만** 한다.
+            # 게이트 프로브도 raw backfill도 같은 `lex_searches`를 재사용하므로,
+            # 이 지점을 지나면 "게이트가 판정한 문자열 ≠ recall이 보낸 문자열"이
+            # 구조적으로 불가능하다. 질의 대상 컬렉션이 정해진 **뒤**여야 하는 이유:
+            # DF 는 코퍼스에 대한 사실이고 hierarchical 은 wiki 컬렉션만 먼저 본다.
+            lex_df, lex_terms_absent = narrow_general_lex(
+                lex_searches, built_terms["generalTerms"],
+                daemon_url=daemon_url, collections=queried_collections,
+                budget=lex_probe_timeout(config),
+            )
+            results = query_daemon(queried_collections)
 
             if results is None:
                 log_recall_event(log_path, "query_failed", daemon=daemon_url)
@@ -2116,6 +2220,16 @@ def main():
         lex_hits=lex_hits,
         lex_gate=lex_gate,
         lex_gate_applied=lex_gate_applied,
+        # DF 좁히기. 게이트가 발동해 주입이 줄었을 때 "왜"가 이 두 값에서 갈린다.
+        # lex_df: not_needed(일반 term 없음) | skipped_fixture | probe_failed(조회
+        # 실패·예산 소진 → 위치 컷 폴백, **"히트 0"이 아니다**) | present(좁히기 채택)
+        # | lone_survivor(남은 term<2라 위치 컷 유지 — 잔여물로 히트를 만들지 않는다).
+        # lex_terms_absent = 코퍼스에 없어 뺀 토큰 수(구어체 군더더기·활용형 어미).
+        # 셋을 뭉치면 "정말 관련이 없어서 0건"과 "데몬이 느려 옛 동작으로 돌아감"과
+        # "좁혔지만 여전히 0건"이 구분되지 않는다.
+        lex_df=lex_df,
+        lex_terms_absent=lex_terms_absent,
+        lex_query=lex_searches[0]["query"] if lex_searches else "",
         # 원문 경로(`sources[].path`) 주입. 무흔적 실패 금지 — 링크가 하나도 안 붙었을 때
         # 이유(미존재/루트 밖/한 줄 아님/중복/상한/파싱 실패/경로 없음)를 로그만으로 판정한다.
         inject_source_paths_per_card=card_source_opts[0],

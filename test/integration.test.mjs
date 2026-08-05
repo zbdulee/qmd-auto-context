@@ -6,6 +6,21 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { removeTemp } from './helpers/temp.mjs';
 
+// DF(존재) 좁히기 프로브는 본 recall 질의가 아니다 — term 하나짜리 lex + limit 1
+// (본 질의는 vec 을 포함하고, lex 게이트 프로브는 DAEMON_QUERY_LIMIT=8 을 쓴다).
+// 시퀀스 단정(requests[0]=wiki, requests[1]=raw backfill)이 프로브에 밀리지 않도록
+// 기록에서 제외한다. 응답은 각 서버의 기본 결과 그대로다 — payload 에 테스트 전용
+// 표식을 넣으면 라이브 데몬 스키마와 갈린다.
+function isDfProbe(payload) {
+  const searches = payload?.searches || [];
+  return payload?.limit === 1 && searches.length === 1 && searches[0].type === 'lex';
+}
+
+function recordQuery(list, payload) {
+  if (!isDfProbe(payload)) list.push(payload);
+  return payload;
+}
+
 function runRecallAsync(input, env) {
   return new Promise((resolve, reject) => {
     const child = spawn('python3', ['core/recall.py'], { env });
@@ -48,7 +63,7 @@ test('mock HTTP daemon recall integration validates query payload and context ou
       req.setEncoding('utf8');
       req.on('data', chunk => { body += chunk; });
       req.on('end', () => {
-        requests.push(JSON.parse(body));
+        recordQuery(requests, JSON.parse(body));
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
           results: [
@@ -104,7 +119,7 @@ test('hierarchical recall queries wiki collections before raw backfill', async (
       req.on('data', chunk => { body += chunk; });
       req.on('end', () => {
         const payload = JSON.parse(body);
-        requests.push(payload);
+        recordQuery(requests, payload);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ results: [
           { file: 'qmd://proj-wiki/.auto-context/wiki/decisions/config-layout.md', title: 'Config layout', score: 0.93 },
@@ -163,7 +178,7 @@ test('hierarchical recall backfills raw collections when wiki has no results', a
       req.on('data', chunk => { body += chunk; });
       req.on('end', () => {
         const payload = JSON.parse(body);
-        requests.push(payload);
+        recordQuery(requests, payload);
         const isWiki = payload.collections.includes('proj-wiki');
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ results: isWiki ? [] : [
@@ -224,7 +239,7 @@ test('recallVerifiedOnly 기본(true): wiki가 미검수 generated뿐이면 live
       req.on('data', chunk => { body += chunk; });
       req.on('end', () => {
         const payload = JSON.parse(body);
-        requests.push(payload);
+        recordQuery(requests, payload);
         const isWiki = payload.collections.includes('proj-wiki');
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ results: isWiki ? [
@@ -283,7 +298,7 @@ test('hierarchical recall does not duplicate raw backfill when raw also has no r
       req.setEncoding('utf8');
       req.on('data', chunk => { body += chunk; });
       req.on('end', () => {
-        requests.push(JSON.parse(body));
+        recordQuery(requests, JSON.parse(body));
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ results: [] }));
       });
@@ -335,7 +350,7 @@ test('hierarchical recall backfills raw when the only wiki hit is a contested ca
       req.on('data', chunk => { body += chunk; });
       req.on('end', () => {
         const payload = JSON.parse(body);
-        requests.push(payload);
+        recordQuery(requests, payload);
         const isWiki = payload.collections.includes('proj-wiki');
         res.writeHead(200, { 'Content-Type': 'application/json' });
         // wiki는 contested 카드 하나만(minScore 통과, exclude 대상), raw는 정상 문서.
@@ -401,7 +416,7 @@ test('hierarchical drops a wiki hit with unresolvable _collection and backfills 
       req.on('data', chunk => { body += chunk; });
       req.on('end', () => {
         const payload = JSON.parse(body);
-        requests.push(payload);
+        recordQuery(requests, payload);
         const isWiki = payload.collections.includes('proj-wiki');
         res.writeHead(200, { 'Content-Type': 'application/json' });
         // wiki 히트의 file이 슬래시/스킴 없어 _collection이 안 풀린다(unresolvable).
@@ -461,7 +476,7 @@ test('wikiOnly recall queries only wiki collections and emits the wiki result', 
       req.setEncoding('utf8');
       req.on('data', chunk => { body += chunk; });
       req.on('end', () => {
-        requests.push(JSON.parse(body));
+        recordQuery(requests, JSON.parse(body));
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ results: [
           { file: 'qmd://proj-wiki/.auto-context/wiki/decisions/config-layout.md', title: 'Config layout', score: 0.93 },
@@ -517,7 +532,7 @@ test('wikiOnly recall does NOT backfill raw when wiki has no results (differs fr
       req.setEncoding('utf8');
       req.on('data', chunk => { body += chunk; });
       req.on('end', () => {
-        requests.push(JSON.parse(body));
+        recordQuery(requests, JSON.parse(body));
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ results: [] }));
       });
@@ -568,7 +583,7 @@ test('wikiOnly recall makes no query and emits nothing when no wiki role is conf
       req.setEncoding('utf8');
       req.on('data', chunk => { body += chunk; });
       req.on('end', () => {
-        requests.push(JSON.parse(body));
+        recordQuery(requests, JSON.parse(body));
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ results: [
           { file: 'qmd://proj-docs/docs/raw-source.md', title: 'Raw source', score: 0.99 },
@@ -621,7 +636,7 @@ test('hierarchical recall backfills raw when wiki results are below minScore', a
       req.on('data', chunk => { body += chunk; });
       req.on('end', () => {
         const payload = JSON.parse(body);
-        requests.push(payload);
+        recordQuery(requests, payload);
         const isWiki = payload.collections.includes('proj-wiki');
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ results: isWiki ? [
@@ -684,7 +699,7 @@ test('hierarchical recall applies rawFallbackMinScore to raw backfill results', 
       req.on('data', chunk => { body += chunk; });
       req.on('end', () => {
         const payload = JSON.parse(body);
-        requests.push(payload);
+        recordQuery(requests, payload);
         const isWiki = payload.collections.includes('proj-wiki');
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ results: isWiki ? [] : [
@@ -749,7 +764,7 @@ test('hierarchical recall can relax raw fallback below the wiki minScore', async
       req.on('data', chunk => { body += chunk; });
       req.on('end', () => {
         const payload = JSON.parse(body);
-        requests.push(payload);
+        recordQuery(requests, payload);
         const isWiki = payload.collections.includes('proj-wiki');
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ results: isWiki ? [] : [

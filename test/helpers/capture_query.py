@@ -18,6 +18,7 @@ import tempfile
 import threading
 
 payloads: list[dict] = []
+probes: list[dict] = []
 
 
 class _Handler(http.server.BaseHTTPRequestHandler):
@@ -31,10 +32,23 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(length) if length else b"{}"
         try:
-            payloads.append(json.loads(raw))
+            payload = json.loads(raw)
         except json.JSONDecodeError:
-            payloads.append({"_unparsed": raw.decode("utf-8", "replace")})
-        body = json.dumps({"results": []}).encode("utf-8")
+            payload = {"_unparsed": raw.decode("utf-8", "replace")}
+        # 본 질의와 프로브를 갈라 담는다. 판정 기준은 **vec 엔트리 유무**다 —
+        # recall 이 보내는 질의 중 vec 을 포함하는 것은 본 질의뿐이고(DF 좁히기·lex
+        # 게이트 프로브는 lex 단독), payload 에 테스트 전용 표식을 넣으면 라이브
+        # 데몬 스키마와 갈린다.
+        searches = payload.get("searches") or []
+        is_probe = isinstance(searches, list) and not any(
+            isinstance(s, dict) and s.get("type") == "vec" for s in searches
+        )
+        (probes if is_probe else payloads).append(payload)
+        # DF 프로브에는 히트를 돌려준다 = "모든 term 이 코퍼스에 있다". 그래야 본 질의의
+        # lex 문자열이 위치 컷 기대값과 같아져, 이 헬퍼를 쓰는 기존 테스트가 term 선택
+        # 규칙이 아니라 **조립 규칙**(EP 분리·순서·dedup)만 계속 검증한다.
+        hit = [{"file": "stub/present.md", "score": 1.0}] if is_probe else []
+        body = json.dumps({"results": hit}).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -72,7 +86,7 @@ def main() -> int:
             timeout=30,
         )
     server.shutdown()
-    print(json.dumps({"queries": payloads}, ensure_ascii=False))
+    print(json.dumps({"queries": payloads, "probes": probes}, ensure_ascii=False))
     return 0
 
 
