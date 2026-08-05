@@ -286,6 +286,36 @@ def extract_keywords(text: str) -> list[str]:
 # 6 = EP 번호 3개 × 변형 2종 → payload 총 8개로 스키마 상한 안에 머문다.
 EP_SEARCH_BUDGET = 6
 
+# 일반 lex 문자열(`lexQueries[0]`)에 넣을 AND term 수 상한.
+#
+# **AND 를 OR 로 바꾸는 것이 아니다.** 남는 term 은 여전히 AND 로 결합되고, 검색을
+# 좁히는 그 동작은 의도된 것이다(CLAUDE.md "일반 키워드의 AND 결합은 유지한다").
+# 이 상한이 막는 것은 하나뿐이다: **어미 한 토큰이 질의 전체를 0건으로 만드는 것.**
+#
+# `KO_STOPWORDS` 는 조사는 잡지만 활용형 어미는 못 잡는다(`뭐였지`·`발생해`). 어간
+# 판정 없이 어미를 목록으로 넣으면 의미어를 잃으므로(그래서 활용형은 의도적으로 제외돼
+# 있다) 목록을 늘리는 방향은 형태소 분석기 없이는 끝나지 않는다. term 수를 자르면
+# 어미가 **구조적으로** 컷 뒤로 밀린다 — 어미는 문장 끝에 오고 키워드 추출은 등장
+# 순서를 보존하기 때문이다.
+#
+# 라이브 service-engineering-wiki 색인(limit 8) 실측:
+#
+#   | lexQueries[0]                  | 앞 2개 | 앞 3개 | 전체(상한 전) |
+#   |--------------------------------|-------:|-------:|--------------:|
+#   | sendbird 장애 원인 뭐였지      |      8 |  **8** |         **0** |
+#   | VN 콜백 이벤트 발생해          |      8 |  **7** |         **0** |
+#   | 중복 판정                      |      8 |  **8** |             8 |
+#   | 오늘 점심 먹을까 고민이네      |      0 |  **0** |             0 |
+#   | python list comprehension 문법 |      0 |  **0** |             0 |
+#   | useEffect 리액트 의존성 배열 규칙 |   0 |  **0** |             0 |
+#
+# 관련 3/3 통과 · 무관 3/3 차단. 2가 아니라 3인 이유: 결과가 같으면서 "AND 로 좁힌다"는
+# 기존 의도에 더 가깝다. term 이 3개 이하면 이 상한은 아무 일도 하지 않는다.
+#
+# 이 값은 **EP 변형(`lexQueries[1:]`)에 적용되지 않는다** — EP 는 독립 lex search 로
+# 나가 AND 가 아니라 RRF 융합(OR 효과)이고, 그쪽 상한은 `EP_SEARCH_BUDGET` 이다.
+GENERAL_LEX_TERM_CAP = 3
+
 
 _EP_MENTION_RE = re.compile(
     r"\bEP\s*0*(\d{1,3})\b|\b0*(\d{1,3})\s*화", re.IGNORECASE
@@ -413,7 +443,12 @@ def build_lexical_terms(prompt: str, patterns: list[str]) -> dict:
     # 일반 문자열은 항상 lexQueries[0] 이다(빈 문자열이어도) — ep 가 꺼진 프로젝트의
     # payload 모양이 바뀌지 않게 하고, structuredSearch 의 "첫 리스트 2x 가중" 대상도
     # 기존과 같이 유지한다. 빈 lex 는 결과 0건이라 rankedList 로 push 되지도 않는다.
-    general_query = " ".join(t for t in deduped if t.lower() not in ep_set)
+    # AND term 수는 GENERAL_LEX_TERM_CAP 까지만. AND 결합 자체는 유지하고(좁히는 것은
+    # 의도된 동작) 문장 끝의 활용형 어미가 질의를 통째로 0건으로 만드는 것만 막는다 —
+    # 근거·실측표는 그 상수 주석. `lexicalTerms`/`keywords` 계약은 건드리지 않는다
+    # (상한은 lex **문자열**에만 걸린다. shadow 진단의 `lex_terms` 집계도 그대로다).
+    general_terms = [t for t in deduped if t.lower() not in ep_set]
+    general_query = " ".join(general_terms[:GENERAL_LEX_TERM_CAP])
 
     return {
         "keywords": keywords,

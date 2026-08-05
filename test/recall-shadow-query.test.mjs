@@ -25,11 +25,19 @@ function shadowLine(result) {
   return result.log.filter((e) => e.event === 'qmd_recall_shadow');
 }
 
+// 본 recall(index 0) 바로 뒤에 **lex 게이트 프로브**(index 1)가 온다 — 무관 주입 차단용
+// lex 단독 질의이고 진단이 아니라 제품 경로다(recall 실행당 최대 1회, 주입할 카드 본문·
+// 원문 경로가 있을 때만). shadow 진단 질의는 그 뒤로 밀린다.
+const GATE_PROBE = 1;
+const SHADOW0 = 1 + GATE_PROBE;
+
 test('shadow env 없으면 추가 query 0건 + shadow 로그 라인 없음', () => {
   const r = probe({ log: true });
   assert.equal(r.exit_code, 0);
   assert.match(r.stdout, /card\.md/, '본 recall은 정상 동작');
-  assert.equal(r.queries.length, 1, 'shadow off면 /query는 본 recall 1건만');
+  assert.equal(r.queries.length, 1 + GATE_PROBE,
+    'shadow off면 /query는 본 recall + lex 게이트 프로브뿐');
+  assert.equal(kinds(r.queries[GATE_PROBE]), 'lex', '게이트 프로브는 lex 단독');
   assert.equal(shadowLine(r).length, 0, 'shadow 라인 없음');
   assert.equal(
     r.log.filter((e) => e.event === 'qmd_recall_selection').length, 1,
@@ -48,14 +56,14 @@ test('shadow on: rank 포함 진단 라인 + lex/vec 분리 질의 + raw 대조'
   JSON.parse(r.stdout.trim()); // stdout은 여전히 순수 훅 JSON 한 줄
 
   // 본 wiki query 1 + lex-only + vec-only + raw hybrid = 4
-  assert.equal(r.queries.length, 4, `추가 shadow query 3건 (실제 ${r.queries.length})`);
+  assert.equal(r.queries.length, SHADOW0 + 3, `추가 shadow query 3건 (실제 ${r.queries.length})`);
   assert.equal(kinds(r.queries[0]), 'lex+vec', '본 recall은 하이브리드');
-  assert.equal(kinds(r.queries[1]), 'lex', 'lex 단독 진단 질의');
-  assert.equal(kinds(r.queries[2]), 'vec', 'vec 단독 진단 질의');
-  assert.deepEqual(r.queries[3].collections, ['proj'], 'raw 컬렉션 대조 질의');
+  assert.equal(kinds(r.queries[SHADOW0]), 'lex', 'lex 단독 진단 질의');
+  assert.equal(kinds(r.queries[SHADOW0 + 1]), 'vec', 'vec 단독 진단 질의');
+  assert.deepEqual(r.queries[SHADOW0 + 2].collections, ['proj'], 'raw 컬렉션 대조 질의');
   assert.deepEqual(r.queries[0].collections, ['proj-wiki'], '본 recall은 wiki만 (wikiOnly)');
   // 진단 질의는 본 recall 의 queryTimeout(기본 5s)을 물려받지 않는다.
-  for (const q of r.queries.slice(1)) {
+  for (const q of r.queries.slice(SHADOW0)) {
     assert.ok(q.timeout <= 1.0, `shadow timeout이 짧아야 함 (${q.timeout})`);
   }
   assert.ok(r.queries[0].timeout > 1.0, '본 recall timeout은 줄어들지 않아야 함');
@@ -69,7 +77,7 @@ test('shadow on: rank 포함 진단 라인 + lex/vec 분리 질의 + raw 대조'
   assert.ok(s.lex_terms > 0, 'lex term 수가 기록되어야 함');
   assert.equal(typeof s.lex_query, 'string');
   assert.ok(s.lex_query.length > 0, '실제로 보낸 lex 쿼리 문자열이 남아야 함');
-  assert.equal(s.lex_query, r.queries[1].searches[0].query, '로그의 lex 쿼리 == 실제 전송값');
+  assert.equal(s.lex_query, r.queries[SHADOW0].searches[0].query, '로그의 lex 쿼리 == 실제 전송값');
   assert.deepEqual(s.queried_collections, ['proj-wiki']);
   assert.deepEqual(s.raw_collections, ['proj']);
 
@@ -208,12 +216,14 @@ test('shadow: EP 변형이 독립 lex 엔트리로 분리된 payload 를 그대�
   assert.ok(!/EP/i.test(primaryLex[0]), `일반 lex 에 EP 가 남으면 AND 가 좁아진다: ${primaryLex[0]}`);
 
   // lex-only 진단 질의는 본 recall 의 lex 엔트리 **전부**를 보낸다(단일 문자열 가정 금지).
-  assert.equal(kinds(r.queries[1]), 'lex+lex+lex');
-  assert.deepEqual(r.queries[1].searches.map((s) => s.query), primaryLex);
+  assert.equal(kinds(r.queries[SHADOW0]), 'lex+lex+lex');
+  assert.deepEqual(r.queries[SHADOW0].searches.map((s) => s.query), primaryLex);
   // raw 대조 질의도 같은 lex 구성 + vec.
-  assert.equal(kinds(r.queries[3]), 'lex+lex+lex+vec');
+  assert.equal(kinds(r.queries[SHADOW0 + 2]), 'lex+lex+lex+vec');
   // 분리해도 shadow 질의 건수는 늘지 않는다(데몬은 single-thread).
-  assert.equal(r.queries.length, 4);
+  assert.equal(r.queries.length, SHADOW0 + 3);
+  // 게이트 프로브도 EP 변형을 포함한 lex 엔트리 전부를 보낸다(본 질의와 같은 구성).
+  assert.deepEqual(r.queries[GATE_PROBE].searches.map((s) => s.query), primaryLex);
 
   const s = shadowLine(r)[0];
   assert.equal(s.lex_query, primaryLex[0], 'lex_query 는 일반 lex 문자열');
@@ -282,11 +292,12 @@ test('shadow: 총 예산(2.5s) 초과 시 남은 질의를 아예 보내지 않�
   assert.equal(s.vec_only.status, 'unavailable');
   assert.equal(s.raw.status, 'budget_exhausted', '예산 소진 후 남은 질의는 skip');
 
-  // 본 recall 1 + lex + vec = 3. raw는 전송조차 되지 않아야 한다.
-  assert.equal(r.queries.length, 3, `raw 질의가 전송됨 (${r.queries.length}건)`);
+  // 본 recall 1 + 게이트 프로브 1 + shadow lex + shadow vec = 4. raw는 전송조차 되지 않아야 한다.
+  assert.equal(r.queries.length, SHADOW0 + 2, `raw 질의가 전송됨 (${r.queries.length}건)`);
 
-  // 전체 상한: python 기동 + 본 recall + 예산 2.5s. CI 여유를 둬도 5s 안이어야 하고,
-  // 이 값이면 예산이 깨질 때(예: 질의당 1.4s가 3회) 반드시 실패한다.
+  // 전체 상한: python 기동 + 본 recall + 게이트 프로브(LEX_PROBE_TIMEOUT 1.0s로 유계,
+  // 이 시나리오에서는 항상 그 상한까지 기다린다) + shadow 예산 2.5s. CI 여유를 둬도 5s
+  // 안이어야 하고, 이 값이면 예산이 깨질 때(예: 질의당 1.4s가 3회) 반드시 실패한다.
   assert.ok(elapsed < 5000, `shadow 예산 상한 초과 (${elapsed}ms)`);
 });
 
@@ -294,7 +305,7 @@ test('QMD_RECALL_LOG 없으면 shadow env가 켜져 있어도 완전 no-op', () 
   const r = probe({ shadow: true }); // log:false → QMD_RECALL_LOG 미설정
   assert.equal(r.exit_code, 0);
   assert.match(r.stdout, /card\.md/);
-  assert.equal(r.queries.length, 1, '로그가 없으면 추가 query 0건');
+  assert.equal(r.queries.length, 1 + GATE_PROBE, '로그가 없으면 shadow 추가 query 0건');
   assert.equal(r.log_exists, false, '로그 파일이 생기지 않음');
 });
 

@@ -284,7 +284,10 @@ test('recall 경로: ep-on 이면 EP 변형이 각각 독립 lex 엔트리로 �
     assert.ok(!/\s/.test(q), `EP 엔트리에 다른 term 이 합쳐졌다 (AND 결합): ${q}`);
   }
   // 일반 키워드는 여전히 하나의 lex 문자열이다 — AND 로 좁히는 것은 의도된 동작.
-  assert.equal(lex[0], '서미래 먹은 약과 부작용');
+  // term 수만 GENERAL_LEX_TERM_CAP(3)으로 잘린다: `부작용`이 컷 뒤로 밀려 AND 조건이
+  // 하나 느슨해진다(4-term AND 는 서사 코퍼스에서 0건이 되기 쉽다). EP 변형 엔트리는
+  // 이 상한의 대상이 아니므로 위 slice(1) 단정이 그대로 유지된다.
+  assert.equal(lex[0], '서미래 먹은 약과');
   assert.ok(!/EP/i.test(lex[0]), `EP 표기가 일반 문자열에 남으면 AND 가 다시 좁아진다: ${lex[0]}`);
   // vec 는 프롬프트 원문 그대로 1건 유지.
   assert.deepEqual(searches.filter(s => s.type === 'vec').map(s => s.query),
@@ -294,7 +297,8 @@ test('recall 경로: ep-on 이면 EP 변형이 각각 독립 lex 엔트리로 �
 test('recall 경로: ep-off 면 payload 가 기존과 동일하다 (lex 1 + vec 1)', () => {
   const searches = recallSearches('EP12 에서 서미래가 먹은 약과 부작용', { collections: ['sample'] });
   assert.deepEqual(searches, [
-    { type: 'lex', query: '서미래 먹은 약과 부작용' },
+    // lex term 3개 상한(GENERAL_LEX_TERM_CAP) — 엔트리 **수**는 예전 그대로 1개다.
+    { type: 'lex', query: '서미래 먹은 약과' },
     { type: 'vec', query: 'EP12 에서 서미래가 먹은 약과 부작용' },
   ]);
 });

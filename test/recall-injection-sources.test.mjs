@@ -678,7 +678,7 @@ test('sources 가 없는 카드({kind: unknown})는 안전하게 빈 결과를 �
     const ctx = run();
     assert.deepEqual(sourceLines(ctx), []);
     assert.doesNotMatch(ctx, /↳/, '원문 경로가 없으면 안내에도 ↳ 가 등장하지 않는다');
-    assert.match(ctx, /요약으로 충분하면 파일을 열지 말고, 부족할 때만 위 경로를 Read\./, '1단계 안내문 그대로');
+    assert.match(ctx, /부족할 때만 위 경로를 Read\./, '원문 경로가 없으면 2단 안내(축약본)');
     const sel = selection(log);
     assert.equal(sel.source_entries, 1);
     assert.equal(sel.sources_injected, 0);
@@ -849,12 +849,11 @@ test('안내문이 ↳ 를 설명하고 "카드 먼저, 원문은 대조시" 우
   }, ({ write, run }) => {
     write([{ file: 'proj-wiki/decisions/card.md', title: 'Summary', score: 1 }]);
     const ctx = run();
-    const guide = ctx.split('\n').find((l) => l.includes('요약으로 충분하면'));
-    assert.match(guide, /`  ↳` 원문 경로를 Read\.$/, '원문은 마지막 우선순위');
-    assert.match(guide, /요약으로 충분하면 파일을 열지 말고/, '카드 본문이 먼저');
-    assert.match(guide, /부족할 때만 위 경로를, 카드와 대조가 필요할 때만/, '3단 우선순위');
-    // 안내문은 매 프롬프트에 붙는다 — 새 문장을 추가하지 않고 기존 문장의 마지막 절만 바꾼다.
-    assert.equal(ctx.split('\n').filter((l) => l.includes('충분하면')).length, 1);
+    const guide = ctx.split('\n').find((l) => l.includes('줄은 위 카드 본문 인용'));
+    assert.match(guide, /`  ↳` 원문을 Read\.$/, '원문은 마지막 우선순위');
+    assert.match(guide, /부족할 때만 위 경로를, 대조는/, '3단 우선순위(카드 본문 → 카드 파일 → 원문)');
+    // 안내문은 매 프롬프트에 붙는다 — 축약해도 문장 수는 늘리지 않는다.
+    assert.equal(ctx.split('\n').filter((l) => l.includes('부족할 때만')).length, 1);
   });
 });
 
@@ -868,7 +867,7 @@ test('본문이 없고 원문 경로만 있는 경우에도 ↳ 안내가 붙는
     const ctx = run();
     assert.deepEqual(sourceLines(ctx), ['docs/a.md']);
     assert.doesNotMatch(ctx, /본문은 주입되지 않는다/);
-    assert.match(ctx, /`  ↳`로 시작하는 줄은 바로 위 항목 카드가 근거로 삼은 원문 경로다/);
+    assert.match(ctx, /`  ↳` 줄은 위 카드의 원문 경로\./);
     assert.match(ctx, /대조가 필요할 때만 Read\./);
   });
 });

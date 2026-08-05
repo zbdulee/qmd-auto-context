@@ -34,13 +34,22 @@ function selection(result) {
   return lines[0];
 }
 
+// raw 컬렉션으로 나간 질의만 센다. 본 recall 뒤에는 lex 게이트 프로브(무관 주입 차단용
+// lex 단독 질의, 주입할 본문이 있을 때 recall 실행당 1회)가 붙으므로 총 건수로는
+// "backfill이 돌았는가"를 판정할 수 없다.
+function rawQueries(r) {
+  return r.queries.filter((q) => (q.collections || []).includes('proj'));
+}
+
 test('hierarchical: wiki rescue가 raw backfill보다 먼저 시도된다 (raw 질의 없음)', () => {
   const r = probe({
     scenario: 'filtered-out',
     settings: { recallStrategy: 'hierarchical', minScore: 0.8 },
   });
   assert.match(r.stdout, /card\.md/, '컷 밖 검수 wiki 카드가 구제되어야 함');
-  assert.equal(r.queries.length, 1, 'wiki rescue가 성공하면 raw는 질의조차 하지 않는다');
+  // queries[1]은 lex 게이트 프로브(주입할 본문이 있을 때 recall 실행당 1회). raw 질의가
+  // 아니라는 것을 컬렉션으로 못박는다 — 건수만 세면 프로브와 backfill이 구분되지 않는다.
+  assert.equal(rawQueries(r).length, 0, 'wiki rescue가 성공하면 raw는 질의조차 하지 않는다');
   const s = selection(r);
   assert.equal(s.reason, 'selected');
   assert.equal(s.selected, 1, '정확히 1건');
@@ -54,7 +63,7 @@ test('hierarchical: eligible wiki가 전혀 없을 때만 raw backfill로 넘어
     scenario: 'all-unverified',
     settings: { recallStrategy: 'hierarchical', minScore: 0.8 },
   });
-  assert.equal(r.queries.length, 2, 'wiki에 살릴 것이 없으면 raw를 질의한다');
+  assert.equal(rawQueries(r).length, 1, 'wiki에 살릴 것이 없으면 raw를 질의한다');
   assert.deepEqual(r.queries[0].collections, ['proj-wiki']);
   assert.deepEqual(r.queries[1].collections, ['proj']);
   assert.match(r.stdout, /raw\.md/, 'raw 원문으로 degrade');
@@ -139,7 +148,7 @@ test('EP promotion과 rescue가 겹쳐도 rescued_original_rank는 promotion 전
 
 test('wikiOnly: rescue가 raw를 surface하지 않는다', () => {
   const r = probe({ scenario: 'filtered-out', settings: { minScore: 0.8 } });
-  assert.equal(r.queries.length, 1, 'wikiOnly는 raw를 질의하지 않는다');
+  assert.equal(rawQueries(r).length, 0, 'wikiOnly는 raw를 질의하지 않는다');
   assert.match(r.stdout, /card\.md/);
   assert.doesNotMatch(r.stdout, /raw\.md|other\.md|third\.md/, 'raw 누출 금지');
   assert.doesNotMatch(r.stdout, /\[raw\]/);
@@ -149,7 +158,7 @@ test('wikiOnly: rescue가 raw를 surface하지 않는다', () => {
 test('wikiOnly: 후보 전체가 미검수면 rescue 없이 0건 (raw로 새지 않는다)', () => {
   const r = probe({ scenario: 'all-unverified', settings: { minScore: 0.8 } });
   assert.equal(r.stdout.trim(), '', '미검수는 rescue 대상이 아니다');
-  assert.equal(r.queries.length, 1, 'raw 질의 없음');
+  assert.equal(rawQueries(r).length, 0, 'raw 질의 없음');
   const s = selection(r);
   assert.equal(s.reason, 'no_results_after_filter');
   assert.equal(s.dropped_unverified, 1, '컷 통과한 1위가 미검수로 제거된 수는 그대로');

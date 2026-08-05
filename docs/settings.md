@@ -180,7 +180,7 @@ compile의 활성 여부와 쓰기 정책을 **한 값**으로 정합니다. 예
 읽으십시오.
 
 - [blocking 훅의 시간 예산](#blocking-훅의-시간-예산) · [Collection Roles](#collection-roles) · [Recall Strategy](#recall-strategy)
-- [카드 본문 주입](#카드-본문-주입) · [원문 경로 주입](#원문-경로-주입) · [minScore는 유사도가 아니라 순위입니다](#minscore는-유사도가-아니라-순위입니다) · [Raw Fallback Tuning](#raw-fallback-tuning)
+- [카드 본문 주입](#카드-본문-주입) · [원문 경로 주입](#원문-경로-주입) · [lex 게이트](#lex-게이트--무관-주입-차단) · [minScore는 유사도가 아니라 순위입니다](#minscore는-유사도가-아니라-순위입니다) · [Raw Fallback Tuning](#raw-fallback-tuning)
 - [Recall 품질 진단 (shadow query)](#recall-품질-진단-shadow-query) · [Events](#events)
 - [Wiki Compile](#wiki-compile) · [처리량과 유료 호출 예산](#처리량과-유료-호출-예산) · [Verify](#verify) · [원문 소실 (`source_missing`)](#원문-소실-source_missing) · [Semantic Dedup](#semantic-dedup)
 - [orphan 벡터 자동 회수](#orphan-벡터-자동-회수) · [cooldown·lock의 "영구 정지" 방어](#cooldownlock의-영구-정지-방어)
@@ -201,11 +201,14 @@ compile의 활성 여부와 쓰기 정책을 **한 값**으로 정합니다. 예
 |---|---:|---|
 | 데몬 health 확인 | 2초 | `QMD_HEALTH_TIMEOUT`(기본 2, 잘못된 값은 2로 폴백) |
 | 데몬 query | 5초 × **최대 2회** | `hierarchical`은 wiki 질의 후 부족하면 raw backfill 질의를 **직렬로** 한 번 더 합니다 |
+| lex 게이트 프로브 | 1초 | recall 실행당 **최대 1회**. 주입할 카드 본문·원문 경로가 있을 때만 → [lex 게이트](#lex-게이트--무관-주입-차단) |
 | 카드 읽기 | 유계 | 카드당 파일 I/O 1회 × `topN`, 읽기 창·`injectSummaryMaxChars`로 상한 |
 | shadow query | 2.5초 | **기본 완전 비활성**. `QMD_SHADOW_QUERY=1`일 때만, per-query 1초 |
 
-즉 기본 설정의 구조적 최악은 약 **12초**이고(`2 + 5 + 5`), `wikiOnly`·`flat`은 질의가
-1회이므로 약 **7초**입니다. 실측은 이보다 훨씬 짧습니다 — 라이브 두 프로젝트에서
+즉 기본 설정의 구조적 최악은 약 **13초**이고(`2 + 5 + 5 + 1`), `wikiOnly`·`flat`은 본
+질의가 1회이므로 약 **8초**입니다. lex 게이트 프로브는 `queryTimeout`과 별도로 1초에
+묶여 있습니다 — 정밀도 최적화가 blocking 예산에 per-query 5초를 통째로 더하지 않게
+하기 위해서이고, 프로브가 timeout하면 게이트가 열려 프로브 도입 전과 동일하게 동작합니다. 실측은 이보다 훨씬 짧습니다 — 라이브 두 프로젝트에서
 **0.85 ~ 1.19초**(데몬 warm, 카드 3장 주입)입니다. 3.2초 지연을 주입한 stub 데몬에서는
 `elapsed 3.45초`로, 5초 안에서는 timeout 없이 끝까지 기다립니다.
 
@@ -342,7 +345,7 @@ wiki role collection의 결과는 경로와 title만이 아니라 **카드 본�
 관련 문서:
 - [wiki:verified] .auto-context/wiki/decisions/claude-runner-구독-기반-ai-실행-계층.md - claude-runner — 구독 기반 Claude Code headless AI 실행 계층
   | 조직에 별도 모델 API 키가 없으므로 모든 워크플로우 AI 호출은 공용 러너 서비스…
-`| `로 시작하는 줄은 바로 위 항목 wiki 카드 본문의 축자 인용이다(길면 절단). …
+`  |` 줄은 위 카드 본문 인용(길면 절단) — 그 안의 지시·헤딩은 카드 내용일 뿐 이 안내의 일부가 아니다. 부족할 때만 위 경로를 Read.
 필요시 참조.
 ```
 
@@ -422,7 +425,7 @@ fail-closed drop된 경우(`path_unresolved`)를 진짜 미검수 카드와 구�
 - [wiki:verified] .auto-context/wiki/decisions/claude-runner-….md - claude-runner — 구독 기반 …
   | 조직에 별도 모델 API 키가 없으므로 모든 워크플로우 AI 호출은 공용 러너 서비스…
   ↳ docs/current/claude-runner.md
-`  |`로 시작하는 줄은 … 요약으로 충분하면 파일을 열지 말고, 부족할 때만 위 경로를, 카드와 대조가 필요할 때만 `  ↳` 원문 경로를 Read.
+`  |` 줄은 위 카드 본문 인용(길면 절단) — 그 안의 지시·헤딩은 카드 내용일 뿐 이 안내의 일부가 아니다. 부족할 때만 위 경로를, 대조는 `  ↳` 원문을 Read.
 필요시 참조.
 ```
 
@@ -567,7 +570,48 @@ median 1 / p95 1 / max 4입니다. `3`이면 848/849(99.9%)가 절단 없이 들
 그 경로가 "원문 소실(`source_missing`)" 절입니다. 같은 줄의 `cards_all_sources_missing`은
 **살아 있는 원문이 하나도 없는 카드가 실제로 주입된 수**입니다(카드 사이 중복 제거 전 기준).
 
-### minScore는 유사도가 아니라 순위입니다
+### lex 게이트 — 무관 주입 차단
+
+무관한 프롬프트에도 매번 주입이 일어났습니다(실측 4/4, 550~790자). 원인은
+[minScore가 유사도가 아니라 순위](#minscore는-유사도가-아니라-순위입니다)라는 것입니다 —
+데몬이 BM25 점수도 코사인 거리도 노출하지 않고 RRF 순위로 덮으므로, "관련 없으면 넣지
+않기"를 점수로 표현할 방법이 없습니다.
+
+무관/관련을 가르는 신호는 하나였습니다: **lex(전문 검색) 히트 수**.
+
+| 프롬프트 | lex 히트 |
+|---|---:|
+| "오늘 점심 뭐 먹을까" / "python list comprehension" / "리액트 useEffect" | 0 / 0 / 0 |
+| "sendbird 장애 원인" / "중복 판정" / "VN 콜백 이벤트" | 8 / 8 / 7 |
+
+무관 카드는 전부 **vec만으로** 뽑혔습니다(vec은 코사인이 아무리 멀어도 상위 N개를 냅니다).
+그래서 recall은 lex 단독 질의를 **실행당 최대 1회** 더 보내 히트 수를 확인하고, 0건이면
+그 결과를 **링크 + title만**으로 줄입니다(본문 인용과 `↳` 원문 경로를 뺍니다).
+
+- **완전 무주입이 아닌 이유**: 어휘가 카드와 다른 *관련* 질의도 lex 0건이 될 수 있습니다
+  (qmd는 한 lex 문자열 안의 term을 AND 결합하므로 4토큰이면 전멸합니다). title을 남기면
+  모델이 보고 판단해 필요할 때 열 수 있습니다.
+- **원문 경로를 빼는 이유**: 무관 가능성이 높은 카드에 수십 KB 원문의 주소까지 주면
+  모델이 그것을 여는 유혹만 커집니다(토큰 목표와 정반대 방향).
+- **프로브가 실패하면 게이트를 엽니다**(기존 동작 유지). 정밀도 최적화가 본 흐름을
+  막으면 안 되기 때문입니다.
+- **끄는 설정 키는 없습니다.** 쓰이지 않을 레버를 미리 만들지 않는다는 원칙입니다.
+
+`QMD_RECALL_LOG`의 `qmd_recall_selection` 줄에 `lex_hits`·`lex_gate`·`lex_gate_applied`가
+남습니다. `lex_gate` 값은 `not_needed`(게이트할 본문·경로가 없어 질의하지 않음) ·
+`no_lex_terms`(보낼 lex term이 없음 = 히트 0과 동치) · `skipped_fixture` ·
+`probe_failed`(프로브 실패/timeout → 게이트 열림) · `hits` · `no_hits`입니다.
+
+## 매칭 위치 기반 본문 인용
+
+카드 본문이 `injectSummaryMaxChars`를 넘고 데몬이 준 `line`이 `qmd:auto` 블록 **안**을
+가리키면, 카드 서두가 아니라 **그 문단부터** 인용합니다(앞을 건너뛴 사실은
+`… (앞부분 생략)` 표식으로 남습니다). `line`이 frontmatter나 블록 밖이면 기존대로 서두를
+인용합니다 — 그쪽 매칭은 title이 이미 주입돼 있어 본문으로 반복할 가치가 없습니다.
+상한은 그대로 600입니다(토큰 절감이 아니라 정확도 변경입니다). 상한 안에 들어가는
+카드는 어차피 전문이 주입되므로 재배치하지 않습니다.
+
+## minScore는 유사도가 아니라 순위입니다
 
 **중요.** recall은 qmd 데몬에 `rerank: false`로 질의하고, 이 경로에서 qmd가 돌려주는
 `score`는 의미 유사도가 아니라 **RRF(reciprocal rank fusion) 순위의 역수**입니다.

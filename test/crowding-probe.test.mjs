@@ -41,8 +41,8 @@ test('어떤 hook 진입점도 crowding_probe 를 부르지 않는다 (blocking 
 test('recall 이 보내는 limit 과 측정 기준 limit 이 같은 상수다', () => {
   const recall = fs.readFileSync('core/recall.py', 'utf8');
   assert.match(recall, /^DAEMON_QUERY_LIMIT = 8$/m);
-  assert.equal((recall.match(/"limit": DAEMON_QUERY_LIMIT,/g) || []).length, 2,
-    'recall 본 질의와 shadow 질의 둘 다 상수를 쓴다');
+  assert.equal((recall.match(/"limit": DAEMON_QUERY_LIMIT,/g) || []).length, 3,
+    'recall 본 질의 · shadow 질의 · lex 게이트 프로브 셋 다 상수를 쓴다');
   assert.ok(!/"limit": 8,/.test(recall), '리터럴 8 이 남아 있으면 측정과 갈린다');
   const probe = fs.readFileSync('core/crowding_probe.py', 'utf8');
   assert.match(probe, /qmd_recall\.DAEMON_QUERY_LIMIT/,
