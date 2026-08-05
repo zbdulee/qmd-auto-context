@@ -16,6 +16,7 @@ KICK_LOCK="${QMD_WORKER_KICK_LOCKDIR:-$STATE_DIR/index-kick.lock.d}"
 COMPILE_KICK_LOCK="${QMD_COMPILE_WORKER_KICK_LOCKDIR:-$STATE_DIR/wiki-compile-kick.lock.d}"
 COMPILE_RETRY_LOCK="${QMD_COMPILE_RETRY_LOCKDIR:-$STATE_DIR/wiki-compile-retry.lock.d}"
 START_LOCK="${QMD_DAEMON_START_LOCKDIR:-$STATE_DIR/daemon-start.lock.d}"
+RELOAD_LOCK="${QMD_DAEMON_RELOAD_LOCKDIR:-$STATE_DIR/daemon-reload.lock.d}"
 REQUIRED_QMD_VERSION="${QMD_REQUIRED_VERSION:-2.5.3}"
 SUPPORTED_QMD_MAJOR="${QMD_SUPPORTED_MAJOR:-2}"
 
@@ -119,7 +120,14 @@ pid_is_daemon() {
   pid_alive "$pid" || return 1
   cmd="$(pid_command "$pid")"
   printf '%s' "$cmd" | grep -q "mcp --http" || return 1
-  printf '%s' "$cmd" | grep -q -- "--port $PORT" || return 1
+  # 포트는 단어 경계까지 봐야 한다 — grep "--port $PORT"는 접두 매칭이라
+  # PORT=1이 `--port 1234` 데몬을 자기 것으로 오판하고 남의 프로세스에 TERM을 보낸다.
+  # case 패턴이라 PORT에 정규식 메타문자가 들어와도 안전하다.
+  case " $cmd " in
+    *" --port $PORT "*|*" --port=$PORT "*) ;;
+    *) return 1 ;;
+  esac
+  return 0
 }
 
 pid_is_starting_daemon() {
@@ -136,9 +144,66 @@ read_pid() {
   cat "$PID_FILE" 2>/dev/null || true
 }
 
+# 포트를 LISTEN 중인 데몬 pid를 찾는다(발견은 항상 pid_is_daemon 재검증을 거친다).
+# lsof 우선 — 기본적으로 자기 소유 프로세스만 보이고 "이 포트를 실제로 쥔 자"를 답한다.
+# pgrep은 폴백이며 uid를 제한하고 cmdline에 qmd 진입점이 있는지까지 본다("mcp --http"만으로는
+# 에이전트 CLI argv(예: 이 문자열을 인자로 든 명령)에 오탐한다). 둘 다 없으면 조용히 빈 문자열.
+discover_daemon_pid() {
+  local pid
+  if command -v lsof >/dev/null 2>&1; then
+    # 한 포트의 LISTEN 소유자는 사실상 1건이라 첫 줄만 본다. (개행이 kill로 흘러가는 것은
+    # for의 단어분리가 이미 막는다 — 아래 pgrep 분기가 그래서 head 없이 전수 검증한다.)
+    for pid in $(lsof -ti "tcp:$PORT" -sTCP:LISTEN 2>/dev/null | head -n1); do
+      case "$pid" in ''|*[!0-9]*) continue ;; esac
+      if pid_is_daemon "$pid"; then
+        printf '%s' "$pid"
+        return 0
+      fi
+    done
+  fi
+  if command -v pgrep >/dev/null 2>&1; then
+    # 여기서는 head -n1로 자르지 않는다 — 다른 포트의 qmd 데몬(사용자의 :8483)이 먼저
+    # 나오는 것이 정상이라 첫 줄만 보면 우리 포트의 데몬을 놓친다. 후보를 전부 검증하고
+    # 통과한 **하나만** 반환하므로 개행 포함 값이 kill로 흘러갈 여지는 없다.
+    for pid in $(pgrep -u "$(id -u)" -f "mcp --http" 2>/dev/null); do
+      case "$pid" in ''|*[!0-9]*) continue ;; esac
+      pid_is_daemon "$pid" || continue
+      case "$(pid_command "$pid")" in
+        *dist/cli/qmd.js*|*qmd*) printf '%s' "$pid"; return 0 ;;
+      esac
+    done
+  fi
+  return 0
+}
+
+# 데몬 pid 조회의 단일 진입점. **핵심은 죽이기가 아니라 추적 복구(입양)다.**
+# PID_FILE은 start_daemon이 실제로 스폰할 때만 쓰이는데 스폰은 health 실패 시에만 일어나므로,
+# 데몬이 살아 있는 한 파일이 한 번 지워지면 영원히 복구되지 않았다. 그 상태에서 reload는
+# 로그 한 줄 없는 no-op이 되고(추적 유실), start_daemon은 살아 있는 포트에 재스폰해 EADDRINUSE를 냈다.
+daemon_pid() {
+  local pid
+  pid="$(read_pid)"
+  if pid_is_daemon "$pid"; then
+    printf '%s' "$pid"
+    return 0
+  fi
+  pid="$(discover_daemon_pid)"
+  if [ -n "$pid" ]; then
+    echo "$pid" >"$PID_FILE" 2>/dev/null || true
+    log "daemon adopted pid=$pid port=$PORT"
+    printf '%s' "$pid"
+  fi
+  return 0
+}
+
 start_daemon() {
   check_qmd >/dev/null 2>&1 || return 0
-  health && return 0
+  if health; then
+    # 살아 있는데 추적이 끊긴 경우에만 발견 비용(lsof/pgrep)을 낸다. 입양이 성공하면
+    # PID_FILE이 유효해져 이후 호출은 ps 한 번으로 끝난다(훅마다 lsof를 돌리지 않는다).
+    pid_is_daemon "$(read_pid)" || daemon_pid >/dev/null
+    return 0
+  fi
   if ! mkdir "$START_LOCK" 2>/dev/null; then
     if [ -n "$(find "$START_LOCK" -maxdepth 0 -mmin +10 2>/dev/null)" ]; then
       rmdir "$START_LOCK" 2>/dev/null || true
@@ -149,8 +214,14 @@ start_daemon() {
     fi
   fi
   local pid
-  pid="$(read_pid)"
-  if pid_is_daemon "$pid" || pid_is_starting_daemon "$pid"; then
+  if pid_is_starting_daemon "$(read_pid)"; then
+    rmdir "$START_LOCK" 2>/dev/null || true
+    return 0
+  fi
+  # daemon_pid는 포트로 살아 있는 데몬을 발견하면 PID_FILE에 다시 써 넣는다(입양).
+  # 이 입양이 없으면 pid 파일이 비었을 때 살아 있는 포트에 재스폰해 EADDRINUSE가 반복된다.
+  pid="$(daemon_pid)"
+  if [ -n "$pid" ]; then
     rmdir "$START_LOCK" 2>/dev/null || true
     return 0
   fi
@@ -210,7 +281,11 @@ warm() {
 }
 
 rotate() {
-  QMD_DAEMON_PORT="$PORT" QMD_DAEMON_PID="$PID_FILE" QMD_DAEMON_LOG="$DAEMON_LOG" bash "$LOGROTATE_SCRIPT" >/dev/null 2>&1 || true
+  # QMD_BACKEND_MANAGER를 넘기지 않던 동안 logrotate.sh의 첫 branch(manager reload)가
+  # **구조적으로 도달 불가**였다 — 호출부 3곳(run-hook·update skill·hermes bridge)이 전부
+  # export 타이밍/상속에 의존해 비어 있었다. 여기서 직접 넘기는 것이 SSOT다.
+  QMD_DAEMON_PORT="$PORT" QMD_BACKEND_MANAGER="${QMD_BACKEND_MANAGER:-$ROOT/core/backend_manager.sh}" \
+    QMD_DAEMON_PID="$PID_FILE" QMD_DAEMON_LOG="$DAEMON_LOG" bash "$LOGROTATE_SCRIPT" >/dev/null 2>&1 || true
 }
 
 wait_pid_exit() {
@@ -226,19 +301,65 @@ wait_pid_exit() {
   return 1
 }
 
-reload() {
-  local pid
-  pid="$(read_pid)"
-  if pid_is_daemon "$pid"; then
-    kill -TERM "$pid" >/dev/null 2>&1 || true
-    log "daemon SIGTERM pid=$pid"
-    wait_pid_exit "$pid" || return 0
-  elif [ -n "$pid" ]; then
-    log "ignore stale/non-qmd daemon pid=$pid"
+# PID_FILE이 지금도 이 pid를 가리킬 때만 지운다. 무조건 rm하면 그 사이 다른 경로가
+# 써 넣은 정상 pid까지 날려 추적을 잃는다(그 상태의 reload는 조용한 no-op이 된다).
+clear_pid_file_if() {
+  [ "$(read_pid)" = "$1" ] && rm -f "$PID_FILE" 2>/dev/null
+  return 0
+}
+
+reload_locked() {
+  local pid file_pid
+  file_pid="$(read_pid)"
+  pid="$(daemon_pid)"
+  if [ -n "$pid" ]; then
+    if kill -TERM "$pid" >/dev/null 2>&1; then
+      log "daemon SIGTERM pid=$pid"
+      # 종료를 못 봤으면 재시작하지 않는다. 옛 프로세스가 포트를 쥔 채라 재스폰은
+      # EADDRINUSE로 죽고 죽은 pid가 PID_FILE에 남는다(이 커밋이 고친 바로 그 상태).
+      wait_pid_exit "$pid" || return 1
+      clear_pid_file_if "$pid"
+    else
+      # EPERM/ESRCH: 신호가 가지 않았으므로 프로세스는 그대로다. 여기서 wait_pid_exit에
+      # 들어가면 기본 60×0.5s = 30초를 확실히 실패할 대기에 태운다(훅 블로킹).
+      log "daemon SIGTERM failed pid=$pid — skip shutdown wait"
+      return 1
+    fi
+  elif [ -n "$file_pid" ]; then
+    log "ignore stale/non-qmd daemon pid=$file_pid"
+    clear_pid_file_if "$file_pid"
   fi
-  rm -f "$PID_FILE" 2>/dev/null || true
   start_daemon
-  wait_health || true
+  # 반환값 = "데몬을 실제로 재시작했는가". 호출자가 이걸로 되돌린다:
+  # logrotate.sh:25는 reload 실패 시 `mv $LOG.1 $LOG`로 회전을 원복한다(데몬이 옛 inode에
+  # 계속 쓰므로 이름을 되돌리면 로그 연속성이 유지된다). 항상 0을 돌려주던 동안 그 원복은
+  # 도달 불가 죽은 코드였고, 실패하면 $LOG가 없는 채로 남아 이후 회전이 전부
+  # logrotate.sh:14에서 조기 종료 → .1 무한 증가였다.
+  wait_health
+}
+
+reload() {
+  # 직렬화: 락이 없던 동안 동시 reload 2건이 서로의 데몬을 죽이고 패자가 EADDRINUSE로
+  # 즉사했다(실측 14:06 로그). stale 회수는 저장소 관례인 find -mmin +10(=LOCK_STALE_SECS 600).
+  if ! mkdir "$RELOAD_LOCK" 2>/dev/null; then
+    if [ -n "$(find "$RELOAD_LOCK" -maxdepth 0 -mmin +10 2>/dev/null)" ]; then
+      rmdir "$RELOAD_LOCK" 2>/dev/null || true
+      mkdir "$RELOAD_LOCK" 2>/dev/null || { log "reload skipped: lock busy"; return 1; }
+    else
+      # 승자가 재시작 중일 수 있지만 "내가 재시작했다"고 말하지 않는다 — 호출자의
+      # 보수적 원복(로그 이름 되돌리기)은 무해하고 다음 회차가 다시 시도한다.
+      log "reload skipped: lock busy"
+      return 1
+    fi
+  fi
+  # trap: 하드킬(Hermes core_bridge.py는 rotate를 8s에 끊는다)에도 락이 남지 않게 한다.
+  # 남으면 stale 회수 10분 동안 모든 reload가 skip된다. kick_index의 선례와 같은 규칙.
+  trap 'rmdir "$RELOAD_LOCK" 2>/dev/null || true' EXIT INT TERM
+  reload_locked
+  local rc=$?
+  rmdir "$RELOAD_LOCK" 2>/dev/null || true
+  trap - EXIT INT TERM
+  return "$rc"
 }
 
 kick_index() {
