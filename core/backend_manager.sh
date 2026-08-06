@@ -1,6 +1,17 @@
 #!/usr/bin/env bash
 set -u
 
+# 샌드박스 가드는 여기가 마지막 방어선이다. 현재 호출부 4갈래(hooks/run-hook,
+# skills/*/scripts/*.sh, backend/index_worker.sh, hermes_adapter/core_bridge.py)가
+# 각자 같은 검사를 하지만 가드가 호출부에 흩어져 있으면 다음에 추가되는 경로가
+# 빠뜨린다(Python 훅의 per-site try/except가 정확히 그렇게 반복 실패해 hook_main.py
+# 한 곳으로 모았다). QMD_SANDBOX를 켜는 곳은 core/extractors/lib.py 하나이고 —
+# wiki 카드를 만들 때 띄우는 host CLI 자식이 자기 qmd 훅을 또 발동시키는 재귀를
+# 막는다 — 그 자식이 여기에 도달하면 reload가 실제로 데몬을 죽인다(이 커밋 전에는
+# reload가 no-op이라 대가가 없었다).
+[ -n "${QMD_SANDBOX:-}" ] && exit 0
+[ -n "${GEMINI_SANDBOX:-}" ] && exit 0
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)" || exit 0
 PORT="${QMD_DAEMON_PORT:-8483}"
 STATE_DIR="${QMD_BACKEND_STATE_DIR:-${TMPDIR:-/tmp}/qmd-auto-context-backend}"

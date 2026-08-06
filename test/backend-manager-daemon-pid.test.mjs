@@ -386,3 +386,34 @@ test('rotate hands QMD_BACKEND_MANAGER to logrotate so its reload branch is reac
     removeTemp(home);
   }
 });
+
+// 샌드박스 자식(core/extractors/lib.py가 wiki 카드용 host CLI를 띄울 때 QMD_SANDBOX=1을
+// 넣는다 — 유일한 setter)이 매니저에 도달해도 데몬을 건드리면 안 된다. 지금은 호출부
+// 4갈래가 각자 막고 있지만 가드가 흩어져 있으면 다음 경로가 빠뜨린다. reload가 더 이상
+// no-op이 아니므로(이 파일의 다른 테스트) 잘못 도달하면 실제로 데몬이 죽는다.
+for (const flag of ['QMD_SANDBOX', 'GEMINI_SANDBOX']) {
+  test(`${flag} stops the manager before it can touch the daemon`, async () => {
+    const home = mkdtempSync(join(tmpdir(), 'qmd-sandbox-'));
+    const port = await freePort();
+    let pid = 0;
+    try {
+      makeFakeQmd(home);
+      const fake = writeFakeDaemon(home);
+      const child = spawnFakeDaemon(fake, port);
+      pid = child.pid;
+      assert.ok(await waitHealthy(port), 'fake daemon should come up');
+      writeFileSync(join(home, 'daemon.pid'), `${pid}\n`);
+
+      const res = run(['reload'], managerEnv(home, port, { [flag]: '1' }));
+      assert.equal(res.status, 0, 'the guard must exit quietly, not error');
+      assert.equal(res.stdout, '', 'sandbox must produce no output');
+
+      await delay(300);
+      assert.ok(childAlive(child), `${flag} must not let reload kill the daemon`);
+      assert.equal(managerLog(home), '', 'a guarded run must not even log');
+    } finally {
+      killQuiet(pid);
+      removeTemp(home);
+    }
+  });
+}
