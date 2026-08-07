@@ -124,6 +124,71 @@ print(json.dumps({'candidates': [{
   }
 });
 
+test('worker ABA: provenance, suppression hash, and extractor input share one source snapshot', () => {
+  const seen = join(mkdtempSync(join(tmpdir(), 'extractor-aba-seen-')), 'content.txt');
+  const extractor = join(mkdtempSync(join(tmpdir(), 'extractor-aba-')), 'extract.py');
+  const sourceA = '# Source A\n\nDurable decision from A.\n';
+  const sourceB = '# Source B\n\nTransient bytes from B.\n';
+  writeFileSync(extractor, `#!/usr/bin/env python3
+import json, pathlib, sys
+payload = json.loads(sys.stdin.read())
+pathlib.Path(${JSON.stringify(seen)}).write_text(payload['source']['content'], encoding='utf-8')
+pathlib.Path(payload['cwd'], payload['source']['path']).write_text(${JSON.stringify(sourceA)}, encoding='utf-8')
+print(json.dumps({'candidates': [{
+  'title': 'ABA Snapshot Decision',
+  'summary': 'The extractor and provenance must describe the same stable source image.',
+  'suggestedType': 'decision',
+  'confidence': 'high',
+  'targetPath': '.auto-context/wiki/decisions/aba-snapshot.md'
+}]}))
+`);
+  const project = setupProject({
+    semanticDedup: { enabled: false },
+    extractor: { backends: { claude: ['python3', extractor] }, timeout: 30 },
+  });
+  const source = join(project, 'docs', 'source.md');
+  writeFileSync(source, sourceA);
+  try {
+    const out = execFileSync('python3', ['-c', `
+import json, pathlib, sys
+sys.path.insert(0, 'core')
+import config as qmd_config
+import wiki_compile as wc
+import wiki_compile_worker as worker
+import wiki_freshness
+root = pathlib.Path(${JSON.stringify(project)}).resolve()
+source = root / 'docs/source.md'
+real_snapshot = wiki_freshness.snapshot_bytes
+switched = {'done': False}
+def aba_snapshot(path):
+    snapshot = real_snapshot(path)
+    if path == source and not switched['done']:
+        source.write_text(${JSON.stringify(sourceB)}, encoding='utf-8')
+        switched['done'] = True
+    return snapshot
+wiki_freshness.snapshot_bytes = aba_snapshot
+wc.append_jsonl(root / '.auto-context/compile/verify-skipped.jsonl', {
+    'sourcePath': 'docs/source.md',
+    'sourceBodyHash': wc.source_body_hash(${JSON.stringify(sourceB)}),
+})
+found = qmd_config.find_project_config(str(root))
+job = json.loads((root / '.auto-context/compile/source-queue.jsonl').read_text().splitlines()[0])
+print(json.dumps(worker.process_job(root, found['config'], found['config']['compile'], job)))
+`], { cwd: process.cwd(), encoding: 'utf8' });
+    assert.deepEqual(JSON.parse(out), [true, false, [
+      '.auto-context/wiki/decisions/aba-snapshot.md',
+    ]]);
+    assert.equal(existsSync(seen), true,
+      'a suppression hash for transient B must not suppress stable snapshot A');
+    assert.equal(readFileSync(seen, 'utf8'), sourceA, 'extractor receives snapshot A, never reopened B');
+    const page = readFileSync(join(project, '.auto-context', 'wiki', 'decisions', 'aba-snapshot.md'), 'utf8');
+    assert.match(page, new RegExp(createHash('sha256').update(sourceA).digest('hex')),
+      'card provenance hashes the exact bytes sent to the extractor');
+  } finally {
+    removeTemp(project);
+  }
+});
+
 test('worker resolves built-in extractor adapter at runtime from plugin root', () => {
   const fakeCli = join(mkdtempSync(join(tmpdir(), 'fake-claude-cli-')), 'claude');
   writeFileSync(fakeCli, `#!/usr/bin/env python3

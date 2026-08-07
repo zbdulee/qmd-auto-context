@@ -51,6 +51,7 @@ import wiki_compile as wc
 import wiki_compile_worker as wcw
 import wiki_freshness
 import wiki_source_missing as wsm
+import yaml_scalars
 from dirty_queue import enqueue_collections
 from wiki_compile_enqueue import _safe_queue_path
 
@@ -428,7 +429,9 @@ def card_state(target: Path) -> tuple[str | None, dict, str, str]:
     return text, meta, status, (match.group(1) if match else "")
 
 
-def load_sources(root: Path, job: dict, max_chars: int) -> list[dict]:
+def load_sources(
+    root: Path, job: dict, max_chars: int, initial_sources: list[dict] | None = None
+) -> list[dict]:
     """검증에 쓸 원문. **잡의 실제 소스가 모델 제공 항목에 밀려나지 않는다.**
 
     `job["sources"]`는 extractor(모델) 출력이 섞인 목록이고 여기는 앞에서 `MAX_SOURCES`
@@ -446,8 +449,11 @@ def load_sources(root: Path, job: dict, max_chars: int) -> list[dict]:
     authoritative = raw_auth if isinstance(raw_auth, list) else []
     raw_model = job.get("sources")
     model = raw_model if isinstance(raw_model, list) else []
-    loaded = []
-    seen: set[str] = set()
+    loaded = list(initial_sources or [])
+    seen: set[str] = {
+        source.get("path") for source in loaded
+        if isinstance(source, dict) and isinstance(source.get("path"), str)
+    }
     # 권위 항목이 전부 앞에 오므로, 예산 소진 판정을 만나는 것은 모델 항목뿐이다.
     for src, forced in [(s, True) for s in authoritative] + [(s, False) for s in model]:
         if not forced and len(loaded) >= MAX_SOURCES:
@@ -474,6 +480,51 @@ def load_sources(root: Path, job: dict, max_chars: int) -> list[dict]:
             "truncated": len(text) > max_chars,
         })
     return loaded
+
+
+def snapshot_revision_sources(
+    root: Path, config: dict, job: dict, max_chars: int
+) -> tuple[list[dict] | None, dict | None]:
+    """Load job-owned sources from the exact snapshots whose hashes were checked.
+
+    ``None, None`` is the narrow compatibility path for a queue row predating
+    ``sourceRevisions``.  Once the field exists, invalid records, unsafe paths,
+    failed snapshots, and hash mismatches all fail closed before a verifier call.
+    """
+    if "sourceRevisions" not in job:
+        return None, None
+    raw_revisions = job.get("sourceRevisions")
+    if not isinstance(raw_revisions, list) or not raw_revisions:
+        return [], {"state": wiki_freshness.UNKNOWN, "reason": "missing_source_revisions"}
+
+    import recall
+
+    allow_roots = wsm.allow_roots_of(config)
+    loaded = []
+    for raw in raw_revisions:
+        expected = yaml_scalars.normalize_source_revision(raw)
+        if expected is None:
+            return [], {"state": wiki_freshness.UNKNOWN, "reason": "invalid_source_revision"}
+        resolved, reason = recall.resolve_existing_source(expected["path"], root, allow_roots)
+        if resolved is None:
+            state = wiki_freshness.STALE if reason == "missing" else wiki_freshness.UNKNOWN
+            return [], {"state": state, "reason": reason or "source_unavailable"}
+        snapshot = wiki_freshness.snapshot_bytes(resolved)
+        if snapshot is None:
+            return [], {"state": wiki_freshness.UNKNOWN, "reason": "source_snapshot_failed"}
+        revision, data = snapshot
+        if revision["sha256"] != expected["sha256"]:
+            return [], {"state": wiki_freshness.STALE, "reason": "content_hash_mismatch"}
+        bounded = wcw.decode_source_bounded(data, max_chars)
+        if bounded is None:
+            return [], {"state": wiki_freshness.UNKNOWN, "reason": "source_decode_failed"}
+        content, truncated = bounded
+        loaded.append({
+            "path": expected["path"],
+            "content": content,
+            "truncated": truncated,
+        })
+    return loaded, {"state": wiki_freshness.FRESH, "checked": len(loaded)}
 
 
 def record_source_missing(root: Path, config: dict, compile_cfg: dict, rel: str,
@@ -547,7 +598,8 @@ def process_verify_job(
         log_verdict(log_path, {**base_record(job), "result": "skipped", "reason": "stale_job"})
         return True, False
 
-    freshness = source_freshness(root, config, job)
+    max_chars = int(compile_cfg.get("maxSourceChars", 12000) or 12000)
+    snapshot_sources, freshness = snapshot_revision_sources(root, config, job, max_chars)
     if freshness is not None and freshness.get("state") != wiki_freshness.FRESH:
         log_verdict(log_path, {
             **base_record(job), "result": "deferred", "reason": "source_changed_before_verify",
@@ -555,8 +607,7 @@ def process_verify_job(
         })
         return False, True
 
-    max_chars = int(compile_cfg.get("maxSourceChars", 12000) or 12000)
-    sources = load_sources(root, job, max_chars)
+    sources = load_sources(root, job, max_chars, initial_sources=snapshot_sources)
     if not sources:
         # 원문 없이는 대조 불가 — generated로 남겨 미검수 배지가 유지되게 한다.
         # verify-log.jsonl은 pass까지 담는 운영 로그라 trim_jsonl 대상이다(활성 프로젝트에서

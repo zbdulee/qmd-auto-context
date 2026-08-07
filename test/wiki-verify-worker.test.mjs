@@ -175,6 +175,49 @@ print(json.dumps({'verdict': 'pass', 'claims': [], 'reasons': []}))
   } finally { removeTemp(project); }
 });
 
+test('verifier ABA: precheck revision and verifier payload use the same source snapshot bytes', () => {
+  const seen = join(mkdtempSync(join(tmpdir(), 'verify-aba-seen-')), 'content.txt');
+  const sourceA = '# Source\n\nDurable claim: the source documents cite markdown.\n';
+  const sourceB = '# Transient B\n\nThis must never reach the verifier.\n';
+  const verifier = join(mkdtempSync(join(tmpdir(), 'verifier-aba-')), 'verify.py');
+  writeFileSync(verifier, `#!/usr/bin/env python3
+import json, pathlib, sys
+payload = json.loads(sys.stdin.read())
+pathlib.Path(${JSON.stringify(seen)}).write_text(payload['sources'][0]['content'], encoding='utf-8')
+pathlib.Path(payload['cwd'], 'docs/source.md').write_text(${JSON.stringify(sourceA)}, encoding='utf-8')
+print(json.dumps({'verdict': 'pass', 'claims': [], 'reasons': []}))
+`);
+  const project = setupProject({ extractorArgv: ['python3', verifier] });
+  try {
+    const out = execFileSync('python3', ['-c', `
+import pathlib, sys
+sys.path.insert(0, 'core')
+import wiki_freshness
+import wiki_verify_worker as worker
+root = pathlib.Path(${JSON.stringify(project)}).resolve()
+source = root / 'docs/source.md'
+real_snapshot = wiki_freshness.snapshot_bytes
+switched = {'done': False}
+def aba_snapshot(path):
+    snapshot = real_snapshot(path)
+    if path == source and not switched['done']:
+        source.write_text(${JSON.stringify(sourceB)}, encoding='utf-8')
+        switched['done'] = True
+    return snapshot
+wiki_freshness.snapshot_bytes = aba_snapshot
+sys.argv = ['wiki_verify_worker.py', '--cwd', str(root), '--json']
+raise SystemExit(worker.main())
+`], {
+      cwd: process.cwd(), encoding: 'utf8',
+      env: { ...process.env, QMD_DIRTY_QUEUE: join(project, 'dirty-queue') },
+    });
+    assert.equal(JSON.parse(out).processed, 1);
+    assert.equal(readFileSync(seen, 'utf8'), sourceA,
+      'verifier receives bytes from the revision-checked snapshot, never reopened B');
+    assert.match(readFileSync(join(project, CARD_REL), 'utf8'), /^status: verified$/m);
+  } finally { removeTemp(project); }
+});
+
 test('verify fail + onFail 기본(delete) → 카드 삭제, tombstone 없음, 재인덱싱 enqueue', () => {
   const verifier = mockVerifier({ verdict: 'fail', claims: [{ claim: 'c', supported: false, quote: '', sourcePath: 'docs/source.md' }], reasons: ['source contradicts claim'] });
   const project = setupProject({ extractorArgv: ['python3', verifier] });

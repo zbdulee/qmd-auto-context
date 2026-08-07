@@ -396,6 +396,15 @@ def read_source_bounded(path: Path, max_chars: int) -> tuple[str, bool] | None:
     return text[:max_chars], len(text) > max_chars
 
 
+def decode_source_bounded(data: bytes, max_chars: int) -> tuple[str, bool] | None:
+    """Decode and bound one already-stable source snapshot."""
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    return text[:max_chars], len(text) > max_chars
+
+
 def read_text_bounded(path: Path, max_chars: int) -> str | None:
     result = read_source_bounded(path, max_chars)
     return None if result is None else result[0]
@@ -740,10 +749,11 @@ def process_job(root: Path, config: dict, compile_cfg: dict, job: dict) -> tuple
     if not qmd_config.is_compile_source_collection(roles, collection):
         append_jsonl(cpath, bounded_failure("extractor_failed", job, "invalid_source_scope"))
         return True, False, []
-    revision_snapshot = wiki_freshness.snapshot_file(src)
-    if revision_snapshot is None:
+    stable_source = wiki_freshness.snapshot_bytes(src)
+    if stable_source is None:
         append_jsonl(cpath, bounded_failure("extractor_failed", job, "source_unreadable"))
         return True, False, []
+    revision_snapshot, source_bytes = stable_source
     source_revision = {
         "kind": "file",
         "path": rel,
@@ -751,7 +761,7 @@ def process_job(root: Path, config: dict, compile_cfg: dict, job: dict) -> tuple
         **revision_snapshot,
     }
     max_chars = int(compile_cfg.get("maxSourceChars", 12000) or 12000)
-    bounded = read_source_bounded(src, max_chars)
+    bounded = decode_source_bounded(source_bytes, max_chars)
     if bounded is None:
         append_jsonl(cpath, bounded_failure("extractor_failed", job, "source_unreadable"))
         return True, False, []
