@@ -22,6 +22,12 @@
       "post_sync_source",
       "manual"
     ],
+    "reasoningEffort": {
+      "generation": "low",
+      "verify": "medium",
+      "semanticDedup": "medium",
+      "engines": {}
+    },
     "extractor": {
       "builtins": [
         "claude",

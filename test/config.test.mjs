@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { dirname } from 'node:path';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { removeTemp } from './helpers/temp.mjs';
 
 // compile.semanticDedup.judge — LLM dedup judge defaults (core/config.py DEFAULTS)
@@ -42,6 +44,33 @@ print(json.dumps(result, ensure_ascii=False))
   });
   return JSON.parse(out);
 }
+
+function loadProjectConfig(cwd) {
+  const code = `
+import json
+import config
+print(json.dumps(config.load_project_config(${JSON.stringify(cwd)}), ensure_ascii=False))
+`;
+  const out = execFileSync('python3', ['-c', code], {
+    encoding: 'utf8',
+    env: { ...process.env, PYTHONPATH: join(cwd, 'core') },
+  });
+  return JSON.parse(out);
+}
+
+test('dogfood project pins the wiki extractor reasoning-effort policy', () => {
+  const projectRoot = realpathSync(join(dirname(fileURLToPath(import.meta.url)), '..'));
+  const cfg = loadProjectConfig(projectRoot);
+  const policy = {
+    generation: 'low',
+    verify: 'medium',
+    semanticDedup: 'medium',
+    engines: {},
+  };
+  const settings = JSON.parse(readFileSync(join(projectRoot, '.auto-context', 'settings.json'), 'utf8'));
+  assert.deepEqual(settings.compile.reasoningEffort, policy);
+  assert.deepEqual(cfg.compile.reasoningEffort, policy);
+});
 
 function migrateLegacyConfig(cwd, env = {}) {
   const code = `
