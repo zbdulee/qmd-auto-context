@@ -14,7 +14,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { removeTemp } from './helpers/temp.mjs';
@@ -48,6 +49,8 @@ const VERIFIED_FM = [
   'title: "카드 정식 제목 — 설정 레이아웃 결정"',
   'status: verified',
   'createdBy: qmd-auto-context',
+  'sourceRevisions:',
+  '  - __TRUST_REVISION__',
   'reviewed: false',
   'sources:',
   '  - {kind: "file", path: "docs/guide.md"}',
@@ -84,6 +87,21 @@ function card(fm, paragraphs) {
   return { text: lines.join('\n'), marks };
 }
 
+function withTrustedRevision(dir, body) {
+  if (!/^status: verified$/m.test(body) || !/^createdBy: qmd-auto-context$/m.test(body)) return body;
+  const relative = 'docs/guide.md';
+  const source = join(dir, relative);
+  const bytes = readFileSync(source);
+  const stat = statSync(source, { bigint: true });
+  const hash = createHash('sha256').update(bytes).digest('hex');
+  const revision = `{kind: "file", path: "${relative}", collection: "proj-docs", sha256: "${hash}", size: ${stat.size}, mtimeNs: ${stat.mtimeNs}}`;
+  if (body.includes('__TRUST_REVISION__')) return body.replace('__TRUST_REVISION__', revision);
+  return body.replace(
+    'createdBy: qmd-auto-context\n',
+    `createdBy: qmd-auto-context\nsourceRevisions:\n  - ${revision}\n`,
+  );
+}
+
 function withProject({ settings = {}, cards = {} }, fn) {
   const dir = mkdtempSync(join(tmpdir(), 'qmd-precision-'));
   mkdirSync(join(dir, '.auto-context', 'wiki', 'decisions'), { recursive: true });
@@ -99,7 +117,7 @@ function withProject({ settings = {}, cards = {} }, fn) {
     ...settings,
   }));
   for (const [name, body] of Object.entries(cards)) {
-    writeFileSync(join(dir, '.auto-context', 'wiki', 'decisions', name), body);
+    writeFileSync(join(dir, '.auto-context', 'wiki', 'decisions', name), withTrustedRevision(dir, body));
   }
   const fixture = join(dir, 'fixture.json');
   const lexFixture = join(dir, 'lex.json');

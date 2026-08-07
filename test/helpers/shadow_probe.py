@@ -26,6 +26,7 @@ Output: {"queries": [...], "df_probes": [...], "stdout": str,
   df_probes = DF(존재) 좁히기 프로브 payload
 """
 import http.server
+import hashlib
 import json
 import os
 import pathlib
@@ -193,18 +194,34 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 def _write_project(project_dir: pathlib.Path, overrides: dict) -> None:
     wiki = project_dir / ".auto-context" / "wiki" / "concepts"
     wiki.mkdir(parents=True)
-    # status: verified → recallVerifiedOnly 기본값(true)에서도 surface 된다.
-    (wiki / "card.md").write_text("---\nstatus: verified\n---\n# Card\n", encoding="utf-8")
-    (wiki / "card2.md").write_text("---\nstatus: verified\n---\n# Card 2\n", encoding="utf-8")
-    (wiki / "ep-12.md").write_text("---\nstatus: verified\n---\n# EP 12\n", encoding="utf-8")
+    docs = project_dir / "docs"
+    docs.mkdir()
+    trust_source = docs / "trusted-source.md"
+    trust_bytes = b"# Trusted source\n"
+    trust_source.write_bytes(trust_bytes)
+    trust_stat = trust_source.stat()
+    revision = (
+        '{kind: "file", path: "docs/trusted-source.md", collection: "proj", '
+        f'sha256: "{hashlib.sha256(trust_bytes).hexdigest()}", '
+        f'size: {trust_stat.st_size}, mtimeNs: {trust_stat.st_mtime_ns}' + '}'
+    )
+
+    def trusted_card(title: str) -> str:
+        return (
+            "---\nstatus: verified\ncreatedBy: qmd-auto-context\n"
+            f"sourceRevisions:\n  - {revision}\n---\n# {title}\n"
+        )
+
+    # verified + qmd creator + compiler provenance is the injectable contract.
+    (wiki / "card.md").write_text(trusted_card("Card"), encoding="utf-8")
+    (wiki / "card2.md").write_text(trusted_card("Card 2"), encoding="utf-8")
+    (wiki / "ep-12.md").write_text(trusted_card("EP 12"), encoding="utf-8")
     # 미검수 → recallVerifiedOnly가 drop (dropped_unverified 카운트).
     (wiki / "gen.md").write_text("---\nstatus: generated\n---\n# Generated\n", encoding="utf-8")
     (wiki / "gen2.md").write_text("---\nstatus: generated\n---\n# Generated 2\n", encoding="utf-8")
     (wiki / "gen3.md").write_text("---\nstatus: generated\n---\n# Generated 3\n", encoding="utf-8")
     # 미검수 EP 카드 — promotion 은 되지만 recallVerifiedOnly 가 drop 한다.
     (wiki / "ep-99.md").write_text("---\nstatus: generated\n---\n# EP 99\n", encoding="utf-8")
-    docs = project_dir / "docs"
-    docs.mkdir()
     (docs / "raw.md").write_text("# Raw doc\n", encoding="utf-8")
     settings = {
         "indexing": True,

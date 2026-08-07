@@ -10,7 +10,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, statSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { removeTemp } from './helpers/temp.mjs';
@@ -35,9 +36,14 @@ function wikiProject(dir, extraSettings = {}) {
     topN: 3,
     ...extraSettings,
   }));
+  const sourcePath = join(dir, 'docs', 'outside.md');
+  writeFileSync(sourcePath, '---\nstatus: verified\n---\n# Outside\n');
+  const bytes = readFileSync(sourcePath);
+  const stat = statSync(sourcePath, { bigint: true });
+  const hash = createHash('sha256').update(bytes).digest('hex');
+  const revision = `{kind: "file", path: "docs/outside.md", collection: "proj-docs", sha256: "${hash}", size: ${stat.size}, mtimeNs: ${stat.mtimeNs}}`;
   writeFileSync(join(dir, '.auto-context', 'wiki', 'decisions', 'card.md'),
-    '---\nstatus: verified\ncreatedBy: qmd-auto-context\nreviewed: false\nverifiedBy: claude\n---\n# Card\n');
-  writeFileSync(join(dir, 'docs', 'outside.md'), '---\nstatus: verified\n---\n# Outside\n');
+    `---\nstatus: verified\ncreatedBy: qmd-auto-context\nsourceRevisions:\n  - ${revision}\nreviewed: false\nverifiedBy: claude\n---\n# Card\n`);
 }
 
 function withProject(fn, extraSettings = {}) {

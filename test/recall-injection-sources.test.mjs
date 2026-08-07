@@ -10,7 +10,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join, isAbsolute, dirname } from 'node:path';
 import { removeTemp } from './helpers/temp.mjs';
@@ -71,6 +72,27 @@ function fileEntry(path) {
   return `{kind: "file", path: "${path}"}`;
 }
 
+function withTrustedRevision(dir, body) {
+  if (!/^status: verified\r?$/m.test(body)) return body;
+  const relative = 'docs/.recall-trusted-source.md';
+  const source = join(dir, relative);
+  if (!existsSync(source)) writeFileSync(source, '# Trusted recall source\n');
+  const bytes = readFileSync(source);
+  const stat = statSync(source, { bigint: true });
+  const hash = createHash('sha256').update(bytes).digest('hex');
+  const revision = `{kind: "file", path: "${relative}", collection: "proj-docs", sha256: "${hash}", size: ${stat.size}, mtimeNs: ${stat.mtimeNs}}`;
+  if (/^createdBy: qmd-auto-context\r?$/m.test(body)) {
+    return body.replace(
+      /createdBy: qmd-auto-context(\r?\n)/,
+      (_match, eol) => `createdBy: qmd-auto-context${eol}sourceRevisions:${eol}  - ${revision}${eol}`,
+    );
+  }
+  return body.replace(
+    /status: verified(\r?\n)/,
+    (_match, eol) => `status: verified${eol}createdBy: qmd-auto-context${eol}sourceRevisions:${eol}  - ${revision}${eol}`,
+  );
+}
+
 function project(dir, { settings = {}, cards = {}, raw = {} } = {}) {
   mkdirSync(join(dir, '.auto-context', 'wiki', 'decisions'), { recursive: true });
   mkdirSync(join(dir, 'docs'), { recursive: true });
@@ -83,13 +105,13 @@ function project(dir, { settings = {}, cards = {}, raw = {} } = {}) {
     topN: 3,
     ...settings,
   }));
-  for (const [name, body] of Object.entries(cards)) {
-    writeFileSync(join(dir, '.auto-context', 'wiki', 'decisions', name), body);
-  }
   for (const [rel, body] of Object.entries(raw)) {
     const target = join(dir, rel);
     mkdirSync(dirname(target), { recursive: true });
     writeFileSync(target, body);
+  }
+  for (const [name, body] of Object.entries(cards)) {
+    writeFileSync(join(dir, '.auto-context', 'wiki', 'decisions', name), withTrustedRevision(dir, body));
   }
 }
 
@@ -455,12 +477,12 @@ test('sources: [ ... ] 한 줄 flow 시퀀스는 사유를 남긴다 (무흔적 
   try {
     project(dir);
     // frontmatter 를 직접 조립한다(우리 writer 는 이 형태를 쓰지 않는다).
-    writeFileSync(join(dir, '.auto-context', 'wiki', 'decisions', 'card.md'), [
+    writeFileSync(join(dir, '.auto-context', 'wiki', 'decisions', 'card.md'), withTrustedRevision(dir, [
       '---', 'title: "카드"', 'status: verified',
       'sources: [{kind: "file", path: "docs/a.md"}]',
       '---', '', '<!-- qmd:auto:start id="main" sourceHash="h" -->', '## Summary',
       '본문.', '<!-- qmd:auto:end -->', '',
-    ].join('\n'));
+    ].join('\n')));
     writeFileSync(join(dir, 'docs', 'a.md'), 'a\n');
     const fixture = join(dir, 'fixture.json');
     const log = join(dir, 'recall.jsonl');
@@ -512,11 +534,11 @@ test('sources: 줄의 잔여 4분기 — 항목이 아닌 것은 사유를 만�
     try {
       project(dir);
       writeFileSync(join(dir, 'docs', 'a.md'), 'a\n');
-      writeFileSync(join(dir, '.auto-context', 'wiki', 'decisions', 'card.md'), [
+      writeFileSync(join(dir, '.auto-context', 'wiki', 'decisions', 'card.md'), withTrustedRevision(dir, [
         '---', 'title: "카드"', 'status: verified', head, ...tail, '---', '',
         '<!-- qmd:auto:start id="main" sourceHash="h" -->', '## Summary', '본문.',
         '<!-- qmd:auto:end -->', '',
-      ].join('\n'));
+      ].join('\n')));
       const fixture = join(dir, 'fixture.json');
       const log = join(dir, 'recall.jsonl');
       writeFileSync(fixture, JSON.stringify({ results: [{ file: 'proj-wiki/decisions/card.md', title: 'Summary', score: 1 }] }));

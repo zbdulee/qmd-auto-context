@@ -13,7 +13,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { removeTemp } from './helpers/temp.mjs';
@@ -191,11 +192,16 @@ function mixedFixtureProject(dir, settings = {}) {
     topN: 3,
     ...settings,
   }));
+  const sourcePath = join(dir, 'docs', 'raw.md');
+  writeFileSync(sourcePath, '# Raw doc\n');
+  const bytes = readFileSync(sourcePath);
+  const stat = statSync(sourcePath, { bigint: true });
+  const hash = createHash('sha256').update(bytes).digest('hex');
+  const revision = `{kind: "file", path: "docs/raw.md", collection: "proj", sha256: "${hash}", size: ${stat.size}, mtimeNs: ${stat.mtimeNs}}`;
   writeFileSync(join(dir, '.auto-context', 'wiki', 'concepts', 'card.md'),
-    '---\nstatus: verified\n---\n# Card\n');
+    `---\nstatus: verified\ncreatedBy: qmd-auto-context\nsourceRevisions:\n  - ${revision}\n---\n# Card\n`);
   writeFileSync(join(dir, '.auto-context', 'wiki', 'concepts', 'gen.md'),
     '---\nstatus: generated\n---\n# Generated\n');
-  writeFileSync(join(dir, 'docs', 'raw.md'), '# Raw doc\n');
 }
 
 function runFixture(dir, results, env = {}) {

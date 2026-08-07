@@ -1,8 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { removeTemp } from './helpers/temp.mjs';
 
@@ -40,6 +41,23 @@ function runRecallAsync(input, env) {
     });
     child.stdin.end(input);
   });
+}
+
+function sourceRevisionLine(project, relativePath, collection = 'proj-docs') {
+  const path = join(project, relativePath);
+  const bytes = readFileSync(path);
+  const stat = statSync(path, { bigint: true });
+  const hash = createHash('sha256').update(bytes).digest('hex');
+  return `{kind: "file", path: "${relativePath}", collection: "${collection}", sha256: "${hash}", size: ${stat.size}, mtimeNs: ${stat.mtimeNs}}`;
+}
+
+function writeTrustedCard(project, name, sourceText, body) {
+  const sourcePath = `docs/${name}.md`;
+  writeFileSync(join(project, sourcePath), sourceText);
+  const revision = sourceRevisionLine(project, sourcePath);
+  writeFileSync(join(project, '.auto-context', 'wiki', 'concepts', `${name}.md`),
+    `---\ntitle: "${name}"\nstatus: verified\ncreatedBy: qmd-auto-context\nsourceRevisions:\n  - ${revision}\n---\n${body}\n`);
+  return sourcePath;
 }
 
 test('라이브 데몬 recall 스모크', { skip: !process.env.QMD_LIVE }, () => {
@@ -122,7 +140,7 @@ test('hierarchical recall queries wiki collections before raw backfill', async (
         recordQuery(requests, payload);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ results: [
-          { file: 'qmd://proj-wiki/.auto-context/wiki/decisions/config-layout.md', title: 'Config layout', score: 0.93 },
+          { file: 'qmd://proj-wiki/concepts/config-layout.md', title: 'Config layout', score: 0.93 },
         ] }));
       });
       return;
@@ -133,17 +151,18 @@ test('hierarchical recall queries wiki collections before raw backfill', async (
 
   const tempDir = mkdtempSync(join(process.cwd(), '.tmp-qmd-http-hier-'));
   try {
-    mkdirSync(join(tempDir, '.auto-context'), { recursive: true });
+    mkdirSync(join(tempDir, '.auto-context', 'wiki', 'concepts'), { recursive: true });
+    mkdirSync(join(tempDir, 'docs'), { recursive: true });
+    writeTrustedCard(tempDir, 'config-layout', '# current config\n', 'Config layout body');
     writeFileSync(join(tempDir, '.auto-context', 'settings.json'), JSON.stringify({
       indexing: true,
       collections: ['proj-wiki', 'proj-docs'],
+      collectionPaths: { 'proj-wiki': '.auto-context/wiki', 'proj-docs': 'docs' },
       collectionRoles: { 'proj-wiki': 'wiki', 'proj-docs': 'raw' },
       recallStrategy: 'hierarchical',
+      wikiPath: '.auto-context/wiki',
+      injectSummaryMaxChars: 0,
       queryTimeout: 1.25,
-      // wiki-first 라우팅 + generated 배지 검증: 디스크에 카드 파일이 없어 status가
-      // generated로 판정되므로, 기본 recallVerifiedOnly(true)면 제외돼 backfill이 돌아
-      // 라우팅 검증이 무너진다. 미검수 경로 검증이라 flag를 끈다.
-      compile: { recallVerifiedOnly: false },
     }));
 
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -156,8 +175,8 @@ test('hierarchical recall queries wiki collections before raw backfill', async (
     assert.equal(requests.length, 1);
     assert.deepEqual(requests[0].collections, ['proj-wiki']);
     const parsed = JSON.parse(out);
-    assert.match(parsed.hookSpecificOutput.additionalContext, /\[wiki(?::generated)?\]/);
-    assert.match(parsed.hookSpecificOutput.additionalContext, /Config layout/);
+    assert.match(parsed.hookSpecificOutput.additionalContext, /\[wiki:verified\]/);
+    assert.match(parsed.hookSpecificOutput.additionalContext, /config-layout/);
   } finally {
     await new Promise(resolve => server.close(resolve));
     removeTemp(tempDir);
@@ -216,6 +235,87 @@ test('hierarchical recall backfills raw collections when wiki has no results', a
     const parsed = JSON.parse(out);
     assert.match(parsed.hookSpecificOutput.additionalContext, /\[raw\]/);
     assert.match(parsed.hookSpecificOutput.additionalContext, /Raw source/);
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+    removeTemp(tempDir);
+  }
+});
+
+test('hierarchical recall drops byte-stale and newer-pending verified cards before raw fallback', async () => {
+  const requests = [];
+  const server = createServer((req, res) => {
+    if (req.method === 'GET' && req.url === '/health') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end('{"ok":true}');
+      return;
+    }
+    if (req.method === 'POST' && req.url === '/query') {
+      let body = '';
+      req.setEncoding('utf8');
+      req.on('data', chunk => { body += chunk; });
+      req.on('end', () => {
+        const payload = JSON.parse(body);
+        recordQuery(requests, payload);
+        const isWiki = payload.collections.includes('proj-wiki');
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ results: isWiki ? [
+          { file: 'qmd://proj-wiki/concepts/byte-stale.md', title: 'Byte stale', score: 0.95 },
+          { file: 'qmd://proj-wiki/concepts/pending.md', title: 'Pending stale', score: 0.9 },
+        ] : [
+          { file: 'qmd://proj-docs/docs/current.md', title: 'Current raw source', score: 0.88 },
+        ] }));
+      });
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+
+  const tempDir = mkdtempSync(join(process.cwd(), '.tmp-qmd-http-freshness-'));
+  try {
+    mkdirSync(join(tempDir, '.auto-context', 'wiki', 'concepts'), { recursive: true });
+    mkdirSync(join(tempDir, '.auto-context', 'compile'), { recursive: true });
+    mkdirSync(join(tempDir, 'docs'), { recursive: true });
+    const byteStale = writeTrustedCard(tempDir, 'byte-stale', '# old bytes\n', 'Stale wiki body');
+    const pending = writeTrustedCard(tempDir, 'pending', '# unchanged bytes\n', 'Pending wiki body');
+    writeFileSync(join(tempDir, byteStale), '# new bytes\n');
+    writeFileSync(join(tempDir, '.auto-context', 'compile', 'source-refresh-pending.jsonl'),
+      `${JSON.stringify({
+        eventId: 'pending-event-1',
+        ts: new Date(Date.now() + 1000).toISOString(),
+        sourcePath: pending,
+        state: 'pending_refresh',
+        engine: 'codex',
+      })}\n`);
+    writeFileSync(join(tempDir, '.auto-context', 'settings.json'), JSON.stringify({
+      indexing: true,
+      collections: ['proj-wiki', 'proj-docs'],
+      collectionPaths: { 'proj-wiki': '.auto-context/wiki', 'proj-docs': 'docs' },
+      collectionRoles: { 'proj-wiki': 'wiki', 'proj-docs': 'raw' },
+      recallStrategy: 'hierarchical',
+      wikiPath: '.auto-context/wiki',
+      queryTimeout: 1.25,
+    }));
+
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address();
+    const logPath = join(tempDir, 'recall.log');
+    const out = await runRecallAsync(
+      JSON.stringify({ prompt: 'current freshness fallback 근거를 찾아줘', cwd: tempDir }),
+      { ...process.env, QMD_DAEMON_URL: `http://127.0.0.1:${port}`, QMD_RECALL_LOG: logPath },
+    );
+
+    assert.equal(requests.length, 2);
+    assert.equal(requests[0].limit, 8, 'primary wiki freshness work stays inside daemon candidate bound');
+    assert.deepEqual(requests[1].collections, ['proj-docs']);
+    const parsed = JSON.parse(out);
+    const context = parsed.hookSpecificOutput.additionalContext;
+    assert.match(context, /Current raw source/);
+    assert.doesNotMatch(context, /Stale wiki body|Pending wiki body/);
+    const event = readFileSync(logPath, 'utf8').trim().split('\n').map(line => JSON.parse(line))
+      .find(row => row.event === 'qmd_recall_selection');
+    assert.equal(event.freshness_checked, 2);
+    assert.equal(event.dropped_stale, 2);
   } finally {
     await new Promise(resolve => server.close(resolve));
     removeTemp(tempDir);
@@ -479,7 +579,7 @@ test('wikiOnly recall queries only wiki collections and emits the wiki result', 
         recordQuery(requests, JSON.parse(body));
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ results: [
-          { file: 'qmd://proj-wiki/.auto-context/wiki/decisions/config-layout.md', title: 'Config layout', score: 0.93 },
+          { file: 'qmd://proj-wiki/concepts/config-layout.md', title: 'Config layout', score: 0.93 },
         ] }));
       });
       return;
@@ -490,16 +590,18 @@ test('wikiOnly recall queries only wiki collections and emits the wiki result', 
 
   const tempDir = mkdtempSync(join(process.cwd(), '.tmp-qmd-http-wikionly-'));
   try {
-    mkdirSync(join(tempDir, '.auto-context'), { recursive: true });
+    mkdirSync(join(tempDir, '.auto-context', 'wiki', 'concepts'), { recursive: true });
+    mkdirSync(join(tempDir, 'docs'), { recursive: true });
+    writeTrustedCard(tempDir, 'config-layout', '# current config\n', 'Config layout body');
     writeFileSync(join(tempDir, '.auto-context', 'settings.json'), JSON.stringify({
       indexing: true,
       collections: ['proj-wiki', 'proj-docs'],
+      collectionPaths: { 'proj-wiki': '.auto-context/wiki', 'proj-docs': 'docs' },
       collectionRoles: { 'proj-wiki': 'wiki', 'proj-docs': 'raw' },
       recallStrategy: 'wikiOnly',
+      wikiPath: '.auto-context/wiki',
+      injectSummaryMaxChars: 0,
       queryTimeout: 1.25,
-      // wikiOnly 라우팅 검증: 디스크에 카드 파일이 없어 status가 generated로 판정되므로,
-      // 기본 recallVerifiedOnly(true)면 제외돼 빈 출력이 된다. 미검수 경로 검증이라 flag를 끈다.
-      compile: { recallVerifiedOnly: false },
     }));
 
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -512,7 +614,7 @@ test('wikiOnly recall queries only wiki collections and emits the wiki result', 
     assert.equal(requests.length, 1);
     assert.deepEqual(requests[0].collections, ['proj-wiki']);
     const parsed = JSON.parse(out);
-    assert.match(parsed.hookSpecificOutput.additionalContext, /Config layout/);
+    assert.match(parsed.hookSpecificOutput.additionalContext, /config-layout/);
   } finally {
     await new Promise(resolve => server.close(resolve));
     removeTemp(tempDir);

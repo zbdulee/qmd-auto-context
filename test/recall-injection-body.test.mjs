@@ -8,7 +8,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join, isAbsolute } from 'node:path';
 import { removeTemp } from './helpers/temp.mjs';
@@ -61,6 +62,27 @@ function rawCard(lines, eol = '\n') {
   return lines.join(eol) + eol;
 }
 
+function withTrustedRevision(dir, body) {
+  if (!/^status: verified\r?$/m.test(body)) return body;
+  const relative = 'docs/.recall-trusted-source.md';
+  const source = join(dir, relative);
+  if (!existsSync(source)) writeFileSync(source, '# Trusted recall source\n');
+  const bytes = readFileSync(source);
+  const stat = statSync(source, { bigint: true });
+  const hash = createHash('sha256').update(bytes).digest('hex');
+  const revision = `{kind: "file", path: "${relative}", collection: "proj-docs", sha256: "${hash}", size: ${stat.size}, mtimeNs: ${stat.mtimeNs}}`;
+  if (/^createdBy: qmd-auto-context\r?$/m.test(body)) {
+    return body.replace(
+      /createdBy: qmd-auto-context(\r?\n)/,
+      (_match, eol) => `createdBy: qmd-auto-context${eol}sourceRevisions:${eol}  - ${revision}${eol}`,
+    );
+  }
+  return body.replace(
+    /status: verified(\r?\n)/,
+    (_match, eol) => `status: verified${eol}createdBy: qmd-auto-context${eol}sourceRevisions:${eol}  - ${revision}${eol}`,
+  );
+}
+
 function project(dir, { settings = {}, cards = {}, raw = {} } = {}) {
   mkdirSync(join(dir, '.auto-context', 'wiki', 'decisions'), { recursive: true });
   mkdirSync(join(dir, 'docs'), { recursive: true });
@@ -74,7 +96,7 @@ function project(dir, { settings = {}, cards = {}, raw = {} } = {}) {
     ...settings,
   }));
   for (const [name, body] of Object.entries(cards)) {
-    writeFileSync(join(dir, '.auto-context', 'wiki', 'decisions', name), body);
+    writeFileSync(join(dir, '.auto-context', 'wiki', 'decisions', name), withTrustedRevision(dir, body));
   }
   for (const [name, body] of Object.entries(raw)) {
     writeFileSync(join(dir, 'docs', name), body);
@@ -231,7 +253,7 @@ test('flat + raw role 결과에는 본문이 붙지 않는다 (본문 주입은 
   });
 });
 
-test('recallVerifiedOnly:false — 미검수 카드도 본문과 함께 배지·인용 금지 안내가 유지된다', () => {
+test('recallVerifiedOnly:false 여도 generated 카드는 trusted recall에서 제외된다', () => {
   const generatedFm = [
     'title: "미검수 카드 제목"',
     'status: generated',
@@ -244,9 +266,7 @@ test('recallVerifiedOnly:false — 미검수 카드도 본문과 함께 배지·
   }, ({ dir, fixture, write }) => {
     write([{ file: 'proj-wiki/decisions/gen.md', title: 'Summary', score: 1 }]);
     const ctx = contextOf({ prompt: PROMPT, cwd: dir }, { QMD_QUERY_FIXTURE: fixture });
-    assert.match(ctx, /gen\.md - 미검수 카드 제목 \(미검수\)/, '배지가 title 뒤에 유지');
-    assert.match(ctx, /단독 캐논 근거로 인용 금지/, '인용 금지 안내 유지');
-    assert.match(ctx, /미검수 카드의 본문이다\./, '본문은 그대로 주입');
+    assert.equal(ctx, null);
   });
 });
 
@@ -376,7 +396,7 @@ test('식별자 안의 점은 문장 끝으로 쓰이지 않는다 (truncate_sum
 
 test('CRLF 카드에서도 ## Summary 헤딩이 새지 않고 본문이 정상 추출된다', () => {
   withProject({}, ({ dir, fixture, write }) => {
-    writeFileSync(join(dir, '.auto-context', 'wiki', 'decisions', 'crlf.md'), rawCard([
+    writeFileSync(join(dir, '.auto-context', 'wiki', 'decisions', 'crlf.md'), withTrustedRevision(dir, rawCard([
       '---',
       'title: "CRLF 카드"',
       'status: verified',
@@ -386,7 +406,7 @@ test('CRLF 카드에서도 ## Summary 헤딩이 새지 않고 본문이 정상 �
       '## Summary',
       'CRLF 본문이다.',
       '<!-- qmd:auto:end -->',
-    ], '\r\n'));
+    ], '\r\n')));
     write([{ file: 'proj-wiki/decisions/crlf.md', title: 'Summary', score: 1 }]);
     const ctx = contextOf({ prompt: PROMPT, cwd: dir }, { QMD_QUERY_FIXTURE: fixture });
     assert.match(ctx, /crlf\.md - CRLF 카드/, 'CRLF frontmatter title');
@@ -419,21 +439,19 @@ test('읽기 창을 넘겨 frontmatter 끝을 못 찾으면 fail-closed + 로그
   withProject({
     settings: { compile: { recallVerifiedOnly: false } },
   }, ({ dir, fixture, write }) => {
-    writeFileSync(join(dir, '.auto-context', 'wiki', 'decisions', 'big.md'), rawCard([
+    writeFileSync(join(dir, '.auto-context', 'wiki', 'decisions', 'big.md'), withTrustedRevision(dir, rawCard([
       '---', 'title: "거대 frontmatter"', 'status: verified', 'aliases:', bloat, '---',
       '', '<!-- qmd:auto:start id="main" sourceHash="beef" -->', '## Summary', '본문.', '<!-- qmd:auto:end -->',
-    ]));
+    ])));
     write([{ file: 'proj-wiki/decisions/big.md', title: 'Summary', score: 1 }]);
     const log = join(dir, 'recall.log');
     const ctx = contextOf({ prompt: PROMPT, cwd: dir },
       { QMD_QUERY_FIXTURE: fixture, QMD_RECALL_LOG: log });
-    assert.ok(ctx, 'recallVerifiedOnly:false 이므로 카드 자체는 surface');
-    assert.doesNotMatch(ctx, /본문\./, '창을 넘긴 카드는 본문 없이 주입');
+    assert.equal(ctx, null, 'frontmatter/provenance를 읽을 수 없으면 fail-closed');
     const sel = execFileSync('cat', [log], { encoding: 'utf8' }).trim().split('\n')
-      .map(JSON.parse).find((l) => l.event === 'qmd_recall_selection' && l.reason === 'selected');
+      .map(JSON.parse).find((l) => l.event === 'qmd_recall_selection' && l.reason === 'no_results_after_filter');
     assert.equal(sel.bodies_injected, 0);
-    assert.equal(sel.bodies_empty, 1);
-    assert.deepEqual(sel.body_empty_reasons, { frontmatter_unterminated: 1 });
+    assert.deepEqual(sel.card_read_reasons, { frontmatter_unterminated: 1 });
   });
 });
 
@@ -474,10 +492,10 @@ test('여러 카드 본문이 각자 접두를 갖고 배지·안내가 프레�
       { file: 'proj-wiki/decisions/g.md', title: 'Summary', score: 0.5 },
     ]);
     const ctx = contextOf({ prompt: PROMPT, cwd: dir }, { QMD_QUERY_FIXTURE: fixture });
-    assert.deepEqual(bodyLines(ctx), ['검수 카드 본문.', '미검수 카드 본문.']);
-    assert.equal((ctx.match(/단독 캐논 근거로 인용 금지/g) || []).length, 1, '안내는 프레임 끝에 1회');
+    assert.deepEqual(bodyLines(ctx), ['검수 카드 본문.']);
+    assert.equal((ctx.match(/단독 캐논 근거로 인용 금지/g) || []).length, 0);
     assert.equal((ctx.match(/줄은 위 카드 본문 인용/g) || []).length, 1);
-    assert.ok(ctx.indexOf('검수 카드 본문.') < ctx.indexOf('미검수 카드 본문.'));
+    assert.doesNotMatch(ctx, /미검수 카드 본문/);
   });
 });
 
@@ -753,7 +771,9 @@ test('비UTF8 카드는 fail-open 하되 디코딩 대체가 로그에 남는다
   withProject({
     settings: { compile: { recallVerifiedOnly: false } },
   }, ({ dir, fixture, write }) => {
-    const head = Buffer.from('---\ntitle: "깨진 카드"\nstatus: verified\n---\n\n<!-- qmd:auto:start id="main" sourceHash="b" -->\n## Summary\n앞 ', 'utf8');
+    const trustedHead = withTrustedRevision(dir,
+      '---\ntitle: "깨진 카드"\nstatus: verified\n---\n\n<!-- qmd:auto:start id="main" sourceHash="b" -->\n## Summary\n앞 ');
+    const head = Buffer.from(trustedHead, 'utf8');
     const broken = Buffer.from([0xff, 0xfe, 0xfd]);           // 유효하지 않은 UTF-8
     const tail = Buffer.from(' 뒤 문장.\n<!-- qmd:auto:end -->\n', 'utf8');
     writeFileSync(join(dir, '.auto-context', 'wiki', 'decisions', 'bad.md'),
@@ -779,11 +799,11 @@ test('읽기 창이 소진돼 본문이 카드 중간에서 끊기면 절단 표
     settings: { injectSummaryMaxChars: 4000 },
     cards: {},
   }, ({ dir, fixture, write }) => {
-    writeFileSync(join(dir, '.auto-context', 'wiki', 'decisions', 'big.md'), rawCard([
+    writeFileSync(join(dir, '.auto-context', 'wiki', 'decisions', 'big.md'), withTrustedRevision(dir, rawCard([
       '---', 'title: "창 소진 카드"', 'status: verified', 'aliases:', bloat, '---',
       '', '<!-- qmd:auto:start id="main" sourceHash="beef" -->', '## Summary', longBody,
       '<!-- qmd:auto:end -->',
-    ]));
+    ])));
     write([{ file: 'proj-wiki/decisions/big.md', title: 'Summary', score: 1 }]);
     const log = join(dir, 'recall.log');
     const ctx = contextOf({ prompt: PROMPT, cwd: dir },
@@ -800,11 +820,11 @@ test('읽기 창이 소진돼 본문이 카드 중간에서 끊기면 절단 표
 test('title: > (접힌 스칼라)는 값으로 오인되지 않고 진단에 남는다', () => {
   // 예전엔 title 을 문자 `>` 하나로 주입하고 로그는 정상 selected 였다.
   withProject({}, ({ dir, fixture, write }) => {
-    writeFileSync(join(dir, '.auto-context', 'wiki', 'decisions', 'folded.md'), rawCard([
+    writeFileSync(join(dir, '.auto-context', 'wiki', 'decisions', 'folded.md'), withTrustedRevision(dir, rawCard([
       '---', 'title: >', '  접힌 스칼라로 쓴 제목', 'status: verified', '---',
       '', '<!-- qmd:auto:start id="main" sourceHash="beef" -->', '## Summary', '본문이다.',
       '<!-- qmd:auto:end -->',
-    ]));
+    ])));
     write([{ file: 'proj-wiki/decisions/folded.md', title: 'Summary', score: 1 }]);
     const log = join(dir, 'recall.log');
     const ctx = contextOf({ prompt: PROMPT, cwd: dir },
@@ -840,7 +860,7 @@ test('title 에 이스케이프된 인용부호가 있으면 역이스케이프�
   });
 });
 
-test('frontmatter 가 없는 카드도 본문을 쓰고 진단에 남는다', () => {
+test('frontmatter 가 없는 카드는 fail-closed하고 진단에 남는다', () => {
   withProject({
     settings: { compile: { recallVerifiedOnly: false } },
   }, ({ dir, fixture, write }) => {
@@ -850,9 +870,9 @@ test('frontmatter 가 없는 카드도 본문을 쓰고 진단에 남는다', ()
     const log = join(dir, 'recall.log');
     const ctx = contextOf({ prompt: PROMPT, cwd: dir },
       { QMD_QUERY_FIXTURE: fixture, QMD_RECALL_LOG: log });
-    assert.match(ctx, /프론트매터 없는 본문\./);
+    assert.equal(ctx, null);
     const sel = execFileSync('cat', [log], { encoding: 'utf8' }).trim().split('\n')
-      .map(JSON.parse).find((l) => l.event === 'qmd_recall_selection' && l.reason === 'selected');
+      .map(JSON.parse).find((l) => l.event === 'qmd_recall_selection' && l.reason === 'no_results_after_filter');
     assert.equal(sel.card_meta_issues.frontmatter_missing, 1);
   });
 });
@@ -941,11 +961,11 @@ test('열린 인용부호(값이 잘린 카드)는 unbalanced_quote 로 진단�
   // 개행을 이스케이프하지 않던 시절 멀티라인 title 이 실제 개행으로 디스크에 나가,
   // 첫 줄만 읽으면 `"멀티` 처럼 열린 인용부호로 끝났다 — 예전엔 조용히 값으로 썼다.
   withProject({}, ({ dir, fixture, write }) => {
-    writeFileSync(join(dir, '.auto-context', 'wiki', 'decisions', 'broken.md'), rawCard([
+    writeFileSync(join(dir, '.auto-context', 'wiki', 'decisions', 'broken.md'), withTrustedRevision(dir, rawCard([
       '---', 'title: "멀티', '라인 제목"', 'status: verified', '---',
       '', '<!-- qmd:auto:start id="main" sourceHash="beef" -->', '## Summary', '본문이다.',
       '<!-- qmd:auto:end -->',
-    ]));
+    ])));
     write([{ file: 'proj-wiki/decisions/broken.md', title: 'Summary', score: 1 }]);
     const log = join(dir, 'recall.log');
     const ctx = contextOf({ prompt: PROMPT, cwd: dir },
@@ -961,7 +981,7 @@ test('열린 인용부호(값이 잘린 카드)는 unbalanced_quote 로 진단�
   });
 });
 
-test('빈 스칼라(title: "" / status: "")도 진단에 남는다', () => {
+test('빈 스칼라(title: "" / status: "")는 fail-closed하고 진단에 남는다', () => {
   withProject({ settings: { compile: { recallVerifiedOnly: false } } }, ({ dir, fixture, write }) => {
     writeFileSync(join(dir, '.auto-context', 'wiki', 'decisions', 'empty.md'), rawCard([
       '---', 'title: ""', 'status: ""', '---',
@@ -972,7 +992,7 @@ test('빈 스칼라(title: "" / status: "")도 진단에 남는다', () => {
     const log = join(dir, 'recall.log');
     contextOf({ prompt: PROMPT, cwd: dir }, { QMD_QUERY_FIXTURE: fixture, QMD_RECALL_LOG: log });
     const sel = execFileSync('cat', [log], { encoding: 'utf8' }).trim().split('\n')
-      .map(JSON.parse).find((l) => l.event === 'qmd_recall_selection' && l.reason === 'selected');
+      .map(JSON.parse).find((l) => l.event === 'qmd_recall_selection' && l.reason === 'no_results_after_filter');
     assert.deepEqual(sel.card_meta_issues, { status_empty: 1, title_empty: 1 });
   });
 });
@@ -983,11 +1003,11 @@ test('auto:end 는 창 안이지만 수동 섹션이 창 밖이면 절단 표식
   const bloat = Array.from({ length: 100 }, (_, i) => `  - "별칭 ${i} 창을 채우기 위한 긴 별칭 문자열"`).join('\n');
   const manual = Array.from({ length: 200 }, (_, i) => `- 병합된 고유 사실 ${i} 이며 길게 이어진다.`).join('\n');
   withProject({}, ({ dir, fixture, write }) => {
-    writeFileSync(join(dir, '.auto-context', 'wiki', 'decisions', 'tail.md'), rawCard([
+    writeFileSync(join(dir, '.auto-context', 'wiki', 'decisions', 'tail.md'), withTrustedRevision(dir, rawCard([
       '---', 'title: "꼬리 잘린 카드"', 'status: verified', 'aliases:', bloat, '---',
       '', '<!-- qmd:auto:start id="main" sourceHash="beef" -->', '## Summary', 'auto 본문.',
       '<!-- qmd:auto:end -->', '', '## 병합된 고유 사실', manual,
-    ]));
+    ])));
     write([{ file: 'proj-wiki/decisions/tail.md', title: 'Summary', score: 1 }]);
     const log = join(dir, 'recall.log');
     const ctx = contextOf({ prompt: PROMPT, cwd: dir },

@@ -17,6 +17,7 @@ import config as qmd_config
 import keywords as qmd_keywords
 import resolve_paths as qmd_resolve_paths
 import wiki_markers
+import wiki_freshness
 import yaml_scalars
 
 DEFAULT_DAEMON_URL = "http://localhost:8483"
@@ -28,6 +29,13 @@ QUERY_TIMEOUT = 5.0
 # 진단(core/crowding_probe.py)이 이 값과 갈리면 측정이 무의미해진다. 본 질의와 shadow
 # 질의에 리터럴 8이 각각 박혀 있던 것을 상수 하나로 모았다(값은 동일 — 동작 무변화).
 DAEMON_QUERY_LIMIT = 8
+# A card may cite more than one compiler-owned source.  Hashing runs in the
+# blocking prompt hook, so both the per-card scan and the request-local cache
+# have an explicit bound independent of model-provided frontmatter size.
+MAX_FRESHNESS_SOURCE_REVISIONS_PER_CARD = 10
+MAX_FRESHNESS_CACHE_ENTRIES = (
+    DAEMON_QUERY_LIMIT * MAX_FRESHNESS_SOURCE_REVISIONS_PER_CARD
+)
 
 # recall을 시도할 최소 프롬프트 길이. 이보다 짧으면 키워드가 나오지 않아 질의가 무의미하다.
 # 리터럴로 두면 그 조기 return이 무엇을 판단한 것인지 로그(`prompt_too_short`)와 어긋난다.
@@ -516,6 +524,79 @@ def frontmatter_source_entries(block: str) -> list[str]:
     return entries
 
 
+def frontmatter_source_revisions(block: str) -> list[dict]:
+    """Parse the compiler-owned provenance list with a closed, bounded schema.
+
+    The compiler writes a top-level ``sourceRevisions:`` block whose children
+    are one-line flow mappings.  Any inline value, malformed sibling, nested
+    block mapping, duplicate top-level declaration, or over-budget list makes
+    the complete proof unusable.  A valid prefix is never authoritative.
+    """
+    entries: list[str] = []
+    in_revisions = False
+    seen_header = False
+    invalid = False
+    for line in block.split("\n"):
+        if not line.strip():
+            continue
+        if not line[0].isspace():
+            if line.startswith("sourceRevisions:"):
+                if seen_header:
+                    invalid = True
+                seen_header = True
+                in_revisions = True
+                inline = line.split(":", 1)[1].strip()
+                if inline and not inline.startswith("#"):
+                    invalid = True
+            else:
+                in_revisions = False
+            continue
+        if not in_revisions:
+            continue
+        stripped = line.strip()
+        if not stripped.startswith("- "):
+            invalid = True
+            continue
+        entries.append(stripped[2:].strip())
+        if len(entries) > MAX_FRESHNESS_SOURCE_REVISIONS_PER_CARD:
+            invalid = True
+            break
+    if invalid or not seen_header or not entries:
+        return []
+    return yaml_scalars.load_source_revisions(entries)
+
+
+def is_auto_trusted_card(meta: dict) -> bool:
+    """Static recall trust: qmd-created, verified, compiler-provenanced."""
+    return (
+        meta.get("status") == "verified"
+        and meta.get("createdBy") == "qmd-auto-context"
+        and bool(meta.get("sourceRevisions"))
+    )
+
+
+def _event_time_ns(value) -> int | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return int(parsed.timestamp() * 1_000_000_000)
+
+
+def pending_refresh_cutoffs(project_root: Path) -> dict[str, int | None]:
+    """Latest unresolved pending timestamp by source path, read once/request."""
+    cutoffs: dict[str, int | None] = {}
+    for event in wiki_freshness.unresolved_pending_refreshes(project_root):
+        path = event.get("sourcePath")
+        if isinstance(path, str) and path:
+            cutoffs[path] = _event_time_ns(event.get("ts"))
+    return cutoffs
+
+
 # sources 항목 중 원문 경로로 쓸 수 있는 유일한 kind. `wiki_verify_worker.load_sources`가
 # 같은 판정(`src.get("kind") != "file"`)을 쓴다 — **두 곳이 갈리면 안 된다**: 한쪽은 원문을
 # 검증에 쓰고 다른 한쪽은 그 경로를 모델에게 제시하므로, 서로 다른 집합을 보면 "검증되지
@@ -772,7 +853,8 @@ def _apply_match_position(meta: dict, text: str, body_start: int, result: dict,
 
 def read_wiki_meta(result: dict, config: dict, cwd: str, summary_max_chars: int = DEFAULT_INJECT_SUMMARY_MAX_CHARS,
                    roots: tuple[Path, Path] | None = None,
-                   source_opts: tuple[int, list[Path]] | None = None) -> dict:
+                   source_opts: tuple[int, list[Path]] | None = None,
+                   pending_cutoffs: dict[str, int | None] | None = None) -> dict:
     """wiki 결과의 frontmatter에서 status·검수 여부·title을, 본문에서 요약을 읽는다.
 
     검수 판정: reviewed:true, 보호 status, 또는 createdBy가 명시적으로
@@ -787,6 +869,7 @@ def read_wiki_meta(result: dict, config: dict, cwd: str, summary_max_chars: int 
     보이던 것이 이번에 고친 버그의 클래스라, 로그에서 원인을 특정할 수 있어야 한다.
     """
     meta = {"status": "generated", "reviewed": False, "title": "", "summary": "",
+            "createdBy": "", "sourceRevisions": [], "pendingCutoffs": {},
             "displayPath": "", "bodyReason": "", "decodeReplaced": False,
             "cardRead": False, "windowTruncated": False, "bodyIncomplete": False,
             "metaIssues": [], "sources": [], "sourceEntries": 0, "sourceReasons": {},
@@ -840,6 +923,13 @@ def read_wiki_meta(result: dict, config: dict, cwd: str, summary_max_chars: int 
     issues: dict[str, str] = {}
     block = text[3:end]
     fields = parse_frontmatter_scalars(block, issues)
+    meta["sourceRevisions"] = frontmatter_source_revisions(block)
+    if pending_cutoffs:
+        meta["pendingCutoffs"] = {
+            revision["path"]: pending_cutoffs[revision["path"]]
+            for revision in meta["sourceRevisions"]
+            if revision["path"] in pending_cutoffs
+        }
     observe_only = len(source_opts) > 2 and bool(source_opts[2])
     if source_opts[0] > 0 or observe_only:
         # 원문 경로. 이미 메모리에 있는 frontmatter 블록만 쓰므로 추가 파일 읽기는 없다
@@ -861,6 +951,7 @@ def read_wiki_meta(result: dict, config: dict, cwd: str, summary_max_chars: int 
         # 헤딩 `Summary`라 849장 전부 같고, 카드 이름이라는 거짓 정보가 된다).
         meta["metaIssues"].append(f"title_{issues['title']}" if "title" in issues else "title_missing")
     created_by = fields.get("createdBy", "")
+    meta["createdBy"] = created_by
     meta["reviewed"] = (
         fields.get("reviewed", "").lower() == "true"
         or meta["status"].lower() in REVIEWED_WIKI_STATUSES
@@ -883,15 +974,23 @@ def read_wiki_meta(result: dict, config: dict, cwd: str, summary_max_chars: int 
 
 def annotate_wiki_result(result: dict, config: dict, cwd: str, summary_max_chars: int,
                          roots: tuple[Path, Path] | None = None,
-                         source_opts: tuple[int, list[Path]] | None = None) -> None:
+                         source_opts: tuple[int, list[Path]] | None = None,
+                         pending_cutoffs: dict[str, int | None] | None = None) -> None:
     """wiki role 결과에 `_wiki_*` 메타를 붙인다(카드 파일 읽기 1회).
 
     본문·title·표시 경로는 wiki role 결과에만 붙으므로, raw 결과에는 어떤 경우에도
     본문이 실리지 않는다(wikiOnly 경계 유지).
     """
-    meta = read_wiki_meta(result, config, cwd, summary_max_chars, roots, source_opts)
+    meta = read_wiki_meta(
+        result, config, cwd, summary_max_chars, roots, source_opts, pending_cutoffs)
     result["_wiki_status"] = meta["status"]
     result["_wiki_reviewed"] = meta["reviewed"]
+    result["_wiki_trusted"] = is_auto_trusted_card(meta)
+    result["_wiki_created_by"] = meta["createdBy"]
+    if meta["sourceRevisions"]:
+        result["_wiki_source_revisions"] = list(meta["sourceRevisions"])
+    if meta["pendingCutoffs"]:
+        result["_wiki_pending_cutoffs"] = dict(meta["pendingCutoffs"])
     # 원문 경로(`sources[].path`). 카드 본문이 우선이고 원문은 "필요할 때 찾아갈 주소"라,
     # 여기서는 검증만 하고 주입 문구의 우선순위 지시는 format_context가 붙인다.
     if meta.get("sources"):
@@ -1869,6 +1968,10 @@ def main():
     # project_root / wiki_root는 한 recall 호출 안에서 불변이다 — 1회만 계산해 재사용한다
         # (카드마다 find_project_config 재탐색이 52ms/장 → 8장 424ms였다).
     card_roots = wiki_roots(config, cwd)
+    # Pending metadata is project-local and immutable for this one recall
+    # decision.  Read it once; per-card ledger reads would make the blocking
+    # hook scale with candidate count and could observe mixed event snapshots.
+    card_pending_cutoffs = pending_refresh_cutoffs(card_roots[0])
     # 원문 경로 주입 예산(카드당 상한 + allowRoots). 호출당 1회 계산해 카드마다 재사용한다.
     # 로그가 켜져 있으면 상한 0에서도 분류만 돌린다(cards_all_sources_missing 유지).
     card_source_opts = source_inject_opts(config, observe=bool(log_path))
@@ -1903,7 +2006,9 @@ def main():
                 continue
             if not worth_annotating(result):
                 continue
-            annotate_wiki_result(result, config, cwd, summary_max_chars, card_roots, card_source_opts)
+            annotate_wiki_result(
+                result, config, cwd, summary_max_chars, card_roots,
+                card_source_opts, card_pending_cutoffs)
             annotated_cards.append(result)
 
     annotate_all(results)
@@ -1942,13 +2047,18 @@ def main():
     verified_only = bool(compile_cfg.get("recallVerifiedOnly", True))
     strategy = config.get("recallStrategy")
     wiki_only = strategy == "wikiOnly"
+    top_n = int(config.get("topN", 3))
+    top_n = max(0, top_n)
 
     # verified_only 필터로 drop된 미검수 wiki 카드 수. 빈 출력이 "미검수 제외" 때문인지
     # 진단 가능하게 log에 노출한다(경로 해석 실패로 검수 카드가 fail-closed drop된
     # misconfiguration도 여기 잡혀 no_results_after_filter의 원인을 특정할 수 있다).
     # at_cutoff: score >= cutoff 인 후보 수(자격 판정 무관). 순위 폴백 허용 조건이다 —
     # 아래 rescue_one docstring 참조. phase마다 새로 계산한다(= 대입).
-    counters = {"skip": 0, "min_score": 0, "unverified": 0, "at_cutoff": 0}
+    counters = {
+        "skip": 0, "min_score": 0, "unverified": 0, "at_cutoff": 0,
+        "stale": 0, "freshness_unknown": 0, "freshness_checked": 0,
+    }
 
     def classify(r, *, wiki_scoped: bool) -> str:
         """minScore(순위 컷)를 **제외한** hard filter 판정 — "eligible" 자격만 본다.
@@ -1976,6 +2086,11 @@ def main():
         if is_wiki:
             if r.get("_wiki_status", "generated") in excluded_statuses:
                 return "excluded"
+            # This is a static provenance boundary, not a UI preference.  A
+            # status string, human marker, missing creator, or foreign writer
+            # cannot opt out via recallVerifiedOnly:false.
+            if not r.get("_wiki_trusted", False):
+                return "unverified"
             if verified_only and not r.get("_wiki_reviewed", False):
                 return "unverified"
         return "eligible"
@@ -2049,6 +2164,94 @@ def main():
                     return r, rank_index.get(r.get("file", ""), position)
         return None, None
 
+    low_priority = set(compile_cfg.get("lowPriorityStatuses", ["generated", "tentative"]))
+
+    def apply_low_priority_order(items: list[dict]) -> None:
+        """Preserve the existing stable status demotion before freshness scans."""
+        items.sort(
+            key=lambda r: (
+                r.get("_wiki_status") in low_priority
+                and not r.get("_wiki_reviewed", False)
+            )
+        )
+
+    freshness_allow_roots = qmd_resolve_paths.allowed_roots(config)
+    freshness_cache: dict[tuple[str, int, int], dict] = {}
+
+    def current_snapshot_cached(path: Path) -> dict | None:
+        """Stable Task1 snapshot, reused only for this request/stat identity."""
+        try:
+            stat = path.stat()
+        except OSError:
+            return None
+        lookup_key = (str(path), stat.st_size, stat.st_mtime_ns)
+        cached = freshness_cache.get(lookup_key)
+        if cached is not None:
+            return cached
+        if len(freshness_cache) >= MAX_FRESHNESS_CACHE_ENTRIES:
+            return None
+        snapshot = wiki_freshness.snapshot_file(path)
+        if snapshot is None:
+            return None
+        cache_key = (str(path), snapshot["size"], snapshot["mtimeNs"])
+        if cache_key not in freshness_cache:
+            if len(freshness_cache) >= MAX_FRESHNESS_CACHE_ENTRIES:
+                return None
+            freshness_cache[cache_key] = snapshot
+        return freshness_cache[cache_key]
+
+    def card_freshness(result: dict) -> str:
+        revisions = result.get("_wiki_source_revisions")
+        if (
+            not isinstance(revisions, list) or not revisions
+            or len(revisions) > MAX_FRESHNESS_SOURCE_REVISIONS_PER_CARD
+        ):
+            return wiki_freshness.UNKNOWN
+        pending = result.get("_wiki_pending_cutoffs", {})
+        if not isinstance(pending, dict):
+            return wiki_freshness.UNKNOWN
+        for expected in revisions:
+            normalized = yaml_scalars.normalize_source_revision(expected)
+            if normalized is None:
+                return wiki_freshness.UNKNOWN
+            if normalized["path"] in pending:
+                cutoff = pending[normalized["path"]]
+                if cutoff is None:
+                    return wiki_freshness.UNKNOWN
+                if cutoff > normalized["mtimeNs"]:
+                    return wiki_freshness.STALE
+            resolved, reason = resolve_existing_source(
+                normalized["path"], card_roots[0], freshness_allow_roots)
+            if resolved is None:
+                return wiki_freshness.STALE if reason == "missing" else wiki_freshness.UNKNOWN
+            current = current_snapshot_cached(resolved)
+            if current is None:
+                return wiki_freshness.UNKNOWN
+            if current["sha256"] != normalized["sha256"]:
+                return wiki_freshness.STALE
+        return wiki_freshness.FRESH
+
+    def apply_freshness_guard(items: list[dict]) -> list[dict]:
+        """Fill final slots while inspecting only eligible primary wiki hits."""
+        if top_n <= 0:
+            return items
+        selected: list[dict] = []
+        for result in items:
+            if len(selected) >= top_n:
+                break
+            if not qmd_config.is_wiki_collection(roles, result.get("_collection", "")):
+                selected.append(result)
+                continue
+            counters["freshness_checked"] += 1
+            state = card_freshness(result)
+            if state == wiki_freshness.FRESH:
+                selected.append(result)
+            elif state == wiki_freshness.STALE:
+                counters["stale"] += 1
+            else:
+                counters["freshness_unknown"] += 1
+        return selected
+
     # rescue 기록(로그 전용): (원래 rank, phase). phase는 wiki-scoped primary는 "wiki",
     # raw backfill은 "raw", 그 밖의 flat primary는 "primary".
     rank_fallback: tuple[int, str] | None = None
@@ -2060,6 +2263,22 @@ def main():
             filtered_results = [rescued]
             is_wiki_hit = qmd_config.is_wiki_collection(roles, rescued.get("_collection", ""))
             rank_fallback = (rescued_rank, "wiki" if (queried_wiki_first or is_wiki_hit) else "primary")
+
+    # Preserve the previous stable low-priority order, then replace only the
+    # primary wiki selection with current-source-proven candidates.  Rescue is
+    # intentionally not re-run after freshness removal.
+    apply_low_priority_order(filtered_results)
+    top_n_eligible_count = len(filtered_results)
+    primary_freshness_drops_before_fallback = 0
+    if any(qmd_config.is_wiki_collection(roles, r.get("_collection", ""))
+           for r in filtered_results):
+        before_stale = counters["stale"]
+        before_unknown = counters["freshness_unknown"]
+        filtered_results = apply_freshness_guard(filtered_results)
+        primary_freshness_drops_before_fallback = (
+            counters["stale"] - before_stale
+            + counters["freshness_unknown"] - before_unknown
+        )
 
     if (
         strategy == "hierarchical"
@@ -2105,17 +2324,11 @@ def main():
             if rescued is not None:
                 filtered_results = [rescued]
                 rank_fallback = (rescued_rank, "raw")
-
-    # lowPriorityStatuses 강등: 미검수 low-priority wiki 카드를 topN 절단 전에 뒤로 보낸다.
-    # score 내림차순 위의 안정 정렬이라 그룹 내 순위는 유지되고, 검수 카드가
-    # 저점수여도 미검수 generated 카드에 topN 슬롯을 뺏기지 않는다.
-    low_priority = set(compile_cfg.get("lowPriorityStatuses", ["generated", "tentative"]))
-    filtered_results.sort(
-        key=lambda r: r.get("_wiki_status") in low_priority and not r.get("_wiki_reviewed", False)
-    )
+        apply_low_priority_order(filtered_results)
+        top_n_eligible_count = len(filtered_results)
+        primary_freshness_drops_before_fallback = 0
 
     # Limit to topN
-    top_n = int(config.get("topN", 3))
     final_results = filtered_results[:top_n]
 
     # ── lex 게이트 ────────────────────────────────────────────────────────────
@@ -2152,7 +2365,12 @@ def main():
 
     # Record why recall produced (or withheld) output — file-only, never stdout.
     selection_reason = "selected" if final_results else "no_results_after_filter"
-    dropped_top_n = max(0, len(filtered_results) - len(final_results))
+    dropped_top_n = max(
+        0,
+        top_n_eligible_count
+        - primary_freshness_drops_before_fallback
+        - len(final_results),
+    )
     # rescue 사실은 별도 필드로만 남긴다 — dropped_* 는 최초 cutoff/drop 수를 그대로
     # 유지해야 기존 집계 소비자가 깨지지 않는다(rescue는 그 뒤에 일어난 구제다).
     fallback_fields = {"rank_fallback_used": rank_fallback is not None}
@@ -2250,6 +2468,9 @@ def main():
         dropped_skip=counters["skip"],
         dropped_min_score=counters["min_score"],
         dropped_unverified=counters["unverified"],
+        dropped_stale=counters["stale"],
+        freshness_unknown=counters["freshness_unknown"],
+        freshness_checked=counters["freshness_checked"],
         dropped_top_n=dropped_top_n,
         selected=len(final_results),
         min_score=active_min_score,

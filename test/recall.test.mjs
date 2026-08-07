@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { readFileSync, mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { readFileSync, mkdtempSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { removeTemp } from './helpers/temp.mjs';
@@ -18,6 +19,54 @@ function recall(payload, env = {}) {
     console.error("Exec failed:", e.stderr?.toString());
     throw e;
   }
+}
+
+function sourceRevisionLine(project, relativePath, collection = 'proj-docs') {
+  const path = join(project, relativePath);
+  const bytes = readFileSync(path);
+  const stat = statSync(path, { bigint: true });
+  const hash = createHash('sha256').update(bytes).digest('hex');
+  return `{kind: "file", path: "${relativePath}", collection: "${collection}", sha256: "${hash}", size: ${stat.size}, mtimeNs: ${stat.mtimeNs}}`;
+}
+
+function writeTrustedWikiCard(project, name, sourceText, body = `Fresh card ${name}`) {
+  const sourcePath = `docs/source-${name}.md`;
+  const cardPath = join(project, '.auto-context', 'wiki', 'concepts', `${name}.md`);
+  writeFileSync(join(project, sourcePath), sourceText);
+  const revision = sourceRevisionLine(project, sourcePath);
+  writeFileSync(cardPath, [
+    '---',
+    `title: "Card ${name}"`,
+    'status: verified',
+    'createdBy: qmd-auto-context',
+    'sourceRevisions:',
+    `  - ${revision}`,
+    '---',
+    body,
+    '',
+  ].join('\n'));
+  return { sourcePath, cardPath };
+}
+
+function freshnessProject(project, { strategy = 'hierarchical', topN = 5, compile = {} } = {}) {
+  mkdirSync(join(project, '.auto-context', 'wiki', 'concepts'), { recursive: true });
+  mkdirSync(join(project, 'docs'), { recursive: true });
+  writeFileSync(join(project, '.auto-context', 'settings.json'), JSON.stringify({
+    indexing: true,
+    collections: ['proj-wiki', 'proj-docs'],
+    collectionPaths: { 'proj-wiki': '.auto-context/wiki', 'proj-docs': 'docs' },
+    collectionRoles: { 'proj-wiki': 'wiki', 'proj-docs': 'raw' },
+    wikiPath: '.auto-context/wiki',
+    recallStrategy: strategy,
+    topN,
+    compile,
+  }));
+}
+
+function selectionEvent(logPath) {
+  return readFileSync(logPath, 'utf8').trim().split('\n')
+    .map(line => JSON.parse(line))
+    .find(event => event.event === 'qmd_recall_selection');
 }
 
 test('fixture 응답 → additionalContext 생성', () => {
@@ -200,23 +249,16 @@ test('레거시 .agents/qmd-recall.json → recall 동작(하위호환)', () => 
 test('hierarchical recall: wiki 결과가 있으면 raw가 더 높아도 wiki만 우선 주입', () => {
   const dir = mkdtempSync(join(tmpdir(), 'qmd-rh-'));
   const fixture = join(dir, 'hierarchical-fixture.json');
-  mkdirSync(join(dir, '.auto-context'), { recursive: true });
-  writeFileSync(join(dir, '.auto-context', 'settings.json'), JSON.stringify({
-    indexing: true,
-    collections: ['proj-wiki', 'proj-docs'],
-    collectionRoles: { 'proj-wiki': 'wiki', 'proj-docs': 'raw' },
-    recallStrategy: 'hierarchical',
-    topN: 3,
-    compile: { recallVerifiedOnly: false },
-  }));
+  freshnessProject(dir, { strategy: 'hierarchical', topN: 3 });
+  writeTrustedWikiCard(dir, 'config-layout', '# current config\n', 'Wiki decision body');
   writeFileSync(fixture, JSON.stringify({ results: [
     { file: 'qmd://proj-docs/docs/raw-source.md', title: 'Raw source', score: 1.0 },
-    { file: 'qmd://proj-wiki/.auto-context/wiki/decisions/config-layout.md', title: 'Wiki decision', score: 0.6 },
+    { file: 'qmd://proj-wiki/concepts/config-layout.md', title: 'Wiki decision', score: 0.6 },
   ] }));
   try {
     const r = recall({ prompt: 'config layout decision 내용을 알려줘', cwd: dir }, { QMD_QUERY_FIXTURE: fixture });
     assert.ok(r);
-    assert.match(r.hookSpecificOutput.additionalContext, /\[wiki(?::generated)?\]/);
+    assert.match(r.hookSpecificOutput.additionalContext, /\[wiki:verified\]/);
     assert.match(r.hookSpecificOutput.additionalContext, /config-layout\.md/);
     assert.doesNotMatch(r.hookSpecificOutput.additionalContext, /raw-source\.md/);
   } finally { removeTemp(dir); }
@@ -225,21 +267,14 @@ test('hierarchical recall: wiki 결과가 있으면 raw가 더 높아도 wiki만
 test('hierarchical recall: wiki 메타파일(index.md/log.md)은 노이즈라 제외하고 실제 카드만 주입', () => {
   const dir = mkdtempSync(join(tmpdir(), 'qmd-rh-meta-'));
   const fixture = join(dir, 'meta-fixture.json');
-  mkdirSync(join(dir, '.auto-context'), { recursive: true });
-  writeFileSync(join(dir, '.auto-context', 'settings.json'), JSON.stringify({
-    indexing: true,
-    collections: ['proj-wiki'],
-    collectionRoles: { 'proj-wiki': 'wiki' },
-    recallStrategy: 'hierarchical',
-    topN: 5,
-    compile: { recallVerifiedOnly: false },
-  }));
+  freshnessProject(dir, { strategy: 'hierarchical', topN: 5 });
+  writeTrustedWikiCard(dir, 'real-card', '# current source\n', 'Real card body');
   // Meta files score higher than the real card (they aggregate every card name),
   // yet must be dropped so the real card survives.
   writeFileSync(fixture, JSON.stringify({ results: [
     { file: 'qmd://proj-wiki/log.md', title: 'Wiki Log', score: 0.99 },
     { file: 'qmd://proj-wiki/index.md', title: 'Wiki Index', score: 0.95 },
-    { file: 'qmd://proj-wiki/.auto-context/wiki/concepts/real-card.md', title: 'Real card', score: 0.6 },
+    { file: 'qmd://proj-wiki/concepts/real-card.md', title: 'Real card', score: 0.6 },
   ] }));
   try {
     const r = recall({ prompt: '역순 금기 내용을 알려줘', cwd: dir }, { QMD_QUERY_FIXTURE: fixture });
@@ -273,27 +308,28 @@ print("OK")
 test('hierarchical recall: wiki frontmatter status를 prefix에 표시하고 discarded는 제외', () => {
   const dir = mkdtempSync(join(tmpdir(), 'qmd-rh-status-'));
   const fixture = join(dir, 'status-fixture.json');
-  mkdirSync(join(dir, '.auto-context', 'wiki', 'decisions'), { recursive: true });
+  mkdirSync(join(dir, '.auto-context', 'wiki', 'concepts'), { recursive: true });
+  mkdirSync(join(dir, 'docs'), { recursive: true });
   writeFileSync(join(dir, '.auto-context', 'settings.json'), JSON.stringify({
     indexing: true,
-    collections: ['proj-wiki'],
-    collectionPaths: { 'proj-wiki': '.auto-context/wiki' },
-    collectionRoles: { 'proj-wiki': 'wiki' },
+    collections: ['proj-wiki', 'proj-docs'],
+    collectionPaths: { 'proj-wiki': '.auto-context/wiki', 'proj-docs': 'docs' },
+    collectionRoles: { 'proj-wiki': 'wiki', 'proj-docs': 'raw' },
     recallStrategy: 'hierarchical',
     topN: 3,
     compile: { enabled: true, recallVerifiedOnly: false, excludeStatusesFromRecall: ['discarded', 'contested'], lowPriorityStatuses: ['generated', 'tentative'] },
   }));
-  writeFileSync(join(dir, '.auto-context', 'wiki', 'decisions', 'generated.md'), '---\nstatus: generated\n---\n# Generated\n');
-  writeFileSync(join(dir, '.auto-context', 'wiki', 'decisions', 'discarded.md'), '---\nstatus: discarded\n---\n# Discarded\n');
+  writeTrustedWikiCard(dir, 'verified', '# verified source\n', '# Verified');
+  writeFileSync(join(dir, '.auto-context', 'wiki', 'concepts', 'discarded.md'), '---\nstatus: discarded\ncreatedBy: qmd-auto-context\n---\n# Discarded\n');
   writeFileSync(fixture, JSON.stringify({ results: [
-    { file: 'qmd://proj-wiki/decisions/discarded.md', title: 'Discarded wiki', score: 0.99 },
-    { file: 'qmd://proj-wiki/decisions/generated.md', title: 'Generated wiki', score: 0.8 },
+    { file: 'qmd://proj-wiki/concepts/discarded.md', title: 'Discarded wiki', score: 0.99 },
+    { file: 'qmd://proj-wiki/concepts/verified.md', title: 'Verified wiki', score: 0.8 },
   ] }));
   try {
     const r = recall({ prompt: 'config layout decision 내용을 알려줘', cwd: dir }, { QMD_QUERY_FIXTURE: fixture });
     assert.ok(r);
-    assert.match(r.hookSpecificOutput.additionalContext, /\[wiki:generated\]/);
-    assert.match(r.hookSpecificOutput.additionalContext, /generated\.md/);
+    assert.match(r.hookSpecificOutput.additionalContext, /\[wiki:verified\]/);
+    assert.match(r.hookSpecificOutput.additionalContext, /verified\.md/);
     assert.doesNotMatch(r.hookSpecificOutput.additionalContext, /discarded\.md/);
   } finally { removeTemp(dir); }
 });
@@ -302,15 +338,13 @@ test('hierarchical recall: wiki frontmatter status를 prefix에 표시하고 dis
 // wiki role 프로젝트를 만들고 카드 frontmatter로 검수 여부를 가른다.
 function wikiBadgeProject(dir, extraSettings = {}) {
   mkdirSync(join(dir, '.auto-context', 'wiki', 'concepts'), { recursive: true });
-  // 이 헬퍼로 만드는 테스트들은 미검수 generated 카드의 배지/강등/exclude 경로를
-  // 검증한다 → recallVerifiedOnly를 명시적으로 꺼야 generated가 surface한다
-  // (기본값은 true라 미검수 카드를 제외한다). 호출부가 compile을 넘기면 그걸 우선한다.
+  mkdirSync(join(dir, 'docs'), { recursive: true });
   const { compile: extraCompile, ...rest } = extraSettings;
   writeFileSync(join(dir, '.auto-context', 'settings.json'), JSON.stringify({
     indexing: true,
-    collections: ['proj-wiki'],
-    collectionPaths: { 'proj-wiki': '.auto-context/wiki' },
-    collectionRoles: { 'proj-wiki': 'wiki' },
+    collections: ['proj-wiki', 'proj-docs'],
+    collectionPaths: { 'proj-wiki': '.auto-context/wiki', 'proj-docs': 'docs' },
+    collectionRoles: { 'proj-wiki': 'wiki', 'proj-docs': 'raw' },
     topN: 3,
     compile: { recallVerifiedOnly: false, ...(extraCompile || {}) },
     ...rest,
@@ -319,7 +353,7 @@ function wikiBadgeProject(dir, extraSettings = {}) {
 
 // 회귀: 실데몬 /query는 file을 qmd:// 스킴 없이 "collection/path"로 반환한다.
 // 스킴 전제 파싱이면 _collection 미주입 → 배지/강등/exclude가 라이브에서 전부 no-op (2026-07-04 발견).
-test('plain-path(스킴 없는) 데몬 응답에도 wiki 메타·(미검수) 배지가 적용된다', () => {
+test('plain-path(스킴 없는) generated wiki도 trusted provenance가 없으면 제외된다', () => {
   const dir = mkdtempSync(join(tmpdir(), 'qmd-plainpath-'));
   const fixture = join(dir, 'plain-fixture.json');
   wikiBadgeProject(dir, { recallStrategy: 'hierarchical' });
@@ -330,14 +364,11 @@ test('plain-path(스킴 없는) 데몬 응답에도 wiki 메타·(미검수) 배
   ] }));
   try {
     const r = recall({ prompt: '곁눈으로만 보이는 존재의 관찰 원칙을 알려줘', cwd: dir }, { QMD_QUERY_FIXTURE: fixture });
-    assert.ok(r);
-    assert.match(r.hookSpecificOutput.additionalContext, /\[wiki:generated\]/);
-    assert.match(r.hookSpecificOutput.additionalContext, /\(미검수\)/);
-    assert.match(r.hookSpecificOutput.additionalContext, /단독 캐논 근거로 인용 금지/);
+    assert.equal(r, null);
   } finally { removeTemp(dir); }
 });
 
-test('미검수 wiki 카드에 (미검수) 배지 + 안내 문구, reviewed:true 카드는 배지 없음', () => {
+test('generated와 reviewed:true 모두 trusted provenance 없이는 제외된다', () => {
   const dir = mkdtempSync(join(tmpdir(), 'qmd-badge-'));
   const fixture = join(dir, 'badge-fixture.json');
   wikiBadgeProject(dir, { recallStrategy: 'hierarchical' });
@@ -351,15 +382,11 @@ test('미검수 wiki 카드에 (미검수) 배지 + 안내 문구, reviewed:true
   ] }));
   try {
     const r = recall({ prompt: 'config layout decision 내용을 알려줘', cwd: dir }, { QMD_QUERY_FIXTURE: fixture });
-    assert.ok(r);
-    const ctx = r.hookSpecificOutput.additionalContext;
-    assert.match(ctx, /auto\.md - Auto wiki \(미검수\)/);
-    assert.doesNotMatch(ctx, /checked\.md - Checked wiki \(미검수\)/);
-    assert.match(ctx, /단독 캐논 근거로 인용 금지/);
+    assert.equal(r, null);
   } finally { removeTemp(dir); }
 });
 
-test('검수 카드만 있으면 미검수 안내 문구가 붙지 않음', () => {
+test('legacy canon status는 trusted recall 근거가 아니므로 제외된다', () => {
   const dir = mkdtempSync(join(tmpdir(), 'qmd-badge-clean-'));
   const fixture = join(dir, 'clean-fixture.json');
   wikiBadgeProject(dir, { recallStrategy: 'hierarchical' });
@@ -370,35 +397,31 @@ test('검수 카드만 있으면 미검수 안내 문구가 붙지 않음', () =
   ] }));
   try {
     const r = recall({ prompt: 'config layout decision 내용을 알려줘', cwd: dir }, { QMD_QUERY_FIXTURE: fixture });
-    assert.ok(r);
-    const ctx = r.hookSpecificOutput.additionalContext;
-    assert.doesNotMatch(ctx, /미검수/);
-    assert.match(ctx, /\[wiki:canon\]/);
+    assert.equal(r, null);
   } finally { removeTemp(dir); }
 });
 
-test('lowPriorityStatuses 강등: 미검수 generated 카드는 topN 절단 전에 검수 카드에 밀림', () => {
+test('lowPriority 후보가 높아도 fresh trusted 카드가 topN 슬롯을 확보한다', () => {
   const dir = mkdtempSync(join(tmpdir(), 'qmd-badge-demote-'));
   const fixture = join(dir, 'demote-fixture.json');
   wikiBadgeProject(dir, { recallStrategy: 'hierarchical', topN: 1 });
   writeFileSync(join(dir, '.auto-context', 'wiki', 'concepts', 'auto.md'),
     '---\ntitle: "Auto wiki"\nstatus: generated\ncreatedBy: qmd-auto-context\nreviewed: false\n---\n# Auto\n');
-  writeFileSync(join(dir, '.auto-context', 'wiki', 'concepts', 'canon.md'),
-    '---\nstatus: reviewed\ncreatedBy: qmd-auto-context\n---\n# Reviewed\n');
+  writeTrustedWikiCard(dir, 'trusted', '# trusted source\n', '# Trusted');
   writeFileSync(fixture, JSON.stringify({ results: [
     { file: 'qmd://proj-wiki/concepts/auto.md', title: 'Auto wiki', score: 0.9 },
-    { file: 'qmd://proj-wiki/concepts/canon.md', title: 'Reviewed wiki', score: 0.5 },
+    { file: 'qmd://proj-wiki/concepts/trusted.md', title: 'Trusted wiki', score: 0.5 },
   ] }));
   try {
     const r = recall({ prompt: 'config layout decision 내용을 알려줘', cwd: dir }, { QMD_QUERY_FIXTURE: fixture });
     assert.ok(r);
     const ctx = r.hookSpecificOutput.additionalContext;
-    assert.match(ctx, /canon\.md/, '검수 카드가 저점수여도 topN 슬롯을 우선 확보');
-    assert.doesNotMatch(ctx, /auto\.md/, '미검수 generated 카드는 topN=1에서 탈락');
+    assert.match(ctx, /trusted\.md/, 'fresh trusted 카드가 저점수여도 topN 슬롯을 확보');
+    assert.doesNotMatch(ctx, /auto\.md/, 'untrusted generated 카드는 topN=1에서 탈락');
   } finally { removeTemp(dir); }
 });
 
-test('flat 전략에서도 wiki role 컬렉션이면 미검수 배지 적용', () => {
+test('flat 전략에서도 generated wiki는 trusted provenance 없이는 제외된다', () => {
   const dir = mkdtempSync(join(tmpdir(), 'qmd-badge-flat-'));
   const fixture = join(dir, 'flat-fixture.json');
   wikiBadgeProject(dir, { recallStrategy: 'flat' }); // flat 명시(기본값은 hierarchical)
@@ -409,19 +432,15 @@ test('flat 전략에서도 wiki role 컬렉션이면 미검수 배지 적용', (
   ] }));
   try {
     const r = recall({ prompt: 'config layout decision 내용을 알려줘', cwd: dir }, { QMD_QUERY_FIXTURE: fixture });
-    assert.ok(r);
-    const ctx = r.hookSpecificOutput.additionalContext;
-    assert.match(ctx, /auto\.md - Auto wiki \(미검수\)/);
-    assert.match(ctx, /단독 캐논 근거로 인용 금지/);
+    assert.equal(r, null);
   } finally { removeTemp(dir); }
 });
 
-test('verified 카드는 검수급 대우: 배지 없음 + lowPriority 강등 면제 + [wiki:verified] 태그', () => {
+test('fresh provenanced verified 카드는 [wiki:verified]로 surface한다', () => {
   const dir = mkdtempSync(join(tmpdir(), 'qmd-verified-'));
   const fixture = join(dir, 'verified-fixture.json');
   wikiBadgeProject(dir, { recallStrategy: 'hierarchical', topN: 1 });
-  writeFileSync(join(dir, '.auto-context', 'wiki', 'concepts', 'machine.md'),
-    '---\nstatus: verified\ncreatedBy: qmd-auto-context\nreviewed: false\nverifiedBy: claude\n---\n# Machine\n');
+  writeTrustedWikiCard(dir, 'machine', '# machine source\n', '# Machine');
   writeFileSync(join(dir, '.auto-context', 'wiki', 'concepts', 'auto.md'),
     '---\ntitle: "Auto wiki"\nstatus: generated\ncreatedBy: qmd-auto-context\nreviewed: false\n---\n# Auto\n');
   writeFileSync(fixture, JSON.stringify({ results: [
@@ -469,21 +488,21 @@ test('recallVerifiedOnly 기본(true): 미검수 generated wiki만 있으면 빈
   } finally { removeTemp(dir); }
 });
 
-test('recallVerifiedOnly 기본(true): verified/reviewed 카드는 정상 surface', () => {
+test('recallVerifiedOnly 기본(true): fresh provenanced verified만 surface', () => {
   const dir = mkdtempSync(join(tmpdir(), 'qmd-vonly-keep-'));
   const fixture = join(dir, 'vonly-keep-fixture.json');
   mkdirSync(join(dir, '.auto-context', 'wiki', 'concepts'), { recursive: true });
+  mkdirSync(join(dir, 'docs'), { recursive: true });
   writeFileSync(join(dir, '.auto-context', 'settings.json'), JSON.stringify({
     indexing: true,
-    collections: ['proj-wiki'],
-    collectionPaths: { 'proj-wiki': '.auto-context/wiki' },
-    collectionRoles: { 'proj-wiki': 'wiki' },
+    collections: ['proj-wiki', 'proj-docs'],
+    collectionPaths: { 'proj-wiki': '.auto-context/wiki', 'proj-docs': 'docs' },
+    collectionRoles: { 'proj-wiki': 'wiki', 'proj-docs': 'raw' },
     recallStrategy: 'hierarchical',
     topN: 3,
     // recallVerifiedOnly 미설정 → 기본 true
   }));
-  writeFileSync(join(dir, '.auto-context', 'wiki', 'concepts', 'machine.md'),
-    '---\nstatus: verified\ncreatedBy: qmd-auto-context\nreviewed: false\nverifiedBy: claude\n---\n# Machine\n');
+  writeTrustedWikiCard(dir, 'machine', '# machine source\n', '# Machine');
   writeFileSync(join(dir, '.auto-context', 'wiki', 'concepts', 'auto.md'),
     '---\ntitle: "Auto wiki"\nstatus: generated\ncreatedBy: qmd-auto-context\nreviewed: false\n---\n# Auto\n');
   // 라이브 형식(스킴 없는 plain path)으로 둔다 — 데몬 /query가 실제로 이 형태를
@@ -508,8 +527,7 @@ test('flat 전략에서도 contested/discarded 카드는 recall에서 제외 (�
   wikiBadgeProject(dir, { recallStrategy: 'flat' }); // flat 명시(기본값은 hierarchical)
   writeFileSync(join(dir, '.auto-context', 'wiki', 'concepts', 'contested.md'),
     '---\nstatus: contested\ncreatedBy: qmd-auto-context\n---\n# Contested\n');
-  writeFileSync(join(dir, '.auto-context', 'wiki', 'concepts', 'ok.md'),
-    '---\nstatus: generated\ncreatedBy: qmd-auto-context\nreviewed: false\n---\n# OK\n');
+  writeTrustedWikiCard(dir, 'ok', '# ok source\n', '# OK');
   writeFileSync(fixture, JSON.stringify({ results: [
     { file: 'qmd://proj-wiki/concepts/contested.md', title: 'Contested wiki', score: 0.99 },
     { file: 'qmd://proj-wiki/concepts/ok.md', title: 'OK wiki', score: 0.8 },
@@ -520,5 +538,129 @@ test('flat 전략에서도 contested/discarded 카드는 recall에서 제외 (�
     const ctx = r.hookSpecificOutput.additionalContext;
     assert.doesNotMatch(ctx, /contested\.md/, 'flat에서도 contested 제외');
     assert.match(ctx, /ok\.md/);
+  } finally { removeTemp(dir); }
+});
+
+test('freshness guard scans past two stale wiki cards until fresh topN is full', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'qmd-fresh-select-two-'));
+  const fixture = join(dir, 'wiki-fixture.json');
+  const logPath = join(dir, 'recall.log');
+  try {
+    freshnessProject(dir, { topN: 5 });
+    const cards = [];
+    for (let i = 1; i <= 7; i += 1) {
+      const name = String(i);
+      const written = writeTrustedWikiCard(dir, name, `# original ${name}\n`,
+        `${i <= 2 ? 'Stale' : 'Fresh'} card ${name}`);
+      cards.push({ file: `qmd://proj-wiki/concepts/${name}.md`, title: `Card ${name}`, score: 1 - i / 100 });
+      if (i <= 2) writeFileSync(join(dir, written.sourcePath), `# changed ${name}\n`);
+    }
+    writeFileSync(fixture, JSON.stringify({ results: cards }));
+
+    const result = recall(
+      { prompt: 'freshness selection order 근거를 알려줘', cwd: dir },
+      { QMD_QUERY_FIXTURE: fixture, QMD_RECALL_LOG: logPath },
+    );
+    const context = result?.hookSpecificOutput.additionalContext || '';
+    assert.doesNotMatch(context, /Stale card one|Stale card 1/);
+    assert.doesNotMatch(context, /Stale card two|Stale card 2/);
+    assert.match(context, /Fresh card 3/);
+    assert.match(context, /Fresh card 7/);
+    const event = selectionEvent(logPath);
+    assert.equal(event.freshness_checked, 7,
+      '상위 둘이 stale인 topN:5에서는 #7까지 검사해 fresh 5장을 채운다');
+    assert.equal(event.dropped_stale, 2);
+    assert.equal(event.freshness_unknown, 0);
+    const serialized = JSON.stringify(event);
+    assert.doesNotMatch(serialized, /# changed|# original|[a-f0-9]{64}/i,
+      'telemetry must contain counters, not raw bodies or hashes');
+  } finally { removeTemp(dir); }
+});
+
+test('freshness guard stops at candidate six when one stale card precedes five fresh cards', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'qmd-fresh-select-one-'));
+  const fixture = join(dir, 'wiki-fixture.json');
+  const logPath = join(dir, 'recall.log');
+  try {
+    freshnessProject(dir, { topN: 5 });
+    const cards = [];
+    for (let i = 1; i <= 7; i += 1) {
+      const name = String(i);
+      const written = writeTrustedWikiCard(dir, name, `# original ${name}\n`, `Card body ${name}`);
+      cards.push({ file: `qmd://proj-wiki/concepts/${name}.md`, title: `Card ${name}`, score: 1 - i / 100 });
+      if (i === 1) writeFileSync(join(dir, written.sourcePath), '# changed 1\n');
+    }
+    writeFileSync(fixture, JSON.stringify({ results: cards }));
+
+    const result = recall(
+      { prompt: 'freshness bounded scan 동작을 알려줘', cwd: dir },
+      { QMD_QUERY_FIXTURE: fixture, QMD_RECALL_LOG: logPath },
+    );
+    const context = result?.hookSpecificOutput.additionalContext || '';
+    assert.match(context, /Card body 6/);
+    assert.doesNotMatch(context, /Card body 7/);
+    assert.equal(selectionEvent(logPath).freshness_checked, 6);
+  } finally { removeTemp(dir); }
+});
+
+test('all stale hierarchical wiki candidates fall back to raw, while wikiOnly stays empty', () => {
+  for (const strategy of ['hierarchical', 'wikiOnly']) {
+    const dir = mkdtempSync(join(tmpdir(), `qmd-fresh-${strategy}-`));
+    const fixture = join(dir, 'wiki-fixture.json');
+    const rawFixture = join(dir, 'raw-fixture.json');
+    try {
+      freshnessProject(dir, { strategy, topN: 3 });
+      const written = writeTrustedWikiCard(dir, 'stale', '# original\n', 'Stale wiki body');
+      writeFileSync(join(dir, written.sourcePath), '# changed\n');
+      writeFileSync(fixture, JSON.stringify({ results: [
+        { file: 'qmd://proj-wiki/concepts/stale.md', title: 'Stale wiki', score: 0.95 },
+      ] }));
+      writeFileSync(rawFixture, JSON.stringify({ results: [
+        { file: 'qmd://proj-docs/docs/source-stale.md', title: 'Current raw fallback', score: 0.9 },
+      ] }));
+
+      const result = recall(
+        { prompt: 'current source fallback 근거를 알려줘', cwd: dir },
+        { QMD_QUERY_FIXTURE: fixture, QMD_QUERY_FIXTURE_RAW: rawFixture },
+      );
+      if (strategy === 'hierarchical') {
+        const context = result?.hookSpecificOutput.additionalContext || '';
+        assert.match(context, /Current raw fallback/);
+        assert.doesNotMatch(context, /Stale wiki body/);
+      } else {
+        assert.equal(result, null, 'wikiOnly must not replace stale wiki with raw');
+      }
+    } finally { removeTemp(dir); }
+  }
+});
+
+test('verified wiki cards without compiler provenance or qmd creator are hard filtered', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'qmd-fresh-untrusted-'));
+  const fixture = join(dir, 'wiki-fixture.json');
+  try {
+    freshnessProject(dir, { compile: { recallVerifiedOnly: false } });
+    writeFileSync(join(dir, 'docs', 'source-good.md'), '# good\n');
+    const revision = sourceRevisionLine(dir, 'docs/source-good.md');
+    const variants = [
+      ['good', `createdBy: qmd-auto-context\nsourceRevisions:\n  - ${revision}`, 'Trusted body'],
+      ['legacy', 'createdBy: qmd-auto-context', 'No provenance body'],
+      ['missing', `sourceRevisions:\n  - ${revision}`, 'Missing creator body'],
+      ['foreign', `createdBy: another-tool\nsourceRevisions:\n  - ${revision}`, 'Foreign creator body'],
+    ];
+    for (const [name, meta, body] of variants) {
+      writeFileSync(join(dir, '.auto-context', 'wiki', 'concepts', `${name}.md`),
+        `---\ntitle: "${name}"\nstatus: verified\n${meta}\n---\n${body}\n`);
+    }
+    writeFileSync(fixture, JSON.stringify({ results: variants.map(([name], index) => ({
+      file: `qmd://proj-wiki/concepts/${name}.md`, title: name, score: 0.99 - index / 100,
+    })) }));
+
+    const result = recall(
+      { prompt: 'trusted wiki provenance 경계를 알려줘', cwd: dir },
+      { QMD_QUERY_FIXTURE: fixture },
+    );
+    const context = result?.hookSpecificOutput.additionalContext || '';
+    assert.match(context, /Trusted body/);
+    assert.doesNotMatch(context, /No provenance body|Missing creator body|Foreign creator body/);
   } finally { removeTemp(dir); }
 });
