@@ -691,6 +691,38 @@ test('verified wiki cards without compiler provenance or qmd creator are hard fi
   } finally { removeTemp(dir); }
 });
 
+test('legacy human trust labels and foreign verified cards never bypass the hard filter', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'qmd-fresh-fixed-policy-'));
+  const fixture = join(dir, 'wiki-fixture.json');
+  try {
+    freshnessProject(dir, { compile: { recallVerifiedOnly: false } });
+    writeFileSync(join(dir, 'docs', 'source-good.md'), '# good\n');
+    const revision = sourceRevisionLine(dir, 'docs/source-good.md');
+    const variants = [
+      ['fresh', `status: verified\ncreatedBy: qmd-auto-context\nsourceRevisions:\n  - ${revision}`, 'Fresh trusted body'],
+      ['reviewed', 'status: reviewed\ncreatedBy: qmd-auto-context\nreviewed: true', 'Reviewed legacy body'],
+      ['canon', 'status: canon\ncreatedBy: qmd-auto-context', 'Canon legacy body'],
+      ['manual', 'status: manual\ncreatedBy: qmd-auto-context', 'Manual legacy body'],
+      ['foreign', `status: verified\ncreatedBy: another-tool\nsourceRevisions:\n  - ${revision}`, 'Foreign verified body'],
+    ];
+    for (const [name, meta, body] of variants) {
+      writeFileSync(join(dir, '.auto-context', 'wiki', 'concepts', `${name}.md`),
+        `---\ntitle: "${name}"\n${meta}\n---\n${body}\n`);
+    }
+    writeFileSync(fixture, JSON.stringify({ results: variants.map(([name], index) => ({
+      file: `qmd://proj-wiki/concepts/${name}.md`, title: name, score: 0.99 - index / 100,
+    })) }));
+
+    const result = recall(
+      { prompt: 'fixed migration policy trusted boundary를 알려줘', cwd: dir },
+      { QMD_QUERY_FIXTURE: fixture },
+    );
+    const context = result?.hookSpecificOutput.additionalContext || '';
+    assert.match(context, /Fresh trusted body/);
+    assert.doesNotMatch(context, /Reviewed legacy body|Canon legacy body|Manual legacy body|Foreign verified body/);
+  } finally { removeTemp(dir); }
+});
+
 test('malformed or invalid pending ledger fails closed before wiki injection', () => {
   const ledgerRows = [
     ['malformed', '{malformed json\n'],

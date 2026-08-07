@@ -131,6 +131,32 @@ compile의 활성 여부와 쓰기 정책을 **한 값**으로 정합니다. 예
 미지 값(오타 포함)은 `off`로 fail-closed 처리됩니다 — 유료 파이프라인이 오타 하나로
 켜지지 않게 하기 위함입니다.
 
+### Wiki source freshness와 legacy migration
+
+이는 설정이 아니라 고정된 recall 정책입니다. 새 카드와 자동 업데이트 카드는
+`generated` 또는 `tentative`처럼 `verified`가 아닌 상태로 시작하며,
+`qmd-auto-context`가 만든 `verified` 카드라도 유효한 compiler-owned
+`sourceRevisions`가 있을 때만 원문 revision을 엄격히 대조한 뒤 주입합니다.
+원문이 바뀌면 compile cooldown·queue 지연·hook 실패와 무관하게 그 카드는 주입되지 않습니다.
+
+provenance 없는 legacy `verified`는 `unknown`으로 fail-closed drop됩니다. 릴리스 유지보수의
+명시적 offline migration은 이런 qmd 생성 카드와 `reviewed`·`canon`·`manual` 상태 카드를
+`generated`으로 정규화하고 `reviewed:` 및 검수 proof 필드를 제거합니다. 다음 source edit와
+compile, 성공적인 verification이 끝날 때까지 이 카드는 recall에 나오지 않습니다. foreign
+카드는 변경하지 않지만 `recallVerifiedOnly: false`여도 절대 주입하지 않습니다.
+
+사람 검수 lifecycle은 없습니다. 새 자동 카드에 `reviewed:`나 `reviewed`·`canon`·`manual`
+status를 쓰지 않으며, `wiki-review` UI·skill·agent도 제공하지 않습니다. `merge-needed.jsonl`은
+승인 대기열이 아닌 non-trusted collision diagnostic입니다.
+
+운영 중 drop 원인은 `QMD_RECALL_LOG`의 `qmd_recall_selection`에서 봅니다. 특히
+`dropped_stale`, `freshness_unknown`, `dropped_unverified`가 source freshness/provenance 필터 결과입니다.
+`freshness_checked`는 그 요청에서 source revision을 검사한 후보 수이며 drop 사유가 아닙니다.
+로그와 injected context에는 원문 본문·secret value·SHA-256을 기록하지 않습니다.
+
+P0는 `.env`를 source로 등록하지 않습니다. P1 structured-evidence adapter 전에는 `prod.env`의
+repository-config evidence 또는 runtime-current proof를 주장하지 않습니다.
+
 ### compile.budget — 한 run의 유료 호출 총량
 
 `compile.budget`은 **사용자 계정에 청구되는 host CLI 호출 수**를 정하는 값만 모은

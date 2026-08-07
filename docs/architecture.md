@@ -456,11 +456,30 @@ the configured host extractor:
   queue item or leave the card as `generated` according to the worker contract.
 
 Recall admits a wiki card only when it is `status: verified`, was created by
-`qmd-auto-context`, and has non-empty compiler-owned `sourceRevisions`.
+`qmd-auto-context`, and has non-empty compiler-owned `sourceRevisions`. It then
+compares those source revisions with the current source before injection.
+`source-refresh-pending.jsonl` is a fast invalidation hint; the source hash
+comparison is the final defense, so stale cards remain blocked through compile
+cooldown, queue delay, or hook failure. Normal recall hashes only enough primary
+wiki candidates to fill fresh `topN` (never more than the daemon phase cap of
+eight); a stale hierarchical result falls back to raw, while `wikiOnly` stays
+empty.
+
 `generated`, `tentative`, `contested`, `discarded`, and `superseded` remain
-excluded. The `merge-needed.jsonl` ledger is only a bounded collision diagnostic:
-no candidate is auto-merged or trusted, and no human resolution workflow is
-spawned from it.
+excluded. A provenance-free legacy `verified` is `unknown` and drops. Explicit
+offline release maintenance normalizes qmd-created legacy `reviewed`·`canon`·
+`manual` cards, or cards with missing/invalid provenance, to `generated` and
+removes `reviewed:` plus every verification proof field. It preserves foreign
+cards byte-for-byte; they are never trusted or injected, even with
+`recallVerifiedOnly: false`. There is no human wiki lifecycle: automatic cards
+do not use `reviewed:` or human statuses, and no `wiki-review` UI, skill, or
+agent exists. The `merge-needed.jsonl` ledger is only a bounded non-trusted
+collision diagnostic: no candidate is auto-merged, trusted, or queued for human
+approval.
+
+P0 deliberately does not register `.env` as a source. Until a P1 structured-
+evidence adapter exists, wiki output makes no repository-config claim from
+`prod.env` and no runtime-current claim.
 
 Verify and dedup workers are maintenance paths around this generated wiki state.
 They are intentionally fail-open so wiki maintenance does not break normal agent
