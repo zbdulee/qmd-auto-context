@@ -497,6 +497,47 @@ test('update core: --init-wiki creates scaffold and enables wiki recall without 
   }
 });
 
+// scaffold 디렉터리 목록(`update.sh`의 base_dirs)과 프롬프트가 모델에게 제시하는 타입
+// 집합(`extractors/lib.ALLOWED_TYPES`)은 **같은 사실의 두 표현**이다 — 전자는 "여기에 카드가
+// 쌓인다"는 약속이고 후자는 "쌓일 수 있는 카드"의 전부다. 갈리면 두 방향 다 나쁘다:
+//   - scaffold가 넓으면 영영 빈 디렉터리가 남아 "왜 안 쌓이지"라는 오진을 부른다
+//     (라이브 ai-proxy에 sessions/queries가 0건으로 남아 있던 상태 — 이 테스트가 막는 것).
+//   - scaffold가 좁으면 새 타입을 프롬프트에 추가했을 때 그 자리가 눈에 띄지 않는다.
+// 기대값을 리터럴로 적지 않고 **코드에서 유도**하는 이유가 이것이다. 리터럴이면 프롬프트에
+// 타입을 추가할 때 이 테스트도 같이 고쳐야 해서 드리프트를 잡아 주지 못한다.
+// 판정은 소스 텍스트가 아니라 **실제로 만들어진 디렉터리**로 한다(CLAUDE.md: 정규식 단정은
+// 동작이 no-op이어도 통과한다 — backend_manager reload가 그렇게 새어 나갔다).
+test('update core: --init-wiki scaffold는 프롬프트가 제시하는 타입의 디렉터리만 만든다', () => {
+  const py = `import json, sys
+sys.path.insert(0, "core")
+import wiki_compile
+from extractors import lib
+print(json.dumps(sorted(wiki_compile.TYPE_DIRS[t] for t in lib.ALLOWED_TYPES)))`;
+  const expected = JSON.parse(execFileSync('python3', ['-c', py], { encoding: 'utf8' }));
+
+  const work = repoTemp('qmd-init-wiki-dirs');
+  try {
+    execFileSync('bash', [join(process.cwd(), 'core', 'update.sh'), '--init-wiki', work], { encoding: 'utf8' });
+    const wiki = join(work, '.auto-context', 'wiki');
+    const dirs = readdirSync(wiki, { withFileTypes: true })
+      .filter(e => e.isDirectory()).map(e => e.name).sort();
+    assert.deepEqual(dirs, expected,
+      'scaffold 디렉터리는 extractors/lib.ALLOWED_TYPES를 TYPE_DIRS로 매핑한 집합과 정확히 같아야 한다');
+
+    // 위 단정의 이면: 지운 것은 **미리 만드는 것**이지 타입 지원이 아니다. session 카드는
+    // 수동 wiki-compile 경로로 여전히 쓸 수 있어야 하고 그때 디렉터리가 생겨야 한다
+    // (wiki_compile의 `target.parent.mkdir(parents=True)`). 이 절반이 없으면 다음 사람이
+    // "session은 이제 안 되는구나"로 읽고 TYPE_DIRS에서 지운다.
+    assert.equal(dirs.includes('sessions'), false, 'sessions는 자동 compile이 채울 수 없어 미리 만들지 않는다');
+    assert.equal(existsSync(join(wiki, 'index.md')), true);
+    for (const name of expected) {
+      assert.equal(existsSync(join(wiki, name)), true, `${name} 디렉터리가 있어야 한다`);
+    }
+  } finally {
+    removeTemp(work);
+  }
+});
+
 test('update core: --init-wiki without settings creates an opt-in wiki-only config', () => {
   const work = repoTemp('qmd-init-wiki-empty');
   try {

@@ -1521,7 +1521,18 @@ def ensure_project_file(path: Path, content: str) -> bool:
     path.write_text(content, encoding="utf-8")
     return True
 
-base_dirs = ["concepts", "entities", "decisions", "sessions", "comparisons", "queries"]
+# scaffold는 **자동 compile이 실제로 채울 수 있는** 타입 디렉터리만 만든다.
+# extractors/lib.ALLOWED_TYPES(프롬프트가 모델에게 제시하는 집합)가 그 목록이고
+# 현재 concept/entity/decision/comparison 4종이다. `sessions`·`queries`는 그 집합에
+# 없어 자동으로는 영영 비어 있었다(라이브 ai-proxy 실측 0건/0건, service-engineering은
+# 두 디렉터리가 아예 없이 정상 동작). 미리 만들 이유가 없는 이유는 두 가지다 —
+# (1) wiki_compile이 카드를 쓰기 전에 `target.parent.mkdir(parents=True)` 하므로
+#     수동 wiki-compile로 session 카드를 쓰면 그때 생긴다(기능은 그대로다),
+# (2) 빈 디렉터리는 "여기에 뭔가 쌓여야 하는데 안 쌓인다"로 읽혀 오진을 부른다.
+# 즉 여기서 지운 것은 **미리 만드는 것**이지 타입 지원이 아니다 —
+# wiki_compile.ALLOWED_TYPES/TYPE_DIRS의 session·query 항목은 그대로 둔다.
+# 목록이 프롬프트와 갈리지 않는지는 test/update.test.mjs가 코드에서 유도해 단정한다.
+base_dirs = ["concepts", "entities", "decisions", "comparisons"]
 novel_dirs = ["characters", "world", "timeline", "plot", "style", "discarded", "decisions", "sessions"]
 dir_names = novel_dirs if preset == "novel" else base_dirs
 dirs = [wiki] + [wiki / name for name in dir_names]
@@ -1530,7 +1541,7 @@ for path in dirs:
 
 files = {
     wiki / "SCHEMA.md": "# Auto-context Wiki Schema\n\nThis wiki stores promoted, durable project knowledge. Do not paste full transcripts here.\n",
-    wiki / "index.md": "# Auto-context Wiki Index\n\n- decisions/\n- concepts/\n- entities/\n- sessions/\n",
+    wiki / "index.md": "# Auto-context Wiki Index\n\n- decisions/\n- concepts/\n- entities/\n- comparisons/\n",
     wiki / "log.md": "# Auto-context Wiki Log\n\nAppend notable wiki maintenance events here.\n",
 }
 created = []
