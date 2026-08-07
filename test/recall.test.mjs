@@ -21,6 +21,32 @@ function recall(payload, env = {}) {
   }
 }
 
+function recallWithDeniedLedgerExists(payload, env = {}) {
+  const script = [
+    'import io, json, sys',
+    'sys.path.insert(0, "core")',
+    'import recall as R',
+    'import wiki_freshness as F',
+    'real_exists = F.Path.exists',
+    'def denied_exists(path):',
+    '    if path.name == "source-refresh-pending.jsonl":',
+    '        raise PermissionError("denied ledger parent")',
+    '    return real_exists(path)',
+    'F.Path.exists = denied_exists',
+    'sys.stdin = io.StringIO(sys.argv[1])',
+    'try:',
+    '    R.main()',
+    'except Exception as exc:',
+    '    print(json.dumps({"raised": type(exc).__name__}))',
+  ].join('\n');
+  const out = execFileSync('python3', ['-c', script, JSON.stringify(payload)], {
+    cwd: process.cwd(),
+    env: { ...process.env, ...env },
+    encoding: 'utf8',
+  }).trim();
+  return out ? JSON.parse(out) : null;
+}
+
 function sourceRevisionLine(project, relativePath, collection = 'proj-docs') {
   const path = join(project, relativePath);
   const bytes = readFileSync(path);
@@ -759,4 +785,31 @@ test('raw fallback over-return is independently capped at eight candidates', () 
     assert.match(context, /Raw over-return 8/);
     assert.doesNotMatch(context, /Raw over-return 9|Raw over-return 10/);
   } finally { removeTemp(dir); }
+});
+
+test('ledger PermissionError fails closed to hierarchical raw fallback and wikiOnly empty', () => {
+  for (const strategy of ['hierarchical', 'wikiOnly']) {
+    const dir = mkdtempSync(join(tmpdir(), `qmd-fresh-ledger-denied-${strategy}-`));
+    const fixture = join(dir, 'wiki-fixture.json');
+    const rawFixture = join(dir, 'raw-fixture.json');
+    try {
+      freshnessProject(dir, { strategy, topN: 1 });
+      writeTrustedWikiCard(dir, 'denied', '# unchanged source\n', 'Denied wiki must not inject');
+      writeFileSync(fixture, JSON.stringify({ results: [
+        { file: 'qmd://proj-wiki/concepts/denied.md', title: 'Denied wiki', score: 0.99 },
+      ] }));
+      writeFileSync(rawFixture, JSON.stringify({ results: [
+        { file: 'qmd://proj-docs/docs/raw.md', title: 'Permission-safe raw fallback', score: 0.9 },
+      ] }));
+
+      const result = recallWithDeniedLedgerExists(
+        { prompt: 'ledger permission failure 경계를 알려줘', cwd: dir },
+        { QMD_QUERY_FIXTURE: fixture, QMD_QUERY_FIXTURE_RAW: rawFixture },
+      );
+      const context = result?.hookSpecificOutput?.additionalContext || '';
+      assert.doesNotMatch(context, /Denied wiki must not inject/);
+      if (strategy === 'hierarchical') assert.match(context, /Permission-safe raw fallback/);
+      else assert.equal(result, null, 'wikiOnly stays empty on unknown ledger filesystem state');
+    } finally { removeTemp(dir); }
+  }
 });

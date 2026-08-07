@@ -54,6 +54,36 @@ function strictPending(project) {
   ].join('\n'), project));
 }
 
+function strictPendingFault(project, fault) {
+  return JSON.parse(python([
+    'import json, sys',
+    'from pathlib import Path',
+    'sys.path.insert(0, "core")',
+    'import wiki_freshness as F',
+    'fault = sys.argv[2]',
+    'real_exists = F.Path.exists',
+    'real_read_text = F.Path.read_text',
+    'def denied_pending_path(root):',
+    '    raise PermissionError("denied parent")',
+    'def denied_exists(path):',
+    '    if path.name == "source-refresh-pending.jsonl":',
+    '        raise PermissionError("denied exists")',
+    '    return real_exists(path)',
+    'def denied_read_text(path, *args, **kwargs):',
+    '    if path.name == "source-refresh-pending.jsonl":',
+    '        raise PermissionError("denied read")',
+    '    return real_read_text(path, *args, **kwargs)',
+    'if fault == "pending_path": F._pending_path = denied_pending_path',
+    'if fault == "exists": F.Path.exists = denied_exists',
+    'if fault == "read_text": F.Path.read_text = denied_read_text',
+    'try:',
+    '    result = F.unresolved_pending_refreshes_strict(Path(sys.argv[1]))',
+    'except Exception as exc:',
+    '    result = {"raised": type(exc).__name__}',
+    'print(json.dumps(result))',
+  ].join('\n'), project, fault));
+}
+
 function setup() {
   const project = mkdtempSync(join(tmpdir(), 'qmd-freshness-'));
   mkdirSync(join(project, 'docs'));
@@ -230,6 +260,17 @@ test('strict pending ledger API distinguishes absent or empty from malformed, in
     try { chmodSync(ledger, 0o600); } catch {}
     removeTemp(project);
   }
+});
+
+test('strict pending ledger converts every filesystem permission failure to unknown', () => {
+  const project = setup();
+  try {
+    mkdirSync(join(project, '.auto-context', 'compile'), { recursive: true });
+    writeFileSync(join(project, '.auto-context', 'compile', 'source-refresh-pending.jsonl'), '');
+    for (const fault of ['pending_path', 'exists', 'read_text']) {
+      assert.equal(strictPendingFault(project, fault), null, `${fault} PermissionError must be unknown`);
+    }
+  } finally { removeTemp(project); }
 });
 
 test('pending refresh resolves only with the successful compile revision still on disk', () => {

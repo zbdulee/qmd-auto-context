@@ -107,9 +107,9 @@ def _valid_event_time(value) -> bool:
 
 
 def _read_events_unlocked(path: Path, strict: bool = False) -> list[dict] | None:
-    if not path.exists():
-        return []
     try:
+        if not path.exists():
+            return []
         text = path.read_text(encoding="utf-8", errors="strict")
     except (OSError, UnicodeError):
         return None if strict else []
@@ -193,10 +193,13 @@ def unresolved_pending_refreshes_strict(root: Path) -> list[dict] | None:
     events, and invalid timestamps are unknown so a recall caller can fail
     closed without changing the permissive lifecycle recovery API.
     """
-    path = _pending_path(root)
-    if path is None:
+    try:
+        path = _pending_path(root)
+        if path is None:
+            return None
+        rows = _read_events_unlocked(path, strict=True)
+    except (OSError, UnicodeError, RuntimeError):
         return None
-    rows = _read_events_unlocked(path, strict=True)
     if rows is None:
         return None
     latest = _ordered_latest_strict(rows)
