@@ -35,13 +35,20 @@ function setupProject({ compile = {}, indexing = true, base } = {}) {
   return dir;
 }
 
-function writeCard(dir, rel, { status = 'generated', sources = [], title = 'Card' } = {}) {
+function writeCard(dir, rel, {
+  status = 'generated', sources = [], title = 'Card', createdBy = 'qmd-auto-context',
+  sourceRevisions = status === 'verified',
+} = {}) {
   const full = join(dir, '.auto-context', 'wiki', rel);
   mkdirSync(join(full, '..'), { recursive: true });
-  const lines = ['---', `title: "${title}"`, `status: ${status}`, 'createdBy: qmd-auto-context'];
+  const lines = ['---', `title: "${title}"`, `status: ${status}`, `createdBy: ${createdBy}`];
   if (sources.length) {
     lines.push('sources:');
     for (const src of sources) lines.push(`  - ${src}`);
+  }
+  if (sourceRevisions) {
+    lines.push('sourceRevisions:');
+    lines.push('  - {kind: "file", path: "docs/compiler-source.md", collection: "proj-docs", sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", size: 1, mtimeNs: 1}');
   }
   lines.push('---', '', '<!-- qmd:auto:start id="main" sourceHash="abc" -->', '## Summary', 'body', '<!-- qmd:auto:end -->', '');
   writeFileSync(full, lines.join('\n'));
@@ -73,6 +80,12 @@ function runRepair(dir, args) {
     encoding: 'utf8',
     env: { ...process.env },
   });
+}
+
+function runPendingSummary(dir) {
+  return JSON.parse(execFileSync('python3', [
+    'core/wiki_source_missing.py', '--cwd', dir, '--pending-summary',
+  ], { cwd: process.cwd(), encoding: 'utf8', env: { ...process.env } }));
 }
 
 // python 스크립트를 파일로 실행한다. `bash -c "python3 -c <JSON.stringify(...)>"` 는
@@ -279,6 +292,42 @@ test('source repair: 개명 후보를 제안하고 사람이 지정한 재지정
   } finally { removeTemp(dir); }
 });
 
+test('source missing trust labels and pending counts use recall ownership + provenance boundary', () => {
+  const dir = setupProject();
+  try {
+    writeCard(dir, 'entities/trusted.md', {
+      status: 'verified', sources: [fileSource('docs/trusted-gone.md')],
+    });
+    writeCard(dir, 'entities/foreign.md', {
+      status: 'verified', createdBy: 'foreign-tool',
+      sources: [fileSource('docs/foreign-gone.md')],
+    });
+    writeCard(dir, 'entities/provenance-free.md', {
+      status: 'verified', sourceRevisions: false,
+      sources: [fileSource('docs/provenance-free-gone.md')],
+    });
+    writeCard(dir, 'entities/generated.md', {
+      status: 'generated', sourceRevisions: true,
+      sources: [fileSource('docs/generated-gone.md')],
+    });
+    runScan(dir);
+
+    const listed = JSON.parse(runRepair(dir, ['--list']));
+    const trustByTarget = Object.fromEntries(
+      listed.entries.map((entry) => [entry.targetPath, entry.trusted]),
+    );
+    assert.equal(trustByTarget['.auto-context/wiki/entities/trusted.md'], true);
+    assert.equal(trustByTarget['.auto-context/wiki/entities/foreign.md'], false);
+    assert.equal(trustByTarget['.auto-context/wiki/entities/provenance-free.md'], false);
+    assert.equal(trustByTarget['.auto-context/wiki/entities/generated.md'], false);
+
+    const summary = runPendingSummary(dir);
+    assert.equal(summary.pending, 4);
+    assert.equal(summary.verified, 1,
+      'legacy field name counts only currently auto-trusted cards, not status-only verified cards');
+  } finally { removeTemp(dir); }
+});
+
 test('source repair: 존재하지 않는 대상으로는 재지정하지 않는다', () => {
   const dir = setupProject();
   try {
@@ -362,6 +411,10 @@ test('SessionStart: 대기 건수를 1줄 표면화하고 TTL로 억제, 해소�
     mkdirSync(bin, { recursive: true });
     mkdirSync(fakeHome, { recursive: true });
     mkdirSync(join(work, '.auto-context', 'compile'), { recursive: true });
+    // Metadata-only cards back the trust count. Keep `sources` empty so the
+    // detached source scanner cannot rewrite this test's synthetic ledger.
+    writeCard(work, 'entities/a.md', { status: 'verified' });
+    writeCard(work, 'entities/b.md', { status: 'generated' });
     writeFileSync(join(work, LEDGER_REL), [
       JSON.stringify({ targetPath: '.auto-context/wiki/entities/a.md', action: 'detected', status: 'verified', missingSources: ['docs/x.md'], origin: 'scan', ts: '2026-07-29T00:00:00Z' }),
       JSON.stringify({ targetPath: '.auto-context/wiki/entities/b.md', action: 'detected', status: 'generated', missingSources: ['docs/y.md'], origin: 'scan', ts: '2026-07-29T00:00:00Z' }),

@@ -469,8 +469,8 @@ fail-closed drop된 경우(`path_unresolved`)를 진짜 미검수 카드와 구�
 
 ### 읽는 sources 표기
 
-카드의 `sources`는 사람과 dedup/review resolver 에이전트가 손으로 이식하는 필드이므로
-(CLAUDE.md 계약) 우리 writer가 쓰는 표기 외에 표준 YAML 변형도 읽습니다.
+카드의 `sources`는 dedup consolidation이나 명시적 source repair에서 보존될 수 있으므로
+우리 writer가 쓰는 표기 외에 표준 YAML 변형도 읽습니다.
 
 | 표기 | 동작 |
 |---|---|
@@ -495,7 +495,7 @@ fail-closed drop된 경우(`path_unresolved`)를 진짜 미검수 카드와 구�
 > 사용자에게는 조용하고 `source_drop_reasons`의 형태별 사유로만 드러납니다. 손으로
 > `sources`를 쓰거나 다른 카드에서 이식할 때는 **writer가 쓰는 형태**를 쓰십시오 —
 > `  - {kind: "file", path: "docs/a.md"}`. 인용 키·single quote·후행 주석은 그대로 읽힙니다.
-> (dedup/review resolver 에이전트 문서에도 같은 제약이 적혀 있습니다.)
+> dedup consolidation에서도 같은 writer 형태를 유지해야 합니다.
 
 값 표기 규칙은 `core/yaml_scalars.py`가 SSOT이며 표준 YAML을 따릅니다: 인용부호는 **스칼라
 선두에서만** 인용을 시작하고(값 중간의 `"`·`'`는 값의 일부입니다), single-quoted 안의 `''`는
@@ -749,11 +749,11 @@ export QMD_SHADOW_TIMEOUT=1.0
 | `score_model` | score 해석 규약(`1/rank (rerank=false)`) — 위 순위 컷 절 참고 |
 | `lex_query`, `lex_terms` | 실제로 보낸 lex 쿼리 문자열과 term 수. qmd의 lex는 positive term을 **AND**로 묶으므로 term 하나가 색인에 없으면 lex 전체가 0건입니다 |
 | `queried_collections`, `raw_collections` | 무엇을 질의했고 무엇이 비교 대상인가 |
-| `primary` | 실제 recall 대상(wiki 등)이 낸 결과: `count` + `top[]`의 `rank`/`score`/`file`/`status`/`reviewed` |
+| `primary` | 실제 recall 대상(wiki 등)이 낸 결과: `count` + `top[]`의 `rank`/`score`/`file`/`status`/`trusted` |
 | `lex_only` | lex만으로 질의했을 때의 결과 — 0건이면 lex가 죽은 것 |
 | `vec_only` | vec만으로 질의했을 때의 결과 — 어느 쪽이 죽었는지 가릅니다 |
 | `raw` | 같은 쿼리로 raw collection을 질의한 결과(wikiOnly에서 놓친 컨텍스트 확인용) |
-| `selected[]` | 실제로 주입된 문서: `file` + `original_rank`(데몬 순위) + `final_rank`(주입 순위) + `ep_promoted` + `status`/`reviewed` |
+| `selected[]` | 실제로 주입된 문서: `file` + `original_rank`(데몬 순위) + `final_rank`(주입 순위) + `ep_promoted` + `status`/`trusted` |
 | `selection_reason`, `dropped_skip`, `dropped_min_score`, `dropped_unverified`, `dropped_top_n` | 후보가 어느 필터에서 몇 건 빠졌는가 |
 | `verdict.lex_dead` / `verdict.vec_dead` | lex/vec 중 어느 쪽이 0건을 냈는가 |
 | `verdict.selected_empty_raw_nonempty` | **핵심 판정.** 최종적으로 아무것도 주입하지 못했는데 raw엔 있었는가(= 놓친 컨텍스트) |
@@ -1097,7 +1097,9 @@ SessionStart 안내로 표면화됩니다. 이 원장 경로들은 이제 설정
 tombstone(영구 억제)을 세우고, "소스를 고치면 재생성된다"는 전제가 깨집니다.
 사람이 직접 지운 카드는 이 마커가 없으므로 기존대로 tombstone 처리됩니다.
 
-`reviewed: true` 카드와 `is_auto_writable_page` 보호 집합은 삭제 대상이 아닙니다.
+verifier의 자동 삭제 대상은 qmd가 만든 `status: generated` 카드뿐입니다. recall trust는
+`status: verified` + `createdBy: qmd-auto-context` + 비어 있지 않은 compiler-owned
+`sourceRevisions`를 모두 요구하며, status 문자열 하나로 승격되지 않습니다.
 CLI 부재(exit 127)·timeout 같은 **transient 실패는 inconclusive가 아니며** 큐 보존 +
 cooldown 경로를 그대로 타므로, verifier CLI가 없는 머신에서 카드가 삭제되지 않습니다.
 
@@ -1160,7 +1162,7 @@ embed 서브셸 안에 두지 않습니다). 카드 mtime 스냅샷을 쓰지 �
 (`notice_once`, TTL 4h, 조건 해소 시 재무장), `wiki-source-repair` skill이 항목별로
 사람 확인을 받아 `sources[].path`만 고쳐 씁니다(카드 쓰기는 임시파일 + `os.replace`로
 **원자적**이고 원본 권한을 이식합니다 — 쓰기가 실패해도 원본이 잘리지 않아야 합니다.
-같은 원자적 경로를 자동 쓰기(`patch_frontmatter_fields`·wiki compile·wiki review)가 모두
+같은 원자적 경로를 자동 쓰기(`patch_frontmatter_fields`·wiki compile)가 모두
 공유합니다: verify worker가 `status: verified`를 스탬프하다 실패하면 다음 회차가 절단본을
 읽어 `changed_during_verify`로 skip하므로, 사람이 개입하지 않는 그 경로가 오히려 조용한
 영구 손상에 가깝습니다). 재지정 시 옛 `sourceHash` 같은 "옛 파일
@@ -1168,7 +1170,7 @@ embed 서브셸 안에 두지 않습니다). 카드 mtime 스냅샷을 쓰지 �
 링크나 `../`로 프로젝트 밖을 가리키면 스캐너와 **같은 판정**으로 거절합니다. 후보 제안(같은 디렉터리 안 파일명
 유사도)은 **제안일 뿐** 자동 적용하지 않습니다 — 잘못 매칭하면 카드가 무관한 원문을
 가리키고 그 상태로 verify가 돌면 카드가 삭제됩니다. 그래서 자율 resolver 에이전트도
-두지 않습니다(dedup/review와 다른 점). `status`는 이 경로에서 절대 바뀌지 않습니다.
+두지 않습니다. `status`는 이 경로에서 절대 바뀌지 않습니다.
 
 **주입 표식은 두지 않습니다.** 미검수 카드의 ` (미검수)` 배지와 달리 이 카드는 검수
 시점에 유효했고 downgrade하지 않기로 했으므로 모델에게 줄 지시가 없습니다. 그리고 2단계
@@ -1248,7 +1250,9 @@ reason=… engine=… engineCooldown=… cooldownWriteFailed=…` 줄을, write-
 (verify의 `UNUSABLE_OUTPUT_REASONS`/`defer_or_drop`와 같은 규칙이고 종점의 모양만 다릅니다 —
 verify는 잡을 폐기, dedup은 쌍을 억제.)
 
-판정 기록은 `merge-needed.jsonl`(write-time)과 `dedup-needed.jsonl`·`dedup-skipped.jsonl`
+`merge-needed.jsonl`은 write-time collision을 보존하는 passive, non-trusted diagnostic입니다.
+자동 merge나 trust 승격, SessionStart resolver 입력으로 사용되지 않습니다. 판정 기록은
+`merge-needed.jsonl`(write-time)과 `dedup-needed.jsonl`·`dedup-skipped.jsonl`
 (scan)에 `judgedBy`(판정 엔진) / `judgedMode`(달성된 관계) / `producedBy`(생산 엔진,
 write-time만)로 남습니다. 판정이 없었던 행에는 이 필드들을 쓰지 않습니다.
 

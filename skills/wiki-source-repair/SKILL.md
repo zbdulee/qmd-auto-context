@@ -27,8 +27,11 @@ downgrades `verified` → `generated` (that would hide the card from recall unde
    ```
 
    `pending: 0` → tell the user there is nothing to repair and stop. Each entry carries
-   `targetPath` (the card), `status`/`reviewed`, `missingSources`, and `candidates` — rename
+   `targetPath` (the card), `status`/`trusted`, `missingSources`, and `candidates` — rename
    suggestions found in the missing path's own directory, ranked by filename similarity.
+   `trusted` is true only for a current card with `status: verified`,
+   `createdBy: qmd-auto-context`, and non-empty compiler-owned `sourceRevisions`; the ledger's
+   stored status alone never grants trust.
 
 2. For each entry, show the user the card's title/summary, the missing source path, and the
    suggested candidates. **Ask which candidate is the same document** (or whether the source
@@ -64,3 +67,5 @@ downgrades `verified` → `generated` (that would hide the card from recall unde
 - Unsupported `sources` spellings (single-line flow sequence, block mapping) are refused with
   `source_entry_not_found` / `frontmatter_missing` rather than rewritten — fix those by hand.
 - Card `status` is never changed by this skill.
+- Write-time `merge-needed.jsonl` is a passive, non-trusted collision diagnostic and is not
+  consumed or resolved by this skill.

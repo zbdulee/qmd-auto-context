@@ -41,3 +41,16 @@ test("wiki-compile skill metadata and wrapper contract", () => {
   assert.match(wrapper, /core\/wiki_extract\.py/);
   assert.match(wrapper, /check-qmd --manual/);
 });
+
+test("active operator docs expose automatic trust and no removed review lifecycle", () => {
+  const files = ["CLAUDE.md", "docs/settings.md", "skills/wiki-source-repair/SKILL.md"];
+  for (const file of files) {
+    const text = readFileSync(file, "utf8");
+    assert.doesNotMatch(text, /wiki-review|wiki_review|wiki-review-resolver|\breviewed\b/i, file);
+  }
+
+  const combined = files.map((file) => readFileSync(file, "utf8")).join("\n");
+  assert.match(combined, /createdBy.*qmd-auto-context/is);
+  assert.match(combined, /sourceRevisions/);
+  assert.match(combined, /merge-needed.*passive|passive.*merge-needed/is);
+});

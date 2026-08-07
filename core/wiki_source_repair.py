@@ -118,7 +118,7 @@ def list_pending(root: Path, config: dict, compile_cfg: dict) -> dict:
         rows.append({
             "targetPath": target,
             "status": row.get("status", ""),
-            "trusted": wsm.is_trusted_status(row.get("status")),
+            "trusted": wsm.is_auto_trusted_target(root, config, target),
             "origin": row.get("origin", ""),
             "detectedAt": row.get("ts", ""),
             "missingSources": missing,

@@ -383,9 +383,38 @@ def allow_roots_of(config: dict) -> list[Path]:
     return qmd_resolve_paths.allowed_roots(config)
 
 
-def is_trusted_status(status) -> bool:
-    """Status-only diagnostic label; recall still checks owner and revisions."""
-    return str(status or "").strip().lower() in qmd_recall.TRUSTED_WIKI_STATUSES
+def is_auto_trusted_target(root: Path, config: dict, target_rel) -> bool:
+    """Apply recall's automatic-trust predicate to the card currently on disk.
+
+    The source-missing ledger is an event history, not trusted card metadata.
+    Its stored ``status`` can outlive a card rewrite or describe a foreign card,
+    so diagnostic summaries must resolve and parse the current card fail-closed.
+    This is a point-in-time advisory read; mutation paths perform their own
+    validation under their existing locks.
+    """
+    if not isinstance(target_rel, str) or not target_rel or Path(target_rel).is_absolute():
+        return False
+    wiki_root = wiki_root_of(root, config)
+    if wiki_root is None:
+        return False
+    target = qmd_resolve_paths.contained_path(root, target_rel, [])
+    if target is None or not qmd_resolve_paths.is_within(target, wiki_root):
+        return False
+    try:
+        if not target.is_file():
+            return False
+        text = target.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return False
+    block = frontmatter_block(text)
+    if block is None:
+        return False
+    fields = qmd_recall.parse_frontmatter_scalars(block)
+    return qmd_recall.is_auto_trusted_card({
+        "status": fields.get("status", ""),
+        "createdBy": fields.get("createdBy", ""),
+        "sourceRevisions": qmd_recall.frontmatter_source_revisions(block),
+    })
 
 
 def pending_summary(root: Path, config: dict) -> dict:
@@ -393,7 +422,12 @@ def pending_summary(root: Path, config: dict) -> dict:
     compile_cfg = config.get("compile") if isinstance(config.get("compile"), dict) else {}
     states = load_states(ledger_path(root, compile_cfg))
     rows = pending_targets(states)
-    verified = sum(1 for row in rows if is_trusted_status(row.get("status")))
+    # ``verified`` is the existing wire key. Its count is automatic trust, not
+    # a status-only count: foreign/provenance-free cards must never inflate it.
+    verified = sum(
+        1 for row in rows
+        if is_auto_trusted_target(root, config, row.get("targetPath"))
+    )
     return {"pending": len(rows), "verified": verified}
 
 
