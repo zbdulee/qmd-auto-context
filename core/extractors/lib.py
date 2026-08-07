@@ -35,7 +35,39 @@ EFFORT_REJECTION_PATTERNS = {
     ),
 }
 
-ALLOWED_TYPES = ("concept", "entity", "decision", "comparison")
+# suggestedType의 SSOT. **정의와 목록을 한 dict로 묶는 이유**: 예전에는 프롬프트가 타입
+# 이름 4개를 나열만 하고 각각이 무엇인지 한 줄도 주지 않았고, 그 결과 모델이 가장 무난한
+# concept/decision으로만 수렴했다(라이브 ai-proxy 카드 21장 = concept 14 + decision 7,
+# entity·comparison 0장. `docs/resource.md`의 AWS 리소스 인벤토리처럼 명백한 entity
+# 후보까지 concept으로 나갔다). 목록과 정의가 따로 있으면 타입을 추가할 때 한쪽만 고쳐져
+# 정의 없는 선택지가 다시 생기므로 dict 하나에서 둘 다 유도한다.
+#
+# **이 집합을 넓히는 것은 scaffold 디렉터리를 넓히는 것과 같은 변경이다** —
+# `core/update.sh`의 `base_dirs`가 이 집합을 `wiki_compile.TYPE_DIRS`로 매핑한 값이어야
+# 하고, `test/update.test.mjs`가 그 일치를 코드에서 유도해 단정한다. 여기에만 추가하면
+# 그 테스트가 FAIL한다(의도된 동작 — 새 타입의 디렉터리가 조용히 빠지지 않게).
+# `session`/`query`를 여기 넣지 말 것: 입력이 **문서 파일 하나**라 세션 기록을 만들 수 없고
+# (그건 수동 `wiki-compile` 경로다), `query`는 어디에도 정의가 없다.
+TYPE_GUIDE = {
+    "concept": (
+        "a durable rule, structure, mechanism, invariant, or how-it-works fact. "
+        "The fallback when no other type fits — not the default."
+    ),
+    "entity": (
+        "a fact about one specific named thing — a service, resource, environment, "
+        "cluster, table, team, person, or file. Answers \"what X is / what X has\". "
+        "Inventories and per-resource reference material are entities, not concepts."
+    ),
+    "decision": (
+        "a choice that was made, with the reason and the rejected alternatives. "
+        "Usually has a date and an owner."
+    ),
+    "comparison": (
+        "two or more options weighed against each other along explicit axes. "
+        "Use this instead of decision when no option was actually chosen."
+    ),
+}
+ALLOWED_TYPES = tuple(TYPE_GUIDE)
 
 # Matches wiki_compile.py's compile.maxAutoPageLines default; the prompt states the
 # budget so the model does not write a summary the lint would reject outright.
@@ -53,6 +85,9 @@ Output RULES (strict):
 - summary is a durable conclusion (a decision, rule, concept, or entity fact). NOT a transcript, NOT step-by-step dialog, NOT a scene-by-scene retelling.
 - If nothing durable is worth saving, output {{"candidates": []}}.
 - Do NOT use any tools. Do NOT read or write files. Answer directly.
+
+TYPES (pick the most specific one that fits; do not default to concept):
+{type_guide}
 
 VERBATIM RULES (critical — these cards are keyword-searched, so identifiers ARE the search surface):
 - Copy identifiers EXACTLY as the source writes them. Never paraphrase, translate, abbreviate, normalize, or replace an identifier with a generic description of it.
@@ -183,6 +218,8 @@ def build_prompt(payload: dict) -> str:
     wiki = payload.get("wiki") if isinstance(payload.get("wiki"), dict) else {}
     return _PROMPT_TEMPLATE.format(
         types="/".join(ALLOWED_TYPES),
+        # 목록(`{types}`)과 정의(`{type_guide}`)가 같은 dict에서 나온다 — 갈릴 수 없다.
+        type_guide="\n".join(f"- {name}: {desc}" for name, desc in TYPE_GUIDE.items()),
         schema=str(wiki.get("schema", ""))[:4000],
         existing_context_section=render_existing_context_section(wiki),
         path=str(source.get("path", "")),
