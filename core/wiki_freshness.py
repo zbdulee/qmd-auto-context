@@ -12,6 +12,7 @@ import fcntl
 import hashlib
 import json
 import os
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -24,6 +25,8 @@ UNKNOWN = "unknown"
 PENDING_REFRESH = "pending_refresh"
 RESOLVED = "resolved"
 PENDING_COMPACT_BYTES = 256 * 1024
+PENDING_FIELDS = frozenset({"eventId", "ts", "sourcePath", "state", "engine"})
+RESOLVED_FIELDS = frozenset({"pendingEventId", "ts", "state"})
 
 
 def _now_iso() -> str:
@@ -48,35 +51,38 @@ def _safe_source_path(value) -> str | None:
     return normalized if normalized not in ("", ".") else None
 
 
-def _pending_key(row: dict) -> tuple[str, str, str] | None:
+def _pending_id(row: dict) -> str | None:
+    if set(row) != PENDING_FIELDS:
+        return None
     source = _safe_source_path(row.get("sourcePath"))
+    event_id = row.get("eventId")
     ts = row.get("ts")
     engine = row.get("engine")
-    if source is None or not isinstance(ts, str) or not ts or not isinstance(engine, str) or not engine:
+    if (
+        source is None or not isinstance(event_id, str) or not event_id
+        or not isinstance(ts, str) or not ts or not isinstance(engine, str) or not engine
+    ):
         return None
-    return source, ts, engine
+    return event_id
 
 
-def _resolved_key(row: dict) -> tuple[str, str, str] | None:
-    source = _safe_source_path(row.get("sourcePath"))
-    ts = row.get("pendingTs")
-    engine = row.get("pendingEngine")
-    if source is None or not isinstance(ts, str) or not ts or not isinstance(engine, str) or not engine:
+def _resolved_id(row: dict) -> str | None:
+    if set(row) != RESOLVED_FIELDS:
         return None
-    return source, ts, engine
+    event_id = row.get("pendingEventId")
+    ts = row.get("ts")
+    if not isinstance(event_id, str) or not event_id or not isinstance(ts, str) or not ts:
+        return None
+    return event_id
 
 
 def _valid_event(row) -> bool:
     if not isinstance(row, dict):
         return False
     if row.get("state") == PENDING_REFRESH:
-        return _pending_key(row) is not None
+        return _pending_id(row) is not None
     if row.get("state") == RESOLVED:
-        return (
-            _resolved_key(row) is not None
-            and isinstance(row.get("ts"), str)
-            and yaml_scalars.normalize_source_revision(row.get("sourceRevision")) is not None
-        )
+        return _resolved_id(row) is not None
     return False
 
 
@@ -124,6 +130,7 @@ def record_pending_refresh(root: Path, source_path: str, engine: str) -> dict | 
     if source is None or path is None:
         return None
     event = {
+        "eventId": uuid.uuid4().hex,
         "ts": _now_iso(),
         "sourcePath": source,
         "state": PENDING_REFRESH,
@@ -151,18 +158,41 @@ def read_pending_refreshes(root: Path) -> list[dict]:
 
 def unresolved_pending_refreshes(root: Path) -> list[dict]:
     """Return the latest unresolved pending event for each source."""
-    latest: dict[str, dict] = {}
-    resolved: set[tuple[str, str, str]] = set()
-    for row in read_pending_refreshes(root):
+    latest = _ordered_latest(read_pending_refreshes(root))
+    return [pending for _index, pending, resolved in latest.values() if resolved is None]
+
+
+def _ordered_latest(rows: list[dict]) -> dict[str, tuple[int, dict, tuple[int, dict] | None]]:
+    """Fold ordered history; a resolve only applies to an earlier exact event id."""
+    seen: dict[str, tuple[int, dict]] = {}
+    latest: dict[str, tuple[int, dict, tuple[int, dict] | None]] = {}
+    for index, row in enumerate(rows):
         if row.get("state") == PENDING_REFRESH:
-            key = _pending_key(row)
-            if key is not None:
-                latest[key[0]] = row
-        elif row.get("state") == RESOLVED:
-            key = _resolved_key(row)
-            if key is not None:
-                resolved.add(key)
-    return [row for row in latest.values() if _pending_key(row) not in resolved]
+            event_id = _pending_id(row)
+            if event_id is None:
+                continue
+            seen[event_id] = (index, row)
+            latest[row["sourcePath"]] = (index, row, None)
+            continue
+        event_id = _resolved_id(row)
+        pending_item = seen.get(event_id) if event_id is not None else None
+        if pending_item is None or pending_item[0] >= index:
+            continue
+        source = pending_item[1]["sourcePath"]
+        current = latest.get(source)
+        if current is not None and current[1].get("eventId") == event_id:
+            latest[source] = (current[0], current[1], (index, row))
+    return latest
+
+
+def latest_unresolved_pending(root: Path, source_path: str) -> dict | None:
+    source = _safe_source_path(source_path)
+    if source is None:
+        return None
+    item = _ordered_latest(read_pending_refreshes(root)).get(source)
+    if item is None or item[2] is not None:
+        return None
+    return dict(item[1])
 
 
 def same_revision(left, right) -> bool:
@@ -172,22 +202,26 @@ def same_revision(left, right) -> bool:
 
 
 def resolve_pending_refresh(
-    root: Path, pending: dict, captured_revision: dict, compiled_revisions: list[dict]
+    root: Path, pending: dict, captured_revision: dict, compiled_revisions: list[dict],
+    compiled_event_id: str | None = None,
 ) -> bool:
     """Resolve only the latest event with the captured bytes the writer returned."""
-    pending_key = _pending_key(pending) if isinstance(pending, dict) else None
+    pending_id = _pending_id(pending) if isinstance(pending, dict) else None
     captured = yaml_scalars.normalize_source_revision(captured_revision)
     compiled = [yaml_scalars.normalize_source_revision(item) for item in compiled_revisions]
     path = _pending_path(root)
+    if compiled_event_id is None:
+        compiled_event_id = pending_id
     if (
-        pending_key is None or captured is None or path is None
-        or captured.get("path") != pending_key[0]
+        pending_id is None or captured is None or path is None
+        or compiled_event_id != pending_id
+        or captured.get("path") != pending.get("sourcePath")
         or any(item is None for item in compiled)
         or captured not in compiled
     ):
         return False
     root = Path(root).resolve()
-    source = (root / pending_key[0]).resolve()
+    source = (root / pending["sourcePath"]).resolve()
     try:
         source.relative_to(root)
     except ValueError:
@@ -199,27 +233,19 @@ def resolve_pending_refresh(
             rows = _read_events_unlocked(path, strict=True)
             if rows is None:
                 return False
-            latest = None
-            resolved = set()
-            for row in rows:
-                if row.get("state") == PENDING_REFRESH and row.get("sourcePath") == pending_key[0]:
-                    latest = row
-                elif row.get("state") == RESOLVED:
-                    key = _resolved_key(row)
-                    if key is not None:
-                        resolved.add(key)
-            if latest is None or _pending_key(latest) != pending_key or pending_key in resolved:
+            latest = _ordered_latest(rows).get(pending["sourcePath"])
+            if (
+                latest is None or latest[2] is not None
+                or latest[1].get("eventId") != pending_id
+            ):
                 return False
             current = snapshot_file(source)
             if current is None or current["sha256"] != captured["sha256"]:
                 return False
             event = {
                 "ts": _now_iso(),
-                "sourcePath": pending_key[0],
                 "state": RESOLVED,
-                "pendingTs": pending_key[1],
-                "pendingEngine": pending_key[2],
-                "sourceRevision": captured,
+                "pendingEventId": pending_id,
             }
             if not _append_event_unlocked(path, event):
                 return False
@@ -242,23 +268,11 @@ def compact_pending_refreshes(root: Path, force: bool = False) -> bool:
             rows = _read_events_unlocked(path, strict=True)
             if rows is None:
                 return False
-            latest: dict[str, tuple[int, dict]] = {}
-            resolved: dict[tuple[str, str, str], tuple[int, dict]] = {}
-            for index, row in enumerate(rows):
-                if row.get("state") == PENDING_REFRESH:
-                    key = _pending_key(row)
-                    if key is not None:
-                        latest[key[0]] = (index, row)
-                else:
-                    key = _resolved_key(row)
-                    if key is not None:
-                        resolved[key] = (index, row)
             kept: list[tuple[int, dict]] = []
-            for pending_item in latest.values():
-                kept.append(pending_item)
-                pair = resolved.get(_pending_key(pending_item[1]))
-                if pair is not None and pair[0] > pending_item[0]:
-                    kept.append(pair)
+            for pending_index, pending, resolved in _ordered_latest(rows).values():
+                kept.append((pending_index, pending))
+                if resolved is not None:
+                    kept.append(resolved)
             kept.sort(key=lambda item: item[0])
             tmp = path.with_suffix(path.suffix + ".compact.tmp")
             with tmp.open("w", encoding="utf-8") as handle:

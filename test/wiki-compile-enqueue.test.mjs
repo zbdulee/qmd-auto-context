@@ -69,9 +69,11 @@ test('source edit records pending refresh before its source queue job', () => {
     assert.equal(pending[0].sourcePath, 'docs/source.md');
     assert.equal(pending[0].state, 'pending_refresh');
     assert.equal(pending[0].engine, 'codex');
+    assert.match(pending[0].eventId, /^[0-9a-f-]{32,36}$/);
+    assert.deepEqual(Object.keys(pending[0]).sort(), ['engine', 'eventId', 'sourcePath', 'state', 'ts']);
     assert.equal(jobs.length, 1);
     assert.deepEqual(jobs[0].pendingRefresh, {
-      ts: pending[0].ts, engine: pending[0].engine,
+      eventId: pending[0].eventId, ts: pending[0].ts, engine: pending[0].engine,
     }, 'the queue carries the exact pending event that causally precedes its source snapshot');
   } finally {
     removeTemp(project);

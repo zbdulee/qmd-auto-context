@@ -72,7 +72,7 @@ function seedPending(project, engine = 'claude') {
 function attachPendingToQueuedJob(project, pending) {
   const queue = join(project, '.auto-context', 'compile', 'source-queue.jsonl');
   const job = jsonl(queue)[0];
-  job.pendingRefresh = { ts: pending.ts, engine: pending.engine };
+  job.pendingRefresh = { eventId: pending.eventId, ts: pending.ts, engine: pending.engine };
   writeFileSync(queue, JSON.stringify(job) + '\n');
 }
 
@@ -85,7 +85,9 @@ test('worker recovers a pending-only crash window by reenqueuing the source job'
     const jobs = jsonl(join(project, '.auto-context', 'compile', 'source-queue.jsonl'));
     assert.equal(jobs.length, 1);
     assert.equal(jobs[0].source.path, 'docs/source.md');
-    assert.deepEqual(jobs[0].pendingRefresh, { ts: pending.ts, engine: 'codex' });
+    assert.deepEqual(jobs[0].pendingRefresh, {
+      eventId: pending.eventId, ts: pending.ts, engine: 'codex',
+    });
   } finally { removeTemp(project); }
 });
 
@@ -98,7 +100,9 @@ test('worker recovery coalesces canonical cwd aliases in the queue-append crash 
     runWorker(project, {}, ['--json']);
     const jobs = jsonl(join(project, '.auto-context', 'compile', 'source-queue.jsonl'));
     assert.equal(jobs.length, 1, 'recovery and the already-appended job coalesce by source');
-    assert.deepEqual(jobs[0].pendingRefresh, { ts: latest.ts, engine: latest.engine });
+    assert.deepEqual(jobs[0].pendingRefresh, {
+      eventId: latest.eventId, ts: latest.ts, engine: latest.engine,
+    });
   } finally { removeTemp(project); }
 });
 
@@ -139,12 +143,55 @@ print(json.dumps({'candidates': [{
     assert.match(readFileSync(dirtyQueue, 'utf8'), /^proj-wiki\t/);
     const refreshRows = jsonl(join(project, '.auto-context', 'compile', 'source-refresh-pending.jsonl'));
     assert.deepEqual(refreshRows.map((row) => row.state), ['pending_refresh', 'resolved']);
-    assert.equal(refreshRows[1].pendingTs, pending.ts);
-    assert.equal(refreshRows[1].sourceRevision.sha256,
-      createHash('sha256').update(sourceBytes).digest('hex'));
+    assert.equal(refreshRows[1].pendingEventId, pending.eventId);
+    assert.deepEqual(Object.keys(refreshRows[1]).sort(), ['pendingEventId', 'state', 'ts']);
+    assert.doesNotMatch(JSON.stringify(refreshRows), /sha256|sourceRevision|mtimeNs|"size"|content|secret/i,
+      'the refresh ledger persists event metadata only');
   } finally {
     removeTemp(project);
   }
+});
+
+test('process_job binds the latest unresolved event before capture and rejects a replayed queue token', () => {
+  const project = setupProject({ verify: { enabled: false } });
+  try {
+    const older = seedPending(project, 'claude');
+    attachPendingToQueuedJob(project, older);
+    const latest = seedPending(project, 'codex');
+    const out = JSON.parse(execFileSync('python3', ['-c', `
+import json, pathlib, sys
+sys.path.insert(0, 'core')
+import config, wiki_compile_worker as w
+root = pathlib.Path(${JSON.stringify(project)}).resolve()
+found = config.find_project_config(str(root))
+job = json.loads((root / '.auto-context/compile/source-queue.jsonl').read_text().splitlines()[0])
+w.resolve_extractor_argv = lambda *_: ['fake-extractor']
+w.run_extractor = lambda *_: ({'candidates': [{
+  'title': 'Latest Event Binding',
+  'summary': 'The worker binds the latest unresolved event before source capture.',
+  'suggestedType': 'decision',
+  'confidence': 'high',
+  'targetPath': '.auto-context/wiki/decisions/latest-event-binding.md',
+}]}, '', 0)
+w.gather_similar_pages = lambda *_: None
+seen = {}
+def compile_candidate(_root, candidate):
+    seen['eventId'] = candidate.get('sourceRefreshEventId')
+    return {
+      'action': 'created',
+      'targetPath': candidate['targetPath'],
+      'sourceRevisions': candidate['sourceRevisions'],
+      'sourceRefreshEventId': candidate.get('sourceRefreshEventId'),
+    }
+w.compile_candidate = compile_candidate
+result = w.process_job(root, found['config'], found['config']['compile'], job)
+print(json.dumps({'result': result, 'seen': seen, 'rows': w.wiki_freshness.read_pending_refreshes(root)}))
+`], { cwd: process.cwd(), encoding: 'utf8' }));
+    assert.equal(out.seen.eventId, latest.eventId, 'stale queued token is replaced before capture');
+    assert.equal(out.rows.at(-1).pendingEventId, latest.eventId);
+    assert.equal(out.rows.filter((row) => row.state === 'pending_refresh').length, 2);
+    assert.equal(out.result[1], false);
+  } finally { removeTemp(project); }
 });
 
 test('worker preserves the source job when resolved-event append fails after card write', () => {

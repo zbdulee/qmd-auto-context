@@ -753,6 +753,10 @@ def process_job(root: Path, config: dict, compile_cfg: dict, job: dict) -> tuple
     if not qmd_config.is_compile_source_collection(roles, collection):
         append_jsonl(cpath, bounded_failure("extractor_failed", job, "invalid_source_scope"))
         return True, False, []
+    # Bind the ledger's latest unresolved event immediately before the stable
+    # source capture.  A queue token is only transport metadata and may be stale
+    # after a crash/replay; it never decides which edit this compile resolves.
+    bound_pending = wiki_freshness.latest_unresolved_pending(root, rel)
     stable_source = wiki_freshness.snapshot_bytes(src)
     if stable_source is None:
         append_jsonl(cpath, bounded_failure("extractor_failed", job, "source_unreadable"))
@@ -901,6 +905,8 @@ def process_job(root: Path, config: dict, compile_cfg: dict, job: dict) -> tuple
         # revisions: the extractor only saw the bounded source body, while this
         # record was captured from the complete file before the extractor ran.
         candidate["sourceRevisions"] = [dict(source_revision)]
+        if bound_pending is not None:
+            candidate["sourceRefreshEventId"] = bound_pending["eventId"]
         # **모델 출력을 신뢰 판정에 쓰지 않는다.** candidate는 extractor(모델) 출력이므로
         # setdefault면 모델이 낸 값이 이긴다 — `engine`이 그렇게 위조되면 자기검증이
         # `verifiedMode: cross-engine`으로 승격된다(생성 엔진은 job이 정하는 사실이고 모델의
@@ -929,6 +935,11 @@ def process_job(root: Path, config: dict, compile_cfg: dict, job: dict) -> tuple
             or not wiki_freshness.same_revision(returned_revisions[0], source_revision)
         ):
             refresh_complete = False
+        if (
+            bound_pending is not None
+            and result.get("sourceRefreshEventId") != bound_pending.get("eventId")
+        ):
+            refresh_complete = False
         # wiki_compile은 verify 큐에 실제로 넣었을 때만 이 플래그를 준다(generated 카드 +
         # verify.enabled + 안전한 큐 경로). 카드 수를 세거나 큐 파일 줄 수를 재는 대신
         # 쓰는 쪽의 사실을 그대로 받는다 — 판정 조건을 여기 복제하면 어긋난다.
@@ -939,20 +950,10 @@ def process_job(root: Path, config: dict, compile_cfg: dict, job: dict) -> tuple
     if failed_compile:
         append_jsonl(cpath, bounded_failure("compile_failed", job, "writer_rejected"))
         return False, True, verify_targets
-    token = job.get("pendingRefresh") if isinstance(job.get("pendingRefresh"), dict) else {}
-    if (
-        refresh_complete
-        and isinstance(token.get("ts"), str) and token.get("ts")
-        and isinstance(token.get("engine"), str) and token.get("engine")
-    ):
-        pending = {
-            "state": wiki_freshness.PENDING_REFRESH,
-            "sourcePath": rel,
-            "ts": token.get("ts"),
-            "engine": token.get("engine"),
-        }
+    if refresh_complete and bound_pending is not None:
         if not wiki_freshness.resolve_pending_refresh(
-            root, pending, source_revision, [source_revision]
+            root, bound_pending, source_revision, [source_revision],
+            compiled_event_id=bound_pending["eventId"],
         ):
             return True, True, verify_targets
     return True, False, verify_targets
@@ -972,6 +973,7 @@ def recover_pending_refreshes(root: Path, config: dict, queue: Path) -> int:
         # every worker retry.  Its durable pending timestamp owns debounce age.
         record["ts"] = pending.get("ts")
         record["pendingRefresh"] = {
+            "eventId": pending.get("eventId"),
             "ts": pending.get("ts"),
             "engine": pending.get("engine"),
         }

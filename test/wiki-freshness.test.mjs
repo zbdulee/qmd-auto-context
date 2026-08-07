@@ -204,8 +204,37 @@ test('pending refresh resolves only with the successful compile revision still o
     assert.equal(out.oldOk, false, 'a revision captured before the pending event cannot resolve it');
     assert.equal(out.currentOk, true);
     assert.deepEqual(out.rows.map((row) => row.state), ['pending_refresh', 'resolved']);
-    assert.equal(out.rows[1].pendingTs, out.rows[0].ts);
-    assert.equal(out.rows[1].sourceRevision.sha256, sourceRevision(project).sha256);
+    assert.equal(out.rows[1].pendingEventId, out.rows[0].eventId);
+    assert.deepEqual(Object.keys(out.rows[1]).sort(), ['pendingEventId', 'state', 'ts']);
+    assert.doesNotMatch(JSON.stringify(out.rows), /sha256|sourceRevision|mtimeNs|"size"|content|secret/i);
+  } finally { removeTemp(project); }
+});
+
+test('ordered history and unique event ids reject prior resolution and token replay for later ABA pending', () => {
+  const project = setup();
+  try {
+    const out = JSON.parse(python([
+      'import json, sys',
+      'from pathlib import Path',
+      'sys.path.insert(0, "core")',
+      'import wiki_freshness as F',
+      'root = Path(sys.argv[1])',
+      'old = F.record_pending_refresh(root, "docs/source.md", "codex")',
+      'revision = {"kind": "file", "path": "docs/source.md", "collection": "proj-docs", **F.snapshot_file(root / "docs/source.md")}',
+      'assert F.resolve_pending_refresh(root, old, revision, [revision])',
+      '# Same bytes represent the A return of an A->B->A edit sequence; the new event id is the causal proof.',
+      'later = F.record_pending_refresh(root, "docs/source.md", "codex")',
+      'replay_ok = F.resolve_pending_refresh(root, old, revision, [revision])',
+      'unresolved = F.unresolved_pending_refreshes(root)',
+      'later_ok = F.resolve_pending_refresh(root, later, revision, [revision])',
+      'print(json.dumps({"old": old, "later": later, "replayOk": replay_ok, "unresolved": unresolved, "laterOk": later_ok, "rows": F.read_pending_refreshes(root)}))',
+    ].join('\n'), project));
+    assert.notEqual(out.old.eventId, out.later.eventId);
+    assert.equal(out.replayOk, false, 'an already-resolved token cannot resolve a later same-content edit');
+    assert.deepEqual(out.unresolved.map((row) => row.eventId), [out.later.eventId],
+      'an earlier resolved row does not suppress the later pending event');
+    assert.equal(out.laterOk, true);
+    assert.equal(out.rows.at(-1).pendingEventId, out.later.eventId);
   } finally { removeTemp(project); }
 });
 
@@ -233,10 +262,11 @@ test('pending refresh compaction atomically retains only each source latest unre
     assert.deepEqual(rows.map((row) => [row.sourcePath, row.state]), [
       ['docs/source.md', 'pending_refresh'],
       ['docs/other.md', 'pending_refresh'],
-      ['docs/other.md', 'resolved'],
+      [undefined, 'resolved'],
     ]);
     assert.equal(rows[0].engine, 'codex');
-    assert.equal(rows[2].pendingTs, rows[1].ts);
+    assert.equal(rows[2].pendingEventId, rows[1].eventId);
+    assert.doesNotMatch(JSON.stringify(rows), /sha256|sourceRevision|mtimeNs|"size"|content|secret/i);
     assert.equal(existsSync(join(project, '.auto-context', 'compile', 'source-refresh-pending.jsonl.compact.tmp')), false);
   } finally { removeTemp(project); }
 });

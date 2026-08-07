@@ -218,7 +218,11 @@ def main():
             Path(project_root), source.get("path", ""), record.get("engine", DEFAULT_ENGINE))
         if pending is None:
             continue
-        record["pendingRefresh"] = {"ts": pending["ts"], "engine": pending["engine"]}
+        record["pendingRefresh"] = {
+            "eventId": pending["eventId"],
+            "ts": pending["ts"],
+            "engine": pending["engine"],
+        }
         queued.append(record)
     _append_jsonl(queue_path, queued)
     return 0

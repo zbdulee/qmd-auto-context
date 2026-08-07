@@ -1617,6 +1617,9 @@ def main() -> int:
         "targetPath": record["targetPath"],
         "sourceRevisions": record["sourceRevisions"],
     }
+    source_refresh_event_id = candidate.get("sourceRefreshEventId")
+    if isinstance(source_refresh_event_id, str) and source_refresh_event_id:
+        result["sourceRefreshEventId"] = source_refresh_event_id
     # 이 카드가 기계 검수 큐에 실려 있는지를 호출자(compile worker)가 알아야 한다: 한 run이
     # 만든 검수 부채만큼 같은 run의 verify 예산을 늘려 큐가 배수보다 빨리 자라지 않게 한다.
     if verify_queued:
