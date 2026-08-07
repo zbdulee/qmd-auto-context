@@ -25,6 +25,7 @@ import cooldown as qmd_cooldown
 from collection_match import select_collections
 from wiki_compile_enqueue import _queue_lock_path, _safe_queue_path
 import wiki_compile as wc
+import wiki_freshness
 
 
 DEFAULT_SOURCE_QUEUE = cp.rel(cp.SOURCE_QUEUE)
@@ -739,6 +740,16 @@ def process_job(root: Path, config: dict, compile_cfg: dict, job: dict) -> tuple
     if not qmd_config.is_compile_source_collection(roles, collection):
         append_jsonl(cpath, bounded_failure("extractor_failed", job, "invalid_source_scope"))
         return True, False, []
+    revision_snapshot = wiki_freshness.snapshot_file(src)
+    if revision_snapshot is None:
+        append_jsonl(cpath, bounded_failure("extractor_failed", job, "source_unreadable"))
+        return True, False, []
+    source_revision = {
+        "kind": "file",
+        "path": rel,
+        "collection": source.get("collection", ""),
+        **revision_snapshot,
+    }
     max_chars = int(compile_cfg.get("maxSourceChars", 12000) or 12000)
     bounded = read_source_bounded(src, max_chars)
     if bounded is None:
@@ -798,6 +809,11 @@ def process_job(root: Path, config: dict, compile_cfg: dict, job: dict) -> tuple
     }
     payload["_qmd"]["reasoningEffort"]["capabilityDeclared"] = argv == _builtin_adapter_argv(engine)
     extracted, reason, returncode = run_extractor(argv, payload, timeout, root)
+    freshness, _ = wiki_freshness.compare_revision(src, source_revision)
+    if freshness != wiki_freshness.FRESH:
+        append_jsonl(cpath, bounded_failure(
+            "extractor_failed", job, "source_changed_during_extract"))
+        return False, True, []
     if returncode == 127:
         append_jsonl(cpath, bounded_failure("needs_extractor", job, "extractor_unavailable"))
         return False, True, []  # CLI absent: preserve for when it's installed
@@ -865,6 +881,10 @@ def process_job(root: Path, config: dict, compile_cfg: dict, job: dict) -> tuple
         # 다음 편집에서 조용히 깨진다. 실제 소스를 별도 필드로 못박아 verifier가
         # `MAX_SOURCES`와 무관하게 반드시 읽게 한다(wiki_compile이 verify 잡으로 전달).
         candidate["authoritativeSources"] = [dict(file_source)]
+        # Trusted provenance is worker-owned.  Never accept model-provided
+        # revisions: the extractor only saw the bounded source body, while this
+        # record was captured from the complete file before the extractor ran.
+        candidate["sourceRevisions"] = [dict(source_revision)]
         # **모델 출력을 신뢰 판정에 쓰지 않는다.** candidate는 extractor(모델) 출력이므로
         # setdefault면 모델이 낸 값이 이긴다 — `engine`이 그렇게 위조되면 자기검증이
         # `verifiedMode: cross-engine`으로 승격된다(생성 엔진은 job이 정하는 사실이고 모델의

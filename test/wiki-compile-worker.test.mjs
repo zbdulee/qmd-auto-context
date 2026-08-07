@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from 'node:fs';
@@ -82,8 +83,42 @@ print(json.dumps({'candidates': [{
     const text = readFileSync(page, 'utf8');
     assert.match(text, /Source Compile Decision/);
     assert.match(text, /path: "docs\/source.md"/);
+    assert.match(text, /^sourceRevisions:$/m);
+    const sourceBytes = readFileSync(join(project, 'docs', 'source.md'));
+    assert.match(text, new RegExp(`sha256: "${createHash('sha256').update(sourceBytes).digest('hex')}"`),
+      'trusted revision hashes the complete source file');
+    const verifyJob = jsonl(join(project, '.auto-context', 'compile', 'verify-queue.jsonl'))[0];
+    assert.equal(verifyJob.sourceRevisions[0].sha256,
+      createHash('sha256').update(sourceBytes).digest('hex'));
     assert.equal(readFileSync(join(project, '.auto-context', 'compile', 'source-queue.jsonl'), 'utf8'), '');
     assert.match(readFileSync(dirtyQueue, 'utf8'), /^proj-wiki\t/);
+  } finally {
+    removeTemp(project);
+  }
+});
+
+test('worker preserves the source job and writes no card when source changes during extraction', () => {
+  const extractor = join(mkdtempSync(join(tmpdir(), 'extractor-source-race-')), 'extract.py');
+  writeFileSync(extractor, `#!/usr/bin/env python3
+import json, pathlib, sys
+payload = json.loads(sys.stdin.read())
+pathlib.Path(payload['cwd'], payload['source']['path']).write_text('# Changed during extraction\\n', encoding='utf-8')
+print(json.dumps({'candidates': [{
+  'title': 'Stale Extraction Must Not Land',
+  'summary': 'This candidate was produced from a source revision that changed during extraction.',
+  'suggestedType': 'decision',
+  'confidence': 'high',
+  'targetPath': '.auto-context/wiki/decisions/stale-extraction.md'
+}]}))
+`);
+  const project = setupProject({ extractor: { backends: { claude: ['python3', extractor] }, timeout: 30 } });
+  try {
+    runWorker(project);
+    assert.equal(existsSync(join(project, '.auto-context', 'wiki', 'decisions', 'stale-extraction.md')), false);
+    assert.match(readFileSync(join(project, '.auto-context', 'compile', 'source-queue.jsonl'), 'utf8'),
+      /docs\/source\.md/, 'changed source job is preserved for retry');
+    const log = jsonl(join(project, '.auto-context', 'compile', 'candidates.jsonl'));
+    assert.equal(log.at(-1).reason, 'source_changed_during_extract');
   } finally {
     removeTemp(project);
   }
@@ -1032,8 +1067,11 @@ else:
 
     // 1) 카드 frontmatter: 실제 소스가 맨 앞. `collection`만 다른 모델 중복은 제거된다.
     const text = readFileSync(join(project, created.targetPath), 'utf8');
-    const sourceLines = text.split('\n')
-      .slice(text.split('\n').findIndex((l) => l === 'sources:') + 1)
+    const textLines = text.split('\n');
+    const sourcesStart = textLines.findIndex((l) => l === 'sources:') + 1;
+    const sourcesEnd = textLines.findIndex((l, i) => i >= sourcesStart && !l.startsWith(' '));
+    const sourceLines = textLines
+      .slice(sourcesStart, sourcesEnd)
       .filter((l) => l.startsWith('  - '));
     assert.match(sourceLines[0], /path: "docs\/source\.md"/, '실제 소스가 목록 맨 앞');
     assert.equal(sourceLines.filter((l) => l.includes('docs/source.md')).length, 1,

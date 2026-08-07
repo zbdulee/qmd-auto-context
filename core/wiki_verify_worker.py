@@ -49,6 +49,7 @@ import compile_paths as cp
 import config as qmd_config
 import wiki_compile as wc
 import wiki_compile_worker as wcw
+import wiki_freshness
 import wiki_source_missing as wsm
 from dirty_queue import enqueue_collections
 from wiki_compile_enqueue import _safe_queue_path
@@ -507,6 +508,15 @@ def base_record(job: dict) -> dict:
     }
 
 
+def source_freshness(root: Path, config: dict, job: dict) -> dict | None:
+    """Check job-owned provenance, preserving legacy jobs without the field."""
+    if "sourceRevisions" not in job:
+        return None
+    revisions = job.get("sourceRevisions")
+    return wiki_freshness.check_card(
+        {"sourceRevisions": revisions}, root, wsm.allow_roots_of(config))
+
+
 def process_verify_job(
     root: Path, config: dict, compile_cfg: dict, vcfg: dict, job: dict, log_path: Path
 ) -> tuple[bool, bool]:
@@ -536,6 +546,14 @@ def process_verify_job(
         # 카드가 이 잡 이후 다시 컴파일됨 — 새 잡이 큐에 따로 있으므로 이 잡은 stale.
         log_verdict(log_path, {**base_record(job), "result": "skipped", "reason": "stale_job"})
         return True, False
+
+    freshness = source_freshness(root, config, job)
+    if freshness is not None and freshness.get("state") != wiki_freshness.FRESH:
+        log_verdict(log_path, {
+            **base_record(job), "result": "deferred", "reason": "source_changed_before_verify",
+            "freshnessReason": freshness.get("reason", ""),
+        })
+        return False, True
 
     max_chars = int(compile_cfg.get("maxSourceChars", 12000) or 12000)
     sources = load_sources(root, job, max_chars)
@@ -648,6 +666,14 @@ def process_verify_job(
     if fresh_status != "generated" or fresh_meta.get("reviewed") is True or (job_hash and fresh_hash and job_hash != fresh_hash):
         log_verdict(log_path, {**base_record(job), **provenance, "result": "skipped", "reason": "changed_during_verify"})
         return True, False
+    freshness = source_freshness(root, config, job)
+    if freshness is not None and freshness.get("state") != wiki_freshness.FRESH:
+        log_verdict(log_path, {
+            **base_record(job), **provenance, "result": "deferred",
+            "reason": "source_changed_during_verify",
+            "freshnessReason": freshness.get("reason", ""),
+        })
+        return False, True
 
     # 판정이 실제로 나온 행에서만 `verifiedMode`가 달성값이 된다.
     record = {

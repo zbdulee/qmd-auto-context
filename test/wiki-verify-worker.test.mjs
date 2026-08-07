@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { removeTemp } from './helpers/temp.mjs';
@@ -31,9 +32,8 @@ function setupProject({ verify = {}, extractorArgv = null, extractor = null, car
   mkdirSync(join(dir, '.auto-context', 'compile'), { recursive: true });
   mkdirSync(join(dir, '.auto-context', 'wiki', 'concepts'), { recursive: true });
   mkdirSync(join(dir, 'docs'), { recursive: true });
-  if (withSource) {
-    writeFileSync(join(dir, 'docs', 'source.md'), '# Source\n\nDurable claim: the source documents cite markdown.\n');
-  }
+  const sourcePath = join(dir, 'docs', 'source.md');
+  if (withSource) writeFileSync(sourcePath, '# Source\n\nDurable claim: the source documents cite markdown.\n');
   writeFileSync(join(dir, '.auto-context', 'settings.json'), JSON.stringify({
     indexing: true,
     collections: ['proj-docs', 'proj-wiki'],
@@ -52,10 +52,17 @@ function setupProject({ verify = {}, extractorArgv = null, extractor = null, car
     },
   }));
   writeFileSync(join(dir, CARD_REL), cardText(cardStatus));
+  const sourceStat = withSource ? statSync(sourcePath, { bigint: true }) : null;
+  const sourceRevisions = withSource ? [{
+    kind: 'file', path: 'docs/source.md', collection: 'proj-docs',
+    sha256: createHash('sha256').update(readFileSync(sourcePath)).digest('hex'),
+    size: Number(sourceStat.size), mtimeNs: Number(sourceStat.mtimeNs),
+  }] : [];
   writeFileSync(join(dir, '.auto-context', 'compile', 'verify-queue.jsonl'), JSON.stringify({
     ts: '2026-07-04T00:00:00Z',
     targetPath: CARD_REL,
     sources: [{ kind: 'file', path: 'docs/source.md', collection: 'proj-docs' }],
+    ...(withSource ? { sourceRevisions } : {}),
     sourceHash: HASH,
     engine: 'claude',
     trigger: 'post_tool_source',
@@ -112,6 +119,59 @@ test('verify pass → status verified + verifiedBy/verifiedAt 패치 + 재인덱
     const log = jsonl(join(project, '.auto-context', 'compile', 'verify-log.jsonl'));
     assert.equal(log[0].result, 'verified');
     assert.equal(readFileSync(join(project, '.auto-context', 'compile', 'verify-queue.jsonl'), 'utf8'), '');
+  } finally { removeTemp(project); }
+});
+
+test('source revision mismatch before load preserves the job without calling a verifier', () => {
+  const tracker = trackerFile('source-before-verify');
+  const project = setupProject({
+    extractor: { timeout: 30, backends: { claude: mockEngine('claude', tracker, 'pass') } },
+  });
+  try {
+    writeFileSync(join(project, 'docs', 'source.md'), '# Changed before verify\n');
+    const out = JSON.parse(runVerifyWorker(project));
+    assert.equal(out.processed, 0);
+    assert.deepEqual(calls(tracker), [], 'stale source is rejected before paid verifier invocation');
+    assert.match(readFileSync(join(project, CARD_REL), 'utf8'), /^status: generated$/m);
+    assert.match(readFileSync(join(project, '.auto-context', 'compile', 'verify-queue.jsonl'), 'utf8'),
+      /test-card\.md/, 'revision mismatch preserves the verify job');
+    assert.equal(jsonl(join(project, '.auto-context', 'compile', 'verify-log.jsonl')).at(-1).reason,
+      'source_changed_before_verify');
+  } finally { removeTemp(project); }
+});
+
+test('explicit empty source revisions fail closed instead of verifying a provenance-free card', () => {
+  const tracker = trackerFile('empty-source-revisions');
+  const project = setupProject({
+    jobOverrides: { sourceRevisions: [] },
+    extractor: { timeout: 30, backends: { claude: mockEngine('claude', tracker, 'pass') } },
+  });
+  try {
+    assert.equal(JSON.parse(runVerifyWorker(project)).processed, 0);
+    assert.deepEqual(calls(tracker), []);
+    assert.match(readFileSync(join(project, CARD_REL), 'utf8'), /^status: generated$/m);
+    assert.equal(jsonl(join(project, '.auto-context', 'compile', 'verify-log.jsonl')).at(-1).reason,
+      'source_changed_before_verify');
+  } finally { removeTemp(project); }
+});
+
+test('source change after verifier load but before stamp preserves job and never stamps verified', () => {
+  const verifier = join(mkdtempSync(join(tmpdir(), 'verifier-source-race-')), 'verify.py');
+  writeFileSync(verifier, `#!/usr/bin/env python3
+import json, pathlib, sys
+payload = json.loads(sys.stdin.read())
+pathlib.Path(payload['cwd'], 'docs/source.md').write_text('# Changed during verify\\n', encoding='utf-8')
+print(json.dumps({'verdict': 'pass', 'claims': [], 'reasons': []}))
+`);
+  const project = setupProject({ extractorArgv: ['python3', verifier] });
+  try {
+    const out = JSON.parse(runVerifyWorker(project));
+    assert.equal(out.processed, 0);
+    assert.doesNotMatch(readFileSync(join(project, CARD_REL), 'utf8'), /^status: verified$/m);
+    assert.match(readFileSync(join(project, '.auto-context', 'compile', 'verify-queue.jsonl'), 'utf8'),
+      /test-card\.md/, 'source race preserves the verify job');
+    assert.equal(jsonl(join(project, '.auto-context', 'compile', 'verify-log.jsonl')).at(-1).reason,
+      'source_changed_during_verify');
   } finally { removeTemp(project); }
 });
 

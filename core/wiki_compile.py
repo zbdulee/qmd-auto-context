@@ -834,6 +834,22 @@ def authoritative_sources(candidate: dict) -> list:
     return out
 
 
+def source_revisions(candidate: dict) -> list[dict]:
+    """Return the complete closed-schema compiler provenance, or no proof.
+
+    ``yaml_scalars`` owns the schema.  Rejecting the whole list when one sibling
+    is malformed prevents a partial authoritative source set from looking
+    complete.
+    """
+    raw = candidate.get("sourceRevisions")
+    if not isinstance(raw, list) or not raw:
+        return []
+    normalized = [yaml_scalars.normalize_source_revision(item) for item in raw]
+    if any(item is None for item in normalized):
+        return []
+    return normalized
+
+
 def markdown_page(candidate: dict, summary: str, status: str, redactions: list[str], h: str) -> str:
     created = today()
     # candidate는 **extractor(모델) 출력**이다. frontmatter로 나가는 모든 모델 제공 값은
@@ -875,6 +891,10 @@ def markdown_page(candidate: dict, summary: str, status: str, redactions: list[s
     ])
     source_lines = [f"  - {flow}" for flow in source_flow_entries(sources)]
     lines.extend(source_lines if source_lines else ["  - {kind: unknown}"])
+    revisions = yaml_scalars.dump_source_revisions(source_revisions(candidate))
+    if revisions:
+        lines.append("sourceRevisions:")
+        lines.extend(f"  - {revision}" for revision in revisions)
     lines.append("triggers:")
     if triggers:
         for trigger in triggers:
@@ -898,6 +918,78 @@ def markdown_page(candidate: dict, summary: str, status: str, redactions: list[s
         "",
     ])
     return "\n".join(lines)
+
+
+def _frontmatter_sections(frontmatter: str) -> list[tuple[str, list[str]]] | None:
+    """Split parsed frontmatter into top-level key sections, preserving bytes."""
+    sections: list[tuple[str, list[str]]] = []
+    for line in frontmatter.splitlines():
+        if line.startswith(" "):
+            if not sections:
+                return None
+            sections[-1][1].append(line)
+            continue
+        if ":" not in line:
+            return None
+        key = line.split(":", 1)[0].strip()
+        if not key or any(existing == key for existing, _ in sections):
+            return None
+        sections.append((key, [line]))
+    return sections
+
+
+def rewrite_generated_card(path: Path, old_text: str, generated_page: str) -> bool:
+    """Atomically refresh trusted frontmatter and the managed block together.
+
+    Human-maintained frontmatter/body outside the managed block survives.  The
+    compiler-owned source lists, generated status, and verification proof are
+    replaced/cleared in the same complete text passed to ``write_text_atomic``.
+    """
+    old_match = FRONTMATTER_RE.match(old_text)
+    new_match = FRONTMATTER_RE.match(generated_page)
+    old_blocks = list(AUTO_BLOCK_RE.finditer(old_text))
+    new_blocks = list(AUTO_BLOCK_RE.finditer(generated_page))
+    if old_match is None or new_match is None or len(old_blocks) != 1 or len(new_blocks) != 1:
+        return False
+    old_sections = _frontmatter_sections(old_match.group(1))
+    new_sections = _frontmatter_sections(new_match.group(1))
+    if old_sections is None or new_sections is None:
+        return False
+    new_by_key = {key: lines for key, lines in new_sections}
+    required = {"status", "sources"}
+    if not required.issubset(new_by_key):
+        return False
+
+    replaced: set[str] = set()
+    merged: list[str] = []
+    proof_keys = set(qmd_config.VERIFY_PROOF_FIELDS)
+    replace_sources = new_by_key["sources"] != ["sources:", "  - {kind: unknown}"]
+    for key, lines in old_sections:
+        if key in proof_keys or key == "sourceRevisions":
+            continue
+        if key == "status":
+            merged.extend(new_by_key["status"])
+            replaced.add("status")
+            continue
+        if key == "sources":
+            merged.extend(new_by_key["sources"] if replace_sources else lines)
+            if "sourceRevisions" in new_by_key:
+                merged.extend(new_by_key["sourceRevisions"])
+            replaced.update({"sources", "sourceRevisions"})
+            continue
+        merged.extend(lines)
+    for key in ("status", "sources"):
+        if key not in replaced:
+            merged.extend(new_by_key[key])
+    if "sourceRevisions" in new_by_key and "sourceRevisions" not in replaced:
+        merged.extend(new_by_key["sourceRevisions"])
+
+    body = old_text[old_match.end():]
+    if len(list(AUTO_BLOCK_RE.finditer(body))) != 1:
+        return False
+    body = AUTO_BLOCK_RE.sub(new_blocks[0].group(0), body, count=1)
+    rewritten = "---\n" + "\n".join(merged) + "\n---\n" + body
+    return write_text_atomic(path, rewritten)
 
 
 def patch_frontmatter_fields(path: Path, updates: dict) -> bool:
@@ -1298,6 +1390,7 @@ def main() -> int:
         "suggestedStatus": compile_cfg.get("defaultStatus", "generated"),
         "confidence": candidate.get("confidence", "medium"),
         "sources": candidate.get("sources") if isinstance(candidate.get("sources"), list) else [],
+        "sourceRevisions": source_revisions(candidate),
         "targetPath": target.relative_to(root).as_posix() if target else str(candidate.get("targetPath") or ""),
         "canonicalKey": clean_canonical_key(candidate.get("canonicalKey")),
         "aliases": clean_aliases(candidate.get("aliases")),
@@ -1461,39 +1554,24 @@ def main() -> int:
             append_jsonl(candidate_path, record)
             print(json.dumps({"action": "merge-needed", "targetPath": record["targetPath"], "findings": ["generated_section_missing"]}, ensure_ascii=False))
             return 0
-        page_block = page_block_match.group(0)
-        page = AUTO_BLOCK_RE.sub(page_block, old)
+        # Every refreshed card re-enters verification regardless of a custom
+        # creation default.  The status reset and trusted provenance must land
+        # with the new managed block in one card rewrite.
+        status = "generated"
+        page = markdown_page(candidate, summary, status, redactions, h)
         action = "updated"
     # 신규 생성도 같은 원자적 경로를 쓴다. `updated`는 기존 카드 파괴 방지가 이유이고,
     # `created`는 **부분 카드가 완성된 카드처럼 보이는 것**이 이유다 — 절단된 파일도
     # 인덱싱되고 recall이 그 본문을 완결된 요약으로 주입하며(읽기 창 안에서 끊겼는지
     # 알 수 없다) verify는 반쪽 카드를 원문과 대조한다. 다음 회차 덮어쓰기에 의존하면
     # 그 사이 세션이 잘린 카드를 캐논으로 본다. 실패는 아래 write_failure로 표면화한다.
-    if not write_text_atomic(target, page):
+    write_ok = (rewrite_generated_card(target, old, page) if action == "updated"
+                else write_text_atomic(target, page))
+    if not write_ok:
         record["action"] = "write-failed"
         append_jsonl(candidate_path, record)
         print(json.dumps({"action": "write-failed", "targetPath": record["targetPath"]}, ensure_ascii=False))
         return 1
-
-    status_reset_failed = False
-    if action == "updated":
-        # updated 경로는 AUTO_BLOCK만 치환하고 기존 frontmatter를 보존하므로, 이전
-        # verified/contested 상태가 새 내용에 그대로 붙는 stale 검증이 된다 — 쓰기
-        # status(defaultStatus)로 명시 리셋해 재검증 대상으로 되돌린다.
-        old_meta, _ = parse_frontmatter(old)
-        old_status = str(old_meta.get("status") or "").strip()
-        if old_status and old_status != status:
-            # 증명 필드는 빈 값으로 남기지 않고 **키째로 지운다** — `verifiedBy: ""`는
-            # "한 번 기계 검수를 통과한 카드"로 읽히는 잔재고, 리셋된 카드에 그 흔적이
-            # 남으면 안 된다(라이브 5장이 그 형태였다).
-            #
-            # **반환값을 삼키면 안 된다.** 이 패치가 실패하면 카드 본문은 새 내용인데
-            # status는 `verified`로 남아 정확히 이 코드가 막으려던 stale 검증이 된다. 게다가
-            # 아래 verify enqueue는 `status == "generated"`만 대상이므로 재검증도 일어나지
-            # 않는다 — 조용히 "검수된 카드"로 남는 최악의 조합이다. 실패를 표면화하고
-            # **status와 무관하게 verify 큐에 넣어** 다음 run이 카드를 다시 대조하게 한다.
-            if not patch_frontmatter_fields(target, {"status": status, **clear_verification_updates(old_meta)}):
-                status_reset_failed = True
 
     record["action"] = action
     append_jsonl(candidate_path, record)
@@ -1516,7 +1594,7 @@ def main() -> int:
     # 카드 주장 vs 원문을 대조해 verified 승격 또는 (onFail) 삭제한다.
     verify_cfg = compile_cfg.get("verify") if isinstance(compile_cfg.get("verify"), dict) else {}
     verify_queued = False
-    if verify_cfg.get("enabled", True) and (status == "generated" or status_reset_failed):
+    if verify_cfg.get("enabled", True) and status == "generated":
         verify_queue_path = cp.ledger(root, cp.VERIFY_QUEUE)
         if verify_queue_path is not None:
             verify_queued = True
@@ -1527,6 +1605,7 @@ def main() -> int:
                 "ts": now_iso(),
                 "targetPath": record["targetPath"],
                 "sources": record["sources"],
+                "sourceRevisions": record["sourceRevisions"],
                 **({"authoritativeSources": authoritative} if authoritative else {}),
                 "sourceHash": h,
                 "engine": candidate.get("engine") if isinstance(candidate.get("engine"), str) else "",
@@ -1538,9 +1617,6 @@ def main() -> int:
     # 만든 검수 부채만큼 같은 run의 verify 예산을 늘려 큐가 배수보다 빨리 자라지 않게 한다.
     if verify_queued:
         result["verifyQueued"] = True
-    if status_reset_failed:
-        record["statusResetFailed"] = True
-        result["statusResetFailed"] = True
     if not index_ok:
         result["indexWriteFailed"] = True
         append_jsonl(candidate_path, {**record, "indexWriteFailed": True})

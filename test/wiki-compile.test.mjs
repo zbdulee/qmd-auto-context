@@ -1,8 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { execFileSync, spawnSync, spawn } from 'node:child_process';
 import { createServer } from 'node:http';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { removeTemp } from './helpers/temp.mjs';
@@ -63,6 +64,16 @@ function runCompileAsync(work, payload, env = {}) {
 
 function readJsonl(path) {
   return readFileSync(path, 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
+}
+
+function sourceRevision(path, rel = 'docs/source.md', collection = 'proj-docs') {
+  const bytes = readFileSync(path);
+  const stat = statSync(path, { bigint: true });
+  return {
+    kind: 'file', path: rel, collection,
+    sha256: createHash('sha256').update(bytes).digest('hex'),
+    size: Number(stat.size), mtimeNs: Number(stat.mtimeNs),
+  };
 }
 
 test('wiki_compile: lint-clean candidate writes generated markdown, audit files, and dirty queue', () => {
@@ -1109,6 +1120,10 @@ test('wiki_compile: generated 카드 write 성공 시 verify-queue에 잡 enqueu
   const work = repoTemp('verify-enq');
   writeSettings(work, { semanticDedup: { enabled: false } });
   try {
+    mkdirSync(join(work, 'docs'), { recursive: true });
+    const source = join(work, 'docs', 'source.md');
+    writeFileSync(source, '# Source\n');
+    const revisions = [sourceRevision(source)];
     const out = JSON.parse(runCompile(work, {
       title: 'Verify Enqueue Decision',
       summary: 'Durable decision: verify queue records freshly written generated cards.',
@@ -1117,6 +1132,7 @@ test('wiki_compile: generated 카드 write 성공 시 verify-queue에 잡 enqueu
       trigger: 'manual',
       engine: 'claude',
       sources: [{ kind: 'file', path: 'docs/source.md', collection: 'proj-docs' }],
+      sourceRevisions: revisions,
       targetPath: '.auto-context/wiki/decisions/verify-enqueue-decision.md',
     }));
     assert.equal(out.action, 'created');
@@ -1127,6 +1143,10 @@ test('wiki_compile: generated 카드 write 성공 시 verify-queue에 잡 enqueu
     assert.equal(queue[0].engine, 'claude');
     assert.ok(queue[0].sourceHash, 'sourceHash 포함');
     assert.equal(queue[0].sources[0].path, 'docs/source.md');
+    assert.deepEqual(queue[0].sourceRevisions, revisions, 'verify job owns the trusted revisions');
+    const card = readFileSync(join(work, '.auto-context', 'wiki', 'decisions', 'verify-enqueue-decision.md'), 'utf8');
+    assert.match(card, /^sourceRevisions:$/m);
+    assert.match(card, new RegExp(revisions[0].sha256));
   } finally { removeTemp(work); }
 });
 
@@ -1160,6 +1180,12 @@ test('wiki_compile: verified 카드가 auto-update되면 status가 generated로 
     targetPath: '.auto-context/wiki/decisions/reset-decision.md',
   };
   try {
+    mkdirSync(join(work, 'docs'), { recursive: true });
+    const source = join(work, 'docs', 'source.md');
+    writeFileSync(source, '# Source v1\n');
+    const initialRevisions = [sourceRevision(source)];
+    payload.sources = [{ kind: 'file', path: 'docs/source.md', collection: 'proj-docs' }];
+    payload.sourceRevisions = initialRevisions;
     assert.equal(JSON.parse(runCompile(work, payload)).action, 'created');
     const page = join(work, '.auto-context', 'wiki', 'decisions', 'reset-decision.md');
     // verify 승격 시뮬레이션
@@ -1171,15 +1197,44 @@ wc.patch_frontmatter_fields(Path(${JSON.stringify(page)}), {"status": "verified"
 `], { encoding: 'utf8' });
     assert.match(readFileSync(page, 'utf8'), /^status: verified$/m);
     // 같은 identity로 재컴파일(내용 갱신) → updated 경로
-    const updated = JSON.parse(runCompile(work, {
+    writeFileSync(source, '# Source v2\n');
+    const refreshedRevisions = [sourceRevision(source)];
+    const updatedPayload = {
       ...payload,
       summary: 'Durable decision: updated cards drop stale verification. Now with new wording.',
-    }));
+      sourceRevisions: refreshedRevisions,
+    };
+    const counted = execFileSync('python3', ['-c', `
+import json, sys
+from pathlib import Path
+sys.path.insert(0, 'core')
+import wiki_compile as wc
+target = Path(${JSON.stringify(page)})
+real_write = wc.write_text_atomic
+writes = []
+def counted_write(path, text):
+    if path == target:
+        writes.append(text)
+    return real_write(path, text)
+wc.write_text_atomic = counted_write
+sys.argv = ['wiki_compile.py', '--cwd', ${JSON.stringify(work)}]
+rc = wc.main()
+print(json.dumps({'rc': rc, 'targetWrites': len(writes)}))
+`], {
+      cwd: process.cwd(), encoding: 'utf8', input: JSON.stringify(updatedPayload),
+      env: { ...process.env, QMD_DIRTY_QUEUE: join(work, 'dirty-queue') },
+    }).trim().split('\n');
+    const updated = JSON.parse(counted.at(-2));
+    const writeAudit = JSON.parse(counted.at(-1));
     assert.equal(updated.action, 'updated');
+    assert.equal(writeAudit.rc, 0);
+    assert.equal(writeAudit.targetWrites, 1, 'frontmatter reset and auto block land in one atomic card write');
     const text = readFileSync(page, 'utf8');
     assert.match(text, /^status: generated$/m, '갱신된 카드는 재검증 대상으로 리셋');
     assert.doesNotMatch(text, /^verifiedBy:/m, 'stale verifiedBy는 키째로 제거');
     assert.doesNotMatch(text, /^verifiedAt:/m, 'stale verifiedAt는 키째로 제거');
+    assert.match(text, new RegExp(refreshedRevisions[0].sha256), 'trusted provenance is replaced with the refreshed source');
+    assert.doesNotMatch(text, new RegExp(initialRevisions[0].sha256), 'old trusted provenance is removed');
     const queue = readFileSync(join(work, '.auto-context', 'compile', 'verify-queue.jsonl'), 'utf8')
       .trim().split('\n').map((l) => JSON.parse(l));
     assert.equal(queue.length, 2, 'created + updated 각각 enqueue');
