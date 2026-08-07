@@ -56,13 +56,14 @@ function withProject(fn, extraSettings = {}) {
   }
 }
 
-test('plain path(<collection>/<rel>)에서 실제 frontmatter status/reviewed를 읽는다', () => {
+test('plain path(<collection>/<rel>)에서 실제 frontmatter status/trusted를 읽는다', () => {
   withProject((dir) => {
     const r = probePath(dir, 'proj-wiki/decisions/card.md');
     assert.ok(r.resolved, '경로가 해석되어야 함 (해석 실패 시 미검수로 오판된다)');
     assert.match(r.resolved, /\.auto-context\/wiki\/decisions\/card\.md$/);
     assert.equal(r.meta.status, 'verified');
-    assert.equal(r.meta.reviewed, true, 'verified는 검수급 대우');
+    assert.equal(r.meta.trusted, true, 'verified + qmd provenance만 자동 신뢰');
+    assert.equal('reviewed' in r.meta, false, '카드 필드로 오인할 호환 telemetry를 노출하지 않음');
   });
 });
 
@@ -71,7 +72,7 @@ test('qmd:// 스킴 경로도 계속 동작한다 (회귀 방지)', () => {
     const r = probePath(dir, 'qmd://proj-wiki/decisions/card.md');
     assert.ok(r.resolved);
     assert.equal(r.meta.status, 'verified');
-    assert.equal(r.meta.reviewed, true);
+    assert.equal(r.meta.trusted, true);
   });
 });
 
@@ -81,7 +82,7 @@ test('첫 세그먼트가 collection 이름이 아니면 벗기지 않는다 (co
     // _collection 을 명시해 prefix 판정이 컬렉션명 비교로 이뤄지는지 본다.
     const r = probePath(dir, 'decisions/card.md', 'proj-wiki');
     assert.equal(r.resolved, null, 'wikiPath 상대 경로는 해석 대상이 아니다');
-    assert.equal(r.meta.reviewed, false, '해석 실패는 fail-closed(미검수)로 남는다');
+    assert.equal(r.meta.trusted, false, '해석 실패는 fail-closed로 남는다');
   });
 });
 
@@ -95,7 +96,7 @@ test('wikiPath 밖 경로는 여전히 거부된다 (fail-closed 보안 경계)'
     ]) {
       const r = probePath(dir, uri, uri.includes('proj-wiki') ? 'proj-wiki' : '');
       assert.equal(r.resolved, null, `wiki_root 밖 경로가 통과됨: ${uri}`);
-      assert.equal(r.meta.reviewed, false);
+      assert.equal(r.meta.trusted, false);
     }
   });
 });
@@ -108,7 +109,7 @@ test('wiki 안의 symlink가 밖을 가리키면 거부된다 (resolve 후 경�
       join(dir, '.auto-context', 'wiki', 'decisions', 'link.md'));
     const r = probePath(dir, 'proj-wiki/decisions/link.md');
     assert.equal(r.resolved, null, 'symlink로 wiki 경계를 우회할 수 없어야 함');
-    assert.equal(r.meta.reviewed, false, 'fail-closed');
+    assert.equal(r.meta.trusted, false, 'fail-closed');
   });
 });
 

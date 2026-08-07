@@ -86,7 +86,8 @@ test('shadow on: rank 포함 진단 라인 + lex/vec 분리 질의 + raw 대조'
   assert.equal(s.primary.count, 1);
   assert.equal(s.primary.top[0].rank, 1);
   assert.equal(s.primary.top[0].status, 'verified');
-  assert.equal(s.primary.top[0].reviewed, true);
+  assert.equal(s.primary.top[0].trusted, true);
+  assert.equal('reviewed' in s.primary.top[0], false);
   assert.equal(s.raw.status, 'ok');
   assert.equal(s.raw.count, 3);
   assert.deepEqual(s.raw.top.map((t) => t.rank), [1, 2, 3], 'score가 동일해도 rank는 구분돼야 함');
@@ -115,7 +116,7 @@ test('shadow on: rank 포함 진단 라인 + lex/vec 분리 질의 + raw 대조'
     original_rank: 1,
     ep_promoted: false,
     status: 'verified',
-    reviewed: true,
+    trusted: true,
   }]);
 });
 

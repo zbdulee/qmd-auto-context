@@ -568,6 +568,53 @@ def source_freshness(root: Path, config: dict, job: dict) -> dict | None:
         {"sourceRevisions": revisions}, root, wsm.allow_roots_of(config))
 
 
+def apply_verify_verdict_locked(
+    root: Path, config: dict, compile_cfg: dict, vcfg: dict, job: dict,
+    target: Path, job_hash: str, engine: str, verified_mode: str,
+    provenance: dict, verdict: str, claims: list, reasons: list[str],
+    sources: list[dict], log_path: Path,
+) -> tuple[bool, bool]:
+    """Re-read, decide, and mutate one card while CARD_WRITE_LOCK is held."""
+    _, fresh_meta, fresh_status, fresh_hash = card_state(target)
+    if (
+        fresh_status != "generated"
+        or fresh_meta.get("createdBy") != "qmd-auto-context"
+        or (job_hash and fresh_hash and job_hash != fresh_hash)
+    ):
+        log_verdict(log_path, {
+            **base_record(job), **provenance,
+            "result": "skipped", "reason": "changed_during_verify",
+        })
+        return True, False
+    freshness = source_freshness(root, config, job)
+    if freshness is not None and freshness.get("state") != wiki_freshness.FRESH:
+        log_verdict(log_path, {
+            **base_record(job), **provenance, "result": "deferred",
+            "reason": "source_changed_during_verify",
+            "freshnessReason": freshness.get("reason", ""),
+        })
+        return False, True
+
+    record = {
+        **base_record(job), **provenance, "verifiedMode": verified_mode,
+        "verdict": verdict, "claims": len(claims), "reasons": reasons,
+    }
+    if verdict == "pass":
+        if not wc.stamp_verification(target, "verified", engine, verified_mode):
+            log_verdict(log_path, {**record, "result": "stamp_failed", "stampStatus": "verified"})
+            return False, True
+        reindex_wiki(root, config)
+        log_verdict(log_path, {**record, "result": "verified"})
+        return True, False
+
+    action = vcfg.get("onFail", "delete") if verdict == "fail" else vcfg.get("onInconclusive", "delete")
+    applied = apply_negative_verdict(
+        root, config, compile_cfg, vcfg, target, engine, verified_mode, action, verdict,
+        sources, record, log_path
+    )
+    return (True, False) if applied else (False, True)
+
+
 def process_verify_job(
     root: Path, config: dict, compile_cfg: dict, vcfg: dict, job: dict, log_path: Path
 ) -> tuple[bool, bool]:
@@ -588,8 +635,7 @@ def process_verify_job(
     if text is None:
         log_verdict(log_path, {**base_record(job), "result": "skipped", "reason": "card_missing"})
         return True, False
-    # 검수/보호 카드·사람 산출물은 기계 검수 대상이 아니다.
-    if status != "generated" or meta.get("reviewed") is True or meta.get("createdBy") != "qmd-auto-context":
+    if status != "generated" or meta.get("createdBy") != "qmd-auto-context":
         log_verdict(log_path, {**base_record(job), "result": "skipped", "reason": "not_generated"})
         return True, False
     job_hash = str(job.get("sourceHash") or "")
@@ -712,48 +758,19 @@ def process_verify_job(
     reasons = [str(item)[:200] for item in reasons[:5]]
     claims = parsed.get("claims") if isinstance(parsed.get("claims"), list) else []
 
-    # 적용 직전 재확인: verifier가 도는 동안 카드가 재컴파일/사람 편집됐으면 이 판정은 무효.
-    _, fresh_meta, fresh_status, fresh_hash = card_state(target)
-    if fresh_status != "generated" or fresh_meta.get("reviewed") is True or (job_hash and fresh_hash and job_hash != fresh_hash):
-        log_verdict(log_path, {**base_record(job), **provenance, "result": "skipped", "reason": "changed_during_verify"})
-        return True, False
-    freshness = source_freshness(root, config, job)
-    if freshness is not None and freshness.get("state") != wiki_freshness.FRESH:
+    try:
+        with cp.card_write_lock(root):
+            return apply_verify_verdict_locked(
+                root, config, compile_cfg, vcfg, job, target, job_hash,
+                engine, verified_mode, provenance, verdict, claims, reasons,
+                sources, log_path,
+            )
+    except OSError:
         log_verdict(log_path, {
-            **base_record(job), **provenance, "result": "deferred",
-            "reason": "source_changed_during_verify",
-            "freshnessReason": freshness.get("reason", ""),
+            **base_record(job), **provenance,
+            "result": "deferred", "reason": "card_write_lock_unavailable",
         })
         return False, True
-
-    # 판정이 실제로 나온 행에서만 `verifiedMode`가 달성값이 된다.
-    record = {
-        **base_record(job), **provenance, "verifiedMode": verified_mode,
-        "verdict": verdict, "claims": len(claims), "reasons": reasons,
-    }
-    if verdict == "pass":
-        # status와 증명 필드는 한 쓰기로 함께 나간다(wc.stamp_verification이 유일한 경로).
-        # **반환값을 삼키면 안 된다.** 스탬프가 실패하면(디렉터리 권한·ENOSPC) 카드는
-        # `generated`로 남는데 로그에는 `verified`가 기록되고 큐에서도 사라져, 재시도 없이
-        # 유료 호출만 소모되고 `recallVerifiedOnly` 기본값 아래 그 카드가 **영구 비가시**가
-        # 된다(실측: 카드 디렉터리 chmod 500). 실패는 로그에 남기고 **잡을 보존**해 다음
-        # run이 다시 시도하게 한다 — 판정 자체는 유효하므로 재검증은 같은 결론을 낸다.
-        if not wc.stamp_verification(target, "verified", engine, verified_mode):
-            log_verdict(log_path, {**record, "result": "stamp_failed", "stampStatus": "verified"})
-            return False, True
-        reindex_wiki(root, config)
-        log_verdict(log_path, {**record, "result": "verified"})
-        return True, False
-    # fail/inconclusive는 같은 값 집합(delete|contested|none)을 각자 키로 고른다.
-    # 여기까지 왔다는 것은 verifier가 유효 JSON verdict를 반환했다는 뜻이다 — CLI 부재(127)와
-    # timeout/실행 실패는 위에서 이미 큐 보존으로 빠져나갔으므로 transient가 삭제로 흐를 수 없다.
-    action = vcfg.get("onFail", "delete") if verdict == "fail" else vcfg.get("onInconclusive", "delete")
-    applied = apply_negative_verdict(
-        root, config, compile_cfg, vcfg, target, engine, verified_mode, action, verdict,
-        sources, record, log_path
-    )
-    # 적용되지 않았으면(감사 원장 쓰기 실패·스탬프 실패) 잡을 보존해 다시 시도한다.
-    return (True, False) if applied else (False, True)
 
 
 def defer_or_drop(

@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-"""소스 소실 카드의 **복구** CLI — 사람이 확인한 재지정/거절만 적용한다.
+"""소스 소실 카드의 **복구** CLI — 명시적으로 지정된 재지정/거절만 적용한다.
 
 실측된 원인이 삭제가 아니라 **개명**(`…07-20.md` → `…07-21.md`)이므로 기본 복구 동작은
-"삭제"가 아니라 **소스 재지정**이다. 선례는 `wiki-review`다 — 사람이 항목마다 판단하고
-wrapper 스크립트가 그 결정만 적용한다(자율 resolver 에이전트는 두지 않는다: 잘못 매칭하면
-카드가 무관한 원문을 가리키고, 그 상태로 verify가 돌면 카드가 삭제된다).
+"삭제"가 아니라 **소스 재지정**이다. 이 CLI는 입력된 결정을 적용할 뿐 경로 관계를 추론하지
+않는다(잘못 매칭하면 카드가 무관한 원문을 가리키고, 그 상태로 verify가 돌면 카드가 삭제된다).
 
 그래서 **자동 재지정은 하지 않는다.** `--list`는 후보를 *제안*할 뿐이고
-(같은 디렉터리 안에서 stem 유사도 상위 3개), 카드를 고치는 것은 `--repoint`로 사람이
-`--from`/`--to`를 명시했을 때뿐이다. `--dismiss`는 "원문이 정말 사라졌고 카드는 유일한
-기록으로 남긴다"는 판단을 원장에 못 박아 반복 알림을 멈춘다(소실 집합이 바뀌면 다시 알린다).
+(같은 디렉터리 안에서 stem 유사도 상위 3개), 카드를 고치는 것은 `--repoint`에
+`--from`/`--to`가 모두 주어졌을 때뿐이다. `--dismiss`는 현재 소실 집합을 원장에 기록해
+반복 알림을 멈춘다(소실 집합이 바뀌면 다시 알린다).
 
 카드 수정 범위는 frontmatter `sources` 항목 하나의 `path` 값뿐이다. status는 건드리지
 않는다(downgrade 금지) — 본문·auto 블록도 그대로다.
@@ -119,7 +118,7 @@ def list_pending(root: Path, config: dict, compile_cfg: dict) -> dict:
         rows.append({
             "targetPath": target,
             "status": row.get("status", ""),
-            "reviewed": wsm.is_reviewed_status(row.get("status")),
+            "trusted": wsm.is_trusted_status(row.get("status")),
             "origin": row.get("origin", ""),
             "detectedAt": row.get("ts", ""),
             "missingSources": missing,

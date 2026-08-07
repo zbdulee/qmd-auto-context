@@ -383,9 +383,9 @@ def allow_roots_of(config: dict) -> list[Path]:
     return qmd_resolve_paths.allowed_roots(config)
 
 
-def is_reviewed_status(status) -> bool:
-    """검수급 status 판정 — recall의 집합(`REVIEWED_WIKI_STATUSES`)을 그대로 쓴다."""
-    return str(status or "").strip().lower() in qmd_recall.REVIEWED_WIKI_STATUSES
+def is_trusted_status(status) -> bool:
+    """Status-only diagnostic label; recall still checks owner and revisions."""
+    return str(status or "").strip().lower() in qmd_recall.TRUSTED_WIKI_STATUSES
 
 
 def pending_summary(root: Path, config: dict) -> dict:
@@ -393,7 +393,7 @@ def pending_summary(root: Path, config: dict) -> dict:
     compile_cfg = config.get("compile") if isinstance(config.get("compile"), dict) else {}
     states = load_states(ledger_path(root, compile_cfg))
     rows = pending_targets(states)
-    verified = sum(1 for row in rows if is_reviewed_status(row.get("status")))
+    verified = sum(1 for row in rows if is_trusted_status(row.get("status")))
     return {"pending": len(rows), "verified": verified}
 
 

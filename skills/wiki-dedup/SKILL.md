@@ -1,6 +1,6 @@
 ---
 name: wiki-dedup
-description: Use when the user asks to clean up, dedupe, merge, or consolidate near-duplicate wiki pages that already exist on disk — e.g. "위키 중복 정리해줘", "dedup 돌려줘", "dedup-needed 처리해줘", "중복 카드 합쳐줘", "clean up duplicate wiki pages". Resolves the retroactive-scan queue at .auto-context/compile/dedup-needed.jsonl by spawning the wiki-dedup-resolver agent. Distinct from wiki-review (that resolves not-yet-written candidates in merge-needed.jsonl).
+description: Use when the user asks to clean up, dedupe, merge, or consolidate near-duplicate wiki pages that already exist on disk — e.g. "위키 중복 정리해줘", "dedup 돌려줘", "dedup-needed 처리해줘", "중복 카드 합쳐줘", "clean up duplicate wiki pages". Resolves the retroactive-scan queue at .auto-context/compile/dedup-needed.jsonl by spawning the wiki-dedup-resolver agent. Write-time merge-needed.jsonl remains a passive collision diagnostic and is outside this workflow.
 ---
 
 # Wiki Dedup
@@ -11,9 +11,9 @@ Drain `.auto-context/compile/dedup-needed.jsonl` — pairs of **already-existing
 entry point for the same cleanup the `core/update.sh` SessionStart hint spawns automatically; use it
 when the user asks for it directly, or when the automatic hint didn't run.
 
-This is **not** `wiki-review`: that skill resolves *new, not-yet-written* candidates queued in
-`merge-needed.jsonl` and asks the human per entry. Here every page is a real file already on disk,
-and the resolver judges each pair **autonomously** — do not ask the user to approve pairs one by one.
+This workflow never consumes `merge-needed.jsonl`; that file is a passive diagnostic for
+write-time collisions. Here every page is a real file already on disk, and the resolver compares
+each queued pair autonomously.
 
 ## Workflow
 

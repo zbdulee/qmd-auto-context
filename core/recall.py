@@ -129,10 +129,9 @@ def resolve_wiki_result_path(
             return candidate
     return None
 
-# recall에서 검수급으로 대우하는 status 집합. wiki_compile.is_auto_writable_page의
-# 보호 집합과 달리 verified를 포함한다(의도적 차이) — verified는 기계 검수 통과라
-# recall 신뢰는 얻지만 쓰기 보호는 받지 않아 소스 변경 시 자동 갱신·재검증이 계속된다.
-REVIEWED_WIKI_STATUSES = {"verified", "reviewed", "canon", "manual", "superseded"}
+# Static automatic trust vocabulary.  A status string alone is insufficient;
+# ``is_auto_trusted_card`` also requires qmd ownership and source revisions.
+TRUSTED_WIKI_STATUSES = {"verified"}
 
 # 카드 본문 주입 상한 기본값(문자). docs/settings.md에 근거를 남긴다 — 요약:
 # dogfooding 두 코퍼스(service-engineering 731장, novel 118장)의 주입 대상 본문 길이가
@@ -415,7 +414,7 @@ def display_card_path(path: Path, cwd: str) -> str:
         return str(path)
 
 
-FRONTMATTER_KEYS = ("status", "reviewed", "createdBy", "title")
+FRONTMATTER_KEYS = ("status", "createdBy", "title")
 
 
 def parse_frontmatter_scalars(block: str, issues: dict | None = None) -> dict:
@@ -569,7 +568,7 @@ def frontmatter_source_revisions(block: str) -> list[dict]:
 def is_auto_trusted_card(meta: dict) -> bool:
     """Static recall trust: qmd-created, verified, compiler-provenanced."""
     return (
-        meta.get("status") == "verified"
+        meta.get("status") in TRUSTED_WIKI_STATUSES
         and meta.get("createdBy") == "qmd-auto-context"
         and bool(meta.get("sourceRevisions"))
     )
@@ -860,11 +859,11 @@ def read_wiki_meta(result: dict, config: dict, cwd: str, summary_max_chars: int 
                    roots: tuple[Path, Path] | None = None,
                    source_opts: tuple[int, list[Path]] | None = None,
                    pending_cutoffs: dict[str, int | None] | None = None) -> dict:
-    """wiki 결과의 frontmatter에서 status·검수 여부·title을, 본문에서 요약을 읽는다.
+    """Read a wiki result's status, automatic trust, title, and body.
 
-    검수 판정: reviewed:true, 보호 status, 또는 createdBy가 명시적으로
-    qmd-auto-context가 아닌 경우. createdBy 부재 시에는 status가 기준이다
-    (status 부재 기본값 generated = 미검수 — 기존 status 기본값 규약과 일치).
+    Trust is fail-closed: only verified qmd-owned cards with non-empty compiler
+    source revisions qualify.  Legacy human markers and foreign ownership never
+    opt into recall.
 
     title·본문·표시 경로를 **같은 읽기**에서 함께 낸다 — 카드당 파일 I/O는 1회다.
     `title`은 frontmatter 값이다. 데몬 `title`은 frontmatter가 아니라 첫 섹션 헤딩
@@ -873,7 +872,7 @@ def read_wiki_meta(result: dict, config: dict, cwd: str, summary_max_chars: int 
     `bodyReason`은 본문이 빈 이유를 남긴다(진단용) — 본문 공백이 조용히 정상 주입으로
     보이던 것이 이번에 고친 버그의 클래스라, 로그에서 원인을 특정할 수 있어야 한다.
     """
-    meta = {"status": "generated", "reviewed": False, "title": "", "summary": "",
+    meta = {"status": "generated", "trusted": False, "title": "", "summary": "",
             "createdBy": "", "sourceRevisions": [], "pendingCutoffs": {},
             "displayPath": "", "bodyReason": "", "decodeReplaced": False,
             "cardRead": False, "windowTruncated": False, "bodyIncomplete": False,
@@ -957,11 +956,7 @@ def read_wiki_meta(result: dict, config: dict, cwd: str, summary_max_chars: int 
         meta["metaIssues"].append(f"title_{issues['title']}" if "title" in issues else "title_missing")
     created_by = fields.get("createdBy", "")
     meta["createdBy"] = created_by
-    meta["reviewed"] = (
-        fields.get("reviewed", "").lower() == "true"
-        or meta["status"].lower() in REVIEWED_WIKI_STATUSES
-        or (created_by != "" and created_by != "qmd-auto-context")
-    )
+    meta["trusted"] = is_auto_trusted_card(meta)
     # `\n---` 이후: 개행 1 + 구분선 3 = 4자를 건너뛴다.
     meta["summary"], complete = extract_card_body(text, end + 4)
     _apply_match_position(meta, text, end + 4, result, summary_max_chars)
@@ -989,8 +984,7 @@ def annotate_wiki_result(result: dict, config: dict, cwd: str, summary_max_chars
     meta = read_wiki_meta(
         result, config, cwd, summary_max_chars, roots, source_opts, pending_cutoffs)
     result["_wiki_status"] = meta["status"]
-    result["_wiki_reviewed"] = meta["reviewed"]
-    result["_wiki_trusted"] = is_auto_trusted_card(meta)
+    result["_wiki_trusted"] = meta["trusted"]
     result["_wiki_created_by"] = meta["createdBy"]
     if meta["sourceRevisions"]:
         result["_wiki_source_revisions"] = list(meta["sourceRevisions"])
@@ -1394,7 +1388,7 @@ def format_context(results: list[dict], prefix_style: str = "full", collection_r
                    lex_gated: bool = False) -> str:
     collection_roles = collection_roles or {}
     lines = ["관련 문서:"]
-    has_unreviewed = False
+    has_untrusted = False
     has_summary = False
     has_sources = False
     for result in results:
@@ -1415,11 +1409,11 @@ def format_context(results: list[dict], prefix_style: str = "full", collection_r
             tag = collection.rsplit("-", 1)[-1]
         prefix = f"[{tag}] " if tag else ""
 
-        # 미검수 자동생성 wiki 카드 배지: 모델이 카드를 검수된 캐논으로 오신뢰하는 것 방지.
+        # Untrusted automatic-card badge: never frame an excluded draft as evidence.
         suffix = ""
-        if result.get("_wiki_status") and not result.get("_wiki_reviewed", False):
+        if result.get("_wiki_status") and not result.get("_wiki_trusted", False):
             suffix = " (미검수)"
-            has_unreviewed = True
+            has_untrusted = True
 
         if title:
             lines.append(f"- {prefix}{filepath} - {title}{suffix}")
@@ -1435,7 +1429,7 @@ def format_context(results: list[dict], prefix_style: str = "full", collection_r
         for source_path in result.get("_wiki_sources", ()):
             has_sources = True
             lines.append(f"{SOURCE_LINE_PREFIX}{source_path}")
-    if has_unreviewed:
+    if has_untrusted:
         lines.append(UNREVIEWED_GUIDE)
     if has_summary:
         lines.append(body_guide(has_sources))
@@ -1541,7 +1535,7 @@ def summarize_shadow_results(results: list[dict], limit: int = SHADOW_TOP_N) -> 
         status = result.get("_wiki_status")
         if status:
             entry["status"] = status
-            entry["reviewed"] = bool(result.get("_wiki_reviewed", False))
+            entry["trusted"] = bool(result.get("_wiki_trusted", False))
         top.append(entry)
     return {"status": "ok", "count": len(results), "top": top}
 
@@ -1576,7 +1570,7 @@ def describe_selected(final_results: list[dict], rank_index: dict[str, int]) -> 
         status = result.get("_wiki_status")
         if status:
             entry["status"] = status
-            entry["reviewed"] = bool(result.get("_wiki_reviewed", False))
+            entry["trusted"] = bool(result.get("_wiki_trusted", False))
         entries.append(entry)
     return entries
 
@@ -2050,11 +2044,8 @@ def main():
     compile_cfg = config.get("compile", {}) if isinstance(config.get("compile"), dict) else {}
     roles = qmd_config.role_map(config)
     excluded_statuses = set(compile_cfg.get("excludeStatusesFromRecall", ["discarded", "contested"]))
-    # recallVerifiedOnly(기본 True): 검수급(_wiki_reviewed) wiki 카드만 surface하고
-    # 미검수 generated/tentative는 exclude와 동일하게 backfill 판정 "전"에 제거한다.
-    # 이러면 wiki 히트가 전부 미검수여도 cutoff 통과 집합이 비어 hierarchical backfill이
-    # raw 원문으로 정상 fallback한다(미검수 요약 대신 원문 소스 노출 — 의도된 안전 degrade).
-    verified_only = bool(compile_cfg.get("recallVerifiedOnly", True))
+    # Automatic trust is a hard provenance boundary. recallVerifiedOnly is kept
+    # as accepted configuration but cannot weaken it when set false.
     strategy = config.get("recallStrategy")
     wiki_only = strategy == "wikiOnly"
     top_n = int(config.get("topN", 3))
@@ -2100,8 +2091,6 @@ def main():
             # status string, human marker, missing creator, or foreign writer
             # cannot opt out via recallVerifiedOnly:false.
             if not r.get("_wiki_trusted", False):
-                return "unverified"
-            if verified_only and not r.get("_wiki_reviewed", False):
                 return "unverified"
         return "eligible"
 
@@ -2181,7 +2170,7 @@ def main():
         items.sort(
             key=lambda r: (
                 r.get("_wiki_status") in low_priority
-                and not r.get("_wiki_reviewed", False)
+                and not r.get("_wiki_trusted", False)
             )
         )
 

@@ -481,13 +481,13 @@ print(json.dumps({'candidates': [{
   }
 });
 
-test('compile writer merge-needed drains source queue without bounded failure retry', () => {
+test('compile writer refreshes legacy reviewed status automatically and drains source queue', () => {
   const extractor = join(mkdtempSync(join(tmpdir(), 'extractor-merge-needed-')), 'extract.py');
   writeFileSync(extractor, `#!/usr/bin/env python3
 import json
 print(json.dumps({'candidates': [{
   'title': 'Signal Detection',
-  'summary': 'This update should wait for manual merge instead of requeueing forever.',
+  'summary': 'This update is refreshed by the automatic lifecycle.',
   'suggestedType': 'concept',
   'confidence': 'high',
   'canonicalKey': 'signal-perception-rule'
@@ -516,8 +516,12 @@ print(json.dumps({'candidates': [{
     runWorker(project);
     assert.equal(readFileSync(join(project, '.auto-context', 'compile', 'source-queue.jsonl'), 'utf8'), '');
     const rows = jsonl(join(project, '.auto-context', 'compile', 'candidates.jsonl'));
-    assert.equal(rows.at(-1).action, 'merge-needed');
+    assert.equal(rows.at(-1).action, 'updated');
     assert.equal(rows.some((row) => row.action === 'compile_failed'), false);
+    const refreshed = readFileSync(join(targetDir, 'reviewed-signal.md'), 'utf8');
+    assert.match(refreshed, /^status: generated$/m);
+    assert.match(refreshed, /automatic lifecycle/);
+    assert.doesNotMatch(refreshed, /^reviewed:/m);
   } finally {
     removeTemp(project);
   }

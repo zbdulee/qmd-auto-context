@@ -266,7 +266,7 @@ test('write-time gate: an explicit targetPath is judged too (legacy slug-only ga
       targetPath: '.auto-context/wiki/entities/restated.md',
     }, { QMD_QUERY_FIXTURE: fixture });
 
-    assert.equal(out.action, 'queued_for_review');
+    assert.equal(out.action, 'merge-needed');
     assert.equal(out.judgeVerdict, 'duplicate');
     assert.equal(callCount(log), 1, 'judge must be consulted exactly once');
     assert.equal(existsSync(join(work, '.auto-context/wiki/entities/restated.md')), false,
@@ -278,7 +278,8 @@ test('write-time gate: an explicit targetPath is judged too (legacy slug-only ga
     assert.equal(queued[0].matchedPath, '.auto-context/wiki/entities/existing.md');
     assert.ok(queued[0].judgeReason, 'the judge reason is what makes a wrong verdict auditable');
     // Existing queue contract must survive.
-    assert.ok(queued[0].candidate && queued[0].suggestedAction && 'matchedScore' in queued[0]);
+    assert.ok(queued[0].candidate && 'matchedScore' in queued[0]);
+    assert.equal('suggestedAction' in queued[0], false, 'collision record has no human resolution action');
   } finally {
     removeTemp(work);
   }
@@ -381,46 +382,45 @@ test('write-time gate: judge on cooldown falls back to the legacy threshold for 
       confidence: 'high',
     }, { QMD_QUERY_FIXTURE: fixture });
 
-    assert.equal(out.action, 'queued_for_review');
+    assert.equal(out.action, 'merge-needed');
     assert.equal(out.judgeVerdict, undefined, 'no verdict exists — this is the score fallback');
   } finally {
     removeTemp(work);
   }
 });
 
-test('write-time gate: a reviewed target is still only queued, never overwritten or deleted', () => {
-  const work = repoTemp('judge-protected-target');
+test('write-time gate: a foreign target is still only queued, never overwritten or deleted', () => {
+  const work = repoTemp('judge-foreign-target');
   try {
     writeCompileSettings(work, { extractor: { backends: { claude: judgeStub('duplicate') }, timeout: 30 } });
-    const card = join(work, '.auto-context', 'wiki', 'entities', 'reviewed.md');
+    const card = join(work, '.auto-context', 'wiki', 'entities', 'foreign.md');
     mkdirSync(join(card, '..'), { recursive: true });
     const original = [
       '---',
-      'title: "Human reviewed"',
+      'title: "Foreign card"',
       'type: entity',
-      'status: reviewed',
-      'createdBy: qmd-auto-context',
-      'reviewed: true',
+      'status: verified',
+      'createdBy: another-tool',
       '---',
       '',
       '<!-- qmd:auto:start id="main" sourceHash="abc123" -->',
       '## Summary',
-      'A fact a human confirmed by hand.',
+      'A fact owned by another tool.',
       '<!-- qmd:auto:end -->',
       '',
     ].join('\n');
     writeFileSync(card, original);
-    const fixture = fixtureFor(work, [{ file: 'proj-wiki/entities/reviewed.md', score: 0.9 }]);
+    const fixture = fixtureFor(work, [{ file: 'proj-wiki/entities/foreign.md', score: 0.9 }]);
 
     const out = runCompile(work, {
-      title: 'Restatement of a reviewed fact',
-      summary: 'The judge calls this a duplicate; the reviewed card must survive untouched.',
+      title: 'Restatement of a foreign fact',
+      summary: 'The judge calls this a duplicate; the foreign card must survive untouched.',
       suggestedType: 'entity',
       confidence: 'high',
     }, { QMD_QUERY_FIXTURE: fixture });
 
-    assert.equal(out.action, 'queued_for_review');
-    assert.equal(readFileSync(card, 'utf8'), original, 'reviewed card must be byte-identical');
+    assert.equal(out.action, 'merge-needed');
+    assert.equal(readFileSync(card, 'utf8'), original, 'foreign card must be byte-identical');
   } finally {
     removeTemp(work);
   }
@@ -471,7 +471,7 @@ test('write-time: 후보를 만든 엔진(claude)이 아닌 codex 가 판정하�
 
     const out = runCrossCompile(work, fixture, 'Restated version of the same event');
 
-    assert.equal(out.action, 'queued_for_review');
+    assert.equal(out.action, 'merge-needed');
     assert.deepEqual(judgedByEngines(tracker), ['codex'],
       'codex 만 실행된다 — 엔진만 바뀌고 호출 수는 카드당 1회로 불변');
     const queued = mergeNeeded(work);
@@ -492,7 +492,7 @@ test('write-time: 엔진이 하나뿐이면 그 엔진이 판정하고 self 로 
 
     const out = runCrossCompile(work, fixture, 'Restated with only one CLI installed');
 
-    assert.equal(out.action, 'queued_for_review');
+    assert.equal(out.action, 'merge-needed');
     assert.deepEqual(judgedByEngines(tracker), ['claude']);
     assert.equal(mergeNeeded(work)[0].judgedMode, 'self', '약한 근거지만 라벨이 붙는다');
   } finally { removeTemp(work); }
@@ -512,7 +512,7 @@ test('write-time degrade: 다른 엔진 CLI 가 없으면(127) 생산 엔진으�
 
     const out = runCrossCompile(work, fixture, 'Restated while the second CLI is missing');
 
-    assert.equal(out.action, 'queued_for_review');
+    assert.equal(out.action, 'merge-needed');
     assert.deepEqual(judgedByEngines(tracker), ['claude'], '유료 호출은 여전히 1회');
     assert.equal(mergeNeeded(work)[0].judgedBy, 'claude');
     assert.equal(mergeNeeded(work)[0].judgedMode, 'self');
@@ -532,7 +532,7 @@ test('write-time degrade: crossEngine:require + 다른 엔진 없음 → judge �
     const out = runCrossCompile(work, fixture, 'Slug target under crossEngine require');
 
     assert.deepEqual(judgedByEngines(tracker), [], '자기판정을 금지했으므로 아무 CLI도 부르지 않는다');
-    assert.equal(out.action, 'queued_for_review');
+    assert.equal(out.action, 'merge-needed');
     assert.equal(out.judgeVerdict, undefined, '판정이 없었으므로 verdict 를 주장하지 않는다');
     assert.equal(mergeNeeded(work)[0].judgedMode, undefined, '판정 없는 행에 mode 를 쓰지 않는다');
   } finally { removeTemp(work); }
@@ -582,7 +582,7 @@ test('write-time degrade: 선호 엔진의 유료 실패는 그 엔진만 식히
 
     const second = runCrossCompile(work, fixture, 'Second candidate after codex was cooled');
     assert.deepEqual(judgedByEngines(tracker), ['codex', 'claude'], '다음 run 은 생산 엔진으로 내려온다');
-    assert.equal(second.action, 'queued_for_review');
+    assert.equal(second.action, 'merge-needed');
     assert.equal(mergeNeeded(work).at(-1).judgedMode, 'self', 'degrade 사실이 라벨로 남는다');
   } finally { removeTemp(work); }
 });

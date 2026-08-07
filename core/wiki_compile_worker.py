@@ -65,7 +65,7 @@ def append_jsonl(path: Path, payload: dict):
 import time
 
 MAX_REQUEUE_COUNT = 3
-REVIEW_DEDUP_IMPLICIT_TTL = 3600  # 1 hour for review / dedup_resolve CLI
+DEDUP_RESOLVE_IMPLICIT_TTL = 3600  # 1 hour for dedup_resolve CLI
 CLAIMED_PID_BACKSTOP_SECS = 86400  # 24 hours backstop for pid-alive claimed files
 
 
@@ -151,7 +151,7 @@ def reclaim_orphaned_claimed(path: Path, max_requeue: int = MAX_REQUEUE_COUNT):
         # 임계값 선택 근거: 짧게 잡으면 안 됨. 한 run은 extractor(batch.maxPerRun=10) + dedup judge + verify 호출로
         # 정상 동작 중 수십 분이 소요될 수 있으며, 짧은 임계는 살아있는 소유자의 배치를 탈취해 유료 CLI 이중 과금을 유발함.
         # 24h는 정상 run 최악 소요시간보다 압도적으로 큼.
-        # 반면 file_pid가 없는 파일은 소유자가 없으므로 짧은 임계(REVIEW_DEDUP_IMPLICIT_TTL=1h)를 적용함.
+        # 반면 file_pid가 없는 파일은 소유자가 없으므로 짧은 임계(DEDUP_RESOLVE_IMPLICIT_TTL=1h)를 적용함.
         if file_pid and _is_pid_alive(file_pid):
             try:
                 mtime = child.stat().st_mtime
@@ -162,7 +162,7 @@ def reclaim_orphaned_claimed(path: Path, max_requeue: int = MAX_REQUEUE_COUNT):
         elif not file_pid:
             try:
                 mtime = child.stat().st_mtime
-                if not qmd_cooldown.window_elapsed(mtime, now, REVIEW_DEDUP_IMPLICIT_TTL):
+                if not qmd_cooldown.window_elapsed(mtime, now, DEDUP_RESOLVE_IMPLICIT_TTL):
                     continue
             except OSError:
                 continue

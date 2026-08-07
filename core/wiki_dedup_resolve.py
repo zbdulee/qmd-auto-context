@@ -5,8 +5,7 @@ Reads .auto-context/compile/dedup-needed.jsonl, applies one action to the
 entry at --index, and rewrites the queue with that entry removed. Never
 touches entries other than the one resolved this run.
 
-Note: unlike core/wiki_review.py's `merge` (which UPDATES a matched page in
-place), this script's `merge` action DELETES a file -- the caller (the
+This script's `merge` action DELETES a file. The caller (the
 wiki-dedup-resolver subagent) has already folded any unique content into the
 page it is keeping via its own Edit tool before invoking this CLI.
 """
@@ -190,9 +189,8 @@ def main() -> int:
         print(json.dumps({"action": "rejected", "reason": "malformed_entry"}, ensure_ascii=False))
         return 1
 
-    # Ordering invariant (same as core/wiki_review.py): resolve_entry() must
-    # complete BEFORE this entry is excluded from the requeue, so a crash
-    # never loses the entry.
+    # Ordering invariant: resolve_entry() must complete BEFORE this entry is
+    # excluded from the requeue, so a crash never loses the entry.
     try:
         result = resolve_entry(root, wiki_root, compile_dir, entry, args.action, args.delete)
     except Exception:

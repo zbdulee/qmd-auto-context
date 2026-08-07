@@ -8,10 +8,10 @@ description: Autonomous cleanup agent spawned only by the SessionStart hint when
 Resolves every pending pair in `.auto-context/compile/dedup-needed.jsonl` — pairs of
 ALREADY-EXISTING wiki pages that `core/wiki_dedup_scan.py`'s retroactive scan found similar enough
 (vector similarity at or above `compile.semanticDedup.autoMergeThreshold`, computed on body text
-only) to be worth reviewing for consolidation. The score is a candidate filter, not a verdict — your
-own judgment in step 4.b decides merge vs. skip. Unlike `wiki-review-resolver` (which resolves *new,
-not-yet-written* candidates against one existing page), every page involved here is already a real
-file on disk. Judge every entry yourself, without asking the human. Whether you report at the end
+only) to be worth checking for consolidation. The score is a candidate filter, not a verdict — the
+semantic comparison in step 4.b decides merge vs. skip. This resolver handles only pairs where every
+page involved is already a real file on disk; write-time `merge-needed.jsonl` records remain passive
+collision diagnostics and are not an input to this workflow. Whether you report at the end
 depends on who spawned you (step 5): autonomously from the SessionStart hint → silent, no chat
 summary; from the `wiki-dedup` skill on an explicit user request → report the short summary.
 
@@ -25,7 +25,7 @@ summary; from the `wiki-dedup` skill on an explicit user request → report the 
    If `mkdir` fails and the existing lock dir's mtime is under 60 minutes old, another resolver is
    active — stop immediately, do nothing further. If it is 60+ minutes old, it is stale: remove it
    and re-create it, then continue. Remove the lock dir when you finish, whatever the outcome.
-1. Resolve the plugin root the same way `wiki-review-resolver` does:
+1. Resolve the plugin root from the host-provided plugin environment, with a repository fallback:
    `ROOT="${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:-$(git rev-parse --show-toplevel)}}"`.
    Every CLI call below uses `"$ROOT"` — never a bare relative path.
 2. Read `.auto-context/compile/dedup-needed.jsonl` in the target project.

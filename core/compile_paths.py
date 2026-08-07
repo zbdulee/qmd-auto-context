@@ -6,8 +6,11 @@
 안에서 섞였고, 오타 하나(`verify.skippedPath`)가 유료 과금 루프의 입구가 됐다. 위치는
 프로젝트 안에 고정하고(`dataDir` 미도입) 이름은 전부 여기에 둔다.
 
-**sidecar는 여기에 두지 않는다** — `*.lock` · `*.claimed.*` · `*.compact-stamp`는 원본
-파일명에서 파생되므로 상수가 아니라 함수(`path.with_name(...)`)의 결과다.
+**파일별 sidecar는 여기에 두지 않는다** — `*.lock` · `*.claimed.*` ·
+`*.compact-stamp`는 원본 파일명에서 파생되므로 함수(`path.with_name(...)`)의 결과다.
+다만 카드 writer 세 개(compiler·verifier·offline migration)가 공유하는
+`CARD_WRITE_LOCK`은 특정 원본 파일에 속하지 않는 project-level sidecar라
+경로 계약을 이 테이블에 둔다.
 
 경로 주입 방어는 `ledger()` 하나가 한다. 설정 문자열 검증자(`safe_compile_file`)는
 죽었지만 그것이 막던 **symlink escape**는 그대로 살아 있어야 한다: 상수 이름이라도
@@ -19,6 +22,9 @@ symlink일 수 있고, 그러면 원장 append가 프로젝트 밖 파일을 덮
 """
 from __future__ import annotations
 
+import fcntl
+import os
+from contextlib import contextmanager
 from pathlib import Path
 
 COMPILE_DIR = ".auto-context/compile"
@@ -39,6 +45,7 @@ DEDUP_SKIPPED = "dedup-skipped.jsonl"
 DEDUP_DELETED = "dedup-deleted.jsonl"
 DISCARD_LEDGER = "discard-ledger.jsonl"
 SOURCE_MISSING = "source-missing.jsonl"
+REVIEWED_MIGRATION = "reviewed-state-migration.jsonl"
 
 # --- 커서·식힘·로그 ---------------------------------------------------------
 DISCARD_CURSOR = ".discard-ledger.cursor"
@@ -48,6 +55,7 @@ VERIFY_ENGINE_COOLDOWN = "verify-engine-cooldown.json"
 DEDUP_JUDGE_COOLDOWN = "dedup-judge-cooldown"
 DEDUP_JUDGE_ENGINE_COOLDOWN = "dedup-judge-engine-cooldown.json"
 EXTRACTOR_LOG = "extractor.log"
+CARD_WRITE_LOCK = ".card-write.lock"
 
 
 def rel(name: str) -> str:
@@ -91,3 +99,31 @@ def ledger(root, name: str):
     except ValueError:
         return None
     return path
+
+
+@contextmanager
+def card_write_lock(root):
+    """Serialize project card read-decision-write sections across all writers.
+
+    The queue/kick locks guard their own ledgers, not wiki card bytes.  This
+    project-local lock is intentionally independent so the compiler, verifier,
+    and one-shot migration cannot interleave a stale read with a later replace
+    or unlink.  ``O_NOFOLLOW`` closes a lock-file symlink escape before flock.
+    """
+    base = compile_dir(Path(root).resolve(), create=True)
+    if base is None:
+        raise OSError("unsafe compile directory for card lock")
+    path = base / CARD_WRITE_LOCK
+    flags = os.O_RDWR | os.O_CREAT
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags, 0o600)
+    handle = os.fdopen(fd, "a+")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        yield path
+    finally:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()

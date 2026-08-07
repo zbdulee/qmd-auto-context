@@ -15,7 +15,7 @@ Instead, it coordinates:
 - qmd daemon lifecycle and qmd CLI indexing;
 - recall query formatting and result filtering;
 - dirty-queue based incremental indexing;
-- optional wiki compile, review, verify, and dedup workflows.
+- optional wiki compile, verify, and dedup workflows.
 
 The main architectural rule is:
 
@@ -50,7 +50,7 @@ The main architectural rule is:
 core/
   Platform-neutral behavior:
   config loading, recall, update, gate, posttool hint, dirty queue,
-  wiki compile/review/verify/dedup, extractor adapters.
+  wiki compile/verify/dedup, extractor adapters.
 
 hooks/
   Claude/Codex command hook manifests plus the shared dispatcher. The
@@ -68,7 +68,7 @@ skills/
   Manual workflows that call the same core scripts as hooks.
 
 agents/
-  Resolver prompts for wiki-review and wiki-dedup queue cleanup.
+  Resolver prompts for wiki-dedup queue cleanup.
 
 test/
   Deterministic node:test suites. Most tests use fixtures or fake qmd commands
@@ -244,8 +244,9 @@ hermes_adapter.core_bridge.session_update()
 - run `qmd embed` in a background subshell under the shared embed lock;
 - reload the daemon after embeddings or removals change daemon-visible state;
 - run retroactive wiki dedup scan after embed completes;
-- surface one-time notices for daemon-down, stale queue, wiki-review, and
-  wiki-dedup backlogs.
+- surface one-time notices for daemon-down, stale queue, source-missing, and
+  wiki-dedup backlogs. `merge-needed.jsonl` stays a passive diagnostic and is
+  never scanned into a SessionStart review action.
 
 The update path still depends on qmd CLI commands. Replacing qmd for indexing
 requires replacing this contract, not only changing `QMD_DAEMON_URL`.
@@ -432,11 +433,16 @@ equivalent persistence-off flag.
 - rejects unsafe paths and transcript-like content;
 - resolves targets by explicit `targetPath`, then `canonicalKey`, `aliases`,
   `title`, and finally title slug;
-- protects reviewed/manual/non-managed pages from silent overwrite;
+- protects superseded and non-managed pages from silent overwrite;
 - writes generated wiki files under `.auto-context/wiki`;
 - writes new or auto-updated cards as `status: generated` by default;
 - enqueues successful generated writes to the auto-verify queue;
 - logs merge-needed or rejected candidates under `.auto-context/compile`.
+
+Compiler create/update, verifier stamp/delete, and the offline legacy-state
+migration share one project `CARD_WRITE_LOCK`. Each holds it from the card state
+read through the decision and atomic replace/unlink, so their individually
+atomic writes cannot be composed from stale revisions.
 
 The verify worker is the automatic second filter for generated cards, not a
 human approval step. It rechecks the generated card against its source through
@@ -449,15 +455,16 @@ the configured host extractor:
 - missing CLIs, timeouts, stale jobs, or inconclusive verdicts preserve the
   queue item or leave the card as `generated` according to the worker contract.
 
-Recall treats `generated` / `tentative` wiki cards as low-priority and labels
-unverified generated cards with `(미검수)`. `verified` is treated as reviewed
-grade for recall ranking and badges. Human-oriented review queues are reserved
-for semantic merge/supersede/separate/discard decisions when automatic writing
-would risk overwriting protected or ambiguous existing wiki pages.
+Recall admits a wiki card only when it is `status: verified`, was created by
+`qmd-auto-context`, and has non-empty compiler-owned `sourceRevisions`.
+`generated`, `tentative`, `contested`, `discarded`, and `superseded` remain
+excluded. The `merge-needed.jsonl` ledger is only a bounded collision diagnostic:
+no candidate is auto-merged or trusted, and no human resolution workflow is
+spawned from it.
 
-Verify, review, and dedup workers are maintenance paths around this generated
-wiki state. They are intentionally fail-open so wiki maintenance does not break
-normal agent turns.
+Verify and dedup workers are maintenance paths around this generated wiki state.
+They are intentionally fail-open so wiki maintenance does not break normal agent
+turns.
 
 ## Backend Lifecycle
 
@@ -533,17 +540,15 @@ lets SQLite checkpoint state and avoids stale or oversized WAL behavior.
 
 ### Optional Workflow Isolation
 
-Wiki compile, verify, review, and dedup are optional maintenance workflows. They
+Wiki compile, verify, and dedup are optional maintenance workflows. They
 must remain fail-open relative to normal recall and indexing. A failed extractor,
 missing host CLI, stale verify job, or dedup queue issue should leave an audit
 record and preserve or drop only the relevant queue item according to that
 worker's contract.
 
-In this context, `review` means resolving ambiguous merge decisions, while
-`verify` means automatic source-consistency checking of generated cards. The
-default user flow does not require manually approving every compiled wiki page:
-cards start as `generated`, automatic verification promotes good cards to
-`verified`, and only ambiguous merge cases enter the review queue.
+Cards start as `generated`; automatic source-consistency verification promotes
+good cards to `verified`. Ambiguous collisions are recorded passively in
+`merge-needed.jsonl` and never become a promotion or human-review state.
 
 ## qmd Backend Boundary
 
@@ -612,7 +617,6 @@ hooks:
 | `update` | `core/update.sh` |
 | `sync` | `core/sync.py` plus backend index kick |
 | `wiki-compile` | `core/wiki_extract.py` and `core/wiki_compile.py` |
-| `wiki-review` | `core/wiki_review.py` |
 | `wiki-dedup` | `core/wiki_dedup_resolve.py` via resolver workflow |
 | `enable-compile` | `core/update.sh --enable-compile` |
 

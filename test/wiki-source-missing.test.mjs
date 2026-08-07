@@ -258,7 +258,8 @@ test('source repair: 개명 후보를 제안하고 사람이 지정한 재지정
     const listed = JSON.parse(runRepair(dir, ['--list']));
     assert.equal(listed.pending, 1);
     const entry = listed.entries[0];
-    assert.equal(entry.reviewed, true);
+    assert.equal(entry.trusted, true);
+    assert.equal('reviewed' in entry, false);
     assert.deepEqual(entry.candidates['docs/2026-07-20.md'].map((c) => c.path), ['docs/2026-07-21.md']);
     // 제안만 했고 카드는 아직 그대로다(자동 재지정 금지).
     assert.match(readFileSync(card, 'utf8'), /docs\/2026-07-20\.md/);

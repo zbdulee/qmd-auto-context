@@ -222,8 +222,8 @@ MAX_VERIFY_PER_RUN = 50
 VERIFY_PRODUCED_HARD_CAP = 30
 
 COMPILE_MODES = {"off", "candidates", "guarded", "auto-wiki"}
-WIKI_STATUSES = {"generated", "verified", "reviewed", "canon", "tentative", "contested", "discarded", "superseded"}
-# `compile.defaultStatus`가 받는 값. `WIKI_STATUSES` 전체가 아니다 — `verified`/`canon`을
+WIKI_STATUSES = {"generated", "verified", "tentative", "contested", "discarded", "superseded"}
+# `compile.defaultStatus`가 받는 값. `WIKI_STATUSES` 전체가 아니다 — `verified`를
 # 넣으면 기계 검수를 거치지 않은 신규 카드가 `recallVerifiedOnly` 기본값 아래에서 곧바로
 # 캐논 근거로 인용된다(검수 파이프라인 전체를 설정 한 줄로 우회하는 구멍이었다).
 COMPILE_DEFAULT_STATUSES = {"generated", "tentative"}

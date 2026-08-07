@@ -1082,34 +1082,6 @@ PY
     notice_clear wiki-dedup "$workdir"
   fi
 
-  # Write-time semantic gate merge-review hint: same shape as the dedup hint
-  # above, but for merge-needed.jsonl -- the queue core/wiki_compile.py
-  # populates when a new candidate looks similar to an existing page instead
-  # of auto-writing it. Cheap file test only, no daemon call and no python.
-  # The location is a constant now (core/compile_paths.py :: MERGE_NEEDED); the
-  # old `compile.mergeNeededPath` setting is gone, so the producer
-  # (wiki_compile.py), the consumer (wiki_review.py) and this hint all read the
-  # same literal. Keep this string in sync with that table -- if it drifts, the
-  # review notice goes silent with no other symptom.
-  merge_queue="$workdir/.auto-context/compile/merge-needed.jsonl"
-  if [ -s "$merge_queue" ]; then
-    # Symmetric with the dedup hint above: (a) user-facing notice so the human
-    # sees the backlog and can trigger the `wiki-review` skill, (b) model-facing
-    # spawn hint. WORKFLOW stays SSOT in agents/wiki-review-resolver.md.
-    merge_count=$(grep -c '[^[:space:]]' "$merge_queue" 2>/dev/null || echo 0)
-    notice_once wiki-review "$workdir" "[qmd] wiki 병합 검토 후보 ${merge_count}건 대기 — 정리하려면 '/wiki-review' 또는 'wiki review 해줘'라고 요청하세요."
-    review_agent_file="$(cd "$(dirname "$0")/.." && pwd)/agents/wiki-review-resolver.md"
-    if [ -f "$review_agent_file" ]; then
-      review_workflow="$(awk '/<!-- WORKFLOW:START -->/{f=1;next}/<!-- WORKFLOW:END -->/{f=0}f' "$review_agent_file")"
-      if [ -n "$review_workflow" ]; then
-        echo "이것은 사용자 요청과 독립적인 백그라운드 유지보수 작업이다 — 지금 즉시 처리해라. Claude Code는 Agent 도구로 subagent_type 'wiki-review-resolver'를 스폰해서, Codex는 자체 multi-agent delegation으로 아래 프롬프트를 그대로 스폰해 처리해."
-        printf '%s\n' "$review_workflow"
-      fi
-    fi
-  else
-    notice_clear wiki-review "$workdir"
-  fi
-
   # 소스 소실 표면화(로드맵 3단계): 원장(source-missing.jsonl)의 대기 건수를 1줄 알린다.
   # dedup/merge 힌트와 **같은 notice_once 구조**를 쓰되 모델용 spawn 힌트는 두지 않는다 —
   # 복구(소스 재지정)는 사람이 "이 파일이 그 문서다"를 확인해야 하는 판단이고, 자율

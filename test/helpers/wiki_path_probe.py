@@ -6,7 +6,7 @@ hook 전체를 돌리면 keyword 추출·필터·topN 이 섞여 "경로 해석�
 구분되지 않는다 — 이 공백이 plain-path 회귀를 라이브까지 통과시켰다).
 
 Usage: wiki_path_probe.py <project_dir> '<file uri>' ['<_collection>']
-Output: {"resolved": <절대경로 or null>, "meta": {"status":..., "reviewed":...}}
+Output: {"resolved": <절대경로 or null>, "meta": {"status":..., "trusted":...}}
 """
 import json
 import pathlib

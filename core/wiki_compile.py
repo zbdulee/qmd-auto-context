@@ -886,7 +886,6 @@ def markdown_page(candidate: dict, summary: str, status: str, redactions: list[s
         f"updated: {created}",
         "createdBy: qmd-auto-context",
         f"confidence: {confidence}",
-        "reviewed: false",
         "sources:",
     ])
     source_lines = [f"  - {flow}" for flow in source_flow_entries(sources)]
@@ -965,7 +964,7 @@ def rewrite_generated_card(path: Path, old_text: str, generated_page: str) -> bo
     proof_keys = set(qmd_config.VERIFY_PROOF_FIELDS)
     replace_sources = new_by_key["sources"] != ["sources:", "  - {kind: unknown}"]
     for key, lines in old_sections:
-        if key in proof_keys or key == "sourceRevisions":
+        if key in proof_keys or key in {"sourceRevisions", "reviewed"}:
             continue
         if key == "status":
             merged.extend(new_by_key["status"])
@@ -995,9 +994,7 @@ def rewrite_generated_card(path: Path, old_text: str, generated_page: str) -> bo
 def patch_frontmatter_fields(path: Path, updates: dict) -> bool:
     """Rewrite only the named top-level scalar frontmatter keys in place.
 
-    Leaves every other frontmatter line and the managed body untouched. Used by
-    wiki_review.py's supersede action to flip an old page's status without
-    touching its generated summary block.
+    Leaves every other frontmatter line and the managed body untouched.
 
     A value of **None removes the key** instead of writing it. Blanking a proof
     field (`verifiedBy: ""`) leaves a residue that still reads as "this card was
@@ -1320,15 +1317,9 @@ def is_auto_writable_page(path: Path) -> tuple[bool, list[str]]:
     if not ok:
         return False, ["frontmatter_unparseable"]
     findings = []
-    if meta.get("reviewed") is True:
-        findings.append("reviewed_true")
-    # 주의: verified는 의도적으로 이 보호 집합에서 제외한다(recall.py
-    # REVIEWED_WIKI_STATUSES와 다름). verified는 기계 검수 통과라 recall
-    # 신뢰는 받지만 쓰기 보호는 받지 않는다 — 소스 변경 시 updated 경로가
-    # status를 defaultStatus(generated)로 리셋해 재검증 대상으로 되돌리기
-    # 위함이다. 여기에 verified를 추가하면 stale 카드가 영구히 verified로
-    # 남는다.
-    if str(meta.get("status") or "").strip().lower() in {"reviewed", "canon", "manual", "superseded"}:
+    # verified remains auto-writable so source changes reset it to generated.
+    # superseded alone is historical and must never be revived by a refresh.
+    if str(meta.get("status") or "").strip().lower() == "superseded":
         findings.append("protected_status")
     if meta.get("createdBy") != "qmd-auto-context":
         findings.append("non_qmd_created_by")
@@ -1358,6 +1349,18 @@ def main() -> int:
     if wiki_root is None or compile_dir is None:
         print(json.dumps({"action": "rejected", "reason": "unsafe_managed_path"}, ensure_ascii=False))
         return 1
+
+    try:
+        with cp.card_write_lock(root):
+            return _compile_locked(
+                root, config, compile_cfg, mode, wiki_root, candidate, args.regenerate)
+    except OSError:
+        print(json.dumps({"action": "rejected", "reason": "card_write_lock_unavailable"}, ensure_ascii=False))
+        return 1
+
+
+def _compile_locked(root: Path, config: dict, compile_cfg: dict, mode: str,
+                    wiki_root: Path, candidate: dict, regenerate: bool) -> int:
 
     suggested_type = candidate.get("suggestedType") if candidate.get("suggestedType") in ALLOWED_TYPES else "concept"
     identity_index = build_identity_index(wiki_root)
@@ -1419,7 +1422,7 @@ def main() -> int:
         return 0
 
     tombstones = read_jsonl(tombstone_path)
-    if any(same_generated_identity(row, record) for row in tombstones) and not args.regenerate:
+    if any(same_generated_identity(row, record) for row in tombstones) and not regenerate:
         record["action"] = "suppressed"
         append_jsonl(candidate_path, record)
         print(json.dumps({"action": "suppressed", "targetPath": record["targetPath"]}, ensure_ascii=False))
@@ -1432,7 +1435,7 @@ def main() -> int:
     if (
         previous
         and not target.exists()
-        and not args.regenerate
+        and not regenerate
         and previous[-1].get("action") != MACHINE_DELETE_ACTION
     ):
         tombstone = {**record, "action": "deleted", "status": "deleted", "previousStatus": previous[-1].get("status", "generated")}
@@ -1475,13 +1478,11 @@ def main() -> int:
             matched_path, score = find_wiki_semantic_match(root, wiki_root, config, candidate, summary)
             judge_info = {**judge_info, "fallback": "score_threshold"}
         if matched_path is not None:
-            suggested_action = "supersede-or-new" if suggested_type == "decision" else "merge"
             entry = {
                 "ts": now_iso(),
                 "candidate": record,
                 "matchedPath": matched_path.relative_to(root).as_posix(),
                 "matchedScore": score,
-                "suggestedAction": suggested_action,
             }
             if judge_info.get("verdict"):
                 entry["judgeVerdict"] = judge_info["verdict"]
@@ -1495,10 +1496,10 @@ def main() -> int:
                 entry["uniqueToCandidate"] = judge_info.get("uniqueToA", [])
                 entry["uniqueToMatched"] = judge_info.get("uniqueToB", [])
             append_jsonl(merge_needed_path, entry)
-            record["action"] = "queued_for_review"
+            record["action"] = "merge-needed"
             append_jsonl(candidate_path, record)
             print(json.dumps({
-                "action": "queued_for_review",
+                "action": "merge-needed",
                 "matchedPath": matched_path.relative_to(root).as_posix(),
                 "score": score,
                 **({"judgeVerdict": judge_info["verdict"]} if judge_info.get("verdict") else {}),
@@ -1524,7 +1525,6 @@ def main() -> int:
                 "candidate": record,
                 "matchedPath": record["targetPath"],
                 "matchedScore": 0,
-                "suggestedAction": "merge",
                 "reason": mismatch,
             }
             if merge_needed_path is not None:

@@ -1067,7 +1067,7 @@ test('extractor 제공 필드에 개행·YAML 메타문자가 와도 frontmatter
     'meta, ok = W.parse_frontmatter(page)',
     'py = yaml.safe_load(fm)',
     'print(json.dumps({"wc_ok": ok, "keys": sorted(py), "status": py.get("status"),',
-    '                  "reviewed": py.get("reviewed"), "type": py.get("type"),',
+    '                  "has_reviewed": "reviewed" in py, "type": py.get("type"),',
     '                  "confidence": py.get("confidence"),',
     '                  "triggers": py.get("triggers"), "sources": py.get("sources"),',
     '                  "wc_status": meta.get("status") if ok else None}, ensure_ascii=False))',
@@ -1076,14 +1076,14 @@ test('extractor 제공 필드에 개행·YAML 메타문자가 와도 frontmatter
   assert.equal(r.wc_ok, true, 'wiki_compile.parse_frontmatter 가 fail-close 하면 verify·dedup 이 멈춘다');
   assert.equal(r.status, 'generated', 'status 위조 금지');
   assert.equal(r.wc_status, 'generated');
-  assert.equal(r.reviewed, false, 'reviewed 위조 금지');
+  assert.equal(r.has_reviewed, false, 'reviewed 필드 자체를 방출하지 않음');
   assert.equal(r.type, 'concept', '닫힌 집합 밖 type 은 기본값으로');
   assert.equal(r.confidence, 'medium', '닫힌 집합 밖 confidence 는 기본값으로');
   assert.deepEqual(r.triggers, ['promote\nstatus: verified'], 'trigger 값은 인용돼 보존');
   assert.deepEqual(r.sources, [{ kind: 'file', path: 'p.md\nstatus: verified' }],
     '안전하지 않은 source 키는 탈락, 값은 인용돼 보존');
   assert.deepEqual(r.keys, ['aliases', 'canonicalKey', 'confidence', 'created', 'createdBy',
-    'redactions', 'reviewed', 'sources', 'status', 'title', 'triggers', 'type', 'updated'],
+    'redactions', 'sources', 'status', 'title', 'triggers', 'type', 'updated'],
     '위조된 top-level 키가 생기면 안 됨');
 });
 

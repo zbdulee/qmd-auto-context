@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 
 function frontmatter(text) {
   const match = /^---\n([\s\S]*?)\n---/.exec(text);
@@ -59,7 +59,6 @@ test("wiki-dedup-resolver agent: workflow block has the cluster pass before the 
   );
 });
 
-test("wiki-review-resolver agent: description no longer claims the wiki-dedup trigger phrase", () => {
-  const agent = readFileSync("agents/wiki-review-resolver.md", "utf8");
-  assert.doesNotMatch(agent, /wiki dedup queue 전부 자동으로 처리해줘/);
+test("wiki-review-resolver agent surface is removed", () => {
+  assert.equal(existsSync("agents/wiki-review-resolver.md"), false);
 });
