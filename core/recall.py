@@ -587,13 +587,18 @@ def _event_time_ns(value) -> int | None:
     return int(parsed.timestamp() * 1_000_000_000)
 
 
-def pending_refresh_cutoffs(project_root: Path) -> dict[str, int | None]:
+def pending_refresh_cutoffs(project_root: Path) -> dict[str, int] | None:
     """Latest unresolved pending timestamp by source path, read once/request."""
-    cutoffs: dict[str, int | None] = {}
-    for event in wiki_freshness.unresolved_pending_refreshes(project_root):
+    events = wiki_freshness.unresolved_pending_refreshes_strict(project_root)
+    if events is None:
+        return None
+    cutoffs: dict[str, int] = {}
+    for event in events:
         path = event.get("sourcePath")
-        if isinstance(path, str) and path:
-            cutoffs[path] = _event_time_ns(event.get("ts"))
+        cutoff = _event_time_ns(event.get("ts"))
+        if not isinstance(path, str) or not path or cutoff is None:
+            return None
+        cutoffs[path] = cutoff
     return cutoffs
 
 
@@ -1951,6 +1956,10 @@ def main():
                 log_recall_event(log_path, "query_failed", daemon=daemon_url)
                 return 0
 
+    # The daemon's requested limit is not a trust boundary.  Enforce the
+    # primary phase bound locally before any wiki card annotation or hashing.
+    results = results[:DAEMON_QUERY_LIMIT]
+
     # Log raw score observation if requested (log_path read once near the top)
     if log_path:
         log_score_observation(log_path, results, collections)
@@ -1972,6 +1981,7 @@ def main():
     # decision.  Read it once; per-card ledger reads would make the blocking
     # hook scale with candidate count and could observe mixed event snapshots.
     card_pending_cutoffs = pending_refresh_cutoffs(card_roots[0])
+    card_pending_unknown = card_pending_cutoffs is None
     # 원문 경로 주입 예산(카드당 상한 + allowRoots). 호출당 1회 계산해 카드마다 재사용한다.
     # 로그가 켜져 있으면 상한 0에서도 분류만 돌린다(cards_all_sources_missing 유지).
     card_source_opts = source_inject_opts(config, observe=bool(log_path))
@@ -2201,6 +2211,8 @@ def main():
         return freshness_cache[cache_key]
 
     def card_freshness(result: dict) -> str:
+        if card_pending_unknown:
+            return wiki_freshness.UNKNOWN
         revisions = result.get("_wiki_source_revisions")
         if (
             not isinstance(revisions, list) or not revisions
@@ -2301,6 +2313,9 @@ def main():
             if raw_results is None:
                 log_recall_event(log_path, "query_failed", daemon=daemon_url)
                 return 0
+        # Raw backfill is a separate phase with its own local daemon bound.  It
+        # is never source-hashed, but an over-return must not expand injection.
+        raw_results = raw_results[:DAEMON_QUERY_LIMIT]
         annotate_all(raw_results)
         # backfill이면 최종 선택은 raw에서 나오므로 original_rank도 raw 기준이다.
         rank_index.update(build_rank_index(raw_results))

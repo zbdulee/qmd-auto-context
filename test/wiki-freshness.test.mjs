@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, mkdirSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { removeTemp } from './helpers/temp.mjs';
@@ -41,6 +41,17 @@ function check(project, card) {
 
 function sourceRevision(project, path = 'docs/source.md') {
   return { kind: 'file', path, collection: 'proj-docs', ...revision(project, path) };
+}
+
+function strictPending(project) {
+  return JSON.parse(python([
+    'import json, sys',
+    'from pathlib import Path',
+    'sys.path.insert(0, "core")',
+    'import wiki_freshness as F',
+    'reader = getattr(F, "unresolved_pending_refreshes_strict", None)',
+    'print(json.dumps({"api": "missing"} if reader is None else reader(Path(sys.argv[1]))))',
+  ].join('\n'), project));
 }
 
 function setup() {
@@ -181,6 +192,44 @@ test('sourceRevisions emission rejects an entire list when any sibling is invali
     'print(json.dumps(Y.dump_source_revisions([record, invalid])))',
   ].join('\n'), JSON.stringify(record)));
   assert.deepEqual(out, [], 'partial provenance must never be emitted');
+});
+
+test('strict pending ledger API distinguishes absent or empty from malformed, invalid, and unreadable', () => {
+  const project = setup();
+  const compileDir = join(project, '.auto-context', 'compile');
+  const ledger = join(compileDir, 'source-refresh-pending.jsonl');
+  try {
+    assert.deepEqual(strictPending(project), [], 'safely absent ledger has no pending invalidation');
+    mkdirSync(compileDir, { recursive: true });
+    writeFileSync(ledger, '');
+    assert.deepEqual(strictPending(project), [], 'empty ledger is known and valid');
+
+    writeFileSync(ledger, '{malformed json\n');
+    assert.equal(strictPending(project), null, 'malformed JSON makes ledger state unknown');
+
+    writeFileSync(ledger, `${JSON.stringify({ state: 'pending_refresh', sourcePath: 'docs/source.md' })}\n`);
+    assert.equal(strictPending(project), null, 'invalid closed-schema event makes ledger state unknown');
+
+    const pending = {
+      eventId: 'event-1', ts: '2026-08-07T00:00:00Z', sourcePath: 'docs/source.md',
+      state: 'pending_refresh', engine: 'codex',
+    };
+    writeFileSync(ledger, `${JSON.stringify(pending)}\n${JSON.stringify(pending)}\n`);
+    assert.equal(strictPending(project), null, 'duplicate pending event id makes ledger state unknown');
+
+    writeFileSync(ledger, `${JSON.stringify({
+      pendingEventId: 'missing-event', ts: '2026-08-07T00:00:01Z', state: 'resolved',
+    })}\n`);
+    assert.equal(strictPending(project), null, 'orphan resolved event makes ledger state unknown');
+
+    writeFileSync(ledger, `${JSON.stringify(pending)}\n`);
+    assert.deepEqual(strictPending(project), [pending], 'valid pending ledger remains distinguishable');
+    chmodSync(ledger, 0o000);
+    assert.equal(strictPending(project), null, 'unreadable ledger makes ledger state unknown');
+  } finally {
+    try { chmodSync(ledger, 0o600); } catch {}
+    removeTemp(project);
+  }
 });
 
 test('pending refresh resolves only with the successful compile revision still on disk', () => {

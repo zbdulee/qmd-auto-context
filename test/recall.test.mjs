@@ -664,3 +664,99 @@ test('verified wiki cards without compiler provenance or qmd creator are hard fi
     assert.doesNotMatch(context, /No provenance body|Missing creator body|Foreign creator body/);
   } finally { removeTemp(dir); }
 });
+
+test('malformed or invalid pending ledger fails closed before wiki injection', () => {
+  const ledgerRows = [
+    ['malformed', '{malformed json\n'],
+    ['invalid', `${JSON.stringify({ state: 'pending_refresh', sourcePath: 'docs/source.md' })}\n`],
+  ];
+  for (const [ledgerKind, ledgerText] of ledgerRows) {
+    for (const strategy of ['hierarchical', 'wikiOnly']) {
+      const dir = mkdtempSync(join(tmpdir(), `qmd-fresh-ledger-${ledgerKind}-${strategy}-`));
+      const fixture = join(dir, 'wiki-fixture.json');
+      const rawFixture = join(dir, 'raw-fixture.json');
+      const logPath = join(dir, 'recall.log');
+      try {
+        freshnessProject(dir, { strategy, topN: 1 });
+        mkdirSync(join(dir, '.auto-context', 'compile'), { recursive: true });
+        writeTrustedWikiCard(dir, 'ledger', '# unchanged source\n', 'Wiki must not inject');
+        writeFileSync(join(dir, '.auto-context', 'compile', 'source-refresh-pending.jsonl'), ledgerText);
+        writeFileSync(fixture, JSON.stringify({ results: [
+          { file: 'qmd://proj-wiki/concepts/ledger.md', title: 'Ledger wiki', score: 0.99 },
+        ] }));
+        writeFileSync(rawFixture, JSON.stringify({ results: [
+          { file: 'qmd://proj-docs/docs/raw.md', title: 'Safe raw fallback', score: 0.9 },
+        ] }));
+
+        const result = recall(
+          { prompt: 'pending ledger fail closed 경계를 알려줘', cwd: dir },
+          {
+            QMD_QUERY_FIXTURE: fixture,
+            QMD_QUERY_FIXTURE_RAW: rawFixture,
+            QMD_RECALL_LOG: logPath,
+          },
+        );
+        const context = result?.hookSpecificOutput.additionalContext || '';
+        assert.doesNotMatch(context, /Wiki must not inject/);
+        if (strategy === 'hierarchical') assert.match(context, /Safe raw fallback/);
+        else assert.equal(result, null, 'wikiOnly stays empty when ledger state is unknown');
+        assert.equal(selectionEvent(logPath).freshness_unknown, 1);
+      } finally { removeTemp(dir); }
+    }
+  }
+});
+
+test('daemon or fixture over-return is locally capped at eight primary wiki candidates', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'qmd-fresh-over-return-'));
+  const fixture = join(dir, 'wiki-fixture.json');
+  const logPath = join(dir, 'recall.log');
+  try {
+    freshnessProject(dir, { topN: 9 });
+    const cards = [];
+    for (let i = 1; i <= 10; i += 1) {
+      writeTrustedWikiCard(dir, String(i), `# source ${i}\n`, `Over-return card ${i}`);
+      cards.push({
+        file: `qmd://proj-wiki/concepts/${i}.md`,
+        title: `Card ${i}`,
+        score: 1 - i / 100,
+      });
+    }
+    writeFileSync(fixture, JSON.stringify({ results: cards }));
+
+    const result = recall(
+      { prompt: 'daemon over return freshness bound를 알려줘', cwd: dir },
+      { QMD_QUERY_FIXTURE: fixture, QMD_RECALL_LOG: logPath },
+    );
+    const context = result?.hookSpecificOutput.additionalContext || '';
+    assert.equal(selectionEvent(logPath).freshness_checked, 8);
+    assert.match(context, /Over-return card 8/);
+    assert.doesNotMatch(context, /Over-return card 9|Over-return card 10/);
+  } finally { removeTemp(dir); }
+});
+
+test('raw fallback over-return is independently capped at eight candidates', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'qmd-fresh-raw-over-return-'));
+  const fixture = join(dir, 'wiki-fixture.json');
+  const rawFixture = join(dir, 'raw-fixture.json');
+  try {
+    freshnessProject(dir, { strategy: 'hierarchical', topN: 9 });
+    const written = writeTrustedWikiCard(dir, 'stale-over-return', '# original\n', 'Stale wiki');
+    writeFileSync(join(dir, written.sourcePath), '# changed\n');
+    writeFileSync(fixture, JSON.stringify({ results: [
+      { file: 'qmd://proj-wiki/concepts/stale-over-return.md', title: 'Stale wiki', score: 0.99 },
+    ] }));
+    writeFileSync(rawFixture, JSON.stringify({ results: Array.from({ length: 10 }, (_, index) => ({
+      file: `qmd://proj-docs/docs/raw-${index + 1}.md`,
+      title: `Raw over-return ${index + 1}`,
+      score: 1 - (index + 1) / 100,
+    })) }));
+
+    const result = recall(
+      { prompt: 'raw fallback over return bound를 알려줘', cwd: dir },
+      { QMD_QUERY_FIXTURE: fixture, QMD_QUERY_FIXTURE_RAW: rawFixture },
+    );
+    const context = result?.hookSpecificOutput.additionalContext || '';
+    assert.match(context, /Raw over-return 8/);
+    assert.doesNotMatch(context, /Raw over-return 9|Raw over-return 10/);
+  } finally { removeTemp(dir); }
+});

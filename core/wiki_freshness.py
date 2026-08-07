@@ -86,6 +86,26 @@ def _valid_event(row) -> bool:
     return False
 
 
+def _closed_json_object(pairs):
+    """Reject duplicate JSON object keys instead of silently taking the last."""
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON object key")
+        result[key] = value
+    return result
+
+
+def _valid_event_time(value) -> bool:
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None
+
+
 def _read_events_unlocked(path: Path, strict: bool = False) -> list[dict] | None:
     if not path.exists():
         return []
@@ -98,12 +118,15 @@ def _read_events_unlocked(path: Path, strict: bool = False) -> list[dict] | None
         if not line.strip():
             continue
         try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
+            if strict:
+                row = json.loads(line, object_pairs_hook=_closed_json_object)
+            else:
+                row = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
             if strict:
                 return None
             continue
-        if not _valid_event(row):
+        if not _valid_event(row) or (strict and not _valid_event_time(row.get("ts"))):
             if strict:
                 return None
             continue
@@ -162,6 +185,26 @@ def unresolved_pending_refreshes(root: Path) -> list[dict]:
     return [pending for _index, pending, resolved in latest.values() if resolved is None]
 
 
+def unresolved_pending_refreshes_strict(root: Path) -> list[dict] | None:
+    """Return unresolved events, or ``None`` when ledger state is unknowable.
+
+    Absent and empty ledgers are known-empty. Unsafe ledger resolution,
+    unreadable bytes, malformed JSON, duplicate keys, invalid closed-schema
+    events, and invalid timestamps are unknown so a recall caller can fail
+    closed without changing the permissive lifecycle recovery API.
+    """
+    path = _pending_path(root)
+    if path is None:
+        return None
+    rows = _read_events_unlocked(path, strict=True)
+    if rows is None:
+        return None
+    latest = _ordered_latest_strict(rows)
+    if latest is None:
+        return None
+    return [pending for _index, pending, resolved in latest.values() if resolved is None]
+
+
 def _ordered_latest(rows: list[dict]) -> dict[str, tuple[int, dict, tuple[int, dict] | None]]:
     """Fold ordered history; a resolve only applies to an earlier exact event id."""
     seen: dict[str, tuple[int, dict]] = {}
@@ -182,6 +225,37 @@ def _ordered_latest(rows: list[dict]) -> dict[str, tuple[int, dict, tuple[int, d
         current = latest.get(source)
         if current is not None and current[1].get("eventId") == event_id:
             latest[source] = (current[0], current[1], (index, row))
+    return latest
+
+
+def _ordered_latest_strict(
+    rows: list[dict],
+) -> dict[str, tuple[int, dict, tuple[int, dict] | None]] | None:
+    """Fold only a causally valid ledger; reject ambiguous event histories."""
+    seen: dict[str, tuple[int, dict]] = {}
+    resolved_ids: set[str] = set()
+    latest: dict[str, tuple[int, dict, tuple[int, dict] | None]] = {}
+    for index, row in enumerate(rows):
+        if row.get("state") == PENDING_REFRESH:
+            event_id = _pending_id(row)
+            if event_id is None or event_id in seen:
+                return None
+            seen[event_id] = (index, row)
+            latest[row["sourcePath"]] = (index, row, None)
+            continue
+        event_id = _resolved_id(row)
+        pending_item = seen.get(event_id) if event_id is not None else None
+        if pending_item is None or event_id in resolved_ids or pending_item[0] >= index:
+            return None
+        source = pending_item[1]["sourcePath"]
+        current = latest.get(source)
+        if (
+            current is None or current[2] is not None
+            or current[1].get("eventId") != event_id
+        ):
+            return None
+        resolved_ids.add(event_id)
+        latest[source] = (current[0], current[1], (index, row))
     return latest
 
 
