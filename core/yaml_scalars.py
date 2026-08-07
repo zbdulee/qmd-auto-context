@@ -32,6 +32,14 @@ BLOCK_SCALAR_HEADERS = {">", "|", ">-", "|-", ">+", "|+", ">>", "|2", ">2"}
 # (wiki_compile.SAFE_YAML_KEY_RE가 이 상수를 그대로 재노출한다: 정의는 한 곳이다.)
 SAFE_KEY_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]*")
 
+# Compiler-owned provenance has a deliberately closed schema.  Model-provided
+# ``sources`` remains an open audit field; source revisions are the current
+# filesystem proof used to decide whether a verified card may be recalled.
+SOURCE_REVISION_KEYS = ("kind", "path", "collection", "sha256", "size", "mtimeNs")
+SOURCE_REVISION_KEY_SET = frozenset(SOURCE_REVISION_KEYS)
+SHA256_RE = re.compile(r"[0-9a-f]{64}")
+NONNEGATIVE_INT_RE = re.compile(r"0|[1-9][0-9]*")
+
 # YAML 1.2 double-quoted 이스케이프(값 → 표기). 순서 중요: 백슬래시가 먼저다.
 _DUMP_ESCAPES = [
     ("\\", "\\\\"),
@@ -351,6 +359,118 @@ def load_flow_mapping(raw: str) -> tuple[dict, str]:
     if not fields and not issue:
         issue = "empty"
     return fields, issue
+
+
+def _closed_flow_mapping(raw: str) -> dict | None:
+    """Parse one flow mapping without the permissive first-wins fallback.
+
+    ``load_flow_mapping`` is intentionally lenient for legacy ``sources``.
+    Provenance is different: duplicate, malformed, or unknown fields must not
+    become a compiler-owned revision record.
+    """
+    items, issue = _scan_flow_mapping(raw.strip())
+    if issue:
+        return None
+    fields = {}
+    for item in items:
+        if not item.strip():
+            # The permissive source parser ignores empty items.  A compiler
+            # provenance record must reject `,,` and trailing commas instead
+            # of treating a malformed mapping as a complete revision.
+            return None
+        key, separator, value = _split_key_value(item)
+        if not separator:
+            return None
+        key, key_issue = load_with_issue(key)
+        parsed, value_issue = load_with_issue(value)
+        if key_issue or value_issue or not SAFE_KEY_RE.fullmatch(key) or key in fields:
+            return None
+        if key in ("size", "mtimeNs"):
+            # ``load_with_issue`` intentionally returns strings for both
+            # `1` and `"1"`.  Preserve the original token distinction here:
+            # quoted numbers are strings, not typed provenance integers.
+            token = value.strip()
+            if not NONNEGATIVE_INT_RE.fullmatch(token):
+                return None
+            fields[key] = int(token)
+        else:
+            fields[key] = parsed
+    return fields
+
+
+def _nonnegative_int(value) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    return None
+
+
+def normalize_source_revision(record) -> dict | None:
+    """Validate one source revision and return its stable typed representation."""
+    if not isinstance(record, dict) or set(record) != SOURCE_REVISION_KEY_SET:
+        return None
+    kind = record.get("kind")
+    path = record.get("path")
+    collection = record.get("collection")
+    sha256 = record.get("sha256")
+    size = _nonnegative_int(record.get("size"))
+    mtime_ns = _nonnegative_int(record.get("mtimeNs"))
+    if kind != "file" or not isinstance(path, str) or not path:
+        return None
+    if not isinstance(collection, str) or not isinstance(sha256, str):
+        return None
+    if not SHA256_RE.fullmatch(sha256) or size is None or mtime_ns is None:
+        return None
+    return {
+        "kind": kind,
+        "path": path,
+        "collection": collection,
+        "sha256": sha256,
+        "size": size,
+        "mtimeNs": mtime_ns,
+    }
+
+
+def parse_source_revision(raw: str) -> dict | None:
+    """Parse exactly one closed-schema ``sourceRevisions`` flow mapping."""
+    if not isinstance(raw, str):
+        return None
+    return normalize_source_revision(_closed_flow_mapping(raw))
+
+
+def dump_source_revisions(revisions) -> list[str]:
+    """Emit only valid compiler-owned revision records as YAML flow mappings."""
+    if not isinstance(revisions, list):
+        return []
+    normalized_records = [normalize_source_revision(record) for record in revisions]
+    # Provenance is a complete compiler snapshot.  Emitting a valid prefix
+    # when a sibling is malformed would make a partial source set look trusted.
+    if any(record is None for record in normalized_records):
+        return []
+    emitted = []
+    for normalized in normalized_records:
+        # ``dump_flow_mapping`` correctly rejects non-string model fields.  This
+        # closed compiler schema intentionally includes two typed integers, so
+        # serialize its fixed keys here rather than weakening that open-source
+        # helper's type contract.
+        emitted.append("{" + ", ".join(
+            f"{key}: {dump(normalized[key])}" for key in SOURCE_REVISION_KEYS
+        ) + "}")
+    return emitted
+
+
+def load_source_revisions(entries) -> list[dict]:
+    """Parse a complete revision list; any bad item rejects the entire list."""
+    if not isinstance(entries, list):
+        return []
+    parsed = []
+    for entry in entries:
+        revision = parse_source_revision(entry)
+        if revision is None:
+            return []
+        parsed.append(revision)
+    return parsed
 
 
 def fold_inline(value) -> str:
