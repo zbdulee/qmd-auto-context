@@ -1,7 +1,6 @@
 {
   "indexing": false,
   "name": "qmd-auto-context",
-  "minScore": 0.5,
   "queryTimeout": 3,
   "prefixStyle": "tag"
 }

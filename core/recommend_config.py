@@ -17,10 +17,21 @@ CANDIDATES = [
 ]
 MAX_FILES = 200
 MAX_BYTES = 5 * 1024 * 1024
-# 추천 온보딩이 의도하는 recall 값. 이 중 `topN`·`events`는 DEFAULT_CONFIG와 같아
-# 생성기 delta에서 빠지고(effective 동일), `minScore`·`queryTimeout`·`prefixStyle`만
-# 기본값과 달라 실제로 파일에 남는다.
-DEFAULTS = {"minScore": 0.5, "topN": 3, "queryTimeout": 3,
+# 추천 온보딩이 의도하는 recall 값. 이 중 `minScore`·`topN`·`events`는 DEFAULT_CONFIG와
+# 같아 생성기 delta에서 빠지고(effective 동일), `queryTimeout`·`prefixStyle`만 기본값과
+# 달라 실제로 파일에 남는다.
+#
+# **`minScore`는 0.0이어야 한다 — 여기 0.5를 두면 바로 윗줄의 `topN: 3`을 무력화한다.**
+# recall은 `rerank: False`로 질의하고 qmd 2.5.3은 그 경로에서 score를 RRF 순위의
+# 역수(`1/rank`)로 돌려준다. 즉 minScore는 유사도 임계가 아니라 **순위 컷**이고
+# 실효 상한은 `floor(1/minScore)`다 — 0.5면 2, 0.8이면 1. 그래서 이 dict은 한때
+# `topN: 3`을 "의도"라고 적어 두고 같은 dict의 `minScore: 0.5`로 그것을 2로 깎고 있었다
+# (라이브 실측: 관련 질의 후보 6건 → skipPaths 2건 제외 → minScore가 **관련 카드 2건**을
+# 더 버려 주입 2건. 버려진 3등은 그 질문에 정확히 맞는 런북이었다).
+# 순위 컷은 무관 주입도 막지 못한다 — 1등은 아무리 무관해도 항상 score 1.0이다
+# (같은 실측: 무관 프롬프트에서 `dropped_min_score`는 0이었고, 실제로 막은 것은 lex 게이트다).
+# 무관 주입 차단은 lex 게이트(`recall.py`)가 담당하고 주입량 조절은 `topN`이 담당한다.
+DEFAULTS = {"minScore": 0.0, "topN": 3, "queryTimeout": 3,
             "prefixStyle": "tag",
             "events": ["sessionStart", "userPromptSubmit", "postToolUse"]}
 

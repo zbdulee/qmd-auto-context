@@ -515,11 +515,11 @@
         "minRatio": 0.2
       }
     },
-    "minScore": 0.5,
+    "minScore": 0,
     "name": "freezeproj",
     "prefixStyle": "tag",
     "queryTimeout": 3,
-    "rawFallbackMinScore": 0.5,
+    "rawFallbackMinScore": 0,
     "recallStrategy": "hierarchical",
     "skipPaths": [],
     "staleQueueThreshold": 20,
