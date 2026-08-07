@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).parent.resolve()))
 import compile_paths as cp
 import config as qmd_config
 import posttool
+import wiki_freshness
 from collection_match import select_collections
 
 
@@ -210,7 +211,16 @@ def main():
             continue
         seen.add(key)
         records.append(record)
-    _append_jsonl(queue_path, records)
+    queued = []
+    for record in records:
+        source = record.get("source") if isinstance(record.get("source"), dict) else {}
+        pending = wiki_freshness.record_pending_refresh(
+            Path(project_root), source.get("path", ""), record.get("engine", DEFAULT_ENGINE))
+        if pending is None:
+            continue
+        record["pendingRefresh"] = {"ts": pending["ts"], "engine": pending["engine"]}
+        queued.append(record)
+    _append_jsonl(queue_path, queued)
     return 0
 
 

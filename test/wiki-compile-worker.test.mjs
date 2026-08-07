@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { removeTemp } from './helpers/temp.mjs';
@@ -59,6 +59,49 @@ function jsonl(path) {
   return readFileSync(path, 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
 }
 
+function seedPending(project, engine = 'claude') {
+  return JSON.parse(execFileSync('python3', ['-c', [
+    'import json, sys',
+    'from pathlib import Path',
+    'sys.path.insert(0, "core")',
+    'import wiki_freshness as F',
+    'print(json.dumps(F.record_pending_refresh(Path(sys.argv[1]), "docs/source.md", sys.argv[2])))',
+  ].join('\n'), project, engine], { cwd: process.cwd(), encoding: 'utf8' }));
+}
+
+function attachPendingToQueuedJob(project, pending) {
+  const queue = join(project, '.auto-context', 'compile', 'source-queue.jsonl');
+  const job = jsonl(queue)[0];
+  job.pendingRefresh = { ts: pending.ts, engine: pending.engine };
+  writeFileSync(queue, JSON.stringify(job) + '\n');
+}
+
+test('worker recovers a pending-only crash window by reenqueuing the source job', () => {
+  const project = setupProject({ batch: { idleSeconds: 3600, maxItems: 5 } });
+  try {
+    writeFileSync(join(project, '.auto-context', 'compile', 'source-queue.jsonl'), '');
+    const pending = seedPending(project, 'codex');
+    runWorker(project, {}, ['--json']);
+    const jobs = jsonl(join(project, '.auto-context', 'compile', 'source-queue.jsonl'));
+    assert.equal(jobs.length, 1);
+    assert.equal(jobs[0].source.path, 'docs/source.md');
+    assert.deepEqual(jobs[0].pendingRefresh, { ts: pending.ts, engine: 'codex' });
+  } finally { removeTemp(project); }
+});
+
+test('worker recovery coalesces canonical cwd aliases in the queue-append crash window', () => {
+  const project = setupProject({ batch: { idleSeconds: 3600, maxItems: 5 } });
+  try {
+    const older = seedPending(project, 'claude');
+    attachPendingToQueuedJob(project, older);
+    const latest = seedPending(project, 'codex');
+    runWorker(project, {}, ['--json']);
+    const jobs = jsonl(join(project, '.auto-context', 'compile', 'source-queue.jsonl'));
+    assert.equal(jobs.length, 1, 'recovery and the already-appended job coalesce by source');
+    assert.deepEqual(jobs[0].pendingRefresh, { ts: latest.ts, engine: latest.engine });
+  } finally { removeTemp(project); }
+});
+
 test('worker runs the engine backend argv, writes generated wiki page, and stays silent', () => {
   const extractor = join(mkdtempSync(join(tmpdir(), 'extractor-')), 'extract.py');
   writeFileSync(extractor, `#!/usr/bin/env python3
@@ -76,7 +119,9 @@ print(json.dumps({'candidates': [{
   const project = setupProject({ extractor: { backends: { claude: ['python3', extractor] }, timeout: 30 } });
   const dirtyQueue = join(mkdtempSync(join(tmpdir(), 'dirty-')), 'queue');
   try {
-    const out = runWorker(project, { QMD_DIRTY_QUEUE: dirtyQueue });
+    const pending = seedPending(project, 'claude');
+    attachPendingToQueuedJob(project, pending);
+    const out = runWorker(project, { QMD_DIRTY_QUEUE: dirtyQueue }, ['--flush-all']);
     assert.equal(out, '');
     const page = join(project, '.auto-context', 'wiki', 'decisions', 'source-compile-decision.md');
     assert.equal(existsSync(page), true);
@@ -92,7 +137,42 @@ print(json.dumps({'candidates': [{
       createHash('sha256').update(sourceBytes).digest('hex'));
     assert.equal(readFileSync(join(project, '.auto-context', 'compile', 'source-queue.jsonl'), 'utf8'), '');
     assert.match(readFileSync(dirtyQueue, 'utf8'), /^proj-wiki\t/);
+    const refreshRows = jsonl(join(project, '.auto-context', 'compile', 'source-refresh-pending.jsonl'));
+    assert.deepEqual(refreshRows.map((row) => row.state), ['pending_refresh', 'resolved']);
+    assert.equal(refreshRows[1].pendingTs, pending.ts);
+    assert.equal(refreshRows[1].sourceRevision.sha256,
+      createHash('sha256').update(sourceBytes).digest('hex'));
   } finally {
+    removeTemp(project);
+  }
+});
+
+test('worker preserves the source job when resolved-event append fails after card write', () => {
+  const extractor = join(mkdtempSync(join(tmpdir(), 'extractor-resolve-failure-')), 'extract.py');
+  writeFileSync(extractor, `#!/usr/bin/env python3
+import json
+print(json.dumps({'candidates': [{
+  'title': 'Resolve Failure Retry',
+  'summary': 'A durable pending event remains unresolved until its successful captured revision is recorded.',
+  'suggestedType': 'decision',
+  'confidence': 'high',
+  'targetPath': '.auto-context/wiki/decisions/resolve-failure-retry.md'
+}]}))
+`);
+  const project = setupProject({ extractor: { backends: { claude: ['python3', extractor] }, timeout: 30 } });
+  const ledger = join(project, '.auto-context', 'compile', 'source-refresh-pending.jsonl');
+  try {
+    const pending = seedPending(project, 'claude');
+    attachPendingToQueuedJob(project, pending);
+    chmodSync(ledger, 0o444);
+    runWorker(project, {}, ['--flush-all']);
+    assert.equal(existsSync(join(project, '.auto-context', 'wiki', 'decisions', 'resolve-failure-retry.md')), true,
+      'the card write can succeed before the separate resolved append');
+    assert.equal(jsonl(ledger).at(-1).state, 'pending_refresh');
+    assert.equal(jsonl(join(project, '.auto-context', 'compile', 'source-queue.jsonl')).length, 1,
+      'failed resolution is retried instead of inferred from the card write');
+  } finally {
+    chmodSync(ledger, 0o644);
     removeTemp(project);
   }
 });

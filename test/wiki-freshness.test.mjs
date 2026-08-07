@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, mkdirSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { removeTemp } from './helpers/temp.mjs';
@@ -181,4 +181,62 @@ test('sourceRevisions emission rejects an entire list when any sibling is invali
     'print(json.dumps(Y.dump_source_revisions([record, invalid])))',
   ].join('\n'), JSON.stringify(record)));
   assert.deepEqual(out, [], 'partial provenance must never be emitted');
+});
+
+test('pending refresh resolves only with the successful compile revision still on disk', () => {
+  const project = setup();
+  try {
+    const before = sourceRevision(project);
+    writeFileSync(join(project, 'docs', 'source.md'), '# edited after old capture\n');
+    const out = JSON.parse(python([
+      'import json, sys',
+      'from pathlib import Path',
+      'sys.path.insert(0, "core")',
+      'import wiki_freshness as F',
+      'root = Path(sys.argv[1])',
+      'old = json.loads(sys.argv[2])',
+      'pending = F.record_pending_refresh(root, "docs/source.md", "codex")',
+      'old_ok = F.resolve_pending_refresh(root, pending, old, [old])',
+      'current = {"kind": "file", "path": "docs/source.md", "collection": "proj-docs", **F.snapshot_file(root / "docs/source.md")}',
+      'current_ok = F.resolve_pending_refresh(root, pending, current, [current])',
+      'print(json.dumps({"oldOk": old_ok, "currentOk": current_ok, "rows": F.read_pending_refreshes(root)}))',
+    ].join('\n'), project, JSON.stringify(before)));
+    assert.equal(out.oldOk, false, 'a revision captured before the pending event cannot resolve it');
+    assert.equal(out.currentOk, true);
+    assert.deepEqual(out.rows.map((row) => row.state), ['pending_refresh', 'resolved']);
+    assert.equal(out.rows[1].pendingTs, out.rows[0].ts);
+    assert.equal(out.rows[1].sourceRevision.sha256, sourceRevision(project).sha256);
+  } finally { removeTemp(project); }
+});
+
+test('pending refresh compaction atomically retains only each source latest unresolved event or resolved pair', () => {
+  const project = setup();
+  try {
+    writeFileSync(join(project, 'docs', 'other.md'), '# other\n');
+    const rows = JSON.parse(python([
+      'import json, sys',
+      'from pathlib import Path',
+      'sys.path.insert(0, "core")',
+      'import wiki_freshness as F',
+      'root = Path(sys.argv[1])',
+      'first = F.record_pending_refresh(root, "docs/source.md", "claude")',
+      'rev = {"kind": "file", "path": "docs/source.md", "collection": "proj-docs", **F.snapshot_file(root / "docs/source.md")}',
+      'assert F.resolve_pending_refresh(root, first, rev, [rev])',
+      'latest = F.record_pending_refresh(root, "docs/source.md", "codex")',
+      'other = F.record_pending_refresh(root, "docs/other.md", "hermes")',
+      'other_rev = {"kind": "file", "path": "docs/other.md", "collection": "proj-docs", **F.snapshot_file(root / "docs/other.md")}',
+      'assert F.resolve_pending_refresh(root, other, other_rev, [other_rev])',
+      'assert F.compact_pending_refreshes(root, force=True)',
+      'print(json.dumps(F.read_pending_refreshes(root)))',
+    ].join('\n'), project));
+    assert.equal(rows.length, 3);
+    assert.deepEqual(rows.map((row) => [row.sourcePath, row.state]), [
+      ['docs/source.md', 'pending_refresh'],
+      ['docs/other.md', 'pending_refresh'],
+      ['docs/other.md', 'resolved'],
+    ]);
+    assert.equal(rows[0].engine, 'codex');
+    assert.equal(rows[2].pendingTs, rows[1].ts);
+    assert.equal(existsSync(join(project, '.auto-context', 'compile', 'source-refresh-pending.jsonl.compact.tmp')), false);
+  } finally { removeTemp(project); }
 });

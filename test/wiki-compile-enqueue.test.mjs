@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, realpathSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, realpathSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { removeTemp } from './helpers/temp.mjs';
@@ -49,6 +49,72 @@ function queueLines(project) {
   if (!existsSync(q)) return [];
   return readFileSync(q, 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
 }
+
+function pendingLines(project) {
+  const path = join(project, '.auto-context', 'compile', 'source-refresh-pending.jsonl');
+  if (!existsSync(path)) return [];
+  return readFileSync(path, 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
+}
+
+test('source edit records pending refresh before its source queue job', () => {
+  const project = setupProject();
+  try {
+    const out = runEnqueue(project, {
+      engine: 'codex', tool_input: { file_path: join(project, 'docs', 'source.md') },
+    });
+    assert.equal(out, '');
+    const pending = pendingLines(project);
+    const jobs = queueLines(project);
+    assert.equal(pending.length, 1);
+    assert.equal(pending[0].sourcePath, 'docs/source.md');
+    assert.equal(pending[0].state, 'pending_refresh');
+    assert.equal(pending[0].engine, 'codex');
+    assert.equal(jobs.length, 1);
+    assert.deepEqual(jobs[0].pendingRefresh, {
+      ts: pending[0].ts, engine: pending[0].engine,
+    }, 'the queue carries the exact pending event that causally precedes its source snapshot');
+  } finally {
+    removeTemp(project);
+  }
+});
+
+test('pending append failure keeps the hook silent and does not queue an unguarded source job', () => {
+  const project = setupProject();
+  const outside = join(mkdtempSync(join(tmpdir(), 'qwiki-pending-outside-')), 'ledger.jsonl');
+  try {
+    const oldRevision = JSON.parse(execFileSync('python3', ['-c', [
+      'import json, sys',
+      'from pathlib import Path',
+      'sys.path.insert(0, "core")',
+      'import wiki_freshness as F',
+      'print(json.dumps(F.snapshot_file(Path(sys.argv[1]) / "docs/source.md")))',
+    ].join('\n'), project], { cwd: process.cwd(), encoding: 'utf8' }));
+    mkdirSync(join(project, '.auto-context', 'compile'), { recursive: true });
+    writeFileSync(outside, 'outside-must-not-change\n');
+    symlinkSync(outside, join(project, '.auto-context', 'compile', 'source-refresh-pending.jsonl'));
+    writeFileSync(join(project, 'docs', 'source.md'), '# Changed source\n');
+
+    const out = runEnqueue(project, { tool_input: { file_path: join(project, 'docs', 'source.md') } });
+    assert.equal(out, '', 'hook failures stay silent');
+    assert.deepEqual(queueLines(project), [], 'queueing without durable pending invalidation is unsafe');
+    assert.equal(readFileSync(outside, 'utf8'), 'outside-must-not-change\n');
+
+    const freshness = JSON.parse(execFileSync('python3', ['-c', [
+      'import json, sys',
+      'from pathlib import Path',
+      'sys.path.insert(0, "core")',
+      'import wiki_freshness as F',
+      'root = Path(sys.argv[1])',
+      'revision = json.loads(sys.argv[2])',
+      'card = {"sourceRevisions": [{"kind": "file", "path": "docs/source.md", "collection": "proj-docs", **revision}]}',
+      'print(json.dumps(F.check_card(card, root, [(root / "docs").resolve()])))',
+    ].join('\n'), project, JSON.stringify(oldRevision)], { cwd: process.cwd(), encoding: 'utf8' }));
+    assert.equal(freshness.state, 'stale', 'the final source hash guard remains the safety net');
+  } finally {
+    removeTemp(project);
+    removeTemp(join(outside, '..'));
+  }
+});
 
 test('raw markdown edit enqueues bounded source job silently', () => {
   const project = setupProject();

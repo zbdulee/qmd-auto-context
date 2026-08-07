@@ -23,7 +23,8 @@ import compile_paths as cp
 import config as qmd_config
 import cooldown as qmd_cooldown
 from collection_match import select_collections
-from wiki_compile_enqueue import _queue_lock_path, _safe_queue_path
+from wiki_compile_enqueue import _append_jsonl as append_source_jobs
+from wiki_compile_enqueue import _queue_lock_path, _safe_queue_path, _source_record
 import wiki_compile as wc
 import wiki_freshness
 
@@ -644,7 +645,10 @@ def compile_candidate(root: Path, candidate: dict) -> dict | None:
 
 def _job_key(job: dict) -> tuple:
     source = job.get("source") if isinstance(job.get("source"), dict) else {}
-    return (job.get("cwd", ""), source.get("path", ""), source.get("collection", ""))
+    # The queue itself is project-local.  Including cwd made the same source
+    # appear distinct across macOS' /var -> /private/var spelling (and after a
+    # moved checkout), defeating crash-recovery coalescing.
+    return (source.get("path", ""), source.get("collection", ""))
 
 
 def _parse_ts(value) -> float | None:
@@ -864,10 +868,12 @@ def process_job(root: Path, config: dict, compile_cfg: dict, job: dict) -> tuple
         })
         candidates = candidates[:max_cards]
     failed_compile = False
+    refresh_complete = bool(candidates)
     extracted_qmd = extracted.get("_qmd") if isinstance(extracted, dict) else None
     verify_targets: list[str] = []
     for candidate in candidates:
         if not isinstance(candidate, dict):
+            refresh_complete = False
             continue
         # **검증 근거의 권위는 큐가 갖는다.** `candidate["sources"]`는 extractor(모델)
         # 출력이고, verifier(`wiki_verify_worker.load_sources`)는 목록 **앞에서**
@@ -912,7 +918,17 @@ def process_job(root: Path, config: dict, compile_cfg: dict, job: dict) -> tuple
         result = compile_candidate(root, candidate)
         if not isinstance(result, dict) or result.get("action") in {"rejected", "conflict"}:
             failed_compile = True
+            refresh_complete = False
             continue
+        if result.get("action") not in {"created", "updated"}:
+            refresh_complete = False
+        returned_revisions = result.get("sourceRevisions")
+        if (
+            not isinstance(returned_revisions, list)
+            or len(returned_revisions) != 1
+            or not wiki_freshness.same_revision(returned_revisions[0], source_revision)
+        ):
+            refresh_complete = False
         # wiki_compile은 verify 큐에 실제로 넣었을 때만 이 플래그를 준다(generated 카드 +
         # verify.enabled + 안전한 큐 경로). 카드 수를 세거나 큐 파일 줄 수를 재는 대신
         # 쓰는 쪽의 사실을 그대로 받는다 — 판정 조건을 여기 복제하면 어긋난다.
@@ -923,7 +939,48 @@ def process_job(root: Path, config: dict, compile_cfg: dict, job: dict) -> tuple
     if failed_compile:
         append_jsonl(cpath, bounded_failure("compile_failed", job, "writer_rejected"))
         return False, True, verify_targets
+    token = job.get("pendingRefresh") if isinstance(job.get("pendingRefresh"), dict) else {}
+    if (
+        refresh_complete
+        and isinstance(token.get("ts"), str) and token.get("ts")
+        and isinstance(token.get("engine"), str) and token.get("engine")
+    ):
+        pending = {
+            "state": wiki_freshness.PENDING_REFRESH,
+            "sourcePath": rel,
+            "ts": token.get("ts"),
+            "engine": token.get("engine"),
+        }
+        if not wiki_freshness.resolve_pending_refresh(
+            root, pending, source_revision, [source_revision]
+        ):
+            return True, True, verify_targets
     return True, False, verify_targets
+
+
+def recover_pending_refreshes(root: Path, config: dict, queue: Path) -> int:
+    """Reenqueue latest unresolved sources after either cross-file crash window."""
+    records = []
+    for pending in wiki_freshness.unresolved_pending_refreshes(root):
+        record = _source_record(
+            pending.get("sourcePath"), str(root), str(root), config,
+            pending.get("engine", qmd_config.UNKNOWN_ENGINE),
+        )
+        if record is None:
+            continue
+        # Recovery must not make the same unresolved event perpetually young on
+        # every worker retry.  Its durable pending timestamp owns debounce age.
+        record["ts"] = pending.get("ts")
+        record["pendingRefresh"] = {
+            "ts": pending.get("ts"),
+            "engine": pending.get("engine"),
+        }
+        records.append(record)
+    try:
+        append_source_jobs(queue, records)
+    except OSError:
+        return 0
+    return len(records)
 
 
 def _run_verify_pass(
@@ -974,6 +1031,8 @@ def main():
     queue = _safe_queue_path(root, DEFAULT_SOURCE_QUEUE)
     if queue is None:
         return 0
+
+    recover_pending_refreshes(root, config, queue)
 
     claimed = claim_queue(queue)
     if claimed is None:

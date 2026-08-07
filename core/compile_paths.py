@@ -26,6 +26,7 @@ COMPILE_DIR = ".auto-context/compile"
 # --- 원장/큐 (JSONL) --------------------------------------------------------
 CANDIDATES = "candidates.jsonl"
 SOURCE_QUEUE = "source-queue.jsonl"
+SOURCE_REFRESH_PENDING = "source-refresh-pending.jsonl"
 TOMBSTONES = "tombstones.jsonl"
 MANIFEST = "generated-manifest.jsonl"
 MERGE_NEEDED = "merge-needed.jsonl"
