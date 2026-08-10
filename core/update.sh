@@ -157,6 +157,21 @@ wiki_ineligible_state() {
   printf '%s' "$(_notice_marker wiki-ineligible-state "$1")"
 }
 
+# 같은 worker→main 신호 패턴. 값은 격리된 파일 이름이다.
+# **`-state` 접미사 규칙은 여기에도 그대로 적용된다** — notice 키(`pending-quarantined`)와
+# 경로가 같으면 worker가 값을 쓰는 순간 그것이 TTL marker가 되어 notice가 자기 자신을
+# 억제한다(위 두 주석의 그 실패다).
+#
+# **위 둘과 다른 점 하나**: 이것은 수준(level)이 아니라 **일회성 사건**이다. ineligible은
+# 매 worker run이 다시 세는 값이라 "0이면 notice_clear"로 재무장하지만, 격리는 다시
+# 계산되지 않으므로 (a) worker가 격리할 때 notice marker를 직접 지워 재무장하고
+# (b) 동기 경로가 알린 뒤 상태 파일을 **소비**한다. 그래야 격리 1회당 정확히 1번 알린다
+# — 남겨 두면 TTL마다 같은 사건을 영원히 반복하고, worker 재무장이 없으면 4h 안에 두 번째
+# 격리가 일어났을 때 그 알림이 통째로 삼켜진다.
+pending_quarantine_state() {
+  printf '%s' "$(_notice_marker pending-quarantined-state "$1")"
+}
+
 # orphan 벡터 회수의 1차 트리거. `qmd collection remove`가 **실제로 성공**한 직후에만
 # 부른다 — 그 순간 orphan 벡터가 생긴 것이 확실하므로(qmd 2.5.3 `removeCollection`은
 # 벡터를 지우지 않는다) 비율 임계를 따지지 않고 회수 대상으로 표시한다.
@@ -903,6 +918,27 @@ run_update() {
   # 재컴파일될 때만 돌아온다. 그 절벽 자체는 의도된 정책이지만, **조용하면 안 된다** —
   # 사용자에게는 "어느 날 wiki recall이 그냥 비었다"로 보이고 그것은 버그로 신고된다.
   # 0이 되면 아래 notice_clear가 재무장하므로 복구가 끝나면 알림이 저절로 사라진다.
+  # 손상된 source-refresh-pending.jsonl 격리. 여기(worker)인 이유는 위 (a)~(c)와 같고,
+  # 특히 **recall(blocking hook)은 절대 쓰지 않는다** — 손상 상태의 recall fail-closed
+  # (전 후보 unknown)는 그대로 옳고, 치우는 것은 다음 worker run의 몫이다.
+  # 자기치유가 없으면 permissive recovery ↔ strict resolve 불일치로 worker run당
+  # extractor 1회 + verify 1회가 영구 반복된다(그 판정 근거는 quarantine_corrupt_pending
+  # docstring에 있다). 실패해도 worker를 죽이지 않는다(|| true + 로그).
+  quarantine_json="$(python3 "$(dirname "$0")/wiki_freshness.py" --cwd "$workdir" --quarantine-corrupt-pending --json 2>>"$LOG" || true)"
+  quarantined="$(printf '%s' "$quarantine_json" | python3 -c '
+import json, sys
+try:
+    print(json.loads(sys.stdin.read() or "{}").get("quarantinedTo") or "")
+except Exception:
+    print("")
+' 2>/dev/null || echo "")"
+  if [ -n "$quarantined" ]; then
+    printf '%s' "$quarantined" > "$(pending_quarantine_state "$workdir")" 2>/dev/null || true
+    # 사건 단위 재무장: 이 격리는 TTL에 삼켜지면 안 된다(위 helper 주석).
+    notice_clear pending-quarantined "$workdir"
+    log "PENDING: quarantined corrupt source-refresh ledger -> $quarantined"
+  fi
+
   scan_json="$(python3 "$(dirname "$0")/wiki_source_scan.py" --cwd "$workdir" --json 2>>"$LOG" || true)"
   printf '%s\n' "$scan_json" >> "$LOG"
   ineligible="$(printf '%s' "$scan_json" | python3 -c '
@@ -1014,6 +1050,19 @@ main() {
     notice_once wiki-ineligible "$workdir" "[qmd] wiki 카드 ${wiki_ineligible}장이 원문 지문(sourceRevisions) 없이 남아 있어 recall에 주입되지 않습니다. 해당 원문을 편집하면 자동으로 재생성·재검수되어 돌아옵니다(일괄 재검증은 유료 호출이라 하지 않습니다). 남은 수는 이 알림이 사라지면 0입니다."
   else
     notice_clear wiki-ineligible "$workdir"
+  fi
+
+  # 손상 원장 격리 표면화. 여기서도 파일만 읽는다(판정은 worker가 이미 했다).
+  # 위 ineligible과 달리 `else notice_clear`가 없다 — 재무장은 worker가 격리 시점에
+  # 하고(사건 단위), 알린 뒤에는 상태 파일을 **소비**해 같은 사건을 반복하지 않는다.
+  pending_quarantined=""
+  pending_quarantine_file="$(pending_quarantine_state "$workdir")"
+  if [ -s "$pending_quarantine_file" ]; then
+    pending_quarantined="$(cat "$pending_quarantine_file" 2>/dev/null || true)"
+  fi
+  if [ -n "$pending_quarantined" ]; then
+    notice_once pending-quarantined "$workdir" "[qmd] 손상된 원문 갱신 원장(.auto-context/compile/source-refresh-pending.jsonl)을 격리했습니다 → ${pending_quarantined}. 그대로 두면 같은 문서가 매번 재컴파일·재검수되고(유료 호출) wiki recall이 전부 비어 있습니다. 격리 파일은 진단용으로 남겨 두었고, 원장은 다음 편집에서 새로 만들어집니다. 그 사이 기록된 갱신 대기 표식은 사라졌지만 카드 신선도는 원문 SHA-256 대조로 계속 판정됩니다."
+    rm -f "$pending_quarantine_file" 2>/dev/null || true
   fi
 
   # orphan 벡터 회수 실패 표면화(같은 종점 패턴). 회수는 백그라운드 fork에서 돌아

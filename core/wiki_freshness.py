@@ -371,6 +371,91 @@ def compact_pending_refreshes(root: Path, force: bool = False) -> bool:
     return True
 
 
+CORRUPT_QUARANTINE_PREFIX = "source-refresh-pending.corrupt-"
+
+
+def quarantine_corrupt_pending(root: Path) -> dict | None:
+    """Rename an unparsable pending ledger aside so the lifecycle can restart.
+
+    Corruption here is not an outside accident -- this module's own failure path
+    produces it.  ``_append_event_unlocked`` issues one buffered ``write``; when
+    that write is short and then fails (ENOSPC/EFBIG), the bytes already handed
+    to the kernel stay durable while the caller is told the append failed.  A
+    torn last line is the result (measured: 40 of 153 bytes, no newline).
+
+    From there nothing recovers.  ``unresolved_pending_refreshes`` (permissive)
+    still yields the earlier valid events, so ``recover_pending_refreshes``
+    re-enqueues the source every worker run, while ``resolve_pending_refresh``
+    reads strictly, refuses, and preserves the job -- one extractor call plus
+    one verify call per run, forever (measured: 20 runs -> 20 + 20 calls).
+    Recall is fail-closed at the same time: ``pending_refresh_cutoffs`` gets
+    ``None`` and every card is reported ``unknown``.  ``compact_pending_refreshes``
+    cannot clean up because it reads strictly too, and a fresh
+    ``record_pending_refresh`` only appends after the torn line.
+
+    Renaming (never deleting) keeps the bytes for post-mortem; this repository
+    has repeatedly recorded deletions whose ledger held no body and so could not
+    be explained afterwards.  The ledger is deliberately left ABSENT rather than
+    recreated empty, so the next ``record_pending_refresh`` builds it normally.
+
+    The cost is real and accepted: the pending marks captured at that moment are
+    lost, so a card compiled from an already-edited source can look settled for
+    one cycle.  That is a degradation, not a hole -- the authoritative freshness
+    decision is the ``sourceRevisions`` SHA-256 comparison against the file on
+    disk (``check_card``), which this never touches.
+
+    Quarantining is idempotent: the renamed path no longer resolves as the
+    ledger, so the next call sees an absent (= known-empty) ledger.
+    """
+    try:
+        path = _pending_path(root)
+        if path is None:
+            return None
+        with _pending_lock_path(path).open("a", encoding="utf-8") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            if not path.exists():
+                return None
+            # The judgement is deliberately narrow, because a false positive
+            # *is* the loss this function exists to bound.  Two conditions must
+            # both hold: the bytes are readable, and the strict reader (reused,
+            # never reimplemented) rejects their content.
+            #
+            # `_read_events_unlocked` folds "cannot read" and "read fine but
+            # invalid" into the same `None`, so the read below splits them: an
+            # OSError is a permission/transient filesystem problem and must
+            # never cost a healthy ledger, while a UnicodeError is genuine byte
+            # corruption.  Everything the strict reader accepts is left alone --
+            # notably blank lines and valid pending/resolved pairs, which the
+            # permissive/strict divergence survey showed are NOT corruption
+            # (only torn lines, non-JSON, duplicate JSON keys, schema
+            # violations, invalid/naive timestamps, duplicate event ids, and
+            # causally impossible resolves are).
+            try:
+                path.read_text(encoding="utf-8", errors="strict")
+            except UnicodeError:
+                reason = "invalid_utf8"
+            except OSError:
+                return None
+            else:
+                if _read_events_unlocked(path, strict=True) is not None:
+                    return None
+                reason = "strict_reject"
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            root_path = Path(root).resolve()
+            target = cp.ledger(root_path, "{}{}.jsonl".format(CORRUPT_QUARANTINE_PREFIX, stamp))
+            if target is not None and target.exists():
+                # Never overwrite an earlier quarantine; that would destroy the
+                # very evidence this function preserves.
+                target = cp.ledger(root_path, "{}{}-{}.jsonl".format(
+                    CORRUPT_QUARANTINE_PREFIX, stamp, uuid.uuid4().hex[:8]))
+            if target is None:
+                return None
+            os.replace(path, target)
+    except OSError:
+        return None
+    return {"quarantinedTo": target.name, "reason": reason}
+
+
 def snapshot_bytes(path: Path) -> tuple[dict, bytes] | None:
     """Read one stable file image as ``(revision, bytes)`` or return ``None``.
 
@@ -465,3 +550,33 @@ def check_card(card: dict, project_root: Path, allow_roots: list[Path]) -> dict:
         if state != FRESH:
             return {"state": state, "reason": reason}
     return {"state": FRESH, "checked": len(revisions)}
+
+
+def _main() -> int:
+    """Worker-side maintenance CLI.  Always exits 0 -- never kills the worker.
+
+    `argparse` is imported here, not at module scope: recall imports this module
+    on the blocking hook path and must not pay for a CLI it never runs.
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--cwd", default=os.getcwd())
+    parser.add_argument("--quarantine-corrupt-pending", action="store_true")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args()
+    result = None
+    if args.quarantine_corrupt_pending:
+        try:
+            result = quarantine_corrupt_pending(Path(args.cwd))
+        except Exception:
+            result = None
+    if args.json:
+        print(json.dumps(result or {}, ensure_ascii=False, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+
+    sys.exit(_main())

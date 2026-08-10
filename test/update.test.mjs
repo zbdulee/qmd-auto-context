@@ -1346,3 +1346,57 @@ test('update core: discard ledger cursor resets when ledger shrinks (partial cle
     removeTemp(home);
   }
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 손상 원장 격리의 종점: worker가 격리 → 상태 파일 → 다음 SessionStart가 notice_once.
+// worker는 detached fork라 stdout이 사용자에게 닿지 않는다. 조용하면 유료 반복 호출과
+// 빈 wiki recall이 원인 불명으로 남으므로, 이 알림 자체가 그 기능의 절반이다.
+// ─────────────────────────────────────────────────────────────────────────────
+test('SessionStart: 손상된 원문 갱신 원장을 격리하고 그 사실을 1회 알린다', () => {
+  const work = repoTemp('qmd-pending-quarantine');
+  const bin = join(work, 'bin');
+  const fakeHome = join(work, 'home');
+  try {
+    mkdirSync(bin, { recursive: true });
+    mkdirSync(fakeHome, { recursive: true });
+    mkdirSync(join(work, '.auto-context', 'compile'), { recursive: true });
+    mkdirSync(join(work, '.auto-context', 'wiki'), { recursive: true });
+    mkdirSync(join(work, 'docs'), { recursive: true });
+    writeFileSync(join(work, '.auto-context', 'settings.json'), JSON.stringify({
+      indexing: true,
+      collections: ['proj-docs', 'proj-wiki'],
+      collectionPaths: { 'proj-docs': 'docs', 'proj-wiki': '.auto-context/wiki' },
+      collectionRoles: { 'proj-docs': 'raw', 'proj-wiki': 'wiki' },
+      wikiPath: '.auto-context/wiki',
+    }));
+    // short-write가 남기는 형태 그대로: 정상 1줄 + 개행 없는 잘린 줄.
+    const ledger = join(work, '.auto-context', 'compile', 'source-refresh-pending.jsonl');
+    writeFileSync(ledger, JSON.stringify({
+      eventId: 'e'.repeat(32), ts: '2026-08-01T00:00:00Z', sourcePath: 'docs/a.md',
+      state: 'pending_refresh', engine: 'claude',
+    }) + '\n{"engine": "claude", "eventId": "aaa", "sourceP');
+    writeFileSync(join(bin, 'curl'), '#!/usr/bin/env sh\nexit 1\n', { mode: 0o755 });
+    writeFileSync(join(bin, 'qmd'), '#!/usr/bin/env sh\nexit 0\n', { mode: 0o755 });
+    const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, HOME: fakeHome, QMD_CACHE_DIR: CACHE_DIR };
+    // 절대 경로로 부른다 — 상대 경로면 update.sh 안의 `dirname "$0"` 파생 경로가
+    // workdir 기준으로 풀려 config import가 죽고 sessionStart가 통째로 skip된다.
+    const run = () => execFileSync('bash', [join(process.cwd(), 'core', 'update.sh')], {
+      encoding: 'utf8', input: JSON.stringify({ cwd: work }), env,
+    });
+    const quarantined = () => readdirSync(join(work, '.auto-context', 'compile'))
+      .filter((name) => name.startsWith('source-refresh-pending.corrupt-'));
+
+    // 1회차: 동기 경로는 아직 알릴 것이 없고, detached worker가 격리한다.
+    run();
+    // worker는 비동기라 결과를 기다린다(폴링 — sleep 상수로 고정하면 느린 머신에서 flaky).
+    for (let i = 0; i < 100 && quarantined().length === 0; i += 1) execFileSync('sleep', ['0.05']);
+    assert.equal(quarantined().length, 1, 'worker가 손상 원장을 격리한다');
+    assert.equal(existsSync(ledger), false, '원장은 부재로 남는다(다음 편집이 새로 만든다)');
+
+    // 2회차: 동기 경로가 그 사실을 알린다.
+    assert.match(run(), /격리했습니다 → source-refresh-pending\.corrupt-/, '격리를 표면화한다');
+
+    // 3회차: 같은 사건을 반복하지 않는다(상태 파일을 소비했다).
+    assert.doesNotMatch(run(), /격리했습니다/, '사건 1회당 알림 1회');
+  } finally { removeTemp(work); }
+});

@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { removeTemp } from './helpers/temp.mjs';
@@ -358,5 +358,146 @@ test('pending refresh compaction atomically retains only each source latest unre
     assert.equal(rows[2].pendingEventId, rows[1].eventId);
     assert.doesNotMatch(JSON.stringify(rows), /sha256|sourceRevision|mtimeNs|"size"|content|secret/i);
     assert.equal(existsSync(join(project, '.auto-context', 'compile', 'source-refresh-pending.jsonl.compact.tmp')), false);
+  } finally { removeTemp(project); }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 손상 원장 격리(quarantine). 자기치유가 없으면 permissive recovery ↔ strict resolve
+// 불일치로 worker run당 유료 2회가 영구 반복되고 recall은 전 후보 unknown이 된다.
+// 오탐(정상 원장 격리)은 그 자체가 pending 표식 상실이므로 음성 케이스가 본체다.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const PENDING_REL = ['.auto-context', 'compile', 'source-refresh-pending.jsonl'];
+
+function quarantine(project) {
+  return JSON.parse(python([
+    'import json, sys',
+    'from pathlib import Path',
+    'sys.path.insert(0, "core")',
+    'import wiki_freshness as F',
+    'print(json.dumps(F.quarantine_corrupt_pending(Path(sys.argv[1]))))',
+  ].join('\n'), project));
+}
+
+function writePending(project, text) {
+  mkdirSync(join(project, '.auto-context', 'compile'), { recursive: true });
+  writeFileSync(join(project, ...PENDING_REL), text);
+}
+
+function pendingEvent(overrides = {}) {
+  return JSON.stringify({
+    eventId: 'e'.repeat(32), ts: '2026-08-01T00:00:00Z', sourcePath: 'docs/source.md',
+    state: 'pending_refresh', engine: 'claude', ...overrides,
+  });
+}
+
+function quarantineFiles(project) {
+  const dir = join(project, '.auto-context', 'compile');
+  return existsSync(dir)
+    ? readdirSync(dir).filter((name) => name.startsWith('source-refresh-pending.corrupt-')) : [];
+}
+
+test('격리는 손상 원장을 개명해 치우고 원본 바이트를 남긴다(삭제 아님)', () => {
+  const project = setup();
+  try {
+    // 실측된 발생원 그대로: 정상 1줄 + short-write가 남긴 개행 없는 잘린 줄.
+    const torn = pendingEvent() + '\n{"engine": "claude", "eventId": "aaa", "sourceP';
+    writePending(project, torn);
+    assert.equal(strictPending(project), null, '전제: strict가 거부하는 상태');
+
+    const result = quarantine(project);
+    assert.equal(result.reason, 'strict_reject');
+    assert.match(result.quarantinedTo, /^source-refresh-pending\.corrupt-\d{8}T\d{6}Z\.jsonl$/);
+
+    // 원장은 **부재**로 남긴다(빈 파일 재생성 아님) — 다음 record_pending_refresh가 만든다.
+    assert.equal(existsSync(join(project, ...PENDING_REL)), false, '원장은 부재로 남는다');
+    const kept = join(project, '.auto-context', 'compile', result.quarantinedTo);
+    assert.equal(readFileSync(kept, 'utf8'), torn, '원본 바이트를 그대로 보존한다');
+
+    // 격리 후 strict가 다시 답을 낸다 = recall의 전 후보 unknown이 풀린다.
+    assert.deepEqual(strictPending(project), [], '격리 후 strict는 known-empty');
+  } finally { removeTemp(project); }
+});
+
+test('격리는 멱등이고 앞선 격리 파일을 덮어쓰지 않는다', () => {
+  const project = setup();
+  try {
+    writePending(project, pendingEvent() + '\ngarbage not json\n');
+    const first = quarantine(project);
+    assert.equal(first.reason, 'strict_reject');
+    assert.equal(quarantine(project), null, '두 번째 호출은 할 일이 없다');
+
+    writePending(project, pendingEvent() + '\ngarbage not json\n');
+    const second = quarantine(project);
+    assert.notEqual(second, null);
+    assert.equal(quarantineFiles(project).length, 2, '앞선 증거를 덮어쓰지 않는다');
+  } finally { removeTemp(project); }
+});
+
+test('정상 원장은 격리하지 않는다 — 빈 줄·resolved 쌍·부재·빈 파일', () => {
+  const project = setup();
+  try {
+    // strict가 받아들이는 형태는 전부 손상이 아니다. 오탐 = pending 표식 상실.
+    assert.equal(quarantine(project), null, '원장 부재');
+    writePending(project, '');
+    assert.equal(quarantine(project), null, '빈 파일');
+    writePending(project, pendingEvent() + '\n\n   \n');
+    assert.equal(quarantine(project), null, '빈 줄은 손상이 아니다');
+    writePending(project, [pendingEvent(),
+      JSON.stringify({ pendingEventId: 'e'.repeat(32), ts: '2026-08-01T00:01:00Z', state: 'resolved' }),
+    ].join('\n') + '\n');
+    assert.equal(quarantine(project), null, '정상 pending/resolved 쌍');
+    assert.equal(quarantineFiles(project).length, 0, '아무것도 격리되지 않았다');
+    assert.equal(existsSync(join(project, ...PENDING_REL)), true, '원장이 그대로 남아 있다');
+  } finally { removeTemp(project); }
+});
+
+test('읽을 수 없는 원장은 격리하지 않는다(권한 문제로 정상 원장을 잃지 않는다)', () => {
+  const project = setup();
+  try {
+    writePending(project, pendingEvent() + '\n');
+    const out = python([
+      'import json, sys',
+      'from pathlib import Path',
+      'sys.path.insert(0, "core")',
+      'import wiki_freshness as F',
+      'real_read_text = F.Path.read_text',
+      'def denied(path, *a, **k):',
+      '    if path.name == "source-refresh-pending.jsonl":',
+      '        raise PermissionError("denied read")',
+      '    return real_read_text(path, *a, **k)',
+      'F.Path.read_text = denied',
+      'print(json.dumps(F.quarantine_corrupt_pending(Path(sys.argv[1]))))',
+    ].join('\n'), project);
+    assert.equal(JSON.parse(out), null, 'OSError는 손상이 아니다');
+    assert.equal(existsSync(join(project, ...PENDING_REL)), true);
+  } finally { removeTemp(project); }
+});
+
+test('비UTF8 바이트는 격리한다(내용 손상이므로)', () => {
+  const project = setup();
+  try {
+    mkdirSync(join(project, '.auto-context', 'compile'), { recursive: true });
+    writeFileSync(join(project, ...PENDING_REL),
+      Buffer.concat([Buffer.from(pendingEvent() + '\n'), Buffer.from([0xff, 0xfe]), Buffer.from('\n')]));
+    const result = quarantine(project);
+    assert.equal(result.reason, 'invalid_utf8');
+    assert.equal(existsSync(join(project, ...PENDING_REL)), false);
+  } finally { removeTemp(project); }
+});
+
+test('CLI는 손상 여부와 무관하게 exit 0이다(worker를 죽이지 않는다)', () => {
+  const project = setup();
+  try {
+    writePending(project, pendingEvent() + '\ngarbage\n');
+    const out = execFileSync('python3', ['core/wiki_freshness.py',
+      '--cwd', project, '--quarantine-corrupt-pending', '--json'],
+    { cwd: process.cwd(), encoding: 'utf8' });
+    assert.equal(JSON.parse(out).reason, 'strict_reject');
+    // 할 일이 없어도 exit 0 + 빈 객체.
+    const again = execFileSync('python3', ['core/wiki_freshness.py',
+      '--cwd', project, '--quarantine-corrupt-pending', '--json'],
+    { cwd: process.cwd(), encoding: 'utf8' });
+    assert.deepEqual(JSON.parse(again), {});
   } finally { removeTemp(project); }
 });
