@@ -149,6 +149,14 @@ unregister_failed_state() {
   printf '%s' "$(_notice_marker unregister-failed-state "$1")"
 }
 
+# 같은 worker→main 신호 패턴. 값은 "provenance가 없어 recall이 주입할 수 없는 카드 수"다.
+# **`-state` 접미사 규칙은 여기에도 그대로 적용된다** — notice 키(`wiki-ineligible`)와
+# 경로가 같으면 worker가 값을 쓰는 순간 그것이 TTL marker가 되어 notice가 자기 자신을
+# 억제한다(위 unregister_failed_state 주석의 그 실패다).
+wiki_ineligible_state() {
+  printf '%s' "$(_notice_marker wiki-ineligible-state "$1")"
+}
+
 # orphan 벡터 회수의 1차 트리거. `qmd collection remove`가 **실제로 성공**한 직후에만
 # 부른다 — 그 순간 orphan 벡터가 생긴 것이 확실하므로(qmd 2.5.3 `removeCollection`은
 # 벡터를 지우지 않는다) 비율 임계를 따지지 않고 회수 대상으로 표시한다.
@@ -884,7 +892,32 @@ run_update() {
   #       `qmd update` 실패로 소실 감지가 조용히 건너뛰어진다.
   #   (c) 새 스케줄러를 만들지 않고 기존 배수 경로를 재사용한다.
   # 비용 상한과 순환 커서는 스캐너 안에 있다(compile.sourceScan.maxCardsPerScan).
-  python3 "$(dirname "$0")/wiki_source_scan.py" --cwd "$workdir" >> "$LOG" 2>&1 || true
+  # 같은 run이 "provenance가 없어 recall이 주입할 수 없는 카드 수"도 세어 준다
+  # (`ineligible`). 그 수를 상태 파일로 남기고 **다음 SessionStart의 동기 경로**가
+  # notice_once로 알린다 — unregister-failed와 같은 패턴이고 이유도 같다: worker는
+  # 백그라운드 fork라 stdout이 사용자에게 닿지 않는다.
+  #
+  # 왜 필요한가: source freshness 도입으로 compiler-owned `sourceRevisions`가 없는
+  # **기존 카드 전부**가 한 번에 recall에서 빠진다(라이브 실측 service-engineering
+  # 931/931, ai-proxy 26/26). 자동 재검증은 없으므로 각 카드는 그 원문을 다시 편집해
+  # 재컴파일될 때만 돌아온다. 그 절벽 자체는 의도된 정책이지만, **조용하면 안 된다** —
+  # 사용자에게는 "어느 날 wiki recall이 그냥 비었다"로 보이고 그것은 버그로 신고된다.
+  # 0이 되면 아래 notice_clear가 재무장하므로 복구가 끝나면 알림이 저절로 사라진다.
+  scan_json="$(python3 "$(dirname "$0")/wiki_source_scan.py" --cwd "$workdir" --json 2>>"$LOG" || true)"
+  printf '%s\n' "$scan_json" >> "$LOG"
+  ineligible="$(printf '%s' "$scan_json" | python3 -c '
+import json, sys
+try:
+    print(int(json.loads(sys.stdin.read() or "{}").get("ineligible") or 0))
+except Exception:
+    print(0)
+' 2>/dev/null || echo 0)"
+  ineligible_state="$(wiki_ineligible_state "$workdir")"
+  if [ "${ineligible:-0}" -gt 0 ] 2>/dev/null; then
+    printf '%s' "$ineligible" > "$ineligible_state" 2>/dev/null || true
+  else
+    rm -f "$ineligible_state" 2>/dev/null || true
+  fi
 }
 
 main() {
@@ -965,6 +998,17 @@ main() {
     notice_once unregister-failed "$workdir" "[qmd] role source 컬렉션을 qmd 인덱스에서 제거하지 못했습니다: ${unregister_failed}. 그때까지 이 컬렉션은 계속 색인·검색됩니다. 'qmd collection remove <이름>'을 직접 실행하거나 qmd 데몬 상태를 확인하세요."
   else
     notice_clear unregister-failed "$workdir"
+  fi
+
+  # source freshness 도입으로 provenance 없는 기존 카드가 recall에서 빠진 상태를 알린다.
+  # 여기서도 파일만 읽는다(카드 스캔은 worker가 이미 했다) — hot path 규칙 유지.
+  wiki_ineligible=""
+  wiki_ineligible_file="$(wiki_ineligible_state "$workdir")"
+  [ -s "$wiki_ineligible_file" ] && wiki_ineligible="$(cat "$wiki_ineligible_file" 2>/dev/null || true)"
+  if [ -n "$wiki_ineligible" ]; then
+    notice_once wiki-ineligible "$workdir" "[qmd] wiki 카드 ${wiki_ineligible}장이 원문 지문(sourceRevisions) 없이 남아 있어 recall에 주입되지 않습니다. 해당 원문을 편집하면 자동으로 재생성·재검수되어 돌아옵니다(일괄 재검증은 유료 호출이라 하지 않습니다). 남은 수는 이 알림이 사라지면 0입니다."
+  else
+    notice_clear wiki-ineligible "$workdir"
   fi
 
   # orphan 벡터 회수 실패 표면화(같은 종점 패턴). 회수는 백그라운드 fork에서 돌아

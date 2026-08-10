@@ -82,6 +82,47 @@ def card_paths(wiki_root: Path) -> list[Path]:
     return [page for page in sorted(wiki_root.rglob("*.md")) if page.name not in META_PAGES]
 
 
+def count_recall_ineligible(wiki_root: Path) -> dict:
+    """recall이 주입할 수 없는 카드 수를 센다 — **순환 커서를 쓰지 않고 전량**을 본다.
+
+    소실 감지(`run`)는 창을 나눠 여러 회차로 덮어도 되지만 이 값은 사용자에게 보여 줄
+    **총량**이라 부분 집계면 틀린 수를 말하게 된다. 전량이어도 frontmatter만 읽으므로
+    라이브 931장 실측 113ms(0.12ms/장)이고, 이 함수는 blocking hook이 아니라 update
+    worker(백그라운드 fork)에서만 호출된다.
+
+    세는 대상은 `recall.is_auto_trusted_card`가 거부하는 카드다 — 판정을 여기서
+    재구현하지 않는다(갈리면 "알림은 0인데 recall은 계속 비어 있다"가 된다).
+    freshness(원문 SHA 비교)는 **일부러 보지 않는다**: 그것은 원문을 읽어야 하고
+    시점에 따라 변하는 값이라 "복구 대기 총량"이라는 이 지표의 의미를 흐린다.
+    provenance가 없어 **구조적으로** 주입 불가한 카드만이 대상이다.
+    """
+    import recall  # 지연 import — worker 전용 경로이고 순환 참조를 피한다
+
+    result = {"cards": 0, "ineligible": 0}
+    for page in card_paths(wiki_root):
+        result["cards"] += 1
+        try:
+            with open(page, "r", encoding="utf-8", errors="replace") as handle:
+                # 소실 스캔과 **같은 읽기 창**을 쓴다 — 같은 개념(frontmatter만 읽는다)에
+                # 상수를 두 개 두면 한쪽만 조정돼 두 집계가 다른 카드를 본다.
+                head = handle.read(FRONTMATTER_READ_LIMIT)
+        except OSError:
+            # 읽지 못한 카드는 recall도 주입하지 못한다(fail-closed와 같은 방향).
+            result["ineligible"] += 1
+            continue
+        if not head.startswith("---"):
+            result["ineligible"] += 1
+            continue
+        end = head.find("\n---", 3)
+        meta = recall.parse_frontmatter_scalars(head[4:end] if end > 0 else head)
+        # `sourceRevisions`는 블록 시퀀스라 scalar 파서가 값을 주지 않는다. 여기서 필요한
+        # 것은 "비어 있지 않은가" 하나뿐이므로 헤더 존재만 본다(항목 파싱은 recall이 한다).
+        meta["sourceRevisions"] = ["present"] if "\nsourceRevisions:\n" in head else []
+        if not recall.is_auto_trusted_card(meta):
+            result["ineligible"] += 1
+    return result
+
+
 def rotate(rels: list[str], cursor: str, limit: int) -> list[str]:
     """커서 **뒤**부터 limit개. 목록 끝에서 처음으로 감싸므로 여러 회차에 전량이 덮인다.
 
@@ -108,7 +149,8 @@ def rotate(rels: list[str], cursor: str, limit: int) -> list[str]:
 
 
 def run(cwd: str) -> dict:
-    result = {"cards": 0, "examined": 0, "detected": 0, "recorded": 0, "resolved": 0}
+    result = {"cards": 0, "examined": 0, "detected": 0, "recorded": 0, "resolved": 0,
+              "ineligible": 0}
     found = qmd_config.find_project_config(cwd)
     root = Path(found["projectRoot"]).resolve()
     config = found["config"]
@@ -141,6 +183,11 @@ def run(cwd: str) -> dict:
     pages = card_paths(wiki_root)
     rels = [page.relative_to(wiki_root).as_posix() for page in pages]
     result["cards"] = len(rels)
+    # provenance 없는 카드 수를 같은 run에서 함께 센다. 여기 붙이는 이유는 이 함수가
+    # 이미 worker 전용이고 카드 목록을 방금 만들었기 때문이다(새 스케줄러 금지).
+    # 이 값의 종점은 update.sh의 SessionStart notice다 — 0이 되면 notice_clear로
+    # 조용해지므로, 복구가 끝나면 알림이 저절로 사라진다.
+    result["ineligible"] = count_recall_ineligible(wiki_root)["ineligible"]
     project_key = qmd_sync.project_key(str(root), found.get("configPath"))
     state = qmd_sync.read_state(cursor_path(project_key))
     cursor = state.get("cursor") if isinstance(state.get("cursor"), str) else ""
@@ -198,7 +245,7 @@ def run(cwd: str) -> dict:
     log(
         f"cards={result['cards']} examined={result['examined']} "
         f"detected={result['detected']} recorded={result['recorded']} "
-        f"resolved={result['resolved']} cursor={last}"
+        f"resolved={result['resolved']} ineligible={result['ineligible']} cursor={last}"
     )
     return result
 

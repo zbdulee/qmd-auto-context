@@ -919,3 +919,38 @@ test('index.md 쓰기 실패에서 누적 인덱스가 온전히 남는다 / 정
       .split('\n').filter((l) => l.includes('created')).length, 3);
   } finally { removeTemp(dir); }
 });
+
+// `ineligible`은 소실 감지와 **다른 지표**다: "provenance가 없어 recall이 구조적으로
+// 주입할 수 없는 카드 수"이고, 종점은 update.sh의 SessionStart notice다. 이 값이 필요한
+// 이유는 source freshness 도입으로 기존 카드가 **한 번에** 전부 recall에서 빠지기 때문이다
+// (라이브 실측 service-engineering 931/931, ai-proxy 26/26). 절벽 자체는 의도된 정책이지만
+// 조용하면 "어느 날 wiki recall이 그냥 비었다"로 보여 버그로 신고된다.
+test('source scan: ineligible은 provenance 없는 카드를 recall과 같은 판정으로 센다', () => {
+  const dir = setupProject();
+  try {
+    // 신뢰 조건 3개(verified · qmd 소유 · sourceRevisions)를 하나씩 깨뜨린다.
+    writeCard(dir, 'entities/ok.md', { status: 'verified' });                       // 적격
+    writeCard(dir, 'entities/no-rev.md', { status: 'verified', sourceRevisions: false }); // 지문 없음
+    writeCard(dir, 'entities/draft.md', { status: 'generated' });                   // 미검수
+    writeCard(dir, 'entities/foreign.md', { status: 'verified', createdBy: 'human' }); // 외부 작성
+    const r = runScan(dir);
+    assert.equal(r.cards, 4);
+    assert.equal(r.ineligible, 3, 'ok.md만 적격이어야 한다');
+  } finally { removeTemp(dir); }
+});
+
+// 소실 감지는 순환 커서로 창을 나눠 여러 회차에 덮지만, `ineligible`은 사용자에게 보여 줄
+// **총량**이라 같은 창에 갇히면 틀린 수를 말하게 된다("3장 남았습니다"라고 했는데 실제로는
+// 300장인 상태). 전량 집계라는 성질을 여기서 못박는다 — frontmatter만 읽으므로
+// 라이브 931장 실측 113ms이고 이 경로는 blocking hook이 아니라 update worker다.
+test('source scan: ineligible은 순환 커서 창이 아니라 전량을 센다', () => {
+  const dir = setupProject();
+  try {
+    for (let i = 0; i < 5; i += 1) {
+      writeCard(dir, `entities/c${i}.md`, { status: 'generated' });
+    }
+    const r = runScan(dir, { QMD_SOURCE_SCAN_MAX: '1' });
+    assert.equal(r.examined, 1, '소실 감지는 창(1장)만 본다');
+    assert.equal(r.ineligible, 5, 'ineligible은 창과 무관하게 전량이다');
+  } finally { removeTemp(dir); }
+});
