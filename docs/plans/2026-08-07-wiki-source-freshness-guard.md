@@ -22,6 +22,40 @@
 - P0는 auxiliary `.env`를 `sourceRevisions`에 넣지 않으며, extractor/verifier에 secret file 원문이나 hash를 전달하지 않는다. `prod.env` 같은 current-state 보조 evidence는 allowlist·redaction을 갖춘 P1 structured-evidence adapter에서만 다룬다.
 - 이 문서는 P0 source freshness 범위다. claim 유형별 보조 source resolver, live evidence TTL, SessionStart의 전체 queue/cooldown notice는 후속 P1 문서로 분리한다.
 
+### Task 0: 이 프로젝트의 extractor reasoning-effort policy를 명시한다
+
+**Files:**
+
+- Modify: `.auto-context/settings.json`
+- Modify: `test/config.test.mjs`
+
+**Step 1: 실패하는 project-config test를 작성한다**
+
+이 저장소의 `.auto-context/settings.json`을 실제로 읽어 effective compile 설정을 정규화하고,
+`reasoningEffort`가 다음 policy를 명시하는지 검증한다.
+
+```javascript
+assert.deepEqual(cfg.compile.reasoningEffort, {
+  generation: 'low', verify: 'medium', semanticDedup: 'medium', engines: {},
+});
+```
+
+생성 경로의 delta-only 정책은 유지한다. 이 작업은 이 dogfood 프로젝트가 기본값 변경과
+무관하게 low generation policy를 의도적으로 고정한다는 선언이며, 전역 default를 바꾸지 않는다.
+
+**Step 2: 실패를 확인하고 최소 변경을 구현한다**
+
+Run: `node --test test/config.test.mjs`
+
+`compile.reasoningEffort`에 위 policy를 명시한 뒤 같은 명령이 통과해야 한다.
+
+**Step 3: 커밋한다**
+
+```bash
+git add .auto-context/settings.json test/config.test.mjs
+git commit -m "chore(config): pin wiki extractor effort policy"
+```
+
 ### Task 1: Source revision SSOT와 결정적 단위 테스트를 만든다
 
 **Files:**
@@ -152,7 +186,9 @@ git commit -m "feat(wiki): persist and verify source revisions"
 - Modify: `core/wiki_compile_enqueue.py:196-213`
 - Modify: `core/wiki_compile.py` (성공적인 compile이 자기 source의 pending event보다 새 revision임을 판정할 수 있게 필요한 metadata만 기록)
 - Modify: `core/compile_paths.py`
+- Modify: `core/wiki_compile_worker.py` (모든 kick과 SessionStart flush에서 pending source recovery)
 - Modify: `test/wiki-compile-enqueue.test.mjs`
+- Modify: `test/wiki-compile-worker.test.mjs`
 - Modify: `test/wiki-freshness.test.mjs`
 
 **Step 1: 실패하는 hook-order 테스트를 작성한다**
@@ -205,8 +241,14 @@ git commit -m "feat(wiki): mark edited sources pending refresh"
 **Files:**
 
 - Modify: `core/recall.py:24-31,641-755,1877-2120,2249-2303`
+- Modify: `core/wiki_freshness.py` (strict pending-ledger read state for recall)
 - Modify: `test/recall.test.mjs`
 - Modify: `test/integration.test.mjs`
+- Modify: `test/wiki-freshness.test.mjs` (strict pending-ledger failures)
+- Modify: `test/recall-injection-sources.test.mjs` (trusted-source fixture retrofit)
+- Modify: `test/recall-rank-fallback.test.mjs` (trusted-source fixture retrofit)
+- Modify: `test/recall-shadow-query.test.mjs` (trusted-source fixture retrofit)
+- Modify: `test/recall-wiki-path.test.mjs` (trusted-source fixture retrofit)
 
 **Step 1: 실패하는 selection 테스트를 작성한다**
 
@@ -274,6 +316,8 @@ git commit -m "feat(recall): exclude stale wiki source revisions"
 - Modify: `core/wiki_verify_worker.py:520-535,646-652`
 - Modify: `core/wiki_source_missing.py`
 - Modify: `core/wiki_source_repair.py`
+- Modify: `core/wiki_dedup_resolve.py` (remove stale wiki-review comment)
+- Modify: `core/update.sh` (remove SessionStart human merge-review notice/spawn)
 - Delete: `core/wiki_review.py`
 - Delete: `skills/wiki-review/SKILL.md`
 - Delete: `skills/wiki-review/scripts/wiki-review.sh`
@@ -281,7 +325,12 @@ git commit -m "feat(recall): exclude stale wiki source revisions"
 - Modify: `.claude-plugin/plugin.json`
 - Modify: `.claude-plugin/marketplace.json`
 - Modify: `.codex-plugin/plugin.json`
+- Modify: `CLAUDE.md` (remove active human-review guidance)
 - Modify: `docs/architecture.md`
+- Modify: `docs/settings.md` (remove active human-review guidance)
+- Modify: `agents/wiki-dedup-resolver.md` (remove stale wiki-review reference)
+- Modify: `skills/wiki-dedup/SKILL.md` (remove stale wiki-review reference)
+- Modify: `skills/wiki-source-repair/SKILL.md` (remove reviewed/wiki-review guidance)
 - Modify: `test/recall.test.mjs`
 - Modify: `test/recall-wiki-path.test.mjs`
 - Modify: `test/recall-shadow-query.test.mjs`
@@ -295,6 +344,7 @@ git commit -m "feat(recall): exclude stale wiki source revisions"
 - Modify: `test/compile-write-guards.test.mjs`
 - Modify: `test/wiki-source-missing.test.mjs`
 - Modify: `test/manual-skills.test.mjs`
+- Modify: `test/update.test.mjs`
 
 **Interfaces:**
 
