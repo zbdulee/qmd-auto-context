@@ -139,6 +139,14 @@ compile의 활성 여부와 쓰기 정책을 **한 값**으로 정합니다. 예
 `sourceRevisions`가 있을 때만 원문 revision을 엄격히 대조한 뒤 주입합니다.
 원문이 바뀌면 compile cooldown·queue 지연·hook 실패와 무관하게 그 카드는 주입되지 않습니다.
 
+**이 검사가 보장하는 것과 보장하지 않는 것을 구분하십시오.** `verified` + 신선도 통과는
+**"원문이 컴파일 시점 이후 바뀌지 않았다"**는 뜻이며, **"지금 이 카드에 적힌 내용이
+검증됐다"는 뜻이 아닙니다.** 지문(`sourceRevisions`)은 원문 파일에만 걸려 있고 카드 파일
+자체에는 무결성 검사가 없습니다 — 원문을 그대로 둔 채 카드 본문만 고치면 그 내용이
+`verified` 표시를 단 채 그대로 주입됩니다. 카드를 손으로 편집하거나 중복 카드를 병합할 때는
+이 점을 알고 하십시오(고유 사실을 `qmd:auto:end` 밖에 두라는 권고는 **소스 변경에 의한
+재생성으로부터 보존**하기 위한 것이지, 그 내용이 검증된다는 뜻이 아닙니다).
+
 provenance 없는 legacy `verified`는 `unknown`으로 fail-closed drop됩니다. 릴리스 유지보수의
 명시적 offline migration은 이런 qmd 생성 카드와 `reviewed`·`canon`·`manual` 상태 카드를
 `generated`으로 정규화하고 `reviewed:` 및 검수 proof 필드를 제거합니다. 다음 source edit와
