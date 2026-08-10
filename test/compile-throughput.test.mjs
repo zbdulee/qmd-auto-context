@@ -196,13 +196,13 @@ test('verify keeps its standing per-run cap when nothing was produced this run',
     writeFileSync(join(dir, rel), [
       '---', `title: "Card ${name}"`, 'status: generated', 'createdBy: qmd-auto-context',
       'reviewed: false', '---', '',
-      '<!-- qmd:auto:start id="main" sourceHash="h1" -->', '## Summary',
+      '<!-- qmd:auto:start id="main" sourceHash="d1" -->', '## Summary',
       `Durable claim: card ${name} cites markdown.`, '<!-- qmd:auto:end -->', '',
     ].join('\n'));
     jobs.push(JSON.stringify({
       ts: '2026-07-30T00:00:00Z', targetPath: rel,
       sources: [{ kind: 'file', path: `docs/${name}.md`, collection: 'proj-docs' }],
-      sourceHash: 'h1', engine: 'claude', trigger: 'post_tool_source',
+      sourceHash: 'd1', engine: 'claude', trigger: 'post_tool_source',
     }));
   }
   writeFileSync(join(dir, '.auto-context', 'compile', 'verify-queue.jsonl'), jobs.join('\n') + '\n');
@@ -317,13 +317,13 @@ function seedBacklogCard(dir, name) {
   writeFileSync(join(dir, rel), [
     '---', `title: "Backlog ${name}"`, 'status: generated', 'createdBy: qmd-auto-context',
     'reviewed: false', '---', '',
-    '<!-- qmd:auto:start id="main" sourceHash="h1" -->', '## Summary',
+    '<!-- qmd:auto:start id="main" sourceHash="d1" -->', '## Summary',
     `Durable claim: backlog ${name} cites markdown.`, '<!-- qmd:auto:end -->', '',
   ].join('\n'));
   return JSON.stringify({
     ts: '2026-07-01T00:00:00Z', targetPath: rel,
     sources: [{ kind: 'file', path: `docs/backlog-${name}.md`, collection: 'proj-docs' }],
-    sourceHash: 'h1', engine: 'claude', trigger: 'post_tool_source',
+    sourceHash: 'd1', engine: 'claude', trigger: 'post_tool_source',
   });
 }
 

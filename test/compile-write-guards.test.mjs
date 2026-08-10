@@ -175,13 +175,13 @@ print(json.dumps({'verdict': 'pass', 'claims': [], 'reasons': []}))
   writeFileSync(join(dir, cardRel), [
     '---', 'title: "Stamp Card"', 'status: generated', 'createdBy: qmd-auto-context',
     'reviewed: false', '---', '',
-    '<!-- qmd:auto:start id="main" sourceHash="h1" -->', '## Summary',
+    '<!-- qmd:auto:start id="main" sourceHash="d1" -->', '## Summary',
     'Durable claim: the source cites markdown.', '<!-- qmd:auto:end -->', '',
   ].join('\n'));
   writeFileSync(join(dir, '.auto-context', 'compile', 'verify-queue.jsonl'), JSON.stringify({
     ts: '2026-07-30T00:00:00Z', targetPath: cardRel,
     sources: [{ kind: 'file', path: 'docs/source.md', collection: 'proj-docs' }],
-    sourceHash: 'h1', engine: 'claude', trigger: 'post_tool_source',
+    sourceHash: 'd1', engine: 'claude', trigger: 'post_tool_source',
   }) + '\n');
   try {
     chmodSync(cardDir, 0o500);  // readable + executable, not writable -> atomic write fails
@@ -253,13 +253,13 @@ print(json.dumps({'verdict': ${JSON.stringify(verdict)}, 'claims': [], 'reasons'
   writeFileSync(join(dir, cardRel), [
     '---', 'title: "Ledger Card"', 'status: generated', 'createdBy: qmd-auto-context',
     'reviewed: false', '---', '',
-    '<!-- qmd:auto:start id="main" sourceHash="h1" -->', '## Summary',
+    '<!-- qmd:auto:start id="main" sourceHash="d1" -->', '## Summary',
     'Durable claim: the card says one thing.', '<!-- qmd:auto:end -->', '',
   ].join('\n'));
   writeFileSync(join(dir, '.auto-context', 'compile', 'verify-queue.jsonl'), JSON.stringify({
     ts: '2026-07-30T00:00:00Z', targetPath: cardRel,
     sources: [{ kind: 'file', path: 'docs/source.md', collection: 'proj-docs' }],
-    sourceHash: 'h1', engine: 'claude', trigger: 'post_tool_source',
+    sourceHash: 'd1', engine: 'claude', trigger: 'post_tool_source',
   }) + '\n');
   return { dir, cardRel, callLog };
 }
@@ -547,7 +547,7 @@ print(json.dumps([s['path'] for s in loaded]))
 function migrationCard(frontmatter, body = 'Durable migrated card body.') {
   return [
     '---', frontmatter, '---', '',
-    '<!-- qmd:auto:start id="main" sourceHash="legacy" -->',
+    '<!-- qmd:auto:start id="main" sourceHash="1e6ac4" -->',
     '## Summary', body, '<!-- qmd:auto:end -->', '',
   ].join('\n');
 }

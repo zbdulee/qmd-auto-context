@@ -568,6 +568,34 @@ def source_freshness(root: Path, config: dict, job: dict) -> dict | None:
         {"sourceRevisions": revisions}, root, wsm.allow_roots_of(config))
 
 
+def card_changed_during_verify(
+    job_hash: str, fresh_meta: dict, fresh_status: str, fresh_hash: str,
+) -> bool:
+    """검수 시작 이후 카드가 바뀌었는가 — 잠금 아래 재확인 규칙의 SSOT.
+
+    **`fresh_hash`가 비어 있으면 "바뀌었다"로 본다.** 예전 조건은
+    `job_hash and fresh_hash and job_hash != fresh_hash`라, auto 블록이 없어
+    `card_state`가 `""`를 돌려주면 대조를 통째로 건너뛰었다 — 이 가드가 막으려는 바로 그
+    상황에서 fail-open했다. 실해: 검수 LLM 호출(수십 초) 동안 카드가 `status: generated` +
+    `createdBy: qmd-auto-context`만 남긴 **다른 본문**으로 교체되고 auto 블록이 빠지면
+    (dedup consolidation·사람 편집이 정확히 그 모양이다) 옛 본문에 대한 verdict가 새 본문에
+    적용된다. `pass`면 검증된 적 없는 내용에 `verified`가 찍히고, `fail`이면 방금 사람이 쓴
+    본문이 삭제된다(삭제 원장에 본문이 없어 복구 불가).
+
+    `markdown_page`가 auto 블록을 항상 쓰므로 정상 카드는 영향이 없고, `job_hash`가 빈
+    잡(레거시·수동 경로)은 예전처럼 해시 대조 없이 status/creator만 본다.
+
+    함수로 빼낸 이유는 테스트가 이 규칙을 **재구현하지 않게** 하기 위해서다 — 조건이
+    호출부에 인라인이면 테스트는 같은 식을 다시 적을 수밖에 없고, 그러면 규칙이 바뀌어도
+    둘이 나란히 틀린다.
+    """
+    return (
+        fresh_status != "generated"
+        or fresh_meta.get("createdBy") != "qmd-auto-context"
+        or bool(job_hash and job_hash != fresh_hash)
+    )
+
+
 def apply_verify_verdict_locked(
     root: Path, config: dict, compile_cfg: dict, vcfg: dict, job: dict,
     target: Path, job_hash: str, engine: str, verified_mode: str,
@@ -576,11 +604,7 @@ def apply_verify_verdict_locked(
 ) -> tuple[bool, bool]:
     """Re-read, decide, and mutate one card while CARD_WRITE_LOCK is held."""
     _, fresh_meta, fresh_status, fresh_hash = card_state(target)
-    if (
-        fresh_status != "generated"
-        or fresh_meta.get("createdBy") != "qmd-auto-context"
-        or (job_hash and fresh_hash and job_hash != fresh_hash)
-    ):
+    if card_changed_during_verify(job_hash, fresh_meta, fresh_status, fresh_hash):
         log_verdict(log_path, {
             **base_record(job), **provenance,
             "result": "skipped", "reason": "changed_during_verify",

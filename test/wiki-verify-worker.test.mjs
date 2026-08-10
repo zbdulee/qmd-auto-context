@@ -1214,3 +1214,46 @@ test('만료값 상한 클램프: 오염된 만료값은 후보를 영구 배제
     assert.match(readFileSync(join(project, CARD_REL), 'utf8'), /^status: verified$/m);
   } finally { removeTemp(project); }
 });
+
+// 검수는 host CLI 호출(수십 초) 뒤 잠금을 잡고 카드를 다시 읽어 "그 사이 바뀌었는가"를
+// 확인한 다음에야 stamp/delete 한다. 그 재확인이 뚫리면 **옛 본문에 대한 verdict가 새
+// 본문에 적용된다** — pass면 검증된 적 없는 내용에 `verified`가 찍히고, fail이면 방금
+// 사람이 쓴 본문이 삭제된다(삭제 원장에 본문이 없어 복구 불가). 알려진 한계인 "카드 본문
+// 해시 미결속"보다 한 단계 나쁘다: 그쪽은 배지가 낡는 것이고 이쪽은 가드가 있는데 우회된다.
+//
+// 회귀의 실제 형태: 조건이 `job_hash and fresh_hash and job_hash != fresh_hash`였다.
+// auto 블록이 없으면 `card_state`가 `""`를 돌려주므로 대조를 건너뛰어 fail-open했다.
+// dedup consolidation·사람 편집이 정확히 "본문 교체 + 블록 제거" 모양이다.
+function changedDuringVerify({ jobHash, status = 'generated', createdBy = 'qmd-auto-context', freshHash }) {
+  const py = `import json, sys
+sys.path.insert(0, "core")
+import wiki_verify_worker as vw
+args = json.loads(sys.argv[1])
+print(json.dumps(vw.card_changed_during_verify(
+    args["jobHash"], {"createdBy": args["createdBy"]}, args["status"], args["freshHash"])))`;
+  return JSON.parse(execFileSync('python3', ['-c', py, JSON.stringify({ jobHash, status, createdBy, freshHash })], {
+    cwd: process.cwd(), encoding: 'utf8',
+  }));
+}
+
+test('verify: 검수 중 auto 블록이 사라진 카드는 "변경됨"으로 차단한다', () => {
+  // 정상 경로 — 아무것도 안 바뀌었으면 통과해야 한다(가드가 과하게 잠기면 검수가 영영 안 된다).
+  assert.equal(changedDuringVerify({ jobHash: 'aaaa1111', freshHash: 'aaaa1111' }), false);
+  // 블록이 남아 해시가 다른 경우는 예전에도 잡혔다.
+  assert.equal(changedDuringVerify({ jobHash: 'aaaa1111', freshHash: 'bbbb2222' }), true);
+  // 이 커밋이 고치는 자리: 블록이 통째로 사라져 해시가 빈 경우.
+  assert.equal(changedDuringVerify({ jobHash: 'aaaa1111', freshHash: '' }), true,
+    'auto 블록 제거로 해시 대조를 건너뛰면 옛 verdict가 새 본문에 적용된다');
+  // status·작성자 축은 그대로여야 한다.
+  assert.equal(changedDuringVerify({ jobHash: 'aaaa1111', freshHash: 'aaaa1111', status: 'verified' }), true);
+  assert.equal(changedDuringVerify({ jobHash: 'aaaa1111', freshHash: 'aaaa1111', createdBy: 'human' }), true);
+});
+
+test('verify: job_hash가 없는 레거시 잡은 해시 대조 없이 기존대로 통과한다', () => {
+  // 0.x 잡·수동 경로에는 `sourceHash`가 없다. 여기까지 잠그면 그 잡들이 영구 skip되어
+  // 카드가 `generated`로 남고 recallVerifiedOnly 기본값 아래에서 영원히 보이지 않는다.
+  assert.equal(changedDuringVerify({ jobHash: '', freshHash: '' }), false);
+  assert.equal(changedDuringVerify({ jobHash: '', freshHash: 'anything' }), false);
+  assert.equal(changedDuringVerify({ jobHash: '', freshHash: '', status: 'verified' }), true,
+    '해시를 못 봐도 status 축은 여전히 막는다');
+});
