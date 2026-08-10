@@ -1402,16 +1402,30 @@ def format_context(results: list[dict], prefix_style: str = "full", collection_r
         title = sanitize_inline(result.get("_wiki_title") or result.get("title", ""))
         collection = result.get("_collection", "") or qmd_uri_to_collection(uri)
 
+        # wiki 여부는 tag를 재작성하기 **전에** 한 번 잡는다 — 아래에서 `tag`가 덮어써지므로
+        # 나중에 `tag == "wiki"`로 되물으면 답이 달라진다. 판정 SSOT(`is_wiki_collection`)를
+        # 쓰지 않는 이유는 호출부 주석대로다: 여기 오는 map은 표시용 tag map이고 정규화하면
+        # 미설정 컬렉션의 주입 바이트가 바뀐다. 그래서 tag 줄과 **같은 식**을 공유한다.
+        is_wiki_tag = collection_roles.get(collection, collection) == "wiki"
         tag = collection_roles.get(collection, collection)
-        if tag == "wiki" and result.get("_wiki_status"):
+        if is_wiki_tag and result.get("_wiki_status"):
             tag = f"wiki:{result['_wiki_status']}"
         if collection not in collection_roles and prefix_style == "tag" and collection:
             tag = collection.rsplit("-", 1)[-1]
         prefix = f"[{tag}] " if tag else ""
 
         # Untrusted automatic-card badge: never frame an excluded draft as evidence.
+        #
+        # **`is_wiki_tag`가 반드시 함께 걸려야 한다.** `_wiki_*`는 recall이 결과 dict에
+        # 붙이는 내부 주석인데 그 dict는 데몬/fixture JSON에서 그대로 온다 — 예약 키가 섞여
+        # 오면 지워지지 않는다. wiki role 결과는 `annotate_wiki_result`가 두 키를 무조건
+        # 덮어써 위조가 파괴되지만(실측: `_wiki_trusted: true` 주입 → 여전히 drop), **raw
+        # role 결과는 annotate를 건너뛰어 주입된 값이 살아남는다.** 그러면 classify는
+        # wiki일 때만 trust를 보므로 eligible로 통과시키고, 여기서 role을 안 보면 평범한
+        # 원문에 `(미검수)`와 UNREVIEWED_GUIDE가 붙는다(실측 재현). 즉 이 조건은 두 줄 위
+        # tag 판정과 **같은 술어여야 하고**, 갈려 있던 것이 결함이었다.
         suffix = ""
-        if result.get("_wiki_status") and not result.get("_wiki_trusted", False):
+        if is_wiki_tag and result.get("_wiki_status") and not result.get("_wiki_trusted", False):
             suffix = " (미검수)"
             has_untrusted = True
 
