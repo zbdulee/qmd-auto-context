@@ -1002,9 +1002,14 @@ main() {
 
   # source freshness 도입으로 provenance 없는 기존 카드가 recall에서 빠진 상태를 알린다.
   # 여기서도 파일만 읽는다(카드 스캔은 worker가 이미 했다) — hot path 규칙 유지.
+  # `[ -s f ] && v=$(cat f)` 대신 명시적 if를 쓴다 — `set -e` 아래에서 AND 리스트의
+  # 실패가 어떻게 전파되는지에 기대지 않는다(이 자리는 뒤에 다른 notice가 이어지므로
+  # 조용한 조기 종료가 곧 "그 뒤 알림이 전부 사라짐"이다).
   wiki_ineligible=""
   wiki_ineligible_file="$(wiki_ineligible_state "$workdir")"
-  [ -s "$wiki_ineligible_file" ] && wiki_ineligible="$(cat "$wiki_ineligible_file" 2>/dev/null || true)"
+  if [ -s "$wiki_ineligible_file" ]; then
+    wiki_ineligible="$(cat "$wiki_ineligible_file" 2>/dev/null || true)"
+  fi
   if [ -n "$wiki_ineligible" ]; then
     notice_once wiki-ineligible "$workdir" "[qmd] wiki 카드 ${wiki_ineligible}장이 원문 지문(sourceRevisions) 없이 남아 있어 recall에 주입되지 않습니다. 해당 원문을 편집하면 자동으로 재생성·재검수되어 돌아옵니다(일괄 재검증은 유료 호출이라 하지 않습니다). 남은 수는 이 알림이 사라지면 0입니다."
   else

@@ -411,10 +411,16 @@ test('SessionStart: 대기 건수를 1줄 표면화하고 TTL로 억제, 해소�
     mkdirSync(bin, { recursive: true });
     mkdirSync(fakeHome, { recursive: true });
     mkdirSync(join(work, '.auto-context', 'compile'), { recursive: true });
-    // Metadata-only cards back the trust count. Keep `sources` empty so the
-    // detached source scanner cannot rewrite this test's synthetic ledger.
-    writeCard(work, 'entities/a.md', { status: 'verified' });
-    writeCard(work, 'entities/b.md', { status: 'generated' });
+    // 합성 원장과 **카드의 실제 소스 상태를 일치**시킨다. 예전 주석은 "sources를 비워 두면
+    // detached 스캐너가 이 원장을 못 건드린다"였는데 가정이 정반대였다 — 소스 항목 0은
+    // "전부 소실"이 아니라 판정 불가라, 스캐너는 `detected`를 취소하는 `resolved` 행을
+    // 매 run append한다. 그래서 이 테스트는 detached worker와 동기 notice 읽기 사이의
+    // 레이스를 이기고 있었을 뿐이고, 동기 경로에 latency가 조금만 붙으면(측정: worker가
+    // 47ms 승) `pending=0`이 되어 notice 대신 notice_clear가 돌고 출력이 빈다.
+    // 스캐너 동작은 옳다(영구 대기·거짓 알림을 막는 전이). 픽스처를 물리적으로 모순 없게
+    // 만들어 스캐너 판정이 매 단계 원장과 같아지게 한다.
+    writeCard(work, 'entities/a.md', { status: 'verified', sources: [fileSource('docs/x.md')] });
+    writeCard(work, 'entities/b.md', { status: 'generated', sources: [fileSource('docs/y.md')] });
     writeFileSync(join(work, LEDGER_REL), [
       JSON.stringify({ targetPath: '.auto-context/wiki/entities/a.md', action: 'detected', status: 'verified', missingSources: ['docs/x.md'], origin: 'scan', ts: '2026-07-29T00:00:00Z' }),
       JSON.stringify({ targetPath: '.auto-context/wiki/entities/b.md', action: 'detected', status: 'generated', missingSources: ['docs/y.md'], origin: 'scan', ts: '2026-07-29T00:00:00Z' }),
@@ -435,11 +441,17 @@ test('SessionStart: 대기 건수를 1줄 표면화하고 TTL로 억제, 해소�
     assert.doesNotMatch(run(), /원문 소실/, 'TTL 안에서는 억제');
 
     // 전부 resolve되면 marker가 정리돼 재발 시 다시 알린다.
+    // 원장의 resolve와 **실제 파일 상태를 함께** 움직인다 — 원장만 바꾸면 스캐너가
+    // 카드를 보고 원장을 되돌려 위와 같은 레이스가 다시 생긴다.
+    writeFileSync(join(work, 'docs', 'x.md'), 'x\n');
+    writeFileSync(join(work, 'docs', 'y.md'), 'y\n');
     writeFileSync(join(work, LEDGER_REL), readFileSync(join(work, LEDGER_REL), 'utf8') + [
       JSON.stringify({ targetPath: '.auto-context/wiki/entities/a.md', action: 'dismissed', status: 'verified', missingSources: ['docs/x.md'], origin: 'repair', ts: '2026-07-29T01:00:00Z' }),
       JSON.stringify({ targetPath: '.auto-context/wiki/entities/b.md', action: 'repointed', status: 'generated', missingSources: [], origin: 'repair', ts: '2026-07-29T01:00:00Z' }),
     ].join('\n') + '\n');
     assert.doesNotMatch(run(), /원문 소실/, '대기 0이면 무출력');
+    // 재발도 파일 상태로 만든다(원장의 `detected`와 카드가 같은 사실을 말하게).
+    rmSync(join(work, 'docs', 'x.md'));
     writeFileSync(join(work, LEDGER_REL), readFileSync(join(work, LEDGER_REL), 'utf8') +
       JSON.stringify({ targetPath: '.auto-context/wiki/entities/a.md', action: 'detected', status: 'verified', missingSources: ['docs/z.md'], origin: 'scan', ts: '2026-07-29T02:00:00Z' }) + '\n');
     assert.match(run(), /원문 소실 1건 대기\(검수 카드 1건\)/, '조건 재발 시 다시 알린다');
