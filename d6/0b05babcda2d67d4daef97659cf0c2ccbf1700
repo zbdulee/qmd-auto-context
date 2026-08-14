@@ -1,0 +1,20 @@
+core/update.sh
+  h_42d950683aaaea 160-174,921-941,1055-1067
+core/wiki_freshness.py
+  h_42d950683aaaea 374-458,553-582
+test/update.test.mjs
+  h_42d950683aaaea 1349-1402
+test/wiki-freshness.test.mjs
+  h_42d950683aaaea 5,363-503
+---
+{
+  "schema_version": "zax-attestation/1.2.0",
+  "base_commit_sha": "d60b05babcda2d67d4daef97659cf0c2ccbf1700",
+  "prompts": {},
+  "humans": {
+    "h_42d950683aaaea": {
+      "author": "dulee@zigbang.com"
+    }
+  },
+  "attribution_source": "human_fallback"
+}
