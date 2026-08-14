@@ -1,0 +1,66 @@
+.agents/plugins/marketplace.json
+  h_42d950683aaaea 9
+.claude-plugin/marketplace.json
+  h_42d950683aaaea 9
+.claude-plugin/plugin.json
+  h_42d950683aaaea 4
+.codex-plugin/plugin.json
+  h_42d950683aaaea 3
+core/config.py
+  h_42d950683aaaea 128-133,276-283,395-447,593-595
+core/extractors/claude_adapter.py
+  h_42d950683aaaea 10-17,21-23
+core/extractors/codex_adapter.py
+  h_42d950683aaaea 10-17,21-23
+core/extractors/hermes_adapter.py
+  h_42d950683aaaea 14-17,21-23
+core/extractors/lib.py
+  h_42d950683aaaea 16,24-36,298,317,319,321,326-344,348-351,355,363-364,369,377,383-386,390-401,415-438,444,446-447
+core/wiki_compile.py
+  h_42d950683aaaea 504-509,1322
+core/wiki_compile_defaults.py
+  h_42d950683aaaea 14-19,60-65
+core/wiki_compile_worker.py
+  h_42d950683aaaea 453-461,625-627,630,633-635,676,710-716
+core/wiki_dedup_judge.py
+  h_42d950683aaaea 64,143,409-412,422-427,436-440
+core/wiki_dedup_scan.py
+  h_42d950683aaaea 215
+core/wiki_verify_worker.py
+  h_42d950683aaaea 612-615,634-639,667-671
+package.json
+  h_42d950683aaaea 3
+plugin.json
+  h_42d950683aaaea 3
+plugin.yaml
+  h_42d950683aaaea 2
+test/config.test.mjs
+  h_42d950683aaaea 134-139,160-199
+test/enable-compile.test.mjs
+  h_42d950683aaaea 35-37
+test/probe-manifest.test.mjs
+  h_42d950683aaaea 18,39
+test/reasoning-effort-routes.test.mjs
+  h_42d950683aaaea 1-104
+test/recommend-config.test.mjs
+  h_42d950683aaaea 76-78
+test/wiki-compile-defaults.test.mjs
+  h_42d950683aaaea 34-35,46-48
+test/wiki-compile-worker.test.mjs
+  h_42d950683aaaea 485-548
+test/wiki-dedup-judge.test.mjs
+  h_42d950683aaaea 1209,1219-1221
+test/wiki-extractors.test.mjs
+  h_42d950683aaaea 229-314
+---
+{
+  "schema_version": "zax-attestation/1.2.0",
+  "base_commit_sha": "3c36229404477f22d26183f9d147f5823001704f",
+  "prompts": {},
+  "humans": {
+    "h_42d950683aaaea": {
+      "author": "dulee@zigbang.com"
+    }
+  },
+  "attribution_source": "human_fallback"
+}
