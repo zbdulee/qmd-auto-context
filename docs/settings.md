@@ -109,6 +109,8 @@
 | `compile.verify.crossEngine` | `"prefer"` | 검수 엔진을 카드를 만든 엔진과 분리합니다(`prefer`·`require`·`off`) → [검수 엔진 분리 (`crossEngine`)](#검수-엔진-분리-crossengine) |
 | `compile.verify.builtins` | `[]` | 검수 후보 엔진입니다. 비면 `compile.extractor` 풀을 물려받습니다. |
 | `compile.verify.cooldownSeconds` | `600` | 검수 실패 뒤 cooldown입니다(24h 클램프). |
+| `compile.sourceScan.enabled` | `true` | 카드의 **원문 소실 스캔만** 켜고 끕니다(provenance 결측 집계는 끄지 않습니다). **`true`/`false`만** 유효하고, `"false"`처럼 bool이 아닌 값은 기본값(스캔 유지)으로 폴백한 뒤 SessionStart에 알림이 나옵니다 → [원문 소실 (`source_missing`)](#원문-소실-source_missing) |
+| `compile.sourceScan.maxCardsPerScan` | `300` | 한 회차에 볼 카드 수입니다(5000 클램프). 초과분은 순환 커서가 다음 회차에 이어 봅니다. `QMD_SOURCE_SCAN_MAX`가 이 값을 덮습니다. |
 | `maintenance.orphanVectors.enabled` | `true` | 죽은(orphan) 벡터 자동 회수입니다 → [orphan 벡터 자동 회수](#orphan-벡터-자동-회수) |
 | `maintenance.orphanVectors.minRatio` | `0.2` | 기회적 회수의 orphan 비율 하한입니다(`0`~`1`). |
 | `maintenance.orphanVectors.minCount` | `200` | 기회적 회수의 절대 개수 하한입니다. 두 조건을 **모두** 넘겨야 회수합니다. |
@@ -192,11 +194,11 @@ repository-config evidence 또는 runtime-current proof를 주장하지 않습�
 - **dedup score 레버 4종** — `threshold`·`autoMergeThreshold`·`topK`·`similarPageMaxChars`는
   상수가 됐습니다. daemon score가 유사도가 아니라 **RRF 순위의 함수**라 어떤 임계도
   "두 카드가 같은 사실을 말한다"를 표현할 수 없었습니다([Semantic Dedup](#semantic-dedup)).
-- **`compile.sourceScan.enabled` / `compile.sourceScan.maxCardsPerScan` /
-  `compile.sourceMissingPath`** — 문서에 오래 실려 있었지만 **한 번도 동작한 적이
-  없습니다.** 정규화 화이트리스트 밖이라 적어도 항상 기본값(`true` / `300` /
-  `.auto-context/compile/source-missing.jsonl`)이 쓰였습니다. 스캔 폭은
-  `QMD_SOURCE_SCAN_MAX` 환경변수로만 바꿀 수 있습니다.
+- **`compile.sourceMissingPath`** — 위 "산출물 경로 9종"과 같은 경로 키입니다(목록에서만
+  빠져 있었습니다). 원장 위치는 `.auto-context/compile/source-missing.jsonl` 고정이며
+  적어 두면 SessionStart 알림이 "지우십시오"라고 안내합니다.
+  (`compile.sourceScan.enabled`·`maxCardsPerScan`은 경로 키가 아니라 스캔 동작 값이라
+  **이제 실제로 읽힙니다** — 위 [전체 키 레퍼런스](#전체-키-레퍼런스)를 보십시오.)
 - **클램프 상수** — `MAX_COMPILE_PER_RUN`(50)·`MAX_CARDS_PER_SOURCE`(50)·
   `MAX_VERIFY_PER_RUN`(50)·`VERIFY_PRODUCED_HARD_CAP`(30)·cooldown 24h 상한은
   "설정 오류나 모델 출력이 과금 규모를 정하지 못한다"를 보장하는 자리라 설정으로
@@ -205,6 +207,17 @@ repository-config evidence 또는 runtime-current proof를 주장하지 않습�
 제거된 키가 파일에 남아 있으면 SessionStart에 1줄 알림이 나옵니다(값이 무시되고 있다는
 뜻이며, 옮겨간 키는 행선지를 함께 알려 줍니다). 알림을 없애려면 그 키를 지우거나
 새 위치에 다시 적으십시오.
+
+**예외 하나 — `compile.maxCardsPerSource`는 값이 잠정 반영됩니다.** 새 키
+`compile.budget.cardsPerSource`를 **적지 않은 경우에만** 옛 값이 그 자리를 대신하고
+(같은 50 클램프를 통과합니다), 새 키를 적으면 새 키가 이깁니다. 알림은 그대로 나오므로
+알림 문구의 "값은 무시됩니다"는 이 키에 대해서만 부분적으로 사실이 아닙니다 — 잠정 반영이지
+스키마가 아니니 새 위치로 옮겨 적으십시오. **옮겨간 나머지 4키
+(`batch.maxPerRun`·`verify.maxPerRun`·`semanticDedup.judge.maxPairsPer*`)는 반영되지
+않습니다**(알림만). 이 비대칭은 의도된 것입니다: 그 4키를 반영하면 라이브 프로젝트의
+**유료 호출 예산이 플러그인 업그레이드만으로 올라가는데**(실측: 검수 예산 3 → 15·50),
+`maxCardsPerSource`는 라이브 사용이 0건이라 반영해도 지금 예산이 바뀌는 프로젝트가 없고,
+이 키를 적는 동기 자체가 카드 수를 **줄이는** 것(비용 감소 방향)입니다.
 
 ---
 
@@ -634,10 +647,21 @@ median 1 / p95 1 / max 4입니다. `3`이면 848/849(99.9%)가 절단 없이 들
   막으면 안 되기 때문입니다.
 - **끄는 설정 키는 없습니다.** 쓰이지 않을 레버를 미리 만들지 않는다는 원칙입니다.
 
-`QMD_RECALL_LOG`의 `qmd_recall_selection` 줄에 `lex_hits`·`lex_gate`·`lex_gate_applied`가
-남습니다. `lex_gate` 값은 `not_needed`(게이트할 본문·경로가 없어 질의하지 않음) ·
+`QMD_RECALL_LOG`의 `qmd_recall_selection` 줄에 `lex_hits`·`lex_gate`·`lex_probe_scope`·
+`lex_gate_applied`·`lex_terms_absent_in_cut`·`lex_identifier_present`가 남습니다.
+`lex_gate` 값은 `not_needed`(게이트할 본문·경로가 없어 질의하지 않음) ·
 `no_lex_terms`(보낼 lex term이 없음 = 히트 0과 동치) · `skipped_fixture` ·
-`probe_failed`(프로브 실패/timeout → 게이트 열림) · `hits` · `no_hits`입니다.
+`probe_failed`(프로브 실패/timeout → 게이트 열림) · `hits` · `no_hits` ·
+`identifier_term_present`(면제) · `ep_search_hits`(면제) · `ep_probe_failed` ·
+`lone_survivor_no_identifier_evidence`(발동) · `absent_terms_no_identifier_evidence`(발동)
+입니다. `lex_probe_scope`는 `all` / `ep_only` / `none`이며, 프로브를 보내지 않은 경로의
+`lex_hits`는 `null`입니다("안 물었다"와 "물었는데 0"을 구분해야 히트율 집계가 맞습니다).
+
+DF 좁히기가 **위치 컷 안** term을 버려서 만든 히트는 게이트가 증거로 쓰지 않습니다
+(기준 값은 `lex_terms_absent_in_cut`이고, `lex_terms_absent`는 조회 범위 기준의 기존 값입니다).
+컷 밖 term의 부재는 발동 사유가 아닙니다 — 좁히기가 보낸 문자열을 바꾸지 않았다면 그 히트는
+좁히기의 산물이 아니기 때문입니다. DF-present 식별자가 연접에 남아 있거나 EP 변형 검색이
+히트하면 면제됩니다.
 
 ## lex term 선택 — 코퍼스에 있는 단어만 AND 에 넣습니다
 
@@ -1143,12 +1167,25 @@ cooldown 경로를 그대로 타므로, verifier CLI가 없는 머신에서 카�
 대조가 불가능하고, `verified`라면 캐논급으로 주입되면서도 검증할 수단이 없습니다
 (로드맵 3단계).
 
-**이 기능에는 설정 키가 없습니다.** 원장은 `.auto-context/compile/source-missing.jsonl`
-고정이고(트림하지 않습니다), 스캔은 항상 켜져 있으며 한 회차에 300장을 봅니다. 초과분은
-순환 커서로 다음 회차가 이어 봅니다. 폭을 바꿔야 하면 `QMD_SOURCE_SCAN_MAX` 환경변수를
-씁니다. (`compile.sourceScan.*`·`compile.sourceMissingPath`는 이 문서에 오래 실려
-있었지만 정규화 화이트리스트 밖이라 **한 번도 읽힌 적이 없습니다** — 적어도 항상 위
-기본값으로 동작했습니다.)
+**원장 위치는 설정 키가 아닙니다** — `.auto-context/compile/source-missing.jsonl` 고정이고
+트림하지 않습니다(`compile.sourceMissingPath`는 읽지 않습니다). **스캔 동작은 두 키로
+조정합니다**: `compile.sourceScan.enabled`(기본 `true`, **JSON bool만**)로 끄고,
+`compile.sourceScan.maxCardsPerScan`(기본 300, 5000 클램프)으로 한 회차의 폭을 정합니다.
+초과분은 순환 커서로 다음 회차가 이어 보므로 폭을 줄여도 카드가 영구히 빠지지 않습니다.
+`QMD_SOURCE_SCAN_MAX` 환경변수는 디버그용 레버이고 설정값을 덮습니다.
+
+**`enabled:false`가 끄는 것과 끄지 않는 것.** 끄는 것은 **원문 소실 감지 하나**입니다
+(카드별 소스 존재 판정·`source-missing.jsonl` 기록). 끄지 않는 것은 같은 run이 함께 세는
+**provenance 결측 카드 수**입니다 — 그것은 "원문 지문 없이 남아 recall에 주입되지 않는
+카드가 N장"이라는 별개 신호이고 별개 알림을 가지므로, 소실 스캔을 껐다고 0으로 보고되면
+안 됩니다(그 알림은 "남은 수는 이 알림이 사라지면 0입니다"라고 안내하므로 0은 곧 복구
+완료를 뜻합니다). 즉 `enabled:false`인 프로젝트도 카드 frontmatter를 훑는 비용은 그대로
+냅니다(실측 0.12ms/장, update worker 경로).
+
+`enabled`에 bool이 아닌 값(`"false"`·`1`·`null`)을 적으면 **스캔을 끄지 않고** 기본값으로
+폴백한 뒤 다음 SessionStart에 1줄 알림이 나옵니다. 끄는 쪽으로 읽지 않는 이유는 bool이
+아닌 값 중에는 켜려는 의도(`1`·`"true"`)도 있고, 잘못 켜진 스캔의 대가는 stat 몇 번인데
+잘못 꺼진 스캔의 대가는 **소실 감지 부재**라서입니다. 알림은 값을 고치면 사라집니다.
 
 **삭제도 downgrade도 하지 않습니다.** 라이브 855장 실측에서 소스 전멸 카드는 25장
 (`generated` 18 / `verified` 7)이었고, 사라진 원인은 삭제가 아니라 **개명**
