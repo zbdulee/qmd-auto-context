@@ -690,22 +690,25 @@ test('compile.sourceScan: enabled는 bool만, maxCardsPerScan은 클램프된다
   }
 });
 
-// **이 단정은 계약이 아니라 현재 동작의 기록이다.** `true`는 `int(True) == 1`로 통과한다
-// — `coerce_capped_int`를 쓰는 **모든** 예산 키(`budget.*`)와 같은 동작이라 이 키에서만
-// 바꾸지 않았다(피해도 유계다: 창이 1장으로 좁아질 뿐 순환 커서가 다음 회차에 이어 본다).
-// 공용 coercion이 bool을 거부하도록 고쳐도 좋고, 그때는 이 단정을 함께 갱신하면 된다
-// (`budget.*` 전 키의 동작이 같이 바뀐다는 것만 알고 고칠 것). 여기 있는 이유는 "테스트가
-// 없어서 아무도 모르는 동작"으로 남지 않게 하는 것뿐이다.
-test('[현재 동작 기록, 계약 아님] maxCardsPerScan: true는 공용 coercion을 그대로 통과한다', () => {
+// 공용 `coerce_int`의 계약: 양의 **정수**만 받는다. bool 과 비정수 실수는 거부한다.
+// 교차 엔진 리뷰가 잡은 자리다 — 예전에는 `int(True) == 1`, `int(1.9) == 1`로 둘 다 조용히
+// 통과해 `maxCardsPerScan: 1.9`를 적은 사용자가 창 **1장**을 받았다(300장을 기대한 값이
+// 가장 좁은 값으로 뒤집히는 방향이라 조용한 축소다). 규칙은 `config.coerce_int` 한 곳이고
+// `budget.*` 전 키가 같이 적용받는다 — 여기서 함께 단정해 그 사실을 고정한다.
+test('coerce_int 계약: bool·비정수 실수는 거부하고 기본값으로 보낸다 (budget.* 공용)', () => {
   const scanOf = (v) => loadConfig(JSON.stringify({ compile: { sourceScan: v } })).compile.sourceScan;
-  assert.equal(scanOf({ maxCardsPerScan: true }).maxCardsPerScan, 1);
-  // 같은 coercion을 쓰는 예산 키도 같은 값이 나온다(이 동작이 이 키만의 것이 아니라는 증거).
-  assert.equal(
-    loadConfig(JSON.stringify({ compile: { budget: { extractorPerRun: true } } })).compile.budget.extractorPerRun,
-    1,
-  );
+  for (const bad of [true, false, 1.9, 2.5]) {
+    assert.equal(scanOf({ maxCardsPerScan: bad }).maxCardsPerScan, 300, `maxCardsPerScan: ${bad}`);
+  }
+  // 정수값 실수와 숫자 문자열은 계속 받는다(JSON number 는 실수로 오고, 문자열화도 흔하다).
+  assert.equal(scanOf({ maxCardsPerScan: 50.0 }).maxCardsPerScan, 50);
+  assert.equal(scanOf({ maxCardsPerScan: '50' }).maxCardsPerScan, 50);
+  // 같은 coercion 을 쓰는 예산 키도 같은 규칙이다(이 동작이 이 키만의 것이 아니라는 증거).
+  const budgetOf = (v) => loadConfig(JSON.stringify({ compile: { budget: v } })).compile.budget;
+  assert.equal(budgetOf({ extractorPerRun: true }).extractorPerRun, 10);
+  assert.equal(budgetOf({ extractorPerRun: 2.5 }).extractorPerRun, 10);
+  assert.equal(budgetOf({ extractorPerRun: 4 }).extractorPerRun, 4);
 });
-
 // `enabled` 비-bool은 기본값(true = 스캔 유지)으로 폴백하는데, 그것만으로는 사용자가 적어
 // 둔 opt-out이 **무력화된 채 조용하다**(결과가 "껐는데 돈다"다 — 이 작업이 고치려던 실패의
 // 한 단계 이동). `COLLECTION_ROLE_INVALID`와 같은 규칙으로 표면화하고, 그 판정이 여기다.

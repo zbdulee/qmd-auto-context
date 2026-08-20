@@ -326,9 +326,26 @@ def coerce_float(value, default):
 
 
 def coerce_int(value, default):
+    """양의 정수만 받는다. 실패는 전부 default 다.
+
+    `int(value)` 를 그대로 쓰면 두 가지가 조용히 통과했다(교차 엔진 리뷰 지적):
+    `int(True) == 1`(bool 은 int 의 서브클래스), `int(1.9) == 1`(내림). 그래서
+    `maxCardsPerScan: 1.9` 를 적은 사용자가 창 1장을 받았다 — 300 장을 기대한 값이
+    가장 좁은 값으로 뒤집히는 방향이라 조용한 축소다. bool 과 비정수 실수는 거부하고
+    default 로 보낸다(0·음수·비수치와 같은 취급). 숫자 문자열(`"50"`)은 계속 받는다 —
+    JSON 에서 실수로 문자열이 되는 일이 흔하고 값 자체는 온전하다.
+
+    **이 함수는 공용이다**(`budget.*` 전 키 + `maxCardsPerScan` 등). 여기만 좁히면
+    호출부가 갈리므로 규칙은 이 한 곳에 둔다.
+    """
+    if isinstance(value, bool):
+        return default
     try:
         result = int(value)
     except (TypeError, ValueError):
+        return default
+    # 비정수 실수는 거부한다. `3.0` 같은 정수값 실수는 받는다(JSON number 는 실수로 온다).
+    if isinstance(value, float) and result != value:
         return default
     return result if result > 0 else default
 
