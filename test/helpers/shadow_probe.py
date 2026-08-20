@@ -16,6 +16,9 @@ Usage: shadow_probe.py '<options json>'
                 | "df-absent" | "df-mixed" | "df-fail" | "df-slow",
     "shadow": bool,      # set QMD_SHADOW_QUERY=1
     "log": bool,         # set QMD_RECALL_LOG to a temp file
+    "df_absent": [str],  # DF 프로브가 "코퍼스에 없음"(0건)으로 답할 term 목록.
+                         #   scenario 와 독립이며 기본값(미지정)은 기존 동작 그대로다.
+    "card_body": str,    # card.md 에 auto 블록 본문을 넣는다(미지정이면 기존처럼 없음).
     "fixture": bool,     # run through QMD_QUERY_FIXTURE instead of the daemon
     "settings": {...},   # .auto-context/settings.json overrides
     "env": {...}         # extra env overrides
@@ -84,6 +87,10 @@ EP_DEEP_WIKI = [
 payloads: list[dict] = []
 df_probes: list[dict] = []
 scenario = "default"
+# options["df_absent"] 가 있으면 그 목록이 DF 응답을 지배한다(scenario 와 독립).
+# 라이브 프롬프트별로 "어느 토큰이 코퍼스에 없는가"를 테스트가 직접 지정하기 위한 것이고,
+# 미지정(None)이면 예전 동작(scenario 기반)이 그대로다.
+df_absent_override = None
 
 
 def _is_df_probe(payload: dict) -> bool:
@@ -110,6 +117,9 @@ def _results_for(payload: dict) -> list[dict]:
     if _is_df_probe(payload):
         # 기본은 "모든 term 이 코퍼스에 있다" — 그래야 본 질의의 lex 문자열이 위치 컷
         # 기대값과 같아지고, 기존 테스트가 term 선택이 아니라 진단 계약만 계속 본다.
+        if df_absent_override is not None:
+            term = (payload.get("searches") or [{}])[0].get("query", "")
+            return [] if term in df_absent_override else WIKI_HIT
         if scenario == "df-absent":
             return []
         if scenario == "df-mixed":
@@ -118,7 +128,9 @@ def _results_for(payload: dict) -> list[dict]:
         return WIKI_HIT
     kinds = "+".join(s.get("type", "") for s in payload.get("searches", []))
     is_wiki = "proj-wiki" in (payload.get("collections") or [])
-    if scenario == "lex-dead" and kinds == "lex":
+    # "lex 전멸" = vec 을 섞지 않은 질의는 0건. EP 변형이 붙으면 lex 엔트리가 여러 개라
+    # 'lex' 정확 매칭으로는 그 질의(게이트 프로브·lex 단독 진단)를 못 잡는다.
+    if scenario == "lex-dead" and kinds and set(kinds.split("+")) == {"lex"}:
         return []
     if scenario == "wiki-empty" and is_wiki:
         return []
@@ -191,7 +203,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         pass
 
 
-def _write_project(project_dir: pathlib.Path, overrides: dict) -> None:
+def _write_project(project_dir: pathlib.Path, overrides: dict,
+                   card_body: str = "") -> None:
     wiki = project_dir / ".auto-context" / "wiki" / "concepts"
     wiki.mkdir(parents=True)
     docs = project_dir / "docs"
@@ -213,7 +226,15 @@ def _write_project(project_dir: pathlib.Path, overrides: dict) -> None:
         )
 
     # verified + qmd creator + compiler provenance is the injectable contract.
-    (wiki / "card.md").write_text(trusted_card("Card"), encoding="utf-8")
+    # card_body 가 있으면 auto 블록을 붙인다 — 게이트 발동이 실제로 본문을 걷어내는지
+    # (bodies_injected 0 vs >0) 보려면 읽을 본문이 있어야 한다. 기본은 예전처럼 없다.
+    card = trusted_card("Card")
+    if card_body:
+        card += (
+            '<!-- qmd:auto:start id="main" sourceHash="deadbeef" -->\n'
+            "## Summary\n" + card_body + "\n<!-- qmd:auto:end -->\n"
+        )
+    (wiki / "card.md").write_text(card, encoding="utf-8")
     (wiki / "card2.md").write_text(trusted_card("Card 2"), encoding="utf-8")
     (wiki / "ep-12.md").write_text(trusted_card("EP 12"), encoding="utf-8")
     # 미검수 → recallVerifiedOnly가 drop (dropped_unverified 카운트).
@@ -238,9 +259,11 @@ def _write_project(project_dir: pathlib.Path, overrides: dict) -> None:
 
 
 def main() -> int:
-    global scenario
+    global scenario, df_absent_override
     options = json.loads(sys.argv[1]) if len(sys.argv) > 1 else {}
     scenario = options.get("scenario", "default")
+    if options.get("df_absent") is not None:
+        df_absent_override = set(options["df_absent"])
     prompt = options.get("prompt", "")
 
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
@@ -251,7 +274,8 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as tmp:
         project_dir = pathlib.Path(tmp, "project")
         project_dir.mkdir()
-        _write_project(project_dir, options.get("settings") or {})
+        _write_project(project_dir, options.get("settings") or {},
+                       options.get("card_body") or "")
 
         env = dict(os.environ, QMD_DAEMON_URL=daemon_url)
         env.pop("QMD_QUERY_FIXTURE", None)

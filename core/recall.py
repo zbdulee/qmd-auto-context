@@ -1305,28 +1305,137 @@ def run_df_probe(daemon_url: str, collections: list[str], terms: list[str],
 
 
 def narrow_general_lex(lex_searches: list[dict], general_terms: list[str], *,
-                       daemon_url: str, collections: list[str],
-                       budget: float) -> tuple:
+                       identifiers: list[str], daemon_url: str,
+                       collections: list[str], budget: float) -> dict:
     """일반 lex 문자열(`lex_searches[0]`)을 코퍼스에 존재하는 term 으로 좁힌다.
 
     **본 질의 전에, 한 곳에서만 부른다.** 게이트 프로브는 `lex_searches`에서 파생하므로
     여기서 한 번 좁히면 게이트가 판정하는 문자열과 recall 이 실제로 보낸 문자열이
     구조적으로 같아진다 — 갈리면 게이트가 돌지도 않은 질의를 판정하게 된다.
 
-    반환: `(status, dropped_absent)`. status 는 `not_needed`|`probe_failed`, 또는
-    `keywords.select_general_terms_explained`의 mode(`present`|`lone_survivor`)다 —
-    선택 결과를 로그가 그대로 말하게 해서 "왜 이 문자열인가"가 한 줄에서 읽히게 한다.
+    반환 키:
+      ``mode``  `not_needed`|`probe_failed`, 또는
+                `keywords.select_general_terms_explained`의 mode(`present`|
+                `lone_survivor`) — 선택 결과를 로그가 그대로 말하게 해서 "왜 이
+                문자열인가"가 한 줄에서 읽히게 한다.
+      ``absent``        조회한 term(`probed`, 최대 `DF_PROBE_MAX_TERMS`) 중 코퍼스에
+                        없던 수. 기존 로그 계약(`lex_terms_absent`)이 이 값이다.
+      ``absent_in_cut`` **위치 컷(`GENERAL_LEX_TERM_CAP`) 안**에서 없던 수. 게이트
+                        판정은 이 값만 본다 — 근거는 `narrowing_distrust` 주석.
+      ``identifier_present``
+                        실제로 보낸 일반 lex 문자열에 **DF-present 식별자**가 남아
+                        있는가. 식별자(`keywords.extract_identifiers`: 코드스팬·경로·
+                        snake/kebab/dotted 토큰)는 기능어와 달리 변별력이 크므로,
+                        코퍼스에 실재하는 식별자가 연접에 남아 있으면 그 히트는
+                        "term 을 버려서 만들어낸 것"이 아니다. 조회 범위(`probed`)
+                        밖 식별자는 존재를 **모르므로** 근거로 쓰지 않는다.
     """
     if not lex_searches or not general_terms:
-        return ("not_needed", 0)
+        return {"mode": "not_needed", "absent": 0, "absent_in_cut": 0,
+                "identifier_present": False}
     probed = general_terms[:DF_PROBE_MAX_TERMS]
     present = run_df_probe(daemon_url, collections, probed, budget)
     if present is None:
         # 위치 컷 결과가 이미 lex_searches[0]에 들어 있다 — 손대지 않는 것이 폴백이다.
-        return ("probe_failed", 0)
+        return {"mode": "probe_failed", "absent": 0, "absent_in_cut": 0,
+                "identifier_present": False}
     terms, mode = qmd_keywords.select_general_terms_explained(probed, present)
     lex_searches[0]["query"] = " ".join(terms)
-    return (mode, sum(1 for t in probed if t.lower() not in present))
+    # 위치 컷은 "좁히기가 없었다면 실제로 보냈을 term 집합"이다(폴백 경로가 보내는
+    # 것이 정확히 이것 — `select_general_terms_explained(present=None)`).
+    cut = probed[:qmd_keywords.GENERAL_LEX_TERM_CAP]
+    identifier_set = {i.lower() for i in identifiers or ()}
+    sent = {t.lower() for t in terms}
+    return {
+        "mode": mode,
+        "absent": sum(1 for t in probed if t.lower() not in present),
+        "absent_in_cut": sum(1 for t in cut if t.lower() not in present),
+        "identifier_present": any(
+            t in identifier_set and t in present for t in sent
+        ),
+    }
+
+
+# ── 게이트: DF 좁히기의 산물을 "관련 있음"의 증거로 쓰지 않는다 ─────────────────
+# 게이트의 신호는 lex 히트 수 하나인데, **DF 좁히기가 그 수를 만들어낼 수 있다**. 색인에
+# 없는 term 을 빼는 것은 "만족 불가능이 확정된 연접의 복구"이지만(위 블록), 그 복구는
+# "오타·활용형 때문에 0건"과 "잡담이라 0건"을 구분하지 못한다. 라이브 실측
+# (service-engineering, 2026-08-19):
+#
+#   | 프롬프트                                  | 좁힌 질의     | lex_df        | absent | 히트 |
+#   |-------------------------------------------|---------------|---------------|--------|------|
+#   | 엉 그렇게 해줘.~                          | `그렇게`      | lone_survivor | 0      | 5    |
+#   | 오키 푸시 안된거 모두 푸시해줘.~          | `푸시 모두`   | present       | 2      | 6    |
+#   | 이제 나오네.. 시간이 걸리나 보네.         | `이제 시간`   | present       | 3      | 4    |
+#   | 아 그것도 아까 메뉴얼에 들어 가야 하겠넹  | `들어 가야`   | present       | 3      | 3    |
+#
+# 네 건 모두 본문이 전량 주입됐다. 반면 관련 질의 4건(`github issue form 계층형 양식 적용
+# 결정` 등)은 전부 `present` + `absent 0` 이다 — **깨끗하게 갈린다**. 그래서 판정은
+# 히트 수의 앞단에서 "이 히트가 증거가 되는가"를 먼저 묻는다:
+#   - `lone_survivor` — 남은 term 이 1개면 연접이 아니라 "그 토큰을 가진 아무 문서"다.
+#     (DF 경로는 이미 이 집합으로 좁히기를 **거부**했다 — 거부한 집합의 히트를 게이트가
+#      증거로 소비하던 것이 이 구멍이다.)
+#   - `absent_terms` — 원래 연접이 만족 불가능했고 히트는 term 을 버려서 생긴 것이다.
+# 기능어를 `KO_STOPWORDS`에 계속 더하는 방식(두더지 잡기)은 이 규칙으로 불필요해진다.
+#
+# **`absent_terms`의 판정 범위는 위치 컷(`GENERAL_LEX_TERM_CAP`) 안이다.** "원래 연접"은
+# 좁히기가 없을 때 실제로 보내는 질의이고 그것은 위치 컷 상위 3개다(폴백 경로가 보내는
+# 것이 정확히 그것). 컷 **밖** term 이 색인에 없다는 사실은 원래 질의가 만족 불가능했음을
+# 증명하지 않는다 — 그 term 은 애초에 질의에 들어가지 않았다. 조회 범위(`probed`, 6개)
+# 전체로 재면 이 구분이 사라지고 **정상 질의가 발동한다**(라이브 앵커:
+# `sendbird 장애 원인이 뭐였지?` → 좁힌 질의 `sendbird 장애 원인` = 위치 컷과 **축자
+# 동일**, 즉 좁히기가 문자열을 한 글자도 바꾸지 않았는데 컷 밖의 `뭐였지` 하나로
+# absent=1 이 된다. 그 프롬프트는 DF 좁히기 도입 실측의 "직접 질의 무변화" 집합이다).
+# 반대로 `아까 말한 그거 있잖아 github issue form 계층형 양식`은 컷이 곧
+# `['아까','말한','있잖아']`라 absent 가 컷 **안**에 있고, 좁히기가 없었다면 보냈을
+# 질의(`아까 말한 있잖아`)가 실제로 0건이므로 발동이 옳다. 두 케이스의 차이가 이
+# 범위 규칙의 존재 이유다.
+#
+# **범위(무엇을 잃는가)**: 위치 컷 질의 자체가 만족 불가능했던 프롬프트는 DF 좁히기가
+# 살려낸 뒤에도 링크+title 까지만 남는다(`아까 말한 그거 있잖아 VN 콜백 이벤트`,
+# `이제 나오네..` 계열). retrieval·링크는 그대로 살아 있고 본문·`↳` 원문 경로만 빠진다.
+# 무관 4/4 차단과 그 회복을 동시에 가질 수 없다면 전자를 택한다 — 무관 주입은 매
+# 프롬프트의 토큰 비용이고, 후자는 모델이 링크를 열어 회복할 수 있다. **직접 의문형
+# (`…뭐였지?`·`…언제 발생해?`)은 위 범위 규칙으로 이 손실에서 빠진다.**
+#
+# `lex_df`/absent 수는 본 질의 **전에** `narrow_general_lex`가 계산해 두므로 추가
+# 왕복이 없다. `probe_failed`(조회 실패)와 `not_needed`(일반 term 없음)는 좁히기가
+# 일어나지 않았다는 뜻이라 발동시키지 않는다(fail-open — 오늘의 동작 그대로).
+GATE_DISTRUST_LONE_SURVIVOR = "lone_survivor"
+GATE_DISTRUST_ABSENT_TERMS = "absent_terms"
+
+
+def narrowing_distrust(lex_df: str, absent_in_cut: int) -> str | None:
+    """일반 lex 히트를 증거로 쓸 수 없는 사유. 없으면 None.
+
+    `absent_in_cut`은 **위치 컷 안**에서 코퍼스에 없던 term 수다(`probed` 전체가 아니다
+    — 위 블록의 범위 규칙). `lone_survivor`가 `absent_terms`보다 앞선다(둘 다 성립할 수
+    있다 — 전 term 부재는 `lone_survivor` + `absent > 0`이다). 좁히기를 **채택하지
+    않은** 것이 더 근본적인 사실이라 그것을 사유로 남긴다.
+    """
+    if lex_df == qmd_keywords.LEX_TERMS_LONE_SURVIVOR:
+        return GATE_DISTRUST_LONE_SURVIVOR
+    if absent_in_cut > 0:
+        return GATE_DISTRUST_ABSENT_TERMS
+    return None
+
+
+def ep_variant_searches(lex_searches: list[dict]) -> list[dict]:
+    """EP 변형 독립 search(`keywords.build_lexical_terms`의 `lexQueries[1:]`).
+
+    이 엔트리들은 **AND 대상이 아니다** — 각각 독립 FTS 로 실행돼 RRF 로 융합되므로
+    DF 좁히기가 손대지도 않고 "term 을 버려서 생긴 히트"라는 병리가 성립하지 않는다.
+    그래서 위 판정의 **면제 근거**가 된다: `EP12 확인해줘.~`는 일반 term 이 `['확인']`
+    하나라 `lone_survivor`로 걸리는데, EP 정확매칭 카드는 그 질문에서 가장 관련성이
+    높은 결과다. 면제 없이 넣으면 novel 계열 코퍼스에서 EP 질의의 본문이 전부 박탈된다.
+
+    **이름을 EP 로 못박은 이유**: `lexQueries[1:]`는 `lexicalPatterns`에 `ep` 가 있을
+    때만 채워지는 EP 변형 전용이고, 그 밖의 프로젝트에서는 **항상 공집합**이다. 일반
+    식별자(`resolve_target`·`core/recall.py`)는 독립 search 가 아니라 일반 term 으로
+    합쳐지므로 그쪽 면제는 `narrow_general_lex`의 `identifier_present`(DF-present
+    식별자가 연접에 남아 있는가)가 담당한다 — 두 면제는 근거가 다르고 종점도 다르다.
+    """
+    return lex_searches[1:]
 
 
 def strip_gated_injection(results: list[dict]) -> None:
@@ -1872,6 +1981,10 @@ def main():
     # fixture 테스트의 결정성은 데몬 유무에 의존하지 않는 데서 나온다.
     lex_df = "skipped_fixture" if fixture_path else "not_needed"
     lex_terms_absent = 0
+    # 게이트 판정이 보는 값(위치 컷 안 부재 수)과 면제 근거는 따로 둔다 — `lex_terms_absent`
+    # 는 조회 범위(`probed`) 기준의 기존 로그 계약이라 의미를 바꾸지 않는다.
+    lex_terms_absent_in_cut = 0
+    lex_identifier_present = False
 
     def query_daemon(query_collections: list[str]) -> list[dict] | None:
         return None
@@ -1953,11 +2066,16 @@ def main():
             # 이 지점을 지나면 "게이트가 판정한 문자열 ≠ recall이 보낸 문자열"이
             # 구조적으로 불가능하다. 질의 대상 컬렉션이 정해진 **뒤**여야 하는 이유:
             # DF 는 코퍼스에 대한 사실이고 hierarchical 은 wiki 컬렉션만 먼저 본다.
-            lex_df, lex_terms_absent = narrow_general_lex(
+            narrowing = narrow_general_lex(
                 lex_searches, built_terms["generalTerms"],
+                identifiers=built_terms["identifiers"],
                 daemon_url=daemon_url, collections=queried_collections,
                 budget=lex_probe_timeout(config),
             )
+            lex_df = narrowing["mode"]
+            lex_terms_absent = narrowing["absent"]
+            lex_terms_absent_in_cut = narrowing["absent_in_cut"]
+            lex_identifier_present = narrowing["identifier_present"]
             results = query_daemon(queried_collections)
 
             if results is None:
@@ -2357,27 +2475,69 @@ def main():
     # (2) 게이트할 것이 없으면 질의 자체를 하지 않는다(`not_needed` — 추가 왕복 0).
     # (3) 판정은 로깅 **전**에 끝낸다 — `bodies_injected`/`sources_injected`가 실제
     #     주입을 반영해야 "조용한 동작 변경"이 되지 않는다.
+    # (4) 일반 lex 히트가 DF 좁히기의 산물이면(`narrowing_distrust`) 그 수를 증거로 쓰지
+    #     않는다. 남는 증거는 둘이고 **비용이 다르다**: ⓐ 연접에 남은 DF-present 식별자
+    #     (`narrow_general_lex`가 이미 계산 — 왕복 0), ⓑ EP 변형 독립 search(단 한 번의
+    #     프로브, scope=ep_only). ⓐ가 성립하면 프로브조차 하지 않는다. 프로브가 보내는
+    #     문자열은 여전히 본 질의가 보낸 lex 엔트리의 **부분집합**이라 "돌지도 않은 질의를
+    #     판정한다"는 불변식은 그대로다 — 빼는 것은 증거로 쓰지 않기로 한 엔트리뿐이다.
+    #     fixture 경로는 DF 좁히기를 하지 않으므로(`lex_df=skipped_fixture`) 이 분기가
+    #     구조적으로 발동하지 않는다 — 결정성이 유지되고 기존 fixture 계약도 무변화다.
+    # (5) `lex_gate_applied`는 히트 수에서 **파생하지 않는다**. "프로브를 안 물었다"와
+    #     "물었는데 0건"은 다른 세계이므로 `lex_hits`는 프로브를 실제로 보낸 경로에서만
+    #     숫자이고(그 밖에는 null), 발동 여부는 각 분기가 직접 정한다. 파생 플래그로
+    #     뭉치면 프로브 히트율 집계가 "질의하지 않은 실행"을 0건 히트로 읽는다.
     gate_targets = [r for r in final_results if r.get("_wiki_summary") or r.get("_wiki_sources")]
     lex_hits: int | None = None
     lex_gate = "not_needed"
+    lex_gate_applied = False
+    distrust = narrowing_distrust(lex_df, lex_terms_absent_in_cut)
+    lex_probe_scope = "none"
     if gate_targets:
-        probe_searches = lex_probe_searches(lex_searches)
-        if not probe_searches:
-            # 보낼 lex term이 없다 = 본 질의에도 lex 기여가 없었다 = 히트 0과 같다.
-            lex_hits, lex_gate = 0, "no_lex_terms"
-        elif fixture_path:
-            if lex_fixture_path:
-                probe_results = load_fixture(lex_fixture_path)
-                lex_hits = None if probe_results is None else len(probe_results)
-            else:
-                lex_gate = "skipped_fixture"
+        if distrust and lex_identifier_present:
+            # ⓐ 코퍼스에 실재하는 식별자가 연접에 남아 있다 = 히트가 term 을 버려서
+            #    만들어진 것이 아니다. 프로브 없이 면제한다(왕복 0).
+            lex_gate = "identifier_term_present"
         else:
-            lex_hits = run_lex_probe(
-                daemon_url, queried_collections, probe_searches, lex_probe_timeout(config),
+            probe_searches = lex_probe_searches(
+                ep_variant_searches(lex_searches) if distrust else lex_searches
             )
-        if lex_gate == "not_needed":
-            lex_gate = "probe_failed" if lex_hits is None else ("hits" if lex_hits else "no_hits")
-    lex_gate_applied = lex_hits == 0
+            if not probe_searches:
+                # 보낼 lex term이 없다 = 본 질의에도 lex 기여가 없었다 = 히트 0과 같다.
+                # distrust 인데 EP 엔트리가 없으면(= `ep` 패턴을 안 쓰는 프로젝트 전부)
+                # 면제 근거가 하나도 없다는 뜻이므로 질의 없이 발동한다.
+                lex_gate_applied = True
+                lex_gate = (
+                    f"{distrust}_no_identifier_evidence" if distrust else "no_lex_terms"
+                )
+            elif fixture_path:
+                if lex_fixture_path:
+                    lex_probe_scope = "all"
+                    probe_results = load_fixture(lex_fixture_path)
+                    lex_hits = None if probe_results is None else len(probe_results)
+                    lex_gate = "probe_failed" if lex_hits is None else (
+                        "hits" if lex_hits else "no_hits"
+                    )
+                    lex_gate_applied = lex_hits == 0
+                else:
+                    lex_gate = "skipped_fixture"
+            else:
+                lex_probe_scope = "ep_only" if distrust else "all"
+                lex_hits = run_lex_probe(
+                    daemon_url, queried_collections, probe_searches, lex_probe_timeout(config),
+                )
+                if distrust:
+                    # ⓑ EP 히트가 있으면 면제, 0건이면 발동, 실패면 fail-open.
+                    lex_gate = (
+                        "ep_probe_failed" if lex_hits is None
+                        else ("ep_search_hits" if lex_hits
+                              else f"{distrust}_no_identifier_evidence")
+                    )
+                else:
+                    lex_gate = "probe_failed" if lex_hits is None else (
+                        "hits" if lex_hits else "no_hits"
+                    )
+                lex_gate_applied = lex_hits == 0
     if lex_gate_applied:
         strip_gated_injection(gate_targets)
 
@@ -2450,12 +2610,35 @@ def main():
         # 매칭 위치 인용(데몬 `line`이 auto 블록 안 + 상한 초과 카드). 앞부분 인용과
         # 구분되지 않으면 "왜 서두가 아닌가"를 로그만으로 설명할 수 없다.
         bodies_match_positioned=sum(1 for r in final_results if r.get("_wiki_match_positioned")),
-        # lex 게이트. 무흔적 동작 변경 금지 — 이 두 값이 "왜 본문이 안 붙었는가"의 답이다.
-        # lex_hits는 프로브를 못 돌렸으면 null이고, 그때 lex_gate가 이유를 말한다
-        # (not_needed | no_lex_terms | skipped_fixture | probe_failed | hits | no_hits).
+        # lex 게이트. 무흔적 동작 변경 금지 — 이 값들이 "왜 본문이 안 붙었는가"의 답이다.
+        # lex_hits는 프로브를 못 돌렸으면 null이고, 그때 lex_gate가 이유를 말한다.
+        # lex_gate:
+        #   not_needed        게이트할 본문·경로가 없어 질의하지 않음
+        #   no_lex_terms      보낼 lex 문자열이 없음(= 히트 0과 같다)
+        #   skipped_fixture   fixture 모드 + lex fixture 미지정
+        #   probe_failed      프로브 실패·timeout → 게이트를 연다(fail-open)
+        #   hits / no_hits    일반(+EP) 프로브 결과
+        #   lone_survivor_no_identifier_evidence  좁히기가 거부된 term 집합의 히트라
+        #                                     불신 + 식별자 근거 없음 → 발동
+        #   absent_terms_no_identifier_evidence   히트가 위치 컷 안 term 을 버려서 생긴
+        #                                     것 + 식별자 근거 없음 → 발동
+        #   identifier_term_present   불신 상태였지만 DF-present 식별자가 연접에 남아
+        #                             있음 → 면제(프로브 왕복 0)
+        #   ep_search_hits            불신 상태였지만 EP 변형 독립 search 가 히트 → 면제
+        #   ep_probe_failed           불신 상태에서 EP 프로브 실패 → fail-open
+        # lex_probe_scope 는 그 판정에 **무엇을 물었는지**다: all(본 질의의 lex 엔트리
+        # 전부) | ep_only(EP 변형 엔트리만 — 일반 히트를 증거로 쓰지 않는 경우) |
+        # none(질의하지 않음). `lex_hits`는 scope 가 none 이면 항상 null 이다 —
+        # "안 물었다"와 "물었는데 0"을 같은 0으로 뭉치면 프로브 히트율이 오독된다.
         lex_hits=lex_hits,
         lex_gate=lex_gate,
         lex_gate_applied=lex_gate_applied,
+        lex_probe_scope=lex_probe_scope,
+        # 게이트가 실제로 본 값(위치 컷 안 부재 수)과 면제 근거. `lex_terms_absent`는
+        # 조회 범위(probed, ≤6) 기준의 기존 계약이라 의미를 바꾸지 않았다 — 두 값이
+        # 갈리는 것 자체가 "왜 이 프롬프트는 발동하지 않는가"의 답이다.
+        lex_terms_absent_in_cut=lex_terms_absent_in_cut,
+        lex_identifier_present=lex_identifier_present,
         # DF 좁히기. 게이트가 발동해 주입이 줄었을 때 "왜"가 이 두 값에서 갈린다.
         # lex_df: not_needed(일반 term 없음) | skipped_fixture | probe_failed(조회
         # 실패·예산 소진 → 위치 컷 폴백, **"히트 0"이 아니다**) | present(좁히기 채택)

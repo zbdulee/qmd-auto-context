@@ -362,13 +362,20 @@ test('D: 코퍼스에 없는 term 을 빼고 그 질의를 본 recall 이 그대
   assert.equal(sel.lex_query, 'VN 콜백', '게이트가 판정한 문자열과 같은 값이 남는다');
 });
 
-test('D: 게이트 프로브와 본 질의가 같은 문자열을 쓴다 (갈리면 안 된다)', () => {
-  // 갈리면 게이트가 recall 이 돌리지도 않은 질의를 판정한다.
-  const r = dfProbe({ scenario: 'df-mixed' });
+test('D: 게이트 프로브는 본 질의가 보낸 문자열만 판정한다 (갈리면 안 된다)', () => {
+  // 갈리면 게이트가 recall 이 돌리지도 않은 질의를 판정한다. 좁히기가 채택되고 뺀 term
+  // 이 없으면(present + absent 0) 게이트는 그 좁힌 문자열을 그대로 판정한다.
+  // (absent > 0 인 경로는 아래 E 절 — 그때 게이트는 일반 문자열의 히트를 증거로 쓰지
+  //  않으므로 식별자 엔트리만 판정하고, 그것도 본 질의가 보낸 문자열의 부분집합이다.)
+  const r = dfProbe({ scenario: 'default' });
+  const sel = selectionOf(r);
+  assert.equal(sel.lex_df, 'present');
+  assert.equal(sel.lex_terms_absent, 0);
   const gate = r.queries[1];
   assert.ok(gate, '게이트 프로브가 존재한다');
   assert.deepEqual(gate.searches.map((s) => s.type), ['lex']);
   assert.equal(gate.searches[0].query, mainLexQuery(r));
+  assert.equal(sel.lex_probe_scope, 'all');
 });
 
 test('D: DF 조회가 실패하면 위치 컷으로 폴백한다 (fail-open)', () => {
@@ -420,4 +427,209 @@ test('D: DF 패스 전체가 프로브 예산 안에 머문다 (N 개가 곱해�
   // python 기동 + DF 패스 1.0s + 본 질의 + 게이트 프로브(0.5s 지연). CI 여유를 둬도
   // 4s 안이어야 하고, 이 값이면 예산이 곱해질 때(0.5s × 5 = 2.5s) 반드시 실패한다.
   assert.ok(elapsed < 4000, `DF 패스 예산 초과 (${elapsed}ms)`);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// E. 게이트: DF 좁히기의 산물을 "관련 있음"의 증거로 쓰지 않는다
+//
+// 근거 문서: docs/plans/2026-08-19-recall-utility-recovery-plan.md §3.1
+//
+// 게이트의 신호는 lex 히트 수 하나인데 DF 좁히기가 그 수를 만들어낼 수 있다 — 색인에
+// 없는 term 을 빼면 만족 불가능이던 연접이 히트를 내고, 게이트는 그것을 "관련 있음"으로
+// 읽는다. 라이브 실측 9프롬프트(§3.1 표)를 stub 데몬으로 고정한다: 관련 4건은
+// `present + absent 0` 이라 그대로 통과하고, 새어 나간 5건은 두 사유 중 하나에 걸린다.
+// `df_absent` 는 라이브에서 DF 0 이던 토큰 그대로다.
+//
+// **판정 범위는 위치 컷(3) 안이다.** `absentCount`(조회 범위 probed 기준, 기존 로그
+// 계약)와 `absentInCut`(게이트가 실제로 보는 값)이 갈리는 행이 그 규칙의 증거다 —
+// `sendbird 장애 원인이 뭐였지?`는 probed 기준 absent 1 이지만 컷 안은 0 이라
+// 발동하지 않고(좁히기가 보낸 문자열이 위치 컷과 축자 동일하다), `이제 나오네..`는
+// 3 vs 1 로 줄어도 컷 안에 있어 발동한다.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const GATE_TABLE = [
+  // 관련 질의 — 게이트가 열려 본문이 유지돼야 한다(정밀도가 재현율을 먹으면 실패다).
+  { prompt: 'github issue form 계층형 양식 적용 결정', absent: [], absentCount: 0, inCut: 0,
+    df: 'present', gate: 'hits', applied: false, scope: 'all' },
+  { prompt: '자동화 레벨 판정 규칙', absent: [], absentCount: 0, inCut: 0,
+    df: 'present', gate: 'hits', applied: false, scope: 'all' },
+  { prompt: 'morning brief collector 신뢰성 결함', absent: [], absentCount: 0, inCut: 0,
+    df: 'present', gate: 'hits', applied: false, scope: 'all' },
+  { prompt: 'postgres 격리 수준 결정', absent: [], absentCount: 0, inCut: 0,
+    df: 'present', gate: 'hits', applied: false, scope: 'all' },
+  // 앵커: 활용형 어미가 위치 컷 **밖**에 있다. 좁힌 질의(`sendbird 장애 원인`)가 위치
+  // 컷과 축자 동일하므로 "히트는 term 을 버려서 생겼다"는 전제가 구성적으로 거짓이다.
+  // 이 행이 발동하면 DF 좁히기 도입 실측의 "직접 질의 무변화"가 깨진다.
+  { prompt: 'sendbird 장애 원인이 뭐였지?', absent: ['뭐였지'], absentCount: 1, inCut: 0,
+    df: 'present', gate: 'hits', applied: false, scope: 'all' },
+  // 생존 term 1개 = 연접이 아니라 "그 토큰을 가진 아무 문서" (좁히기가 거부한 집합).
+  { prompt: '엉 그렇게 해줘.~', absent: [], absentCount: 0, inCut: 0,
+    df: 'lone_survivor', gate: 'lone_survivor_no_identifier_evidence',
+    applied: true, scope: 'none' },
+  // 히트가 위치 컷 안 term 을 버려서 생긴 것 — 좁히기 전 연접은 0건이었다.
+  { prompt: '오키 푸시 안된거 모두 푸시해줘.~', absent: ['오키', '안된거'],
+    absentCount: 2, inCut: 2,
+    df: 'present', gate: 'absent_terms_no_identifier_evidence', applied: true, scope: 'none' },
+  { prompt: '이제 나오네.. 시간이 걸리나 보네.', absent: ['나오네', '걸리나', '보네'],
+    absentCount: 3, inCut: 1,
+    df: 'present', gate: 'absent_terms_no_identifier_evidence', applied: true, scope: 'none' },
+  { prompt: '아 그것도 아까 메뉴얼에 들어 가야 하긴 하겠넹',
+    absent: ['그것도', '아까', '메뉴얼에'], absentCount: 3, inCut: 3,
+    df: 'present', gate: 'absent_terms_no_identifier_evidence', applied: true, scope: 'none' },
+  // 이미 발동 중이던 무관 프롬프트 — 사유가 바뀔 뿐 발동은 유지된다.
+  { prompt: '오늘 점심 뭐 먹을까', absent: ['먹을까'], absentCount: 1, inCut: 1,
+    df: 'present', gate: 'absent_terms_no_identifier_evidence', applied: true, scope: 'none' },
+];
+
+for (const c of GATE_TABLE) {
+  test(`E: "${c.prompt}" → lex_gate=${c.gate}`, () => {
+    const r = dfProbe({ prompt: c.prompt, df_absent: c.absent });
+    assert.equal(r.exit_code, 0);
+    const sel = selectionOf(r);
+    assert.equal(sel.lex_df, c.df);
+    assert.equal(sel.lex_terms_absent, c.absentCount, '기존 계약(probed 범위)은 그대로');
+    assert.equal(sel.lex_terms_absent_in_cut, c.inCut, '게이트가 보는 값은 위치 컷 안');
+    assert.equal(sel.lex_gate, c.gate, '사유를 뭉치지 않는다');
+    assert.equal(sel.lex_gate_applied, c.applied);
+    assert.equal(sel.lex_probe_scope, c.scope);
+    // 게이트가 걸리면 본문이 실제로 걷힌다(로그만 바뀌는 것이 아니다).
+    assert.equal(sel.bodies_injected, c.applied ? 0 : 1);
+    if (c.scope === 'none') {
+      assert.equal(r.queries.length, 1, '판정에 쓸 증거가 없으면 왕복도 하지 않는다');
+      assert.equal(sel.lex_hits, null, '"안 물었다"를 히트 0으로 뭉치지 않는다');
+    }
+  });
+}
+
+test('E: DF-present 식별자가 연접에 남아 있으면 프로브 없이 면제한다', () => {
+  // 식별자(`resolve_target`)는 기능어와 달리 변별력이 크다 — 코퍼스에 실재하고 연접에
+  // 남아 있으면 그 히트는 "term 을 버려서 만들어낸 것"이 아니다. EP 변형 전용 면제만
+  // 있으면 `ep` 패턴을 안 쓰는 프로젝트 전부에서 이 경로가 즉시 발동한다.
+  const r = dfProbe({
+    prompt: '아까 말한 그거 있잖아 resolve_target 어디서 불려?', df_absent: ['아까'],
+  });
+  const sel = selectionOf(r);
+  assert.equal(sel.lex_terms_absent_in_cut > 0, true, '불신 조건은 성립한다');
+  assert.equal(sel.lex_identifier_present, true);
+  assert.equal(sel.lex_gate, 'identifier_term_present');
+  assert.equal(sel.lex_gate_applied, false);
+  assert.equal(sel.lex_probe_scope, 'none', '면제는 왕복 0이다');
+  assert.equal(sel.lex_hits, null);
+  assert.equal(sel.bodies_injected, 1);
+});
+
+test('E: 코퍼스에 없는 식별자는 면제 근거가 아니다', () => {
+  // "present" 여야 한다 — 그 이름의 문서가 없으면 증거가 아니고 발동이 옳다.
+  const r = dfProbe({
+    prompt: '아까 말한 그거 있잖아 resolve_target 어디서 불려?',
+    df_absent: ['아까', 'resolve_target'],
+  });
+  const sel = selectionOf(r);
+  assert.equal(sel.lex_identifier_present, false);
+  assert.equal(sel.lex_gate_applied, true);
+  assert.equal(sel.bodies_injected, 0);
+});
+
+test('E: 군더더기가 위치 컷 안이면 내용어가 섞여 있어도 발동한다', () => {
+  // 위 앵커(`sendbird 장애 원인이 뭐였지?`)와 **대비되는 쪽**이다. 판정 범위가 위치 컷
+  // 안이라는 규칙은 "컷 밖 부재는 무해하다"만 말하고, 컷 안 부재는 여전히 발동시킨다:
+  //   - 앵커      : general=['sendbird','장애','원인','뭐였지'] → 컷=앞 3개, 부재는
+  //                 컷 **밖**의 `뭐였지` 하나 → 좁힌 질의가 컷과 축자 동일 → 미발동.
+  //   - 이 케이스 : general=['아까','말한','있잖아','github','issue'] → 컷이 곧
+  //                 ['아까','말한','있잖아'] 이고 부재 2개가 그 **안**에 있다 →
+  //                 좁히기가 없었다면 보냈을 질의(`아까 말한 있잖아`)가 실제로 0건이므로
+  //                 히트는 term 을 버려서 생긴 것 → 발동.
+  // 라이브 lex_query(`말한 github issue`)가 kept[:3] 과 일치하는 것으로 대조된다.
+  const r = dfProbe({
+    prompt: '아까 말한 그거 있잖아 github issue form 계층형 양식',
+    df_absent: ['아까', '있잖아'],
+  });
+  const sel = selectionOf(r);
+  assert.equal(sel.lex_query, '말한 github issue', '좁힌 질의는 라이브와 같다');
+  assert.equal(sel.lex_terms_absent, 2);
+  assert.equal(sel.lex_terms_absent_in_cut, 2, '부재가 위치 컷 안에 있다');
+  assert.equal(sel.lex_gate, 'absent_terms_no_identifier_evidence');
+  assert.equal(sel.lex_gate_applied, true);
+  assert.equal(sel.bodies_injected, 0);
+});
+
+test('E: 발동하면 카드 본문이 컨텍스트에서 사라지고 링크는 남는다', () => {
+  const body = '푸시 정책은 main 브랜치 직접 푸시를 금지한다.';
+  const gated = dfProbe({
+    prompt: '오키 푸시 안된거 모두 푸시해줘.~', df_absent: ['오키', '안된거'], card_body: body,
+  });
+  assert.match(gated.stdout, /card\.md/, '링크는 남는다(완전 무주입이 아니다)');
+  assert.doesNotMatch(gated.stdout, /main 브랜치 직접 푸시/, '본문 인용은 걷힌다');
+
+  // 같은 카드·같은 stub 인데 관련 질의면 본문이 그대로 간다 — 대조가 없으면 이 테스트는
+  // "게이트가 항상 걸린다"와 구분되지 않는다.
+  const open = dfProbe({ prompt: 'postgres 격리 수준 결정', df_absent: [], card_body: body });
+  assert.match(open.stdout, /main 브랜치 직접 푸시/, '관련 질의의 본문은 유지된다');
+});
+
+test('E: EP 변형 search 가 히트를 내면 발동하지 않는다 (면제)', () => {
+  // `EP12 확인해줘.~`는 일반 term 이 `['확인']` 하나라 lone_survivor 로 걸리지만, EP 변형은
+  // 독립 FTS 라 AND 대상이 아니고 EP 정확매칭 카드는 그 질문에서 가장 관련성이 높다.
+  // 면제가 없으면 novel 계열 코퍼스에서 EP 질의의 본문이 전부 박탈된다.
+  const r = dfProbe({ prompt: 'EP12 확인해줘.~', settings: { lexicalPatterns: ['ep'] } });
+  const sel = selectionOf(r);
+  assert.equal(sel.lex_df, 'lone_survivor', '일반 term 은 여전히 불신 대상이다');
+  assert.equal(sel.lex_gate, 'ep_search_hits');
+  assert.equal(sel.lex_gate_applied, false, '면제 — 본문이 유지된다');
+  assert.equal(sel.lex_probe_scope, 'ep_only');
+  assert.equal(sel.bodies_injected, 1);
+
+  // 게이트가 판정한 문자열: 식별자 엔트리만 = 본 질의가 보낸 엔트리의 부분집합.
+  const primaryLex = r.queries[0].searches.filter((s) => s.type === 'lex').map((s) => s.query);
+  const gate = r.queries[1];
+  assert.deepEqual(gate.searches.map((s) => s.query), ['EP012', 'EP12']);
+  assert.equal(gate.searches.every((s) => primaryLex.includes(s.query)), true,
+    '본 질의가 보내지 않은 문자열을 판정하면 안 된다');
+  assert.equal(gate.searches.some((s) => s.query === primaryLex[0]), false,
+    '증거로 쓰지 않기로 한 일반 문자열은 프로브에서 뺀다');
+});
+
+test('E: EP 변형 search 가 0건이면 면제되지 않는다', () => {
+  const r = dfProbe({
+    prompt: 'EP12 확인해줘.~', scenario: 'lex-dead', settings: { lexicalPatterns: ['ep'] },
+  });
+  const sel = selectionOf(r);
+  assert.equal(sel.lex_probe_scope, 'ep_only');
+  assert.equal(sel.lex_hits, 0);
+  assert.equal(sel.lex_gate, 'lone_survivor_no_identifier_evidence');
+  assert.equal(sel.lex_gate_applied, true);
+  assert.equal(sel.bodies_injected, 0);
+});
+
+test('E: EP 프로브가 실패하면 게이트를 연다 (fail-open)', () => {
+  // 정밀도 최적화가 본 흐름을 막으면 안 된다 — 프로브 실패는 "히트 0"이 아니다.
+  const r = dfProbe({
+    prompt: 'EP12 확인해줘.~', scenario: 'fail-after-first', settings: { lexicalPatterns: ['ep'] },
+  });
+  const sel = selectionOf(r);
+  assert.equal(sel.lex_hits, null);
+  assert.equal(sel.lex_gate, 'ep_probe_failed', '"히트 0"과 구분되는 값이어야 한다');
+  assert.equal(sel.lex_gate_applied, false);
+  assert.equal(sel.bodies_injected, 1);
+});
+
+test('E: DF 조회 실패는 발동 사유가 아니다 (fail-open, 오늘의 동작 유지)', () => {
+  // 좁히기가 일어나지 않았으면 "좁히기의 산물"이라는 전제 자체가 없다.
+  const r = dfProbe({ prompt: '오키 푸시 안된거 모두 푸시해줘.~', scenario: 'df-fail' });
+  const sel = selectionOf(r);
+  assert.equal(sel.lex_df, 'probe_failed');
+  assert.equal(sel.lex_gate, 'hits');
+  assert.equal(sel.lex_gate_applied, false);
+  assert.equal(sel.lex_probe_scope, 'all');
+});
+
+test('E: fixture 경로는 이 판정을 태우지 않는다 (결정성)', () => {
+  // fixture 모드는 DF 조회를 하지 않으므로(lex_df=skipped_fixture) 불신할 좁히기가
+  // 구조적으로 존재하지 않는다 — 기존 fixture 계약이 그대로 유지된다.
+  const r = dfProbe({ prompt: '엉 그렇게 해줘.~', fixture: true });
+  const sel = selectionOf(r);
+  assert.equal(sel.lex_df, 'skipped_fixture');
+  assert.equal(sel.lex_gate, 'skipped_fixture');
+  assert.equal(sel.lex_gate_applied, false);
+  assert.equal(r.queries.length, 0, '데몬을 전혀 건드리지 않는다');
 });
