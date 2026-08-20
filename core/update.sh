@@ -101,9 +101,34 @@ qmd_healthcheck() {
 # 조건이 해소되면 notice_clear로 재무장해 재발 시 다시 1회 알린다.
 # QMD_SUPPRESS_NOTICE=1(Hermes 등 stdout이 표면화되지 않는 호스트)이면 출력과
 # marker 기록을 모두 생략한다 — marker 선점으로 타 호스트 알림을 삼키지 않기 위함.
+_notice_hash() {
+  printf '%s' "$1" | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest()[:16])' 2>/dev/null
+}
+
+# 프로젝트 해시를 **부모 셸에** 한 번 계산해 둔다. `_notice_marker`는 notice 키마다
+# 불리고(동기 경로에서 39곳) 그때마다 python3를 스폰했다(실측 26ms/회 ≈ 1초). 해시는
+# `$project`의 순수 함수이므로 단일 항목 캐시로 충분하다.
+#
+# **반드시 부모 셸에서 부를 것.** `_notice_marker`는 `notice_once`/상태 파일 헬퍼가
+# 전부 `$(...)` 안에서 부르므로 그 안에서 계산한 값은 부모로 돌아오지 않는다 —
+# 캐시는 읽기만 서브셸에 상속된다. 프라임하지 않으면 lazy 경로로 그대로 동작한다.
+notice_hash_prime() {
+  local h
+  # set -e 가드: 프라임 실패는 lazy 폴백일 뿐이며 worker를 죽여서는 안 된다.
+  h="$(_notice_hash "$1" || true)"
+  [ -z "$h" ] && return 0
+  _QMD_NOTICE_HASH_PROJECT="$1"
+  _QMD_NOTICE_HASH="$h"
+  return 0
+}
+
 _notice_marker() {
   local key="$1" project="$2" hash
-  hash=$(printf '%s' "$project" | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest()[:16])' 2>/dev/null)
+  if [ -n "${_QMD_NOTICE_HASH:-}" ] && [ "$project" = "${_QMD_NOTICE_HASH_PROJECT:-}" ]; then
+    hash="$_QMD_NOTICE_HASH"
+  else
+    hash=$(_notice_hash "$project")
+  fi
   [ -z "$hash" ] && hash=default
   printf '%s' "$_QMD_CACHE_DIR/notice-${key}-${hash}"
 }
@@ -170,6 +195,27 @@ wiki_ineligible_state() {
 # 격리가 일어났을 때 그 알림이 통째로 삼켜진다.
 pending_quarantine_state() {
   printf '%s' "$(_notice_marker pending-quarantined-state "$1")"
+}
+
+# 같은 worker→main 신호 패턴. 값은 "레지스트리 경로를 설정 경로로 다시 잡은 컬렉션
+# 이름 목록"이다(3.5 — 설정→레지스트리 대조). **`-state` 접미사 규칙은 여기에도 그대로
+# 적용된다** — notice 키(`collection-repointed`)와 경로가 같으면 worker가 값을 쓰는 순간
+# 그것이 TTL marker가 되어 notice가 자기 자신을 억제한다(위 세 주석의 그 실패다).
+#
+# pending_quarantine_state와 같은 **일회성 사건**이다(수준이 아니다): 재지정이 끝나면
+# 다음 run의 경로 대조는 일치로 나와 다시 계산되지 않는다. 그래서 worker가 재지정할 때
+# notice marker를 직접 지워 재무장하고, 동기 경로가 알린 뒤 상태 파일을 **소비**한다.
+collection_repointed_state() {
+  printf '%s' "$(_notice_marker collection-repointed-state "$1")"
+}
+
+# 같은 worker→main 신호 패턴. 값은 "등록 경로가 디스크에 존재하지 않는 컬렉션 이름
+# 목록"이다(3.5 — 레지스트리→설정 대조). **`-state` 접미사 규칙 동일.**
+#
+# 이쪽은 wiki_ineligible_state와 같은 **수준(level)**이다 — 매 worker run이 레지스트리
+# 전체를 다시 세므로 0이 되면 main의 notice_clear가 재무장한다.
+dead_registration_state() {
+  printf '%s' "$(_notice_marker dead-registration-state "$1")"
 }
 
 # orphan 벡터 회수의 1차 트리거. `qmd collection remove`가 **실제로 성공**한 직후에만
@@ -330,11 +376,264 @@ qmd_collection_registered() {
   return 1
 }
 
+# --- 등록 경로 조회 (설정↔레지스트리 대조 전용) -----------------------------
+#
+# `qmd collection add`는 **이름이 이미 있으면 exit 1이고 경로를 갱신하지 않는다**
+# (실측: 같은 경로여도 exit 1, 다른 경로면 경로가 그대로 남는다). `retry()`가
+# `already exists`를 성공으로 처리하므로 `qmd update`는 정상 실행되고, 그래서
+# **설정이 해석한 경로와 레지스트리에 등록된 경로가 어긋나도 아무도 알아채지 못한다.**
+# 라이브 실측: ai-proxy의 두 컬렉션이 삭제된 git worktree를 가리켜 문서 0건이었고
+# (`~/work/ai-proxy/docs`는 존재하므로 prune 대상도 아니다) 자동 복구 경로가 없었다.
+#
+# 등록 경로는 `qmd collection list`가 내주지 않는다(실측) — 컬렉션당 `collection show`
+# 한 번이 필요하다. worker(백그라운드 fork) 경로라 비용은 수용 가능하다.
+#
+# **`qmd_collection_registered`와 폴라리티가 정반대다.** prune은 레지스트리를 읽지
+# 못하면(`unknown`) **지우는 쪽을 시도한다** — 잘못 건너뛰면 복구 불가 고아 등록이
+# 남기 때문이다. 여기서는 반대로 **아무것도 하지 않는다**: 잘못 판정하면 정상
+# 컬렉션을 `collection remove`해 전량 재색인 + 재임베딩(WAL 팽창) + `qmd cleanup`
+# vacuum(실측 7초)이 뒤따른다. 이 비대칭 때문에 판정을 `qmd_collection_registered`
+# 옆의 3값 함수에 얹지 않고 **별 함수**로 둔다(한 함수에 두 폴라리티를 담으면 다음
+# 편집이 호출부를 섞는다).
+#
+# 출력이 비면 "판정 불가"다 — 미등록·show 실패·형식 변경을 구분하지 않는다. 세 경우
+# 모두 이 자리에서 취할 안전한 행동이 같기 때문이다(무행동). 미등록이면 아래 add
+# 루프가 올바른 경로로 새로 등록하므로 무행동이 곧 정상 경로다.
+#
+# **rc 를 파이프에 흘려보내지 않는다.** `qmd collection show | awk` 형태로 쓰면 `$?`가
+# awk 의 것이 되어 **부분 출력 + rc≠0**(CLI 오류, 잘린 출력)에서도 `Path:` 한 줄만
+# 있으면 그 값을 신뢰하고 remove 까지 간다 — 이 함수의 계약("판정 불가면 무행동")이
+# 정확히 거기서 깨진다. 그래서 출력을 먼저 변수로 받고 **rc=0 일 때만** 파싱한다.
+# 실측 qmd 2.5.3 에서 없는 컬렉션은 rc=1 + stdout `Collection not found: <name>`이고,
+# 형식이 바뀌는 경우는 rc=0 이면서 `Path:`가 없을 수 있다 — 두 경우의 안전한 행동이
+# 같으므로(무행동) 빈 출력으로 뭉친다.
+#
+# **필드 분리가 아니라 접두 제거로 값을 얻는다.** `-F': +'`로 `$2`를 뽑으면 경로에
+# 콜론+공백이 들어간 순간 값이 잘린다(`/x/a: b/docs` → `/x/a`). 그 잘린 값은 설정
+# 경로와 **항상** 불일치라 매 세션 remove+add = 전량 재색인이 돈다 — 이 기능이 막으려던
+# 바로 그 실패를 이 함수가 만들어 낸다. POSIX 경로에 콜론은 합법이다. 콜론을 앵커에
+# 포함한다(`^ *Path:`) — `Pattern`/`Files` 같은 다른 줄과 접두가 겹치지 않게.
+qmd_registered_path() {
+  local out rc=0
+  out="$(qmd collection show "$1" 2>/dev/null)" || rc=$?
+  [ "$rc" = 0 ] || return 0
+  printf '%s\n' "$out" | awk '/^ *Path:/ { sub(/^ *Path:[ \t]*/, ""); print; exit }'
+}
+
+# 경로 한 쌍이 같은 대상을 가리키는지 판정한다. stdin `name\twant\thave` 줄들,
+# stdout `name\twant\thave\tsame|differ|unknown`.
+#
+# **판정 규칙이 여기 한 곳이다.** 불일치 필터(remove 를 낼지)와 재지정 확인(성공을
+# 보고할지)이 같은 규칙을 써야 하고, 두 소비자의 안전한 방향이 반대이므로
+# (`differ`만 행동 / `same`만 성공) `unknown`을 **명시적 값**으로 낸다. 예전엔
+# "출력에 줄이 없으면 일치"였는데 그러면 예외(판정 불가)가 확인 단계에서 성공으로
+# 읽힌다.
+#
+# **문자열 비교로는 안 된다.** APFS 는 기본 case-insensitive 이면서 표기를 보존하고
+# 한글은 NFC↔NFD 가 갈린다 — 실측으로 `docs`↔`DOCS`, NFC↔NFD 모두 `samefile()` True
+# 인데 `realpath` 문자열은 다르다. 거짓 불일치 하나가 매 세션 전량 재색인 + 재임베딩
+# 이므로, **양쪽이 존재하면 `samefile()`로** 판정한다.
+#
+# 한쪽이 없을 때만 `realpath` 문자열로 폴백한다 — `samefile`이 불가능하고, 그 경우가
+# 바로 죽은 worktree 를 가리키는 등록 경로라 불일치 판정이 참이다. 접근 불가(권한·IO)는
+# `unknown`이며 호출부는 아무것도 하지 않는다.
+compare_registry_paths() {
+  python3 -c '
+import os
+import sys
+
+
+def verdict(want, have):
+    try:
+        if os.path.exists(want) and os.path.exists(have):
+            # 대소문자·유니코드 정규화 차이를 흡수한다(문자열 비교로는 불가능하다).
+            return "same" if os.path.samefile(want, have) else "differ"
+        # 한쪽이 없으면 samefile 이 성립하지 않는다. 죽은 worktree 등록이 이 경우이고
+        # 그때 불일치는 참이다.
+        return "same" if os.path.realpath(want) == os.path.realpath(have) else "differ"
+    except Exception:
+        return "unknown"
+
+
+for line in sys.stdin.read().splitlines():
+    parts = line.split("\t")
+    if len(parts) != 3:
+        continue
+    name, want, have = parts
+    if not name or not want or not have:
+        continue
+    print(line + "\t" + verdict(want, have))
+' 2>>"$LOG" || true
+}
+
+# 설정→레지스트리: 등록 경로가 설정 경로와 다르면 remove 후 그 자리에서 새 경로로
+# add 한다. **경로가 실제로 다를 때만 실행한다** — 매 세션 remove+add가 돌면 그것이
+# 곧 전량 재색인 + 재임베딩이다. 판정 규칙은 `compare_registry_paths` 한 곳이다.
+#
+# **remove 와 add 를 떼어 놓지 말 것.** 예전에는 이 함수가 remove 만 하고 아래 add
+# 루프가 등록을 맡았는데, 그 사이 add 가 실패하면(권한·디스크·qmd 오류) **컬렉션이
+# 사라진 상태로 남아** 다음 worker run 까지 recall 이 전멸한다. 그런데 알림은 "다시
+# 등록했습니다"라고 말했다 — **고치려던 상태보다 나쁜 상태를 만들고 성공을 보고한다.**
+# 그래서 (1) remove 직후 그 자리에서 add 하고, (2) add 가 실패하면 **옛 경로로
+# rollback** 해 적어도 이전 상태를 복구하며, (3) `repointed` 는 **새 등록을 재조회해
+# 확인한 뒤에만** 기록한다. 확인 실패·rollback 은 기록하지 않으므로 알림은 실제로
+# 일어난 것만 말한다(CLAUDE.md "거짓 성공 보고" 분류: 그 쓰기가 연산의 유일한 효과다).
+#
+# 아래 add 루프와의 **중복 등록은 무해하다** — 같은 이름·같은 경로면 qmd 가
+# `already exists` 로 실패하고 `retry()` 가 그것을 성공으로 처리한다(그 루프가 원래
+# 매 세션 그렇게 돈다). 즉 여기서 등록에 성공하면 add 루프는 no-op 이고, 여기서
+# 실패했으면 add 루프가 한 번 더 시도하는 복구 기회가 된다.
+#
+# full_path 계산은 아래 add 루프와 **같아야 한다**(상대경로는 workdir 기준). 갈리면
+# 재지정한 경로와 등록하는 경로가 달라 매 세션 remove+add가 돈다.
+reconcile_registry_paths() {
+  local entries_tsv="$1" workdir="$2"
+  [ -z "$entries_tsv" ] && return 0
+
+  local pairs="" name path full reg
+  while IFS=$'\t' read -r name path; do
+    [ -z "$name" ] && continue
+    full="$path"
+    case "$path" in /*) ;; *) full="$workdir/$path" ;; esac
+    reg="$(qmd_registered_path "$name" || true)"
+    [ -z "$reg" ] && continue
+    pairs="${pairs}${name}	${full}	${reg}
+"
+  done <<EOF
+$entries_tsv
+EOF
+  [ -z "$pairs" ] && return 0
+
+  # 실패 방향: python3이 죽으면 substitution이 비고(`|| true`로 set -e도 막는다)
+  # → `differ` 0건 = 무행동이다. `unknown`(예외·접근 불가)도 행동하지 않는다.
+  local verdicts mismatched
+  verdicts="$(printf '%s' "$pairs" | compare_registry_paths)"
+  mismatched="$(printf '%s\n' "$verdicts" | awk -F'\t' '$4 == "differ" { print $1 "\t" $2 "\t" $3 }')"
+  [ -z "$mismatched" ] && return 0
+
+  local repointed="" want have rc arc now check
+  while IFS=$'\t' read -r name want have; do
+    [ -z "$name" ] && continue
+    log "REPOINT COLLECTION: $name registry=$have settings=$want"
+    rc=0
+    qmd collection remove "$name" >>"$LOG" 2>&1 || rc=$?
+    if [ "$rc" != 0 ]; then
+      log "REPOINT COLLECTION FAILED: $name (remove rc=$rc)"
+      continue
+    fi
+    qmd_registry_invalidate
+    # remove 가 성공한 것만으로 orphan 벡터가 생긴다(qmd 2.5.3 removeCollection 은
+    # 벡터를 지우지 않는다) — add 성공 여부와 무관하게 회수 대상이다.
+    mark_orphan_reclaim_pending
+
+    arc=0
+    qmd collection add "$want" --name "$name" >>"$LOG" 2>&1 || arc=$?
+    qmd_registry_invalidate
+    if [ "$arc" = 0 ]; then
+      # 재조회 확인: 등록 경로가 실제로 새 경로여야 성공을 보고한다. `same` 이외
+      # (differ/unknown/빈 출력)는 전부 미확인으로 취급한다.
+      now="$(qmd_registered_path "$name" || true)"
+      check=""
+      if [ -n "$now" ]; then
+        check="$(printf '%s	%s	%s\n' "$name" "$want" "$now" | compare_registry_paths | awk -F'\t' '{ print $4 }')"
+      fi
+      if [ "$check" = same ]; then
+        log "REPOINT COLLECTION OK: $name path=$want"
+        repointed="${repointed}${repointed:+, }${name}"
+        continue
+      fi
+      log "REPOINT COLLECTION UNVERIFIED: $name add rc=0 but registry=${now:-<unreadable>} (보고하지 않는다)"
+      continue
+    fi
+
+    # add 실패 → 옛 경로로 rollback 을 시도한다. 아무것도 등록되지 않은 상태로
+    # 남기는 것보다 옛 경로(적어도 이전과 동일)가 낫다. rollback 도 실패하면 이
+    # 컬렉션은 미등록이고, 아래 add 루프와 다음 세션이 재시도한다.
+    log "REPOINT COLLECTION ADD FAILED: $name (add rc=$arc) — rolling back to $have"
+    if qmd collection add "$have" --name "$name" >>"$LOG" 2>&1; then
+      log "REPOINT COLLECTION ROLLED BACK: $name path=$have"
+    else
+      log "REPOINT COLLECTION ROLLBACK FAILED: $name (컬렉션이 미등록 상태다 — 다음 add 루프/세션이 재시도한다)"
+    fi
+    qmd_registry_invalidate
+  done <<EOF
+$mismatched
+EOF
+
+  [ -z "$repointed" ] && return 0
+  printf '%s' "$repointed" > "$(collection_repointed_state "$workdir")" 2>/dev/null || true
+  # 사건 단위 재무장(pending_quarantine_state와 같은 규칙): 재지정은 다시 계산되지
+  # 않으므로 TTL에 삼켜지면 그 세션의 전량 재색인이 조용히 일어난다.
+  notice_clear collection-repointed "$workdir"
+  return 0
+}
+
+# 레지스트리→설정: **등록 경로가 디스크에 존재하지 않는** 컬렉션만 보고한다.
+#
+# **범위를 이보다 넓히지 말 것.** update.sh는 프로젝트 단위로 돌기 때문에 "이 프로젝트
+# settings에 없는 등록"을 고아로 보면 **다른 프로젝트의 정상 컬렉션**을 잡는다(실측:
+# `yakbbal-wiki`는 `~/work/novel/...` 프로젝트 것이고 문서 126건이 살아 있다).
+# 반면 "등록 경로가 없다"는 소유 프로젝트와 무관하게 죽은 등록이다(실측: `t-wiki` →
+# `/Users/dulee/work/qmd-notice-0hOTDz/.auto-context/wiki`, 경로 소실, 문서 0건 —
+# 테스트 임시 디렉터리 잔재). 같은 근거가 docs/settings.md에도 있다.
+#
+# **자동 삭제하지 않는다.** 파괴적이고, 경로가 일시적으로 안 보이는 경우(마운트 안 된
+# 볼륨, 외장 디스크)를 소실과 구분할 수 없다. 목록만 알린다.
+#
+# 호출 자리는 add 루프 **뒤**다: ai-proxy 사례는 "경로 불일치"이면서 동시에 "경로 소실"
+# 이므로, 같은 run의 reconcile+add가 고친 컬렉션을 죽은 등록으로 알리면 거짓 경보다.
+# 그래서 add 뒤에 레지스트리를 다시 읽는다.
+#
+# 비용은 컬렉션당 `collection show` 1회다(실측 93ms, 라이브 36개 = 3.3초). worker는
+# 백그라운드 fork라 blocking hook 예산에 들어가지 않지만, 등록할 컬렉션이 하나도 없는
+# run에서는 호출부가 이 함수를 아예 부르지 않는다(그 근거는 호출 자리 주석).
+scan_dead_registrations() {
+  local workdir="$1"
+  local state
+  state="$(dead_registration_state "$workdir")"
+  qmd_registry_load
+  if [ -z "$_QMD_REGISTRY" ]; then
+    # 레지스트리를 읽지 못했다 = 판정 불가. 지난 목록을 지우지도 않는다(조용한
+    # 재무장은 "고쳐졌다"는 거짓 신호다).
+    return 0
+  fi
+
+  local dead="" name path
+  while IFS= read -r name; do
+    [ -z "$name" ] && continue
+    # `qmd_registry_load`의 awk(`/^[^ ]/ {print $1}`)는 `Collections (36):` 헤더의
+    # 첫 토큰도 목록에 넣는다(실측). 기존 소비자는 `grep -qxF`로 이름 하나를 조회만
+    # 하니 무해했지만, 이 함수는 **목록을 순회**하므로 헤더를 컬렉션으로 취급하면
+    # `collection show Collections`가 not found를 내고 그것이 죽은 등록으로 새어
+    # 나갈 수 있다. 파서를 건드리지 않고 소비자 쪽에서 걸러낸다.
+    [ "$name" = "Collections" ] && continue
+    path="$(qmd_registered_path "$name" || true)"
+    [ -z "$path" ] && continue
+    # `-d` 는 부재와 권한 오류·미마운트를 구분하지 못한다. 자동 삭제가 없으므로 위험은
+    # 낮지만, 알림 문구는 그 한계를 사실대로 말한다("없거나 접근할 수 없음").
+    [ -d "$path" ] && continue
+    log "DEAD REGISTRATION: $name path=$path (등록 경로가 없거나 접근할 수 없음)"
+    dead="${dead}${dead:+, }${name}"
+  done <<EOF
+$_QMD_REGISTRY
+EOF
+
+  if [ -n "$dead" ]; then
+    printf '%s' "$dead" > "$state" 2>/dev/null || true
+  else
+    rm -f "$state" 2>/dev/null || true
+  fi
+  return 0
+}
+
 preflight_remove_risky() {
   qmd_registry_load
   printf '%s\n' "$_QMD_REGISTRY" | while read -r name; do
     [ -z "$name" ] && continue
-    path=$(qmd collection show "$name" 2>/dev/null | awk -F': +' '/^ *Path|^ *Root/ {print $2; exit}')
+    # 접두 제거로 값을 얻는다(필드 분리 금지) — `-F': +'`의 `$2`는 경로에 콜론+공백이
+    # 있으면 값을 자르고, 잘린 경로를 resolver에 물으면 **정상 컬렉션이 risky로 판정돼
+    # 삭제될 수 있다**. `qmd_registered_path`와 같은 규칙이다(여기는 `Root:`도 받는다).
+    path=$(qmd collection show "$name" 2>/dev/null | awk '/^ *Path:|^ *Root:/ { sub(/^ *(Path|Root):[ \t]*/, ""); print; exit }')
     [ -z "$path" ] && continue
     if path_refused_by_resolver "$path"; then
       log "PREFLIGHT: removing risky collection '$name' (path=$path)"
@@ -763,6 +1062,7 @@ run_update() {
 
   workdir="$1"
   set_status_for_workdir "$workdir"
+  notice_hash_prime "$workdir"
   cd "$workdir" 2>/dev/null || exit 0
   
   log "START: cwd=$workdir"
@@ -833,6 +1133,13 @@ run_update() {
   if [ -z "$entries_tsv" ]; then
     log "WARN: no collection entries resolved — collection add skipped"
   fi
+  # 설정→레지스트리 경로 대조(3.5). **재지정은 이 함수 안에서 remove+add 로 완결된다**
+  # (`collection add`는 이름이 이미 있으면 경로를 갱신하지 않으므로 remove 가 선행해야
+  # 하고, 둘을 떼어 놓으면 그 사이 실패가 컬렉션을 지운 채로 남긴다 — 함수 주석 참조).
+  # 그래도 add 루프 **앞**에 둔다: 여기서 등록에 성공하면 아래 루프는 `already exists`
+  # 로 no-op 이고, 실패했으면 아래 루프가 같은 세션에 한 번 더 시도하는 복구 기회다.
+  reconcile_registry_paths "$entries_tsv" "$workdir"
+
   collections_ok=1
   while read -r name path; do
     [ -z "$name" ] && continue
@@ -844,6 +1151,20 @@ run_update() {
     log "ADD COLLECTION: name=$name path=$full_path"
     retry qmd collection add "$full_path" --name "$name" || collections_ok=0
   done <<< "$entries_tsv"
+
+  # 레지스트리→설정 대조(3.5). add **뒤**에 레지스트리를 다시 읽는다 — 방금 재지정·
+  # 등록한 컬렉션을 죽은 등록으로 알리면 거짓 경보다(ai-proxy 사례는 두 조건을 동시에
+  # 만족했다). 삭제는 하지 않고 목록만 남긴다(함수 docstring의 범위 근거 참조).
+  #
+  # **등록할 컬렉션이 하나도 없으면 스캔하지 않는다.** 이 스캔은 레지스트리 전체를
+  # 순회하며 컬렉션당 `collection show` 1회(실측 93ms, 라이브 36개 = 3.3초)를 쓰는데,
+  # entries가 빈 상태는 (a) 전부 role `source`인 프로젝트이거나 (b) 위 `WARN`이 가리키는
+  # 일시적 resolve 실패다. (a)는 애초에 recall 대상이 없고 (b)에서 전역 레지스트리를
+  # 판정해 알리는 것은 근거 없는 잡음이다.
+  if [ -n "$entries_tsv" ]; then
+    qmd_registry_invalidate
+    scan_dead_registrations "$workdir"
+  fi
 
   # 4. update and embed
   if [ "$collections_ok" = 1 ] && retry qmd update; then
@@ -986,6 +1307,8 @@ main() {
   workdir=$(printf '%s' "$raw" | python3 -c 'import json,sys,os; print((json.load(sys.stdin).get("cwd") or os.getcwd()))' 2>/dev/null)
   [ -z "$workdir" ] && workdir="$PWD"
   set_status_for_workdir "$workdir"
+  # notice 해시를 부모 셸에 1회 계산한다(아래 상태 파일·notice 호출 전부가 이 값을 쓴다).
+  notice_hash_prime "$workdir"
 
   config_json=$(load_config_json "$workdir")
   if [ "$(config_event_enabled sessionStart "$config_json")" != "yes" ]; then
@@ -1081,6 +1404,41 @@ main() {
   if [ -n "$pending_quarantined" ]; then
     notice_once pending-quarantined "$workdir" "[qmd] 손상된 원문 갱신 원장(.auto-context/compile/source-refresh-pending.jsonl)을 격리했습니다 → ${pending_quarantined}. 그대로 두면 같은 문서가 매번 재컴파일·재검수되고(유료 호출) wiki recall이 전부 비어 있습니다. 격리 파일은 진단용으로 남겨 두었고, 원장은 다음 편집에서 새로 만들어집니다. 그 사이 기록된 갱신 대기 표식은 사라졌지만 카드 신선도는 원문 SHA-256 대조로 계속 판정됩니다."
     rm -f "$pending_quarantine_file" 2>/dev/null || true
+  fi
+
+  # 컬렉션 경로 재지정 표면화(3.5 — 설정→레지스트리). 여기서도 파일만 읽는다(판정과
+  # remove는 worker가 이미 했다). **사용자가 알아야 한다**: 재지정에는 그 컬렉션의
+  # 전량 재색인 + 재임베딩이 뒤따르므로 몇 분간 검색 결과가 비거나 얕을 수 있고, 그
+  # 원인을 모르면 버그로 신고된다.
+  # **알림은 재색인보다 한 세션 늦다** — 상태는 worker run N이 쓰고 세션 N+1이 읽는다
+  # (worker는 백그라운드 fork라 그 stdout이 사용자에게 닿지 않는다). 그래서 문구는
+  # 시점을 단정하지 않는다("지금부터 …됩니다"는 이미 끝났을 수 있어 거짓이 된다).
+  # 위 pending-quarantined와 같은 **사건 단위**라 `else notice_clear`가 없다 — 재무장은
+  # worker가 재지정 시점에 하고, 알린 뒤에는 상태 파일을 소비한다.
+  collection_repointed=""
+  collection_repointed_file="$(collection_repointed_state "$workdir")"
+  if [ -s "$collection_repointed_file" ]; then
+    collection_repointed="$(cat "$collection_repointed_file" 2>/dev/null || true)"
+  fi
+  if [ -n "$collection_repointed" ]; then
+    notice_once collection-repointed "$workdir" "[qmd] 검색 컬렉션의 등록 경로가 설정 경로와 달라 다시 등록했습니다: ${collection_repointed}. qmd는 같은 이름으로 경로를 갱신하지 않으므로(add가 거부된다) 한 번 어긋나면 그 컬렉션은 계속 옛 경로를 색인합니다 — worktree에서 세션을 열었다가 그 worktree를 지운 경우가 대표적입니다. 그 컬렉션에는 전량 재색인·재임베딩이 뒤따르므로 완료 전까지 검색 결과가 비거나 얕을 수 있습니다."
+    rm -f "$collection_repointed_file" 2>/dev/null || true
+  fi
+
+  # 죽은 등록 표면화(3.5 — 레지스트리→설정). **삭제하지 않고 목록만 알린다** — 파괴적이고
+  # 일시적으로 안 보이는 경로(마운트 안 된 볼륨)를 소실과 구분할 수 없다. 보고 범위가
+  # "등록 경로가 존재하지 않는 것"으로 좁혀진 근거는 scan_dead_registrations docstring과
+  # docs/settings.md에 있다(다른 프로젝트의 정상 컬렉션을 잡지 않기 위함).
+  # 매 worker run이 다시 세는 **수준**이라 0이 되면 notice_clear로 재무장한다.
+  dead_registrations=""
+  dead_registration_file="$(dead_registration_state "$workdir")"
+  if [ -s "$dead_registration_file" ]; then
+    dead_registrations="$(cat "$dead_registration_file" 2>/dev/null || true)"
+  fi
+  if [ -n "$dead_registrations" ]; then
+    notice_once dead-registration "$workdir" "[qmd] 등록 경로가 없거나 접근할 수 없는 검색 컬렉션이 있습니다: ${dead_registrations}. 문서가 0건이라 검색 결과에 기여하지 않고 인덱스에만 남습니다. 삭제는 자동으로 하지 않습니다(경로가 정말 사라진 것인지, 마운트하지 않은 볼륨·권한 문제로 안 보이는 것인지 구분할 수 없습니다) — 경로를 확인한 뒤 'qmd collection remove <이름>'을 직접 실행하세요."
+  else
+    notice_clear dead-registration "$workdir"
   fi
 
   # orphan 벡터 회수 실패 표면화(같은 종점 패턴). 회수는 백그라운드 fork에서 돌아
