@@ -264,3 +264,88 @@ test('SessionStart가 정리된 config에는 아무 알림도 내지 않는다',
     removeTemp(home);
   }
 });
+
+// --- 4. 죽은 설정 키 3개의 처리 방식 (계획 2026-08-19 §3.4) -----------------
+// 세 키가 서로 **다른** 처리를 받으므로 그 차이를 한 자리에서 못박는다. 하나라도
+// 뒤집히면(예: sourceScan을 다시 removed 목록에 넣거나 sourceMissingPath를 살리면)
+// 여기서 잡힌다.
+
+function detectRaw(raw) {
+  const path = join(CACHE, `raw-${Math.random().toString(36).slice(2)}.json`);
+  mkdirSync(CACHE, { recursive: true });
+  writeFileSync(path, JSON.stringify(raw));
+  return detect(path);
+}
+
+test('§3.4 sourceScan은 살아난 키라 알림 대상이 아니다', () => {
+  // 값이 실제로 읽히므로(config.compile_config) 제거·이전 목록 어디에도 없다.
+  const { records, notice } = detectRaw({
+    compile: { mode: 'auto-wiki', sourceScan: { enabled: false, maxCardsPerScan: 50 } },
+  });
+  assert.deepEqual(records, []);
+  assert.equal(notice, '');
+});
+
+test('§3.4 sourceMissingPath는 알림만 나간다 (경로는 compile_paths 상수)', () => {
+  // 소비자(`wiki_source_missing.ledger_path`)가 설정을 아예 읽지 않으므로 살릴 대상이
+  // 아니라 알릴 대상이다. 예전에는 목록에도 없어 **알림조차 없었다**.
+  const { records, notice } = detectRaw({
+    compile: { mode: 'auto-wiki', sourceMissingPath: '.auto-context/compile/mine.jsonl' },
+  });
+  assert.deepEqual(records, [
+    { key: 'compile.sourceMissingPath', kind: 'removed', replacement: null },
+  ]);
+  assert.match(notice, /제거됨\(대체 없음, 지우세요\): compile\.sourceMissingPath/);
+
+  // 키를 적지 않은 프로젝트에는 아무 알림도 나가지 않는다(present일 때만).
+  const clean = detectRaw({ compile: { mode: 'auto-wiki' } });
+  assert.deepEqual(clean.records, []);
+  assert.equal(clean.notice, '');
+});
+
+test('§3.4 maxCardsPerSource는 값이 이전되어도 알림은 유지된다', () => {
+  // 이전은 **잠정 반영**이고 스키마가 아니다 — 사용자는 새 키로 옮겨 적어야 하므로
+  // 행선지 알림이 계속 나가야 한다(docs/settings.md가 이 예외를 함께 적는다).
+  const { records, notice } = detectRaw({ compile: { mode: 'auto-wiki', maxCardsPerSource: 4 } });
+  assert.deepEqual(records, [{
+    key: 'compile.maxCardsPerSource',
+    kind: 'relocated',
+    replacement: 'compile.budget.cardsPerSource',
+  }]);
+  assert.match(notice, /compile\.maxCardsPerSource → compile\.budget\.cardsPerSource/);
+});
+
+// 값을 못 읽어 기본값으로 폴백한 사실의 **종점**. 판정 함수 단위 테스트만으로는
+// "update.sh에서 아무도 안 부른다"를 잡지 못한다(위 deprecated 알림과 같은 이유).
+test('SessionStart가 읽을 수 없는 compile 스위치 값을 알리고 고치면 재무장한다', () => {
+  const { home, dir, env } = sessionStartProject('dep-flag', {
+    mode: 'auto-wiki',
+    sourceScan: { enabled: 'false' },
+  });
+  const settings = join(dir, '.auto-context', 'settings.json');
+  const write = (sourceScan) => writeFileSync(settings, `${JSON.stringify({
+    indexing: true,
+    collections: [`${PROJECT_NAME}-docs`],
+    collectionPaths: { [`${PROJECT_NAME}-docs`]: 'docs' },
+    compile: { mode: 'auto-wiki', sourceScan },
+  }, null, 2)}\n`);
+  try {
+    const first = runSessionStart(dir, env);
+    const lines = first.split('\n').filter((l) => l.includes('compile 설정 값을 읽을 수 없어'));
+    assert.equal(lines.length, 1, `알림이 1줄이 아니다:\n${first}`);
+    assert.match(lines[0], /compile\.sourceScan\.enabled/);
+    // fail-open 방향(스캔 유지)이 안내에 있어야 한다 — 무엇이 지금 일어나는지 모르면
+    // 사용자는 자기 opt-out이 무력화된 것을 알 수 없다.
+    assert.match(lines[0], /스캔이 계속 돕니다/);
+
+    // TTL 억제.
+    assert.doesNotMatch(runSessionStart(dir, env), /compile 설정 값을 읽을 수 없어/);
+    // 값을 고치면 조용해지고(notice_clear) 다시 틀리면 또 알린다.
+    write({ enabled: false });
+    assert.doesNotMatch(runSessionStart(dir, env), /compile 설정 값을 읽을 수 없어/);
+    write({ enabled: 'nope' });
+    assert.match(runSessionStart(dir, env), /compile 설정 값을 읽을 수 없어/);
+  } finally {
+    removeTemp(home);
+  }
+});

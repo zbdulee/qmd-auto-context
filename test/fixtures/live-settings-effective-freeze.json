@@ -66,6 +66,10 @@
         },
         "maxPairsPerScan": 10
       },
+      "sourceScan": {
+        "enabled": true,
+        "maxCardsPerScan": 300
+      },
       "triggers": [
         "post_tool_source",
         "manual"
@@ -171,6 +175,10 @@
           "timeout": 120
         },
         "maxPairsPerScan": 10
+      },
+      "sourceScan": {
+        "enabled": true,
+        "maxCardsPerScan": 300
       },
       "triggers": [],
       "verify": {
@@ -282,6 +290,10 @@
           "timeout": 120
         },
         "maxPairsPerScan": 10
+      },
+      "sourceScan": {
+        "enabled": true,
+        "maxCardsPerScan": 300
       },
       "triggers": [],
       "verify": {
@@ -398,6 +410,10 @@
         },
         "maxPairsPerScan": 100
       },
+      "sourceScan": {
+        "enabled": true,
+        "maxCardsPerScan": 300
+      },
       "triggers": [
         "post_tool_source",
         "manual",
@@ -508,6 +524,10 @@
         },
         "maxPairsPerScan": 10
       },
+      "sourceScan": {
+        "enabled": true,
+        "maxCardsPerScan": 300
+      },
       "triggers": [],
       "verify": {
         "builtins": [],
@@ -609,6 +629,10 @@
         },
         "maxPairsPerScan": 10
       },
+      "sourceScan": {
+        "enabled": true,
+        "maxCardsPerScan": 300
+      },
       "triggers": [],
       "verify": {
         "builtins": [],
@@ -701,6 +725,10 @@
           "timeout": 120
         },
         "maxPairsPerScan": 10
+      },
+      "sourceScan": {
+        "enabled": true,
+        "maxCardsPerScan": 300
       },
       "triggers": [],
       "verify": {
@@ -817,6 +845,10 @@
         },
         "maxPairsPerScan": 10
       },
+      "sourceScan": {
+        "enabled": true,
+        "maxCardsPerScan": 300
+      },
       "triggers": [
         "post_tool_source",
         "manual"
@@ -920,6 +952,10 @@
           "timeout": 120
         },
         "maxPairsPerScan": 10
+      },
+      "sourceScan": {
+        "enabled": true,
+        "maxCardsPerScan": 300
       },
       "triggers": [],
       "verify": {

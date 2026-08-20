@@ -155,6 +155,9 @@ test('wiki recall 신규 필드는 additive로 normalize 된다', () => {
     triggers: ['manual', 'post_session_summary', 'post_tool_source'],
     maxAutoPageLines: 80,
     maxSourceChars: 12000,
+    // 소스 소실 스캐너 설정. 화이트리스트 밖이던 동안 `enabled:false`를 적어도 스캔이
+    // 돌았다(값이 정규화 출력에 없으면 소비자가 기본값을 본다).
+    sourceScan: { enabled: true, maxCardsPerScan: 300 },
     reasoningEffort: {
       generation: 'low',
       verify: 'medium',
@@ -651,6 +654,117 @@ test('compile.budget: 값 정규화 + 유료 호출 클램프가 함께 이동�
   const bad = loadConfig(JSON.stringify({ compile: { budget: { extractorPerRun: 'nope', verifyPerRun: -1 } } }));
   assert.deepEqual(bad.compile.budget, BUDGET_DEFAULTS);
   assert.deepEqual(loadConfig(JSON.stringify({ compile: {} })).compile.budget, BUDGET_DEFAULTS);
+});
+
+// --- 죽은 설정 키 3개 (계획 2026-08-19 §3.4) --------------------------------
+// `sourceScan`은 `wiki_source_scan.run`이 **읽는데도** 정규화 화이트리스트 밖이라 항상
+// 버려졌다(`enabled:false`를 적어도 스캔이 돌았고, 폭은 `QMD_SOURCE_SCAN_MAX` env만
+// 유효했다). 소비자가 살아 있으므로 살릴 대상이고, 값 규칙은 여기가 SSOT다.
+test('compile.sourceScan: enabled는 bool만, maxCardsPerScan은 클램프된다', () => {
+  const SCAN_DEFAULTS = { enabled: true, maxCardsPerScan: 300 };
+  const scanOf = (v) => loadConfig(JSON.stringify({ compile: { sourceScan: v } })).compile.sourceScan;
+  const maxScan = JSON.parse(execFileSync('python3', ['-c', [
+    'import json, sys',
+    "sys.path.insert(0, 'core')",
+    'import config as c',
+    'print(json.dumps(c.MAX_SOURCE_SCAN_CARDS))',
+  ].join('\n')], { encoding: 'utf8' }).trim());
+
+  // 사용자가 기록해 둔 opt-out이 실제로 반영된다 — 이 한 줄이 §3.4의 본체다.
+  assert.deepEqual(scanOf({ enabled: false }), { enabled: false, maxCardsPerScan: 300 });
+  assert.deepEqual(scanOf({ maxCardsPerScan: '50' }), { enabled: true, maxCardsPerScan: 50 });
+  assert.deepEqual(loadConfig(JSON.stringify({ compile: {} })).compile.sourceScan, SCAN_DEFAULTS);
+
+  // bool 강제: `"false"`가 truthy로 읽혀 "껐는데 돈다"가 재발하지 않게 한다.
+  assert.deepEqual(scanOf({ enabled: 'false' }), SCAN_DEFAULTS);
+  assert.deepEqual(scanOf({ enabled: 0 }), SCAN_DEFAULTS);
+  assert.deepEqual(scanOf('nope'), SCAN_DEFAULTS);
+
+  // 클램프 경계. 상한은 리터럴이 아니라 코드 상수에서 읽는다(갈리면 이 단정이 무의미).
+  assert.equal(scanOf({ maxCardsPerScan: 99999999 }).maxCardsPerScan, maxScan);
+  assert.equal(scanOf({ maxCardsPerScan: maxScan }).maxCardsPerScan, maxScan);
+  assert.equal(scanOf({ maxCardsPerScan: maxScan + 1 }).maxCardsPerScan, maxScan);
+  // 0·음수·비수치는 기본값(0은 "끄기"가 아니다 — 끄는 것은 `enabled`다).
+  for (const bad of [0, -1, 'nope', null]) {
+    assert.equal(scanOf({ maxCardsPerScan: bad }).maxCardsPerScan, 300, `maxCardsPerScan: ${bad}`);
+  }
+});
+
+// **이 단정은 계약이 아니라 현재 동작의 기록이다.** `true`는 `int(True) == 1`로 통과한다
+// — `coerce_capped_int`를 쓰는 **모든** 예산 키(`budget.*`)와 같은 동작이라 이 키에서만
+// 바꾸지 않았다(피해도 유계다: 창이 1장으로 좁아질 뿐 순환 커서가 다음 회차에 이어 본다).
+// 공용 coercion이 bool을 거부하도록 고쳐도 좋고, 그때는 이 단정을 함께 갱신하면 된다
+// (`budget.*` 전 키의 동작이 같이 바뀐다는 것만 알고 고칠 것). 여기 있는 이유는 "테스트가
+// 없어서 아무도 모르는 동작"으로 남지 않게 하는 것뿐이다.
+test('[현재 동작 기록, 계약 아님] maxCardsPerScan: true는 공용 coercion을 그대로 통과한다', () => {
+  const scanOf = (v) => loadConfig(JSON.stringify({ compile: { sourceScan: v } })).compile.sourceScan;
+  assert.equal(scanOf({ maxCardsPerScan: true }).maxCardsPerScan, 1);
+  // 같은 coercion을 쓰는 예산 키도 같은 값이 나온다(이 동작이 이 키만의 것이 아니라는 증거).
+  assert.equal(
+    loadConfig(JSON.stringify({ compile: { budget: { extractorPerRun: true } } })).compile.budget.extractorPerRun,
+    1,
+  );
+});
+
+// `enabled` 비-bool은 기본값(true = 스캔 유지)으로 폴백하는데, 그것만으로는 사용자가 적어
+// 둔 opt-out이 **무력화된 채 조용하다**(결과가 "껐는데 돈다"다 — 이 작업이 고치려던 실패의
+// 한 단계 이동). `COLLECTION_ROLE_INVALID`와 같은 규칙으로 표면화하고, 그 판정이 여기다.
+test('invalid_compile_flags: 값 미지 스위치를 표면화한다 (키 없음과 구분)', () => {
+  const flagsOf = (compile) => JSON.parse(execFileSync('python3', ['-c', [
+    'import json, sys',
+    "sys.path.insert(0, 'core')",
+    'import config as c',
+    'print(json.dumps(c.invalid_compile_flags(json.loads(sys.argv[1]))))',
+  ].join('\n'), JSON.stringify(compile)], { encoding: 'utf8' }).trim());
+
+  // 값 미지 — 켜려는 의도(`1`)든 끄려는 의도(`"false"`)든 우리는 못 읽었다는 사실만 안다.
+  assert.deepEqual(flagsOf({ sourceScan: { enabled: 'false' } }), ['compile.sourceScan.enabled']);
+  assert.deepEqual(flagsOf({ sourceScan: { enabled: 1 } }), ['compile.sourceScan.enabled']);
+  assert.deepEqual(flagsOf({ sourceScan: { enabled: null } }), ['compile.sourceScan.enabled']);
+  // 블록 자체를 못 읽으면 그 안의 모든 값이 기본값이 된다.
+  assert.deepEqual(flagsOf({ sourceScan: 'off' }), ['compile.sourceScan']);
+  // 키 없음·정상 bool은 보고하지 않는다(의도 없음 / 의도대로 동작).
+  assert.deepEqual(flagsOf({}), []);
+  assert.deepEqual(flagsOf({ sourceScan: {} }), []);
+  assert.deepEqual(flagsOf({ sourceScan: { enabled: false } }), []);
+  assert.deepEqual(flagsOf({ sourceScan: { enabled: true } }), []);
+  assert.deepEqual(flagsOf('nope'), []);
+  // maxCardsPerScan은 이 알림의 대상이 아니다 — 창 폭이 기본값이 될 뿐 순환 커서가
+  // 커버리지를 유지하므로 `enabled`(opt-out 무력화)와 방향이 다르다.
+  assert.deepEqual(flagsOf({ sourceScan: { maxCardsPerScan: 0 } }), []);
+  assert.deepEqual(flagsOf({ sourceScan: { maxCardsPerScan: 'many' } }), []);
+});
+
+// `compile.maxCardsPerSource`는 `DEPRECATED_RELOCATED_KEYS`의 이름값대로 **값이 이전**된다.
+// 같은 목록의 나머지 4키는 이전하지 않는다 — 근거는 core/config.py의 주석 3항목이고
+// (frozen contract / 비용 증가 방향 / 라이브 발생 0건) 여기서 그 비대칭을 못박는다.
+// 이 단정이 없으면 다음 "전부 고쳐라" 스윕이 프리즈 테스트를 깨면서 되돌린다.
+test('compile.maxCardsPerSource만 budget.cardsPerSource로 값이 이전된다', () => {
+  const budgetOf = (compile) => loadConfig(JSON.stringify({ compile })).compile.budget;
+
+  // 새 키가 없으면 옛 값이 반영된다(관측된 동기 사례: 4 < 기본 10 = 비용 감소 방향).
+  assert.equal(budgetOf({ maxCardsPerSource: 4 }).cardsPerSource, 4);
+  assert.equal(budgetOf({ maxCardsPerSource: '4' }).cardsPerSource, 4);
+  // 새 키가 있으면 새 키가 이긴다(값이 옛 키보다 작아도).
+  assert.equal(budgetOf({ maxCardsPerSource: 40, budget: { cardsPerSource: 7 } }).cardsPerSource, 7);
+  // 이전은 위치 이동이므로 새 키에 적은 것과 같은 클램프·같은 폴백을 통과한다.
+  assert.equal(budgetOf({ maxCardsPerSource: 99999999 }).cardsPerSource, 50);
+  assert.equal(budgetOf({ maxCardsPerSource: 'nope' }).cardsPerSource, 10);
+  assert.equal(budgetOf({ maxCardsPerSource: 0 }).cardsPerSource, 10);
+  // 옛 키는 정규화 출력에 남지 않는다(남으면 소비자가 다시 읽기 시작한다).
+  assert.equal('maxCardsPerSource' in loadConfig(JSON.stringify({
+    compile: { maxCardsPerSource: 4 },
+  })).compile, false);
+
+  // 나머지 4개 relocated 키는 여전히 값이 유실된다(알림만) — 의도된 비대칭이다.
+  const stale = loadConfig(JSON.stringify({
+    compile: {
+      batch: { maxPerRun: 30 },
+      verify: { maxPerRun: 15 },
+      semanticDedup: { judge: { maxPairsPerScan: 40, maxPairsPerCompile: 5 } },
+    },
+  })).compile.budget;
+  assert.deepEqual(stale, BUDGET_DEFAULTS, '4키는 이전하지 않는다(비용 증가 방향 + 동결된 계약)');
 });
 
 // score 레버 4개(threshold·topK·similarPageMaxChars·autoMergeThreshold)는 상수가 됐다 —

@@ -241,6 +241,36 @@ test('source scan: 지원하지 않는 sources 표기는 소실로 오분류하�
   } finally { removeTemp(dir); }
 });
 
+// `compile.sourceScan`은 정규화 화이트리스트 밖이라 **한 번도 읽힌 적이 없었다**(계획
+// 2026-08-19 §3.4). 값 규칙은 test/config.test.mjs가 보고, 여기서는 **종점**을 본다 —
+// 정규화 출력이 실제로 스캐너의 동작을 바꾸는지. 단위 테스트만으로는 "화이트리스트에
+// 넣었지만 소비자가 다른 자리를 읽는다"를 잡지 못한다.
+test('source scan: compile.sourceScan이 실제로 스캐너 동작을 바꾼다 (enabled·창·env 우선순위)', () => {
+  const off = setupProject({ compile: { sourceScan: { enabled: false } } });
+  try {
+    writeCard(off, 'entities/a.md', { status: 'verified', sources: [fileSource('docs/gone.md')] });
+    const result = runScan(off, { QMD_SOURCE_SCAN_MAX: '' });
+    assert.equal(result.examined, 0, 'enabled:false면 소실 판정을 하지 않는다');
+    assert.equal(result.detected, 0);
+    assert.equal(result.recorded, 0);
+    assert.equal(existsSync(join(off, LEDGER_REL)), false, '원장을 만들지 않는다');
+    assert.match(readFileSync(join(off, 'scan.log'), 'utf8'), /SKIP: compile\.sourceScan\.enabled is false/);
+  } finally { removeTemp(off); }
+
+  // 창(maxCardsPerScan)도 설정에서 읽는다 — 예전에는 env만 유효했다.
+  const narrow = setupProject({ compile: { sourceScan: { maxCardsPerScan: 1 } } });
+  try {
+    writeCard(narrow, 'entities/a.md', { status: 'verified', sources: [fileSource('docs/gone-a.md')] });
+    writeCard(narrow, 'entities/b.md', { status: 'verified', sources: [fileSource('docs/gone-b.md')] });
+    const first = runScan(narrow, { QMD_SOURCE_SCAN_MAX: '' });
+    assert.equal(first.cards, 2);
+    assert.equal(first.examined, 1, '창이 1이면 한 회차에 1장만 본다');
+    // env는 명시적 디버그 레버라 설정보다 우선한다(문서화된 우선순위).
+    const wide = runScan(narrow, { QMD_SOURCE_SCAN_MAX: '2' });
+    assert.equal(wide.examined, 2, 'QMD_SOURCE_SCAN_MAX가 설정 창을 덮는다');
+  } finally { removeTemp(narrow); }
+});
+
 test('source scan: opt-out 프로젝트와 sandbox에서는 무동작', () => {
   const dir = setupProject({ indexing: false });
   try {
@@ -949,6 +979,122 @@ test('source scan: ineligible은 provenance 없는 카드를 recall과 같은 �
     assert.equal(r.cards, 4);
     assert.equal(r.ineligible, 3, 'ok.md만 적격이어야 한다');
   } finally { removeTemp(dir); }
+});
+
+// **`sourceScan.enabled`는 소스 소실 스캔만 끈다.** `ineligible`은 별개 기능(provenance
+// 결측 총량)이고 별개 알림을 가지므로 그 스위치의 대상이 아니다. 커플링돼 있던 동안
+// `enabled:false`는 부적격 카드 N장을 **0장으로 보고**했고, update.sh는 0을 받으면 상태
+// 파일을 지워 `notice_clear wiki-ineligible`을 발동한다 — 그 알림 문구가 "남은 수는 이
+// 알림이 사라지면 0입니다"라고 스스로 명시하므로 결과는 **거짓 복구 보고**다.
+test('source scan: enabled:false는 소실 스캔만 끄고 ineligible 집계는 유지한다', () => {
+  const dir = setupProject({ compile: { sourceScan: { enabled: false } } });
+  try {
+    writeCard(dir, 'entities/ok.md', { status: 'verified' });
+    writeCard(dir, 'entities/draft.md', { status: 'generated' });
+    writeCard(dir, 'entities/no-rev.md', { status: 'verified', sourceRevisions: false });
+    const r = runScan(dir, { QMD_SOURCE_SCAN_MAX: '' });
+    assert.equal(r.cards, 3, '카드 목록은 여전히 만든다(집계 입력)');
+    assert.equal(r.ineligible, 2, 'ineligible은 스위치와 무관하게 센다');
+    assert.equal(r.ineligibleMeasured, true, '측정했다는 사실이 결과에 남아야 한다');
+    assert.equal(r.examined, 0, '소실 판정은 하지 않는다');
+  } finally { removeTemp(dir); }
+});
+
+// **"0"과 "안 셌다"는 다르다.** 미측정 run이 0으로 보고되면 update.sh가 상태 파일을 지워
+// 거짓 복구 보고가 된다. 측정 불가 경로(unsafe wikiPath)는 measured:false여야 하고,
+// 카드가 하나도 없는 경로는 **측정된 0**이어야 한다(wiki를 지우면 알림도 사라져야 한다).
+test('source scan: ineligibleMeasured가 "0"과 "안 셌다"를 구분한다', () => {
+  const unsafe = setupProject();
+  try {
+    // wikiPath가 root 밖 → 판정 불가. 카드가 없다는 뜻이 아니다.
+    const settings = join(unsafe, '.auto-context', 'settings.json');
+    const cfg = JSON.parse(readFileSync(settings, 'utf8'));
+    cfg.wikiPath = '../outside';
+    writeFileSync(settings, JSON.stringify(cfg));
+    const r = runScan(unsafe, { QMD_SOURCE_SCAN_MAX: '' });
+    assert.equal(r.ineligible, 0);
+    assert.equal(r.ineligibleMeasured, false, '판정 불가는 미측정이다');
+  } finally { removeTemp(unsafe); }
+
+  const noWiki = setupProject();
+  try {
+    rmSync(join(noWiki, '.auto-context', 'wiki'), { recursive: true, force: true });
+    const r = runScan(noWiki, { QMD_SOURCE_SCAN_MAX: '' });
+    assert.equal(r.ineligible, 0);
+    assert.equal(r.ineligibleMeasured, true, '카드가 없으면 측정된 0이다');
+  } finally { removeTemp(noWiki); }
+
+  const normal = setupProject();
+  try {
+    writeCard(normal, 'entities/draft.md', { status: 'generated' });
+    const r = runScan(normal, { QMD_SOURCE_SCAN_MAX: '' });
+    assert.equal(r.ineligible, 1);
+    assert.equal(r.ineligibleMeasured, true);
+  } finally { removeTemp(normal); }
+});
+
+// update.sh worker → SessionStart notice의 **상태 파일**까지가 이 신호의 종점이다.
+// 스캐너 단위 테스트만으로는 "worker가 0을 받으면 파일을 지운다"는 마지막 한 칸을 못 잡고,
+// 그 칸이 거짓 복구 보고(`notice_clear wiki-ineligible`)의 실제 발생 지점이다.
+test('update.sh worker: 미측정 run은 ineligible 상태 파일을 지우지 않는다', () => {
+  const base = join(homedir(), '.cache');
+  mkdirSync(base, { recursive: true });
+  const work = mkdtempSync(join(base, 'qmd-ineligible-'));
+  const fakehome = join(work, 'fakehome');
+  const bin = join(work, 'bin');
+  mkdirSync(fakehome, { recursive: true });
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(join(bin, 'qmd'), '#!/usr/bin/env sh\nexit 0\n', { mode: 0o755 });
+  const statePath = () => {
+    const hash = execFileSync('python3', ['-c',
+      'import hashlib,sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:16])', work,
+    ], { encoding: 'utf8' }).trim();
+    return join(fakehome, `notice-wiki-ineligible-state-${hash}`);
+  };
+  const runWorker = () => execFileSync('bash', [join(process.cwd(), 'core', 'update.sh'), '--worker', work], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      PATH: `${bin}:${process.env.PATH}`,
+      HOME: fakehome,
+      QMD_CACHE_DIR: fakehome,
+      QMD_LOCK_BASE: join(work, 'locks'),
+      QMD_BACKEND_MANAGER: '/bin/true',
+      QMD_SKIP_BACKGROUND_EMBED: '1',
+      QMD_SOURCE_SCAN_LOG: join(work, 'scan.log'),
+    },
+  });
+  const setScan = (sourceScan, extra = {}) => {
+    const path = join(work, '.auto-context', 'settings.json');
+    const cfg = JSON.parse(readFileSync(path, 'utf8'));
+    cfg.compile.sourceScan = sourceScan;
+    Object.assign(cfg, extra);
+    writeFileSync(path, JSON.stringify(cfg));
+  };
+
+  try {
+    setupProject({ base: work });
+    writeCard(work, 'entities/draft.md', { status: 'generated' });  // provenance 없음
+    runWorker();
+    assert.equal(readFileSync(statePath(), 'utf8'), '1', '측정된 1장이 상태 파일에 남는다');
+
+    // 소실 스캔만 껐다 — ineligible은 계속 측정되므로 수가 유지된다.
+    setScan({ enabled: false });
+    runWorker();
+    assert.equal(readFileSync(statePath(), 'utf8'), '1', 'enabled:false가 수를 0으로 만들지 않는다');
+
+    // 측정 불가(unsafe wikiPath) — 0을 보고하지만 상태 파일을 **지우지 않는다**.
+    setScan({ enabled: true }, { wikiPath: '../outside' });
+    runWorker();
+    assert.equal(existsSync(statePath()), true, '미측정 run이 상태를 지우면 거짓 복구 보고가 된다');
+    assert.equal(readFileSync(statePath(), 'utf8'), '1');
+
+    // 실제로 복구되면(카드가 적격) 측정된 0이므로 파일이 사라진다 — 알림도 사라져야 한다.
+    setScan({ enabled: true }, { wikiPath: '.auto-context/wiki' });
+    writeCard(work, 'entities/draft.md', { status: 'verified' });
+    runWorker();
+    assert.equal(existsSync(statePath()), false, '측정된 0은 상태 파일을 지운다(notice_clear)');
+  } finally { removeTemp(work); }
 });
 
 // 소실 감지는 순환 커서로 창을 나눠 여러 회차에 덮지만, `ineligible`은 사용자에게 보여 줄

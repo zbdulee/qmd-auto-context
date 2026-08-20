@@ -57,6 +57,10 @@
         },
         "maxPairsPerScan": 10
       },
+      "sourceScan": {
+        "enabled": true,
+        "maxCardsPerScan": 300
+      },
       "triggers": [
         "post_tool_source",
         "post_sync_source",
@@ -160,6 +164,10 @@
         },
         "maxPairsPerScan": 10
       },
+      "sourceScan": {
+        "enabled": true,
+        "maxCardsPerScan": 300
+      },
       "triggers": [],
       "verify": {
         "builtins": [],
@@ -258,6 +266,10 @@
           "timeout": 120
         },
         "maxPairsPerScan": 10
+      },
+      "sourceScan": {
+        "enabled": true,
+        "maxCardsPerScan": 300
       },
       "triggers": [
         "post_tool_source",
@@ -369,6 +381,10 @@
           "timeout": 120
         },
         "maxPairsPerScan": 10
+      },
+      "sourceScan": {
+        "enabled": true,
+        "maxCardsPerScan": 300
       },
       "triggers": [
         "post_tool_source",
@@ -482,6 +498,10 @@
           "timeout": 120
         },
         "maxPairsPerScan": 10
+      },
+      "sourceScan": {
+        "enabled": true,
+        "maxCardsPerScan": 300
       },
       "triggers": [
         "post_tool_source",

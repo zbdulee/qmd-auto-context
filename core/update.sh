@@ -941,18 +941,36 @@ except Exception:
 
   scan_json="$(python3 "$(dirname "$0")/wiki_source_scan.py" --cwd "$workdir" --json 2>>"$LOG" || true)"
   printf '%s\n' "$scan_json" >> "$LOG"
-  ineligible="$(printf '%s' "$scan_json" | python3 -c '
+  # **"0"과 "안 셌다"를 구분한다.** 스캐너가 `ineligibleMeasured`를 주고, 미측정 run은
+  # 상태 파일을 쓰지도 **지우지도** 않는다. 지우면 다음 SessionStart의
+  # `notice_clear wiki-ineligible`이 알림을 내리는데 그 문구는 "남은 수는 이 알림이
+  # 사라지면 0입니다"라고 스스로 명시하므로, 측정하지 않은 run 하나가 "복구 완료"를
+  # 보고하게 된다. 필드가 없는 출력(구버전·파싱 실패)도 미측정으로 읽어 상태를 보존한다.
+  scan_counts="$(printf '%s' "$scan_json" | python3 -c '
 import json, sys
 try:
-    print(int(json.loads(sys.stdin.read() or "{}").get("ineligible") or 0))
+    data = json.loads(sys.stdin.read() or "{}")
 except Exception:
-    print(0)
-' 2>/dev/null || echo 0)"
+    data = {}
+if not isinstance(data, dict):
+    data = {}
+try:
+    count = int(data.get("ineligible") or 0)
+except Exception:
+    count = 0
+print("%d %d" % (1 if data.get("ineligibleMeasured") is True else 0, count))
+' 2>/dev/null || echo "0 0")"
+  ineligible_measured="${scan_counts%% *}"
+  ineligible="${scan_counts##* }"
   ineligible_state="$(wiki_ineligible_state "$workdir")"
-  if [ "${ineligible:-0}" -gt 0 ] 2>/dev/null; then
-    printf '%s' "$ineligible" > "$ineligible_state" 2>/dev/null || true
+  if [ "${ineligible_measured:-0}" = "1" ]; then
+    if [ "${ineligible:-0}" -gt 0 ] 2>/dev/null; then
+      printf '%s' "$ineligible" > "$ineligible_state" 2>/dev/null || true
+    else
+      rm -f "$ineligible_state" 2>/dev/null || true
+    fi
   else
-    rm -f "$ineligible_state" 2>/dev/null || true
+    log "SCAN: ineligible not measured - keeping previous state file"
   fi
 }
 
@@ -1091,7 +1109,12 @@ main() {
   # 고치면 재무장한다.
   # config는 argv로 전달한다 — heredoc이 stdin을 차지하므로 파이프는 무시된다
   # (stale-queue·root-path 안내와 동일 패턴).
-  invalid_roles=$(python3 - "$(dirname "$0")" "$config_json" <<'PY' 2>/dev/null || true
+  # 두 판정(role 값 미지 · compile 스위치 값 미지)을 **한 python 스폰**에서 낸다. 같은
+  # config를 같은 argv로 받고 같은 모듈을 import하므로 두 번 띄우면 python 기동 +
+  # config import를 그대로 두 배로 낸다(실측 25ms/스폰). 이 자리는 SessionStart 동기
+  # 경로이므로 그 25ms가 사용자 대기 시간이다. 출력은 접두로 갈라 bash에서 파싱한다
+  # (서브프로세스 0개 — sed/grep을 쓰면 절약한 스폰을 다시 쓴다).
+  config_flags=$(python3 - "$(dirname "$0")" "$config_json" <<'PY' 2>/dev/null || true
 import json
 import sys
 from pathlib import Path
@@ -1106,15 +1129,35 @@ except Exception:
 if not isinstance(cfg, dict):
     raise SystemExit(0)
 collections = [c for c in (cfg.get("collections") or []) if isinstance(c, str)]
-names = qmd_config.invalid_role_collections(cfg.get("collectionRoles"), collections)
-if names:
-    print(", ".join(names))
+print("ROLES:" + ", ".join(qmd_config.invalid_role_collections(cfg.get("collectionRoles"), collections)))
+print("FLAGS:" + ", ".join(qmd_config.invalid_compile_flags(cfg.get("compile"))))
 PY
 )
+  invalid_roles=""
+  invalid_compile_flags=""
+  while IFS= read -r _line; do
+    case "$_line" in
+      ROLES:*) invalid_roles="${_line#ROLES:}" ;;
+      FLAGS:*) invalid_compile_flags="${_line#FLAGS:}" ;;
+    esac
+  done <<EOF
+$config_flags
+EOF
   if [ -n "$invalid_roles" ]; then
     notice_once role-invalid "$workdir" "[qmd] collectionRoles의 role 값을 인식할 수 없어 색인·recall·compile에서 제외했습니다: ${invalid_roles}. 허용값은 raw, wiki, session, source 입니다."
   else
     notice_clear role-invalid "$workdir"
+  fi
+
+  # compile 스위치 값을 읽지 못해 기본값으로 폴백한 경우의 종점(판정은 위 한 스폰에서
+  # 함께 나온다). role-invalid와 같은 규칙이다("키 있음 + 값 미지"는 조용하면 안 된다) —
+  # 다만 방향은 fail-open이다: `compile.sourceScan.enabled`를 못 읽으면 스캔을 **유지**
+  # 하므로(감지 부재가 더 나쁘다) 사용자가 적어 둔 opt-out이 무력화된 채 남는다. 그
+  # 사실이 여기서 표면화되지 않으면 "껐는데 돈다"가 관측 불가능해진다.
+  if [ -n "$invalid_compile_flags" ]; then
+    notice_once compile-flag-invalid "$workdir" "[qmd] compile 설정 값을 읽을 수 없어 기본값을 썼습니다: ${invalid_compile_flags}. true 또는 false로 적으십시오 — 지금은 소스 소실 스캔이 계속 돕니다."
+  else
+    notice_clear compile-flag-invalid "$workdir"
   fi
 
   # 제거된 설정 키 알림. 스키마 정리로 사라진 키는 normalize_config()가 **조용히**

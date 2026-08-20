@@ -75,6 +75,10 @@ def max_cards(scan_cfg: dict) -> int:
         value = int(scan_cfg.get("maxCardsPerScan", DEFAULT_MAX_CARDS) or DEFAULT_MAX_CARDS)
     except (TypeError, ValueError):
         return DEFAULT_MAX_CARDS
+    # 상한 클램프는 `config.compile_config`(MAX_SOURCE_SCAN_CARDS) 한 곳이고 유일 호출부는
+    # 정규화된 config를 받는다 — 여기에 2차 클램프를 두지 말 것(raw dict로 부르는 호출자가
+    # 없어 도달 불가한 죽은 코드가 된다). env(`QMD_SOURCE_SCAN_MAX`)는 명시적 디버그
+    # 레버이므로 위 분기에서 클램프 없이 우선한다.
     return value if value > 0 else DEFAULT_MAX_CARDS
 
 
@@ -149,8 +153,12 @@ def rotate(rels: list[str], cursor: str, limit: int) -> list[str]:
 
 
 def run(cwd: str) -> dict:
+    # `ineligibleMeasured`가 **"0"과 "안 셌다"를 구분**한다. update.sh는 measured일 때만
+    # 상태 파일을 쓰거나 지운다 — 미측정 run이 0을 쓰면 `notice_clear wiki-ineligible`이
+    # 발동하고 그 알림 문구는 "남은 수는 이 알림이 사라지면 0입니다"라고 **명시**하므로,
+    # 측정하지 않은 run 하나가 "복구 완료"를 사용자에게 보고하게 된다.
     result = {"cards": 0, "examined": 0, "detected": 0, "recorded": 0, "resolved": 0,
-              "ineligible": 0}
+              "ineligible": 0, "ineligibleMeasured": False}
     found = qmd_config.find_project_config(cwd)
     root = Path(found["projectRoot"]).resolve()
     config = found["config"]
@@ -160,9 +168,6 @@ def run(cwd: str) -> dict:
         return result
     compile_cfg = config.get("compile") if isinstance(config.get("compile"), dict) else {}
     scan_cfg = compile_cfg.get("sourceScan") if isinstance(compile_cfg.get("sourceScan"), dict) else {}
-    if not scan_cfg.get("enabled", True):
-        log("SKIP: compile.sourceScan.enabled is false")
-        return result
     # wiki root 격리 판정은 wiki_source_missing이 SSOT다 — repair CLI와 같은 함수를 써야
     # 한다(갈려 있던 동안 repair만 심볼릭 링크·`wikiPath:"../x"`를 통과시켰다).
     wiki_root = wsm.wiki_root_of(root, config)
@@ -171,14 +176,10 @@ def run(cwd: str) -> dict:
         return result
     if not wiki_root.is_dir():
         # wiki를 쓰지 않는 프로젝트 — 스캔할 카드가 없다(디렉터리를 만들지 않는다).
+        # 이것은 **측정된 0**이다(카드가 없으므로 부적격 카드도 없다). 미측정으로 두면
+        # wiki를 지운 뒤에도 옛 수가 영구히 알림에 남는다.
+        result["ineligibleMeasured"] = True
         return result
-
-    ledger = wsm.ledger_path(root, compile_cfg)
-    if ledger is None:
-        log("ABORT: unsafe sourceMissingPath")
-        return result
-    states = wsm.load_states(ledger)
-    allow_roots = wsm.allow_roots_of(config)
 
     pages = card_paths(wiki_root)
     rels = [page.relative_to(wiki_root).as_posix() for page in pages]
@@ -187,7 +188,30 @@ def run(cwd: str) -> dict:
     # 이미 worker 전용이고 카드 목록을 방금 만들었기 때문이다(새 스케줄러 금지).
     # 이 값의 종점은 update.sh의 SessionStart notice다 — 0이 되면 notice_clear로
     # 조용해지므로, 복구가 끝나면 알림이 저절로 사라진다.
+    #
+    # **`compile.sourceScan.enabled` 앞에 둔다 — 그 스위치의 대상이 아니다.** 두 신호는
+    # 별개 기능이고(소스 소실 감지 vs provenance 결측 총량) 별개 알림을 가진다. 뒤에
+    # 두면 "소스 소실 스캔만 끄겠다"는 사용자가 부적격 카드 N장을 **0장으로 보고받는다**.
     result["ineligible"] = count_recall_ineligible(wiki_root)["ineligible"]
+    result["ineligibleMeasured"] = True
+
+    if not scan_cfg.get("enabled", True):
+        log("SKIP: compile.sourceScan.enabled is false (ineligible=%d 은 계속 센다)"
+            % result["ineligible"])
+        return result
+
+    ledger = wsm.ledger_path(root, compile_cfg)
+    if ledger is None:
+        # 이 판정은 원장 **이름**이 아니라 위치다(원장 이름은 `compile_paths` 상수이고
+        # 설정 키가 아니다). `wsm.ledger_path`는 `wiki_compile.safe_managed_dir`이 None을
+        # 줄 때 None이고, 그 조건은 프로젝트 밖을 가리키는 경로뿐 아니라
+        # `.auto-context/compile`이 일반 파일인 경우·root 안을 가리키는 심볼릭 링크인
+        # 경우까지 포함한다(관리 디렉터리가 우리 것이 아니면 쓰지 않는다).
+        log("ABORT: unsafe compile dir (.auto-context/compile)")
+        return result
+    states = wsm.load_states(ledger)
+    allow_roots = wsm.allow_roots_of(config)
+
     project_key = qmd_sync.project_key(str(root), found.get("configPath"))
     state = qmd_sync.read_state(cursor_path(project_key))
     cursor = state.get("cursor") if isinstance(state.get("cursor"), str) else ""

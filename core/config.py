@@ -123,6 +123,15 @@ DEFAULT_CONFIG = {
         "triggers": [],
         "maxAutoPageLines": 120,
         "maxSourceChars": 12000,
+        # 소스 소실 스캐너(`core/wiki_source_scan.py`). **유료 호출이 없는 값이다** —
+        # 카드 frontmatter의 stat 검사뿐이라 budget 블록에 두지 않는다. 그래도 설정
+        # 가능해야 하는 이유는 `enabled`다: 이 스캔은 update worker에서 항상 돌고
+        # 사용자가 끌 수단이 문서에만 있었다(정규화 밖이라 `false`를 적어도 돌았다).
+        "sourceScan": {
+            "enabled": True,
+            # 한 회차의 창. 초과분은 순환 커서가 다음 회차에 이어 본다(유실 없음).
+            "maxCardsPerScan": 300,
+        },
         "reasoningEffort": {
             "generation": "low",
             "verify": "medium",
@@ -204,6 +213,12 @@ MAX_INJECT_SUMMARY_CHARS = 4000
 # injectSourcePathsPerCard 상한. 이 값이 카드당 stat() 호출 수이자 주입 줄 수의 상한이므로
 # (topN × 이 값) blocking hook 예산을 유계로 둔다. 관측 최대 소스 수는 4다.
 MAX_INJECT_SOURCE_PATHS_PER_CARD = 10
+
+# sourceScan.maxCardsPerScan 상한. 유료 호출은 없지만(stat뿐) 이 값이 update worker
+# 한 회차의 파일 I/O를 정하므로 설정 오류가 예산을 무제한 늘리지 못하게 클램프한다.
+# 5000은 실측 117µs/장 × 5000 ≈ 0.6초이고 라이브 최대 코퍼스(931장)의 5배다. 창이
+# 코퍼스보다 크면 `rotate`가 전량을 돌려주므로 이 상한은 "전량 스캔"을 막지 않는다.
+MAX_SOURCE_SCAN_CARDS = 5000
 
 # 유료 host CLI 호출 수를 정하는 값들의 **상한 클램프**. 이 값들은 "설정 오류나 모델 출력이
 # 과금 규모를 정하지 못한다"를 보장하는 자리이므로 설정으로 다시 열지 않는다.
@@ -342,7 +357,10 @@ def coerce_nonneg_int(value, default, maximum=None):
 
 
 def coerce_capped_int(value, default, maximum):
-    """1 이상 maximum 이하로 강제한다(유료 호출 수를 정하는 필드 전용).
+    """1 이상 maximum 이하로 강제한다(예산을 정하는 필드 전용).
+
+    대부분은 유료 host CLI 호출 수지만 유료 전용은 아니다 — `sourceScan.maxCardsPerScan`
+    처럼 worker 한 회차의 파일 I/O 예산도 같은 규칙으로 클램프한다.
 
     `coerce_int`는 양수면 무엇이든 통과시키므로 `99999999`가 그대로 run당 호출 상한이
     됐다. 문자열(`"100"`)도 `int()`로 통과하는데 문제는 형이 아니라 **크기**다.
@@ -491,6 +509,37 @@ def invalid_role_collections(value, collections):
     )
 
 
+def invalid_compile_flags(compile_cfg):
+    """compile에서 **값이 present인데 읽을 수 없어** 기본값으로 폴백한 스위치의 키 목록.
+
+    `invalid_role_collections`와 같은 자리·같은 이유다 — "키 없음"(의도 없음)과
+    "키 있음 + 값 미지"(의도했는데 못 읽음)를 구분하고, 후자는 fail-open이든
+    fail-closed든 **조용하면 안 된다**. 이 함수의 결과가 SessionStart notice의
+    입력이고(`core/update.sh`) 그것이 종점이다. raw settings를 받는다 —
+    정규화된 config는 이미 bool로 접혀 있어 판정 정보가 없다.
+
+    **범위는 `compile.sourceScan`뿐이다**(블록 자체 + 그 안의 `enabled`). compile의
+    다른 스위치도 값 미지면 조용히 기본값으로 떨어지지만 여기서 잡지 않는다:
+    `compile.enabled`/`autoWrite`는 `DEPRECATED_FOLDED_KEYS` 알림이, 제거된 키는
+    `DEPRECATED_REMOVED_KEYS` 알림이 부분적으로 덮는다(그 알림들은 "키가 있다"만
+    보고 값은 보지 않으므로 완전한 커버리지가 아니다 — 넓히는 것은 별건이다).
+    `sourceScan.maxCardsPerScan`은 **의도적으로** 제외한다: 그 값의 오류는 "창 폭이
+    기본값"으로 끝나고 순환 커서가 커버리지를 유지하지만, `enabled`는 사용자가 적어 둔
+    **opt-out 자체가 무력화**되는 자리다. 방향이 다르므로 같은 알림에 묶지 않는다.
+    """
+    if not isinstance(compile_cfg, dict):
+        return []
+    if "sourceScan" not in compile_cfg:
+        return []
+    scan = compile_cfg.get("sourceScan")
+    if not isinstance(scan, dict):
+        # 블록 자체를 못 읽었다(`sourceScan: "off"`) — 그 안의 모든 값이 기본값이 된다.
+        return ["compile.sourceScan"]
+    if "enabled" in scan and not isinstance(scan.get("enabled"), bool):
+        return ["compile.sourceScan.enabled"]
+    return []
+
+
 def collection_role(roles, collection):
     """collection의 유효 role.
 
@@ -618,6 +667,33 @@ def compile_config(value):
     ]
     result["maxAutoPageLines"] = coerce_int(value.get("maxAutoPageLines", defaults["maxAutoPageLines"]), defaults["maxAutoPageLines"])
     result["maxSourceChars"] = coerce_int(value.get("maxSourceChars", defaults["maxSourceChars"]), defaults["maxSourceChars"])
+    # sourceScan은 정규화 화이트리스트 밖이라 **한 번도 읽힌 적이 없었다** —
+    # `wiki_source_scan.run`이 `enabled`·`maxCardsPerScan`을 읽는데도 `enabled:false`를
+    # 적은 프로젝트에서 스캔이 계속 돌았고, 폭은 `QMD_SOURCE_SCAN_MAX` env만 유효했다.
+    #
+    # `enabled`는 bool만 받는다. **비-bool이면 기본값(True = 스캔 유지)으로 폴백하되
+    # 침묵하지 않는다** — 폴백만 하면 사용자가 적어 둔 opt-out이 무력화되는데(`"false"`
+    # 문자열도 결과가 "껐는데 돈다"다) 그 사실이 어디에도 나타나지 않는다. 종점은
+    # `invalid_compile_flags` → SessionStart `notice_once`이고, `COLLECTION_ROLE_INVALID`
+    # 와 같은 규칙이다("키 없음"과 "키 있음 + 값 미지"를 구분하고 후자는 조용하면 안 된다).
+    # **끄는 쪽으로 읽지 않는 이유**: 비-bool 집합에는 켜려는 의도의 값(`1`·`"true"`·
+    # `"yes"`)도 들어 있어, 전부 off로 읽으면 그 오타가 소실 감지를 조용히 죽인다.
+    # 잘못 켜진 스캔의 대가는 stat 몇 번(유료 호출·카드 변경 없음)이고 잘못 꺼진 스캔의
+    # 대가는 감지 부재이므로 방향이 비대칭이다.
+    raw_scan = value.get("sourceScan")
+    scan = raw_scan if isinstance(raw_scan, dict) else {}
+    default_scan = defaults["sourceScan"]
+    result["sourceScan"] = {
+        "enabled": (
+            scan.get("enabled")
+            if isinstance(scan.get("enabled"), bool)
+            else default_scan["enabled"]
+        ),
+        "maxCardsPerScan": coerce_capped_int(
+            scan.get("maxCardsPerScan", default_scan["maxCardsPerScan"]),
+            default_scan["maxCardsPerScan"], MAX_SOURCE_SCAN_CARDS,
+        ),
+    }
     result["reasoningEffort"] = reasoning_effort_config(
         value.get("reasoningEffort"), defaults.get("reasoningEffort")
     )
@@ -643,13 +719,30 @@ def compile_config(value):
     raw_budget = value.get("budget")
     budget = raw_budget if isinstance(raw_budget, dict) else {}
     default_budget = defaults["budget"]
+    # **`compile.maxCardsPerSource`만 값을 실제로 이전한다**(`DEPRECATED_RELOCATED_KEYS`의
+    # 이름값대로). 새 키가 **키로 존재하면** 새 키가 이기고, 없을 때만 옛 값이 기본값
+    # 자리를 대신한 뒤 같은 `coerce_capped_int`를 통과한다 — 이전은 위치 이동이므로
+    # 새 키에 그 값을 적은 것과 결과가 같아야 한다. 알림은 그대로 나간다(옮겨 적으라는
+    # 안내는 여전히 유효하다 — 잠정 반영이지 새 스키마가 아니다).
+    #
+    # **같은 목록의 나머지 4키는 이전하지 않는다.** (1) `test/live-settings-freeze.test.mjs`
+    # 의 "§7.2 마이그레이션 부채" 테스트가 라이브 3개 파일의 `verifyPerRun=3`을 못박아
+    # 2026-08-03 "하위호환 폐기" 결정을 계약으로 동결해 뒀다. (2) 그 4키의 이전 방향은
+    # **비용 증가**다(실측: verify 예산 3→15, 3→50) — 플러그인 업그레이드만으로 유료
+    # 호출이 늘어나는 방향이라, "끄는 방향으로만 존중한다"는 위 compile off 스위치의
+    # 비대칭과 정반대다. (3) `maxCardsPerSource`는 라이브 사용이 0건이라 반영해도 지금
+    # 예산이 바뀌는 프로젝트가 없고, 이 키를 적는 동기가 카드 수를 줄이는 것(계획서 재현
+    # 사례 `4` < 기본 `10` = 비용 감소 방향)이다.
+    legacy_cards_per_source = default_budget["cardsPerSource"]
+    if "maxCardsPerSource" in value:
+        legacy_cards_per_source = value.get("maxCardsPerSource")
     result["budget"] = {
         "extractorPerRun": coerce_capped_int(
             budget.get("extractorPerRun", default_budget["extractorPerRun"]),
             default_budget["extractorPerRun"], MAX_COMPILE_PER_RUN,
         ),
         "cardsPerSource": coerce_capped_int(
-            budget.get("cardsPerSource", default_budget["cardsPerSource"]),
+            budget.get("cardsPerSource", legacy_cards_per_source),
             default_budget["cardsPerSource"], MAX_CARDS_PER_SOURCE,
         ),
         "verifyPerRun": coerce_capped_int(
@@ -811,6 +904,10 @@ DEPRECATED_REMOVED_KEYS = (
     "compile.verify.logPath",
     "compile.verify.skippedPath",
     "compile.verify.deletedPath",
+    # 10번째 경로. `compile_paths`가 이름을 상수화할 때 이 키만 목록에서 빠져
+    # **알림조차 없었다**(정규화 밖이라 값도 무시). 소비자(`wiki_source_missing.ledger_path`)
+    # 는 이제 설정을 아예 읽지 않으므로 살릴 대상이 아니라 알릴 대상이다.
+    "compile.sourceMissingPath",
     "compile.extractor.argv",
     "compile.extractor.dispatch",
     "compile.extractor.default",
