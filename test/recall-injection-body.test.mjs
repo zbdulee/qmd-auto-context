@@ -416,20 +416,31 @@ test('CRLF 카드에서도 ## Summary 헤딩이 새지 않고 본문이 정상 �
   });
 });
 
-test('짝 없는 <!-- 가 있어도 뒤 본문이 사라지지 않고 즉시 끝난다 (ReDoS 없음)', () => {
-  // 정규식 <!--.*?--> 판은 (a) 뒤 본문을 통째로 삭제하고 (b) 반복 시 제곱 시간이었다.
+test('짝 없는 <!-- 가 있어도 뒤 본문이 사라지지 않는다', () => {
+  // 정규식 판은 (a) 짝 없는 마커를 EOF 까지로 읽어 뒤 본문을 통째로 삭제하고
+  // (b) 반복 시 제곱 시간이었다.
+  //
+  // **(a) 를 잡는 것은 아래 두 `assert.match` 다** — `<!--.*?(-->|$)` 형태로 되돌아가면
+  // '닫히지 않은 주석' 이하가 사라진다(실측 확인).
+  //
+  // **(b) 는 이 경로에서 벽시계로 잡을 수 없다.** 예전에 `elapsed < 3000` 백스톱이
+  // 있었으나 중복이 아니라 **구조적으로 검출 불가**였다: 제곱 시간은 64KiB 급에서야
+  // 드러나는데(8→64KiB 에서 18→1151ms) 카드 읽기 창이
+  // `max(WIKI_CARD_READ_BASE_CHARS, 2048 + 2×clamp(injectSummaryMaxChars, 4000))`
+  // = 10,048자로 상한돼 그 크기의 입력이 애초에 도달하지 못한다. 실측으로 순진한
+  // 정규식은 4KB 에서 4.2ms, 창 상한인 10KB 에서도 ~25ms 라 3초 상한을 건드리지
+  // 않는다. 즉 ReDoS 를 막고 있는 것은 이 단정이 아니라 읽기 창이고, 노출을 되살리려면
+  // 그 창을 넓혀야 한다. 이름을 "즉시 끝난다"에서 바꾼 이유도 같다 — 이 테스트는
+  // 본문 보존을 검증한다. 타이밍 정책은 test/helpers/timing.mjs 참고.
   const body = '앞 문장. <!-- 닫히지 않은 주석 ' + '<!-- 또 하나 '.repeat(400) + '뒤 문장이 살아야 한다.';
   withProject({
     settings: { injectSummaryMaxChars: 4000 },
     cards: { 'card.md': card(VERIFIED_FM, body) },
   }, ({ dir, fixture, write }) => {
     write([{ file: 'proj-wiki/decisions/card.md', title: 'Summary', score: 1 }]);
-    const started = Date.now();
     const ctx = contextOf({ prompt: PROMPT, cwd: dir }, { QMD_QUERY_FIXTURE: fixture });
-    const elapsed = Date.now() - started;
     assert.match(ctx, /앞 문장\./, '짝 없는 주석 앞 본문 유지');
     assert.match(ctx, /닫히지 않은 주석/, '짝 없는 <!-- 는 삭제하지 않고 남긴다');
-    assert.ok(elapsed < 3000, `blocking hook 예산 초과: ${elapsed}ms`);
   });
 });
 

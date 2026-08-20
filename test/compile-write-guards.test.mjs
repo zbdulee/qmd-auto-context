@@ -7,6 +7,7 @@ import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, statSync, 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { removeTemp } from './helpers/temp.mjs';
+import { waitUntilAsync } from './helpers/timing.mjs';
 
 const EXISTING_REL = '.auto-context/wiki/entities/existing-a.md';
 
@@ -666,12 +667,13 @@ function childExit(child) {
   });
 }
 
-async function waitForFile(path, timeoutMs = 3000) {
-  const started = Date.now();
-  while (!existsSync(path)) {
-    if (Date.now() - started > timeoutMs) throw new Error(`timed out waiting for ${path}`);
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
+// 상한·폴 간격은 test/helpers/timing.mjs 가 SSOT다(3s 고정이던 자리).
+// **여기는 `waitUntil`(동기)이 아니라 `waitUntilAsync` 를 써야 한다** — 이 테스트는
+// 자식의 stdout/stderr 를 이벤트 핸들러로 모으므로 event loop 를 막으면 파이프 버퍼가
+// 차서 자식이 멈추고 교착한다(그 근거도 helper 에 적혀 있다).
+async function waitForFile(path) {
+  const ok = await waitUntilAsync(() => existsSync(path));
+  if (!ok) throw new Error(`timed out waiting for ${path}`);
 }
 
 test('migration waits for CARD_WRITE_LOCK and sees the completed worker revision', async () => {

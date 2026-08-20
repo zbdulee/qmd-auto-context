@@ -276,14 +276,12 @@ test('shadow query 실패(데몬 5xx)가 본 recall 출력·exit code에 영향 
 
 test('shadow: 총 예산(2.5s) 초과 시 남은 질의를 아예 보내지 않는다', () => {
   // per-query 1.4s × 2 = 2.8s > 2.5s 예산 → 3번째(raw) 질의는 전송 없이 skip.
-  const started = Date.now();
   const r = probe({
     log: true,
     shadow: true,
     scenario: 'slow-after-first',
     env: { QMD_SHADOW_TIMEOUT: '1.4' },
   });
-  const elapsed = Date.now() - started;
   assert.equal(r.exit_code, 0);
   assert.match(r.stdout, /card\.md/, 'timeout이 본 recall 출력을 삼키면 안 됨');
 
@@ -294,12 +292,15 @@ test('shadow: 총 예산(2.5s) 초과 시 남은 질의를 아예 보내지 않�
   assert.equal(s.raw.status, 'budget_exhausted', '예산 소진 후 남은 질의는 skip');
 
   // 본 recall 1 + 게이트 프로브 1 + shadow lex + shadow vec = 4. raw는 전송조차 되지 않아야 한다.
+  //
+  // **예산 회귀를 잡는 것은 이 `queries.length` 단정과 위의 `raw.status` 단정이다.**
+  // 예산이 깨져 raw 가 전송되면 개수가 SHADOW0+3 이 되고 status 도 budget_exhausted 가
+  // 아니게 된다 — 부하와 무관하게 정확히 갈린다. 예전에는 여기에 `elapsed < 5000`
+  // 백스톱이 있었으나 (a) 같은 회귀를 이 두 단정이 이미 잡고 (b) 정상 경로가 설계상
+  // 게이트 프로브 1.0s + shadow 예산 2.5s 를 기다려 실측 4032ms — 상한까지 여유가
+  // 1.24배뿐이라 부하가 걸린 머신에서 그대로 터졌다. 타이밍 정책은
+  // test/helpers/timing.mjs 참고.
   assert.equal(r.queries.length, SHADOW0 + 2, `raw 질의가 전송됨 (${r.queries.length}건)`);
-
-  // 전체 상한: python 기동 + 본 recall + 게이트 프로브(LEX_PROBE_TIMEOUT 1.0s로 유계,
-  // 이 시나리오에서는 항상 그 상한까지 기다린다) + shadow 예산 2.5s. CI 여유를 둬도 5s
-  // 안이어야 하고, 이 값이면 예산이 깨질 때(예: 질의당 1.4s가 3회) 반드시 실패한다.
-  assert.ok(elapsed < 5000, `shadow 예산 상한 초과 (${elapsed}ms)`);
 });
 
 test('QMD_RECALL_LOG 없으면 shadow env가 켜져 있어도 완전 no-op', () => {

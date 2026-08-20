@@ -4,6 +4,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, symlinkSync, utimesSync, writeFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { removeTemp, repoTemp, tempCacheDir } from './helpers/temp.mjs';
+import { waitUntil } from './helpers/timing.mjs';
 
 // 생성기는 delta-only다(기본값과 같은 키는 쓰지 않는다). 따라서 "writer가 설정을 켰는가"는
 // emit된 키가 아니라 **effective config**(= normalize_config 통과 결과)로 봐야 한다.
@@ -1075,14 +1076,10 @@ test('update core: dedup scanner actually runs inside the embed subshell at runt
     });
 
     // The embed step (and the scanner after it) run in a detached background
-    // subshell; poll briefly for the scanner's own log line to appear.
-    const deadline = Date.now() + 3000;
-    let seen = false;
-    while (Date.now() < deadline) {
-      if (existsSync(dedupLog)) { seen = true; break; }
-      execFileSync('sleep', ['0.05']);
-    }
-    assert.equal(seen, true, `wiki_dedup_scan.py did not log within 3s; embed subshell wiring likely broken`);
+    // subshell; poll for the scanner's own log line to appear. 상한·간격은
+    // test/helpers/timing.mjs 가 SSOT다(3s 고정 + 폴당 프로세스 스폰이던 자리).
+    const seen = waitUntil(() => existsSync(dedupLog));
+    assert.equal(seen, true, 'wiki_dedup_scan.py did not log within the wait budget; embed subshell wiring likely broken');
   } finally {
     removeTemp(work);
   }
@@ -1388,8 +1385,10 @@ test('SessionStart: 손상된 원문 갱신 원장을 격리하고 그 사실을
 
     // 1회차: 동기 경로는 아직 알릴 것이 없고, detached worker가 격리한다.
     run();
-    // worker는 비동기라 결과를 기다린다(폴링 — sleep 상수로 고정하면 느린 머신에서 flaky).
-    for (let i = 0; i < 100 && quarantined().length === 0; i += 1) execFileSync('sleep', ['0.05']);
+    // worker는 비동기라 결과를 기다린다. 폴링 상한·간격은 test/helpers/timing.mjs 가
+    // SSOT다 — 예전에는 `execFileSync('sleep', ['0.05']) × 100`(= 폴당 프로세스 스폰)
+    // 이라 부하가 걸리면 폴링 자체가 대기 예산을 먹었고 이 단정이 0 !== 1 로 터졌다.
+    waitUntil(() => quarantined().length > 0);
     assert.equal(quarantined().length, 1, 'worker가 손상 원장을 격리한다');
     assert.equal(existsSync(ledger), false, '원장은 부재로 남는다(다음 편집이 새로 만든다)');
 

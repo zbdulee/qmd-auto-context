@@ -17,6 +17,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { removeTemp } from './helpers/temp.mjs';
+import { waitUntilAsync } from './helpers/timing.mjs';
 
 const MANAGER = resolve('core/backend_manager.sh');
 const NODE = process.execPath;
@@ -104,19 +105,15 @@ process.on('exit', () => { for (const pid of strays) { try { process.kill(pid, '
 function healthy(port) {
   return spawnSync('/usr/bin/curl', ['-sf', '-m', '1', `http://localhost:${port}/health`]).status === 0;
 }
-async function waitHealthy(port, tries = 100) {
-  for (let i = 0; i < tries; i += 1) {
-    if (healthy(port)) return true;
-    await delay(50);
-  }
-  return false;
+// 상한·폴 간격은 test/helpers/timing.mjs 가 SSOT다(각자 100×50ms = 5s 고정이던 자리).
+// `healthy()`는 폴마다 curl 을 스폰하므로 부하가 걸리면 폴링 자체가 대기 예산을 먹는다 —
+// 스폰을 없앨 수는 없지만(그게 health 검사다) 상한은 넉넉해야 한다.
+// 여기서 기다리는 것은 "일어나야 하는 일"이고 상한 초과는 호출부의 기능 단정이 잡는다.
+async function waitHealthy(port) {
+  return waitUntilAsync(() => healthy(port));
 }
-async function waitChildDead(child, tries = 100) {
-  for (let i = 0; i < tries; i += 1) {
-    if (!childAlive(child)) return true;
-    await delay(50);
-  }
-  return false;
+async function waitChildDead(child) {
+  return waitUntilAsync(() => !childAlive(child));
 }
 
 function managerEnv(home, port, extra = {}) {
@@ -273,20 +270,25 @@ set -- health
 . "$0"
 reload
 `;
-    const started = Date.now();
     const res = spawnSync('/bin/bash', ['-c', script, MANAGER], {
       encoding: 'utf8',
       // 기본 60×0.5s = 30초. 버그가 남아 있으면 여기서 그대로 걸린다.
       env: managerEnv(home, port, { QMD_DAEMON_SHUTDOWN_ATTEMPTS: '60' }),
+      // 이 timeout 이 "30초 대기에 걸렸는가"의 판정자다. 정상 경로는 실측 ~230ms 라
+      // 25s 는 100배 여유이고, 버그 경로는 확정 30초라 반드시 걸린다.
       timeout: 25000,
     });
-    const elapsed = Date.now() - started;
 
+    // 대기에 걸리면 하네스가 자식을 죽여 signal 이 남는다. 이것이 벽시계 측정을
+    // 대체하는 상태 단정이고, 예전 `elapsed < 10000` 보다 오히려 강하다 —
+    // 그 판이 남긴 구멍을 같이 막는다: 대기에 걸려 timeout 으로 죽으면
+    // `res.status` 는 null 이 되고 아래 `notEqual(res.status, 0)` 이 공허하게
+    // 통과했다. 타이밍 정책은 test/helpers/timing.mjs 참고.
+    assert.equal(res.signal, null, 'reload must not be killed by the harness timeout (30s wait regression)');
     // 반환 계약: "데몬을 재시작했는가". 신호가 가지 않았으므로 재시작이 없었고,
     // logrotate.sh:25가 이 non-zero를 보고 회전을 원복해야 한다(항상 0이면 그 원복이
     // 죽은 코드가 되어 $LOG 없이 남고 이후 회전이 전부 조기 종료된다).
     assert.notEqual(res.status, 0, 'reload must report that it did not restart the daemon');
-    assert.ok(elapsed < 10000, `SIGTERM 실패 후 대기에 걸리면 안 됨 (elapsed=${elapsed}ms)`);
     assert.match(managerLog(home), /daemon SIGTERM failed pid=/, 'the failure must be logged, not swallowed');
     assert.ok(childAlive(child), 'the daemon that could not be signalled must be left alone');
   } finally {

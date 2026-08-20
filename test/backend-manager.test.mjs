@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { removeTemp } from './helpers/temp.mjs';
+import { waitUntil } from './helpers/timing.mjs';
 import {
   existsSync,
   mkdtempSync,
@@ -176,9 +177,7 @@ test("start ignores a live pid file that is not the qmd daemon", () => {
       QMD_DAEMON_PORT: "1",
     });
     assert.equal(result.status, 0);
-    for (let i = 0; i < 20 && !existsSync(marker); i++) {
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
-    }
+    waitUntil(() => existsSync(marker));
     assert.ok(existsSync(marker), "daemon script was not started");
   } finally {
     removeTemp(home);
@@ -236,9 +235,7 @@ test("start recovers stale start lock and starts daemon", () => {
     });
 
     assert.equal(result.status, 0);
-    for (let i = 0; i < 20 && !existsSync(marker); i++) {
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
-    }
+    waitUntil(() => existsSync(marker));
     assert.ok(existsSync(marker), "daemon was not started after stale lock recovery");
   } finally {
     removeTemp(home);
@@ -259,9 +256,7 @@ test("kick-index starts one-shot worker through a silent background kick", () =>
     });
     assert.equal(result.status, 0);
     assert.equal(result.stdout, "");
-    for (let i = 0; i < 20 && !existsSync(marker); i++) {
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
-    }
+    waitUntil(() => existsSync(marker));
     assert.ok(existsSync(marker), "worker was not kicked");
   } finally {
     removeTemp(home);
@@ -285,9 +280,7 @@ test("kick-index recovers stale kick lock and starts worker in the same call", (
       QMD_BACKEND_LOG: join(home, "backend.log"),
     });
     assert.equal(result.status, 0);
-    for (let i = 0; i < 20 && !existsSync(marker); i++) {
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
-    }
+    waitUntil(() => existsSync(marker));
     assert.ok(existsSync(marker), "worker was not kicked after stale lock recovery");
   } finally {
     removeTemp(home);
@@ -365,9 +358,7 @@ test("kick-wiki-compile runs compile worker with explicit cwd and stays silent",
     });
     assert.equal(result.status, 0);
     assert.equal(result.stdout, "");
-    for (let i = 0; i < 20 && !existsSync(log); i++) {
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
-    }
+    waitUntil(() => existsSync(log));
     assert.equal(readFileSync(log, "utf8").trim(), `--cwd ${cwd}`);
   } finally {
     removeTemp(home);
@@ -406,9 +397,7 @@ print(json.dumps({'wakeAfterSeconds': 1 if n == 1 else 0}))
       QMD_COMPILE_RETRY_LOCKDIR: retryBase,
     });
     assert.equal(result.status, 0);
-    for (let i = 0; i < 80 && (!existsSync(count) || readFileSync(count, 'utf8') !== '2'); i++) {
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
-    }
+    waitUntil(() => existsSync(count) && readFileSync(count, 'utf8') === '2');
     assert.equal(readFileSync(count, 'utf8'), '2', 'young queue should be kicked again after its reported delay');
   } finally {
     removeTemp(home);
@@ -442,11 +431,12 @@ print(json.dumps({'wakeAfterSeconds': 2 if n < 3 else 0}))
       QMD_INDEX_WORKER_SCRIPT: indexWorker,
     };
     run(["kick-wiki-compile", cwd], env);
-    for (let i = 0; i < 20 && (!existsSync(count) || readFileSync(count, 'utf8') !== '1'); i++) {
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
-    }
+    waitUntil(() => existsSync(count) && readFileSync(count, 'utf8') === '1');
     run(["kick-wiki-compile", cwd], env);
     // Let both an original and a wrongly duplicated sleeper reach their wake.
+    // **여기는 waitUntil 로 바꾸지 말 것** — 검증 대상이 "중복 sleeper 가 추가로 깨지
+    // 않았다"(부재)라서, count 가 3이 되는 순간 반환하면 그 뒤에 4가 되는 경우를 못 본다.
+    // 조건이 단조 변하는 대기만 폴링으로 바꾼다(근거는 test/helpers/timing.mjs).
     for (let i = 0; i < 60; i++) {
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
     }
@@ -488,9 +478,7 @@ test("kick-wiki-compile kicks the index worker after the compile worker finishes
     assert.equal(result.status, 0);
     assert.equal(result.stdout, "");
     // compile sleep(0.3s) + python lock-hash + double fork + bash spawn 여유를 넉넉히.
-    for (let i = 0; i < 200 && !existsSync(indexLog); i++) {
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
-    }
+    waitUntil(() => existsSync(indexLog));
     assert.ok(existsSync(indexLog), "index worker가 kick 되어야 함");
     assert.equal(readFileSync(indexLog, "utf8").trim(), "after-compile");
   } finally {
@@ -547,9 +535,7 @@ test("kick-index re-drains when a rekick request arrives during the worker run",
       QMD_INDEX_WORKER_SCRIPT: indexWorker,
     });
     assert.equal(result.status, 0);
-    for (let i = 0; i < 100 && (!existsSync(counter) || readFileSync(counter, "utf8").trim() !== "2"); i++) {
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
-    }
+    waitUntil(() => existsSync(counter) && readFileSync(counter, "utf8").trim() === "2");
     assert.equal(readFileSync(counter, "utf8").trim(), "2", "rekick 요청이 있으면 worker가 두 번 돈다");
   } finally {
     removeTemp(home);
@@ -564,9 +550,13 @@ test("kick-wiki-compile --flush passes --flush-all to the worker", () => {
   try {
     execFileSync('/bin/bash', ['core/backend_manager.sh', 'kick-wiki-compile', d, '--flush'],
       { cwd: process.cwd(), encoding: 'utf8', env: { ...process.env, HOME: d, QMD_BACKEND_STATE_DIR: d, QMD_COMPILE_WORKER_SCRIPT: worker } });
-    // kick runs in background; poll the log briefly
+    // kick runs in background; poll the log. 상한·간격은 test/helpers/timing.mjs 가 SSOT다
+    // (폴당 `/bin/sleep` 프로세스를 스폰하던 자리 — 부하가 곧 폴링 비용이었다).
     let content = '';
-    for (let i = 0; i < 100 && !content.includes('--flush-all'); i++) { try { content = readFileSync(argsLog, 'utf8'); } catch {} execFileSync('/bin/sleep', ['0.02']); }
+    waitUntil(() => {
+      content = readFileSync(argsLog, 'utf8');
+      return content.includes('--flush-all');
+    });
     assert.match(content, /--flush-all/);
   } finally { removeTemp(d); }
 });
@@ -592,9 +582,7 @@ test("kick-wiki-compile uses per-project locks so different cwd kicks are not dr
         QMD_COMPILE_WORKER_SCRIPT: worker,
       },
     });
-    for (let i = 0; i < 20 && (!existsSync(log) || readFileSync(log, "utf8").trim().split("\n").filter(Boolean).length < 2); i++) {
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
-    }
+    waitUntil(() => existsSync(log) && readFileSync(log, "utf8").trim().split("\n").filter(Boolean).length >= 2);
     const lines = readFileSync(log, "utf8").trim().split("\n").sort();
     assert.deepEqual(lines, [`--cwd ${cwdA}`, `--cwd ${cwdB}`].sort());
   } finally {

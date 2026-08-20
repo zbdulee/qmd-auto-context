@@ -5,6 +5,7 @@ import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { removeTemp } from './helpers/temp.mjs';
+import { waitUntil } from './helpers/timing.mjs';
 
 function makeExecutable(path, body) {
   writeFileSync(path, body, { mode: 0o755 });
@@ -32,15 +33,11 @@ test("sandbox exits before backend manager", () => {
   }
 });
 
-function waitForFile(path, predicate, timeoutMs = 4000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (existsSync(path)) {
-      const content = readFileSync(path, "utf8");
-      if (predicate(content)) return content;
-    }
-    execFileSync("/bin/sleep", ["0.02"]);
-  }
+// 상한·폴 간격은 test/helpers/timing.mjs 가 SSOT다 — 예전에는 4s 고정 + 폴당
+// `/bin/sleep` 프로세스 스폰이라 부하가 곧 폴링 비용이었다(근거는 그 파일의 규칙 (1)).
+function waitForFile(path, predicate) {
+  waitUntil(() => existsSync(path) && predicate(readFileSync(path, "utf8")));
+  // 상한 초과도 그대로 돌려준다 — 판정은 호출부의 기능 단정이 한다.
   return existsSync(path) ? readFileSync(path, "utf8") : "";
 }
 
@@ -70,25 +67,41 @@ test("update action does not block on a slow backend ensure", () => {
   const d = mkdtempSync(join(tmpdir(), "qmd-runhook-update-noblock-"));
   try {
     const managerStarted = join(d, "manager.started");
+    const managerFinished = join(d, "manager.finished");
+    const release = join(d, "release");
     const coreLog = join(d, "core.log");
-    // ensure blocks for 3s (simulates unresponsive daemon → wait_health); warm/rotate noop.
+    // ensure blocks until the test releases it (simulates an unresponsive daemon →
+    // wait_health). No `sleep <N>` constant: the gate is a file this test controls, so
+    // "did the hook wait for ensure?" is decided by state, not by a wall clock.
+    // The 20s cap only keeps a stray shell from lingering if the assertions blow up.
     const manager = makeExecutable(
       join(d, "manager.sh"),
-      `#!/usr/bin/env bash\nif [ "$1" = "ensure" ]; then echo started > "${managerStarted}"; sleep 3; fi\n`,
+      `#!/usr/bin/env bash
+if [ "$1" = "ensure" ]; then
+  echo started > "${managerStarted}"
+  for _ in $(seq 1 400); do [ -f "${release}" ] && break; sleep 0.05; done
+  echo finished > "${managerFinished}"
+fi
+`,
     );
     const updateCore = makeExecutable(join(d, "update.sh"), `#!/usr/bin/env bash\necho update >> "${coreLog}"\n`);
-    const start = Date.now();
     const out = runHook(["update", "codex"], "{}", {
       QMD_BACKEND_MANAGER: manager,
       QMD_CORE_UPDATE_SCRIPT: updateCore,
     });
-    const elapsed = Date.now() - start;
     assert.equal(out, "");
     assert.equal(readFileSync(coreLog, "utf8"), "update\n");
-    // must return well before the 3s backend ensure finishes
-    assert.ok(elapsed < 2000, `update hook blocked on backend ensure (${elapsed}ms)`);
+    // **이것이 "블로킹하지 않는다"를 잡는 단정이다.** ensure 는 아직 gate 에 걸려 있어
+    // 완료 마커를 쓸 수 없으므로, 훅이 ensure 를 기다렸다면 그 마커가 반드시 존재한다.
+    // 예전에는 `elapsed < 2000` + `sleep 3` 조합이었고 두 세계의 간격이 3초뿐이라
+    // 부하가 걸린 머신에서 좁혀질 수 있었다 — 이제 간격이 시간이 아니라 상태다.
+    // 타이밍 정책은 test/helpers/timing.mjs 참고.
+    assert.equal(existsSync(managerFinished), false, "update hook blocked on backend ensure");
     // backend ensure was still kicked (in background)
     assert.notEqual(waitForFile(managerStarted, () => true), "");
+    // release the gate so the background shell exits promptly
+    writeFileSync(release, "");
+    assert.notEqual(waitForFile(managerFinished, () => true), "", "backgrounded ensure must still complete");
   } finally {
     removeTemp(d);
   }

@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { assertWithinBudget } from './helpers/timing.mjs';
 
 function recall(payload, env = {}) {
   const out = execFileSync('python3', ['core/recall.py'], {
@@ -26,8 +27,12 @@ test('Critical-1: 데몬 부재 시 graceful skip (빠르게 null)', () => {
     { QMD_DAEMON_URL: 'http://127.0.0.1:1' },   // 죽은 포트, fixture 미주입
   );
   const elapsed = Date.now() - start;
+  // 무출력 자체는 언제나 단정한다(정상 graceful skip).
   assert.equal(r, null);
-  assert.ok(elapsed < 8000, `graceful skip 이 너무 느림(${elapsed}ms) — CLI fallback 의심`);
+  // 경과 시간은 opt-in 이다. 스위트의 6개 벽시계 단정 중 개수·상태로 대체할 수 없었던
+  // 유일한 자리 — 죽은 포트라서 재시도 횟수를 셀 종점이 없다. 예산과 근거는
+  // test/helpers/timing.mjs 의 표에 있다(`QMD_TEST_TIMING=1` 로 활성).
+  assertWithinBudget('recall_dead_daemon_skip', elapsed);
 });
 
 test('Medium: prefix 하위호환 — 하이픈 컬렉션은 기본 full prefix', () => {

@@ -415,18 +415,21 @@ test('D: 조회 term 수는 상한(6)으로 유계다', () => {
 });
 
 test('D: DF 패스 전체가 프로브 예산 안에 머문다 (N 개가 곱해지지 않는다)', () => {
-  const started = Date.now();
   const r = dfProbe({ scenario: 'df-slow', settings: { queryTimeout: 1.25 } });
-  const elapsed = Date.now() - started;
   assert.equal(r.exit_code, 0);
   assert.match(r.stdout, /card\.md/, '예산 소진이 본 recall 을 막으면 안 된다');
   // 프로브당 0.5s × 5 term = 2.5s 이지만 패스 전체 예산은 LEX_PROBE_TIMEOUT(1.0s)이다.
   // 예산을 넘기면 조회를 포기하고 위치 컷으로 폴백한다.
+  //
+  // **"N 개가 곱해지지 않는다"를 잡는 것은 아래 `df_probes.length` 단정과 위의
+  // `lex_df == probe_failed` 단정이다.** 예산이 term 당으로 곱해지면 5건을 전부
+  // 조회하므로 개수가 3을 넘고 폴백 사유도 남지 않는다 — 부하와 무관하게 갈린다.
+  // 예전에는 여기에 `elapsed < 4000` 백스톱이 있었으나 같은 회귀를 이 두 단정이
+  // 이미 잡고, 정상 경로가 설계상 DF 패스 1.0s + 게이트 프로브 0.5s 를 기다려
+  // 실측 1627ms — 여유 2.5배로는 부하가 걸린 머신에서 버티지 못했다.
+  // 타이밍 정책은 test/helpers/timing.mjs 참고.
   assert.equal(selectionOf(r).lex_df, 'probe_failed');
   assert.ok(r.df_probes.length <= 3, `예산 소진 후에도 계속 조회했다 (${r.df_probes.length}건)`);
-  // python 기동 + DF 패스 1.0s + 본 질의 + 게이트 프로브(0.5s 지연). CI 여유를 둬도
-  // 4s 안이어야 하고, 이 값이면 예산이 곱해질 때(0.5s × 5 = 2.5s) 반드시 실패한다.
-  assert.ok(elapsed < 4000, `DF 패스 예산 초과 (${elapsed}ms)`);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
