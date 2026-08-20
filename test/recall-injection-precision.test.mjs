@@ -501,34 +501,73 @@ for (const c of GATE_TABLE) {
   });
 }
 
-test('E: DF-present 식별자가 연접에 남아 있으면 프로브 없이 면제한다', () => {
-  // 식별자(`resolve_target`)는 기능어와 달리 변별력이 크다 — 코퍼스에 실재하고 연접에
-  // 남아 있으면 그 히트는 "term 을 버려서 만들어낸 것"이 아니다. EP 변형 전용 면제만
-  // 있으면 `ep` 패턴을 안 쓰는 프로젝트 전부에서 이 경로가 즉시 발동한다.
-  const r = dfProbe({
-    prompt: '아까 말한 그거 있잖아 resolve_target 어디서 불려?', df_absent: ['아까'],
-  });
+const IDENT_PROMPT = '아까 말한 그거 있잖아 resolve_target 어디서 불려?';
+
+test('E: 식별자가 남은 연접은 프로브 대상이 되고, 히트가 있을 때만 면제된다', () => {
+  // 식별자(`resolve_target`)는 기능어와 달리 변별력이 크지만 **DF 존재만으로는 면제
+  // 근거가 아니다** — DF 는 term 당 단독 질의라 두 term 이 서로 다른 문서에 있어도
+  // 둘 다 present 다. 그래서 불신은 히트를 충분조건에서 필요조건으로 내리는 것이고,
+  // 이 경로는 프로브 대상을 EP 엔트리에서 **일반 연접**으로 바꾸기만 한다.
+  const r = dfProbe({ prompt: IDENT_PROMPT, df_absent: ['아까'] });
   const sel = selectionOf(r);
   assert.equal(sel.lex_terms_absent_in_cut > 0, true, '불신 조건은 성립한다');
   assert.equal(sel.lex_identifier_present, true);
-  assert.equal(sel.lex_gate, 'identifier_term_present');
+  assert.equal(sel.lex_probe_scope, 'all', '연접 자체를 프로브한다');
+  assert.equal(r.queries.length, 2, '프로브는 여전히 1회다');
+  assert.ok(sel.lex_hits >= 1);
+  assert.equal(sel.lex_gate, 'identifier_conjunction_hits');
   assert.equal(sel.lex_gate_applied, false);
-  assert.equal(sel.lex_probe_scope, 'none', '면제는 왕복 0이다');
-  assert.equal(sel.lex_hits, null);
   assert.equal(sel.bodies_injected, 1);
 });
 
-test('E: 코퍼스에 없는 식별자는 면제 근거가 아니다', () => {
-  // "present" 여야 한다 — 그 이름의 문서가 없으면 증거가 아니고 발동이 옳다.
-  const r = dfProbe({
-    prompt: '아까 말한 그거 있잖아 resolve_target 어디서 불려?',
-    df_absent: ['아까', 'resolve_target'],
-  });
+test('E: 식별자가 남아도 연접이 0건이면 면제되지 않는다 (DF 존재 ≠ 연접 만족)', () => {
+  // 이 단정이 없으면 "식별자 하나 섞인 무관 프롬프트"가 프로브 없이 통과해 vec-only
+  // 카드 본문을 전량 받는다 — 이 절이 막으려던 누출을 새 문으로 되살리는 경로다.
+  const r = dfProbe({ prompt: IDENT_PROMPT, df_absent: ['아까'], scenario: 'lex-dead' });
   const sel = selectionOf(r);
-  assert.equal(sel.lex_identifier_present, false);
+  assert.equal(sel.lex_identifier_present, true);
+  assert.equal(sel.lex_probe_scope, 'all');
+  assert.equal(sel.lex_hits, 0);
+  assert.equal(sel.lex_gate, 'absent_terms_no_hits', '"근거 없음"과 "0건"을 뭉치지 않는다');
   assert.equal(sel.lex_gate_applied, true);
   assert.equal(sel.bodies_injected, 0);
 });
+
+test('E: 코퍼스에 없는 식별자는 프로브 대상조차 바꾸지 않는다', () => {
+  // "present" 여야 한다 — 그 이름의 문서가 없으면 증거가 아니고 발동이 옳다.
+  const r = dfProbe({ prompt: IDENT_PROMPT, df_absent: ['아까', 'resolve_target'] });
+  const sel = selectionOf(r);
+  assert.equal(sel.lex_identifier_present, false);
+  assert.equal(sel.lex_probe_scope, 'none', 'EP 엔트리가 없으므로 보낼 증거가 없다');
+  assert.equal(sel.lex_gate, 'absent_terms_no_identifier_evidence');
+  assert.equal(sel.lex_gate_applied, true);
+  assert.equal(sel.bodies_injected, 0);
+});
+
+// ── 알려진 불연속(수용) — 내용어 3개 이하의 직접 의문형 ────────────────────────
+// 한국어 의문형 어미는 문장 끝에 오므로 내용어가 3개 이하면 어미가 위치 컷 슬롯을
+// 차지한다. 같은 질문이 내용어 하나 차이로 본문과 title-only 를 오간다. 대안 셋은
+// 실측으로 막혀 있다(근거는 core/recall.py 의 "알려진 불연속" 주석):
+//   (a) 문장 말미 부재 제외 → `오늘 점심 뭐 먹을까`가 열린다(`먹을까`가 `뭐였지`와
+//       문법 범주·위치가 동일 — 위치로는 잡담과 직접 질문을 가를 수 없다).
+//   (b) 어미를 KO_STOPWORDS 에 추가 → 모듈 규칙이 배제(어간 판정 없는 활용형 추가).
+//   (c) 생존 2개 이상 면제 → 발동 5건 중 4건이 생존 정확히 2개라 이 절이 무효화된다.
+// 오류 방향이 정밀도 쪽이고 링크+title 이 남으므로 수용한다. 이 쌍이 그 경계다.
+for (const c of [
+  { prompt: 'sendbird 장애 원인이 뭐였지?', inCut: 0, applied: false, body: 1 },
+  { prompt: 'sendbird 장애 뭐였지?', inCut: 1, applied: true, body: 0 },
+]) {
+  test(`E: 3/4-term 불연속 회귀표 — "${c.prompt}" applied=${c.applied}`, () => {
+    const r = dfProbe({ prompt: c.prompt, df_absent: ['뭐였지'] });
+    const sel = selectionOf(r);
+    assert.equal(sel.lex_terms_absent, 1, '두 프롬프트의 부재 토큰은 같다');
+    assert.equal(sel.lex_terms_absent_in_cut, c.inCut, '갈리는 것은 컷 안/밖 하나다');
+    assert.equal(sel.lex_gate_applied, c.applied);
+    assert.equal(sel.bodies_injected, c.body);
+    // 발동해도 링크+title 은 남는다 — 이 불연속을 수용하는 근거다.
+    assert.match(r.stdout, /card\.md/);
+  });
+}
 
 test('E: 군더더기가 위치 컷 안이면 내용어가 섞여 있어도 발동한다', () => {
   // 위 앵커(`sendbird 장애 원인이 뭐였지?`)와 **대비되는 쪽**이다. 판정 범위가 위치 컷
@@ -596,7 +635,8 @@ test('E: EP 변형 search 가 0건이면 면제되지 않는다', () => {
   const sel = selectionOf(r);
   assert.equal(sel.lex_probe_scope, 'ep_only');
   assert.equal(sel.lex_hits, 0);
-  assert.equal(sel.lex_gate, 'lone_survivor_no_identifier_evidence');
+  assert.equal(sel.lex_gate, 'lone_survivor_no_hits',
+    '프로브를 보냈으나 0건 — "보낼 증거가 없었다"와 구분되는 값이다');
   assert.equal(sel.lex_gate_applied, true);
   assert.equal(sel.bodies_injected, 0);
 });
