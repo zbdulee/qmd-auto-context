@@ -6,14 +6,20 @@ hook 이 아니다(그래서 `core/` 가 아니라 여기 있다). 판정·직�
 
 대상: `status: verified` + `createdBy: qmd-auto-context` + `sourceRevisions` 없음
       + 단일 파일 소스 + `generated-manifest.jsonl` 에 컴파일 시각(`ts`) 이 있는 카드.
-건전 백필 가능: **내용 대조**로 판정한다 — 컴파일 시각 이전의 mainline(`--first-parent`)
-      커밋에서의 원문 blob == HEAD 의 blob == 워킹 트리의 blob.
+건전 백필 가능: **내용 대조**로 판정한다 — 컴파일 시점에 이미 존재했음이 증명되는
+      mainline(`--first-parent`) 앵커 커밋에서의 원문 blob == HEAD 의 blob == 워킹 트리의 blob.
 
 **이 판정의 범위 — 어느 연산에 대해 참인가.** 시각 추론은 "어느 트리와 비교할지"를 고르는
 데만 쓰고 "바뀌지 않았다"는 blob OID 로 증명한다. 그래서 merge 는 더 이상 구멍이 아니다
-(`--no-ff` merge 로 들어온 내용은 base blob ≠ HEAD blob 으로 잡힌다). 남는 구멍은 하나다:
+(`--no-ff` merge 로 들어온 내용은 base blob ≠ HEAD blob 으로 잡힌다). 남는 구멍은 둘이고
+**둘 다 git 메타데이터만으로는 증명 불가**다:
   - **컴파일 시점에 워킹 트리가 dirty 였고 그 변경이 나중에 discard 된 경우.** 카드는
     커밋되지 않은 본문을 읽었는데 지금은 그 흔적이 어디에도 없어 구분할 수 없다.
+  - **author·committer 두 날짜가 모두 컴파일 이후로 백데이트된 커밋.** 앵커 자격은
+    `max(author, committer) <= compiledAt` 인데 두 날짜를 함께 조작하면(import·
+    `filter-branch`·양쪽 `GIT_*_DATE` 명시) 그 커밋이 자격을 얻는다. 한쪽만 되돌려진
+    경우는 `mainline_anchors` 가 막지만 양쪽이면 git 이 가진 시각 증거가 전부 거짓이라
+    남길 수 있는 것이 없다.
   - 버전 관리 밖의 원문(ignore·git 아닌 저장소)·컴파일 시점 mainline 에 없던 파일은
     대조할 트리가 없어 판정 대상이 아니다(`no_git_history`/`no_base_commit`/
     `source_absent_at_compile` → `undecidable`).
@@ -32,7 +38,7 @@ import json
 import os
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -60,8 +66,14 @@ DIRTY = "dirty"
 CLASSES = (BACKFILLABLE, SOURCE_NEWER, SOURCE_MISSING, UNDECIDABLE, DIRTY)
 
 
-def git_out(root: Path, args: list, stdin: bytes = None):
-    """git 한 번. 실패는 None 이다(사유별 분기는 호출부가 한다)."""
+def git_out(root: Path, args: list, stdin: bytes = None, strip: str = "all"):
+    """git 한 번. 실패는 None 이다(사유별 분기는 호출부가 한다).
+
+    `strip="newline"` 은 **후행 개행만** 벗긴다. 경로를 돌려주는 조회
+    (`rev-parse --show-prefix`)에 `.strip()` 을 쓰면 공백으로 끝나는 디렉터리 이름이
+    조용히 다른 경로가 되고(POSIX 는 허용한다) 그 접두로 tree 를 조회하면 엉뚱한
+    파일이나 미존재를 본다.
+    """
     try:
         done = subprocess.run(
             ["git", "-C", str(root)] + list(args),
@@ -71,17 +83,22 @@ def git_out(root: Path, args: list, stdin: bytes = None):
         return None
     if done.returncode != 0:
         return None
-    return done.stdout.decode("utf-8", "replace").strip()
+    text = done.stdout.decode("utf-8", "replace")
+    if strip == "newline":
+        return text[:-1] if text.endswith("\n") else text
+    return text.strip()
 
 
 def parse_iso(value) -> datetime | None:
     """ISO 시각 → aware datetime. **문자열 비교로 대신하지 말 것.**
 
-    매니페스트 `ts` 는 UTC(`Z`/`+00:00`)이지만 git `%cI` 는 커밋 당시의 로컬 오프셋을
-    낸다(`+09:00`). 그 조합에서 문자열 순서와 시간 순서는 실제로 어긋난다 —
-    `2026-01-01T00:30:00+09:00`(= 전날 15:30Z)은 `2026-01-01T00:00:00Z` 보다 **이전**
-    이지만 문자열로는 뒤에 온다. 그 자리를 문자열로 비교하면 낡은 카드에 신선 배지를
-    다는 쪽으로 틀린다.
+    매니페스트 `ts` 는 UTC(`Z`/`+00:00`)인 것도 로컬 오프셋(`+09:00`)인 것도 있다.
+    문자열 순서와 시간 순서는 실제로 어긋난다 — `2026-01-01T00:30:00+09:00`
+    (= 전날 15:30Z)은 `2026-01-01T00:00:00Z` 보다 **이전**이지만 문자열로는 뒤에 온다.
+    그 자리를 문자열로 비교하면 낡은 카드에 신선 배지를 다는 쪽으로 틀린다.
+    커밋 시각과의 비교는 여기서 얻은 aware datetime 을 `pick_anchor` 가 epoch 정수로
+    바꿔서 한다(git 은 `%at`/`%ct` 로 epoch 를 직접 준다) — 두 표현이 만나는 자리를
+    한 곳으로 좁혀 그 클래스를 구조적으로 없앤다.
     """
     if not isinstance(value, str) or not value:
         return None
@@ -93,6 +110,87 @@ def parse_iso(value) -> datetime | None:
         # naive 시각은 어느 오프셋인지 모른다 — 추정하지 않고 판정 불가로 보낸다.
         return None
     return parsed
+
+
+def repo_path_prefix(root: Path):
+    """`<rev>:<경로>` 조회에 붙일 저장소 top-level 상대 접두. 실패·예상 밖 값은 None.
+
+    **`git -C <root> rev-parse HEAD:<rel>` 의 `<rel>` 은 cwd 가 아니라 저장소
+    top-level 기준이다.** 프로젝트 루트가 저장소 하위면 접두 없는 조회가 같은 이름의
+    **상위 저장소 파일**을 낸다(재현: 상위 `docs/a.md`=X, 하위 `project/docs/a.md`=Y →
+    `git -C project rev-parse HEAD:docs/a.md` 는 X 의 blob 을 돌려준다). 그 blob 으로
+    대조하면 카드가 읽은 적 없는 파일이 신뢰의 근거가 되고, 두 파일이 우연히 같으면
+    거짓 통과, 다르면 거짓 `source_newer` 다 — 어느 쪽도 판정이 아니다.
+
+    접두를 못 얻거나 모양이 예상과 다르면 **찍지 않는다**(fail-closed, 호출부의
+    `repo_prefix_unresolved`). 잘못된 접두는 조용히 다른 파일을 증거로 삼는 쪽으로
+    틀리므로 "모르면 안 찍는다"가 유일하게 안전한 기본값이다.
+    """
+    prefix = git_out(root, ["rev-parse", "--show-prefix"], strip="newline")
+    if prefix is None:
+        return None
+    if prefix == "":
+        # 프로젝트 루트 == 저장소 top-level. 라이브 4프로젝트가 전부 이 경우다.
+        return ""
+    if prefix.startswith("/") or not prefix.endswith("/"):
+        return None
+    if ".." in prefix.split("/"):
+        return None
+    return prefix
+
+
+def mainline_anchors(root: Path):
+    """`HEAD` 의 first-parent 조상 `(sha, 앵커 시각 epoch)` 목록. 최신 → 과거. 실패는 None.
+
+    **앵커 시각은 `max(author date, committer date)` 다. `rev-list --before` 를 쓰면
+    안 된다** — 그것은 committer date 만 보므로, author 는 컴파일 이후인데 committer 가
+    과거로 되돌려진 커밋(import·`filter-branch`·`GIT_COMMITTER_DATE` 명시)이 앵커로
+    뽑힌다. 그 커밋의 blob 은 대개 HEAD blob 과 같아 대조를 **통과**하고, 결과는 그
+    내용으로 컴파일된 적 없는 카드에 신뢰를 주는 것이다(재현: base X at=ct=01-01,
+    later Y at=08-03·ct=01-01, 카드 컴파일 08-02 → `--before` 는 later 를 앵커로 잡아
+    통과하고 `max` 는 base 를 잡아 blob 이 달라 거부한다).
+
+    "컴파일 시점에 이미 존재했다"를 주장하려면 **두 날짜 모두** 그 이전이어야 한다.
+    한쪽이라도 컴파일 이후면 그 커밋은 앵커 자격이 없다.
+    """
+    out = git_out(root, ["log", "--first-parent", "--format=%H %at %ct", "HEAD"])
+    if out is None:
+        return None
+    anchors = []
+    for line in out.splitlines():
+        # 읽을 수 없는 줄은 **후보에서 뺀다**(앵커 자격을 주지 않는다). 후보가 줄면 더
+        # 오래된 앵커가 뽑히고 그것은 원문이 더 긴 구간 동안 그대로였음을 요구하므로,
+        # 이 fail 방향은 항상 보수적이다.
+        parts = line.split()
+        if len(parts) != 3:
+            continue
+        try:
+            stamp = max(int(parts[1]), int(parts[2]))
+        except ValueError:
+            continue
+        anchors.append((parts[0], stamp))
+    return anchors
+
+
+def pick_anchor(anchors: list, compiled_at: datetime):
+    """컴파일 시점에 이미 존재한 것이 증명되는 가장 최근 mainline 커밋. 없으면 None."""
+    # **epoch 정수로 비교한다.** ISO 문자열 비교는 이 저장소에서 이미 한 번 크게 틀렸고
+    # (git `+09:00` vs 매니페스트 `Z`) 편향이 한 방향이라 세 번 재현해도 세 번 틀렸다.
+    # `int()` 는 양수 epoch 를 내림하므로 컷오프가 앞으로 가고, 그 역시 보수적이다.
+    cutoff = int(compiled_at.timestamp())
+    for sha, stamp in anchors:
+        if stamp <= cutoff:
+            return sha
+    return None
+
+
+def git_context(root: Path) -> dict:
+    """프로젝트 루트당 **한 번만** 부르는 git 조회 묶음.
+
+    두 값 모두 카드와 무관한데 예전엔 카드마다 `rev-list` 를 실행했다 —
+    service-engineering 은 대상이 1000장 규모라 그것이 이 스크립트의 지배적 비용이다.
+    """
+    return {"prefix": repo_path_prefix(root), "anchors": mainline_anchors(root)}
 
 
 def latest_manifest_records(root: Path) -> dict:
@@ -203,8 +301,72 @@ def declared_source_paths(block: str):
     return paths, True
 
 
+def compare_source_blobs(root: Path, source_rel: str, data: bytes,
+                         compiled_at: datetime, gitctx: dict):
+    """앵커 blob == HEAD blob == 워킹 트리 blob 3자 대조 → `(class, reason)`.
+
+    **이 판정의 SSOT 는 이 함수 하나다.** 진단(`--recheck` 류 드라이버)이 같은 판정을
+    손으로 베끼면 두 벌이 갈리고, 그 클래스가 이 저장소에서 가장 자주 반복됐다
+    (읽기/쓰기 규칙이 갈려 카드 731장 중 8장 title 오염, 판정 두 벌로 census 와
+    백필이 갈림). 호출부는 여기 결과를 그대로 쓴다.
+
+    **어떤 경로도 파일을 쓰지 않는다** — `hash-object` 는 `-w` 가 없어 해시만 내고
+    나머지는 `rev-parse`/`log` 조회다. 그래서 라이브 저장소에 안전하게 돌 수 있다.
+    """
+    prefix = gitctx.get("prefix")
+    if prefix is None:
+        # 접두를 모르면 `<rev>:<경로>` 가 어느 저장소의 어느 파일인지 모른다
+        # (`repo_path_prefix` 참조). "모르면 안 찍는다".
+        return UNDECIDABLE, "repo_prefix_unresolved"
+    tree_rel = prefix + source_rel
+
+    head_blob = git_out(root, ["rev-parse", "--verify", "HEAD:" + tree_rel])
+    if not head_blob:
+        return UNDECIDABLE, "no_git_history"
+    # 클린 판정은 porcelain 파싱이 아니라 **찍을 바로 그 바이트**의 blob 해시로 한다.
+    # 한 번의 읽기에서 클린 검사와 sha256 이 함께 나오므로 그 둘 사이에 원문이 바뀌는
+    # 창이 없다. `--path` 를 주어 저장소의 clean filter·해시 알고리즘을 git 이 적용한다.
+    # (porcelain 은 rename·인용 경로에서 파싱이 깨지고, 검사와 스냅샷이 두 읽기로 갈린다.)
+    # `--path` 에는 저장소 접두를 붙이지 **않는다** — git 이 `-C` 로 준 cwd 기준으로
+    # 스스로 접두를 붙인다(실측: `project/docs/*` 와 `docs/*` 에 다른 gitattributes 를
+    # 준 저장소에서 `-C project --path docs/a.md` 의 blob 이 top-level 기준
+    # `--path project/docs/a.md` 와 정확히 일치했다). 우리가 또 붙이면 이중 접두다.
+    # 접두는 tree 조회(`<rev>:<경로>`) 전용이다.
+    working_blob = git_out(root, ["hash-object", "--stdin", "--path", source_rel],
+                           stdin=data)
+    if not working_blob:
+        return UNDECIDABLE, "hash_object_failed"
+    if working_blob != head_blob:
+        return DIRTY, "working_tree_differs_from_head"
+
+    # **"바뀌지 않았다"는 내용으로 증명한다. 시각 비교는 어느 트리를 볼지 고르는 데만 쓴다.**
+    # `log -1 --format=%cI -- <path>` 를 쓰면 안 된다 — pathspec 이력 단순화가 **feat 브랜치
+    # 커밋**을 보고하므로, `--no-ff` merge 로 새 내용이 트리에 들어와도 브랜치 커밋 날짜가
+    # 컴파일보다 앞서면 "원문 그대로"로 읽힌다(재현: base 1/1=X → feat 1/15=Y → merge 8/1,
+    # 카드는 5/1 에 X 로 컴파일 → plain 은 1/15 를 보고해 건전 판정, 즉 X 카드에 sha256(Y)
+    # 를 찍는다. 라이브 102 target 중 2건이 이 경로에 걸렸고 blob 이 우연히 같아 무해했다).
+    # `--first-parent` 만 더하는 것도 시각 추론에 판정을 맡기는 것이라 쓰지 않는다.
+    # 앵커 자격 규칙(committer date 단독 금지)의 근거는 `mainline_anchors` 에 있다.
+    anchors = gitctx.get("anchors")
+    if anchors is None:
+        # `HEAD:<경로>` 를 이미 얻었으므로 HEAD 는 존재한다 — 사실상 도달하지 않는 방어
+        # 분기다. 그래도 `no_base_commit`("자격 커밋이 없다")과 뭉치지 않는다.
+        return UNDECIDABLE, "mainline_unreadable"
+    base = pick_anchor(anchors, compiled_at)
+    if not base:
+        # 컴파일 시점에 존재한 것이 증명되는 mainline 커밋이 없다 — 대조할 트리가 없다.
+        return UNDECIDABLE, "no_base_commit"
+    base_blob = git_out(root, ["rev-parse", "--verify", base + ":" + tree_rel])
+    if not base_blob:
+        # 컴파일 시점의 mainline 에 그 파일이 없었다 — 카드가 무엇을 읽었는지 알 수 없다.
+        return UNDECIDABLE, "source_absent_at_compile"
+    if base_blob != head_blob:
+        return SOURCE_NEWER, "content_changed_since_compile"
+    return BACKFILLABLE, ""
+
+
 def classify_card(root: Path, card: Path, rel_card: str, latest: dict,
-                  allow_roots: list) -> dict:
+                  allow_roots: list, gitctx: dict) -> dict:
     """카드 하나 → 분류 결과. 어떤 경로도 파일을 쓰지 않는다."""
     try:
         text = card.read_text(encoding="utf-8", errors="replace")
@@ -248,42 +410,11 @@ def classify_card(root: Path, card: Path, rel_card: str, latest: dict,
         return {"class": UNDECIDABLE, "reason": "snapshot_failed", "source": source_rel}
     revision, data = snapshot
 
-    head_blob = git_out(root, ["rev-parse", "--verify", "HEAD:" + source_rel])
-    if not head_blob:
-        return {"class": UNDECIDABLE, "reason": "no_git_history", "source": source_rel}
-    # 클린 판정은 porcelain 파싱이 아니라 **찍을 바로 그 바이트**의 blob 해시로 한다.
-    # 한 번의 읽기에서 클린 검사와 sha256 이 함께 나오므로 그 둘 사이에 원문이 바뀌는
-    # 창이 없다. `--path` 를 주어 저장소의 clean filter·해시 알고리즘을 git 이 적용한다.
-    # (porcelain 은 rename·인용 경로에서 파싱이 깨지고, 검사와 스냅샷이 두 읽기로 갈린다.)
-    working_blob = git_out(root, ["hash-object", "--stdin", "--path", source_rel],
-                           stdin=data)
-    if not working_blob:
-        return {"class": UNDECIDABLE, "reason": "hash_object_failed", "source": source_rel}
-    if working_blob != head_blob:
-        return {"class": DIRTY, "reason": "working_tree_differs_from_head",
-                "source": source_rel}
+    verdict, reason = compare_source_blobs(root, source_rel, data,
+                                           compiled_at, gitctx)
+    if verdict != BACKFILLABLE:
+        return {"class": verdict, "reason": reason, "source": source_rel}
 
-    # **"바뀌지 않았다"는 내용으로 증명한다. 시각 비교는 어느 트리를 볼지 고르는 데만 쓴다.**
-    # `log -1 --format=%cI -- <path>` 를 쓰면 안 된다 — pathspec 이력 단순화가 **feat 브랜치
-    # 커밋**을 보고하므로, `--no-ff` merge 로 새 내용이 트리에 들어와도 브랜치 커밋 날짜가
-    # 컴파일보다 앞서면 "원문 그대로"로 읽힌다(재현: base 1/1=X → feat 1/15=Y → merge 8/1,
-    # 카드는 5/1 에 X 로 컴파일 → plain 은 1/15 를 보고해 건전 판정, 즉 X 카드에 sha256(Y)
-    # 를 찍는다. 라이브 102 target 중 2건이 이 경로에 걸렸고 blob 이 우연히 같아 무해했다).
-    # `--first-parent` 만 더하는 것도 시각 추론에 판정을 맡기는 것이라 쓰지 않는다.
-    compiled_utc = compiled_at.astimezone(timezone.utc).isoformat()
-    base = git_out(root, ["rev-list", "-1", "--first-parent",
-                          "--before=" + compiled_utc, "HEAD"])
-    if not base:
-        # 컴파일 시각 이전의 mainline 커밋이 없다 — 대조할 트리가 없으므로 찍지 않는다.
-        return {"class": UNDECIDABLE, "reason": "no_base_commit", "source": source_rel}
-    base_blob = git_out(root, ["rev-parse", "--verify", base + ":" + source_rel])
-    if not base_blob:
-        # 컴파일 시점의 mainline 에 그 파일이 없었다 — 카드가 무엇을 읽었는지 알 수 없다.
-        return {"class": UNDECIDABLE, "reason": "source_absent_at_compile",
-                "source": source_rel}
-    if base_blob != head_blob:
-        return {"class": SOURCE_NEWER, "reason": "content_changed_since_compile",
-                "source": source_rel}
     collection = source.get("collection")
     declared_paths, declared_ok = declared_source_paths(block)
     return {
@@ -318,6 +449,8 @@ def process_project(root: Path, apply: bool) -> dict:
         return {"skipped": "no_wiki"}
     allow_roots = wsm.allow_roots_of(config)
     latest = latest_manifest_records(root)
+    # 카드마다 git 을 부르지 않는다(`git_context` docstring).
+    gitctx = git_context(root)
 
     counts = collections.Counter()
     reasons = collections.Counter()
@@ -332,7 +465,7 @@ def process_project(root: Path, apply: bool) -> dict:
         if path.name in META_CARDS or not path.is_file():
             continue
         rel_card = os.path.relpath(path, root)
-        info = classify_card(root, path, rel_card, latest, allow_roots)
+        info = classify_card(root, path, rel_card, latest, allow_roots, gitctx)
         if info["class"] is None:
             continue
         counts[info["class"]] += 1

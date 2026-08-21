@@ -66,6 +66,7 @@ function setupProject({
   cardOptions = {},
   trackSource = true,
   extraCommitAfter = null,
+  backdatedCommit = null,
   mergeFeatAt = null,
   mergeAt = null,
 } = {}) {
@@ -115,6 +116,15 @@ function setupProject({
     git(dir, ['commit', '-q', '-m', 'change source'],
         { GIT_AUTHOR_DATE: extraCommitAfter, GIT_COMMITTER_DATE: extraCommitAfter });
   }
+  if (backdatedCommit) {
+    // 두 날짜를 **엇갈리게** 준 실제 커밋. author 는 컴파일 이후인데 committer 만
+    // 과거로 되돌려져 있다(import·`filter-branch`·`GIT_COMMITTER_DATE` 명시가 내는 모양).
+    writeFileSync(join(dir, 'docs', 'a.md'), '# a\n\nThe port is 9999.\n');
+    git(dir, ['add', 'docs/a.md']);
+    git(dir, ['commit', '-q', '-m', 'backdated committer'],
+        { GIT_AUTHOR_DATE: backdatedCommit.authorDate,
+          GIT_COMMITTER_DATE: backdatedCommit.committerDate });
+  }
 
   const record = {
     action, targetPath: CARD_REL, sources: manifestSources,
@@ -123,6 +133,53 @@ function setupProject({
   writeFileSync(join(dir, '.auto-context', 'compile', 'generated-manifest.jsonl'),
     `${JSON.stringify(record)}\n`);
   return dir;
+}
+
+// 상위 git 저장소 **안**에 프로젝트 루트를 둔 픽스처. `git -C <project> rev-parse
+// HEAD:<rel>` 의 `<rel>` 은 cwd 가 아니라 저장소 top-level 기준이므로, 접두 없이
+// 조회하면 같은 이름의 **상위 파일**이 나온다. 두 파일 내용을 다르게 두어 어느 쪽을
+// 봤는지가 분류로 드러나게 한다.
+function setupNestedProject({
+  commitDate = '2026-01-01T00:00:00+00:00',
+  compileTs = '2026-01-02T00:00:00Z',
+  changedAfter = '2026-01-03T00:00:00+00:00',
+} = {}) {
+  const outer = mkdtempSync(join(tmpdir(), 'qmd-revbf-outer-'));
+  const dir = join(outer, 'project');
+  mkdirSync(join(outer, 'docs'), { recursive: true });
+  mkdirSync(join(dir, '.auto-context', 'compile'), { recursive: true });
+  mkdirSync(join(dir, '.auto-context', 'wiki', 'concepts'), { recursive: true });
+  mkdirSync(join(dir, 'docs'), { recursive: true });
+  // 상위의 동명 파일은 **끝까지 바뀌지 않는다** — 그래서 접두를 빼먹은 조회는 항상
+  // "원문 그대로"로 읽힌다. 내용은 하위 프로젝트의 *현재* 본문과 같게 두어, 워킹 트리
+  // 대조까지 통과시켜 잘못된 판정이 끝까지 도달하게 한다.
+  writeFileSync(join(outer, 'docs', 'a.md'), '# a\n\nThe port is 9999.\n');
+  writeFileSync(join(dir, 'docs', 'a.md'), '# a\n\nThe port is 8080.\n');
+  writeFileSync(join(dir, '.auto-context', 'settings.json'), JSON.stringify({
+    indexing: true,
+    collections: ['proj-docs', 'proj-wiki'],
+    collectionPaths: { 'proj-docs': 'docs', 'proj-wiki': '.auto-context/wiki' },
+    collectionRoles: { 'proj-docs': 'raw', 'proj-wiki': 'wiki' },
+    wikiPath: '.auto-context/wiki',
+  }));
+  writeFileSync(join(dir, CARD_REL), card());
+
+  git(outer, ['init', '-q', '-b', 'main']);
+  git(outer, ['add', 'docs/a.md', 'project/docs/a.md']);
+  git(outer, ['commit', '-q', '-m', 'sources'],
+      { GIT_AUTHOR_DATE: commitDate, GIT_COMMITTER_DATE: commitDate });
+  // 컴파일 **이후** 하위 프로젝트의 원문만 바뀐다 → 올바른 분류는 source_newer 다.
+  writeFileSync(join(dir, 'docs', 'a.md'), '# a\n\nThe port is 9999.\n');
+  git(outer, ['add', 'project/docs/a.md']);
+  git(outer, ['commit', '-q', '-m', 'change nested source'],
+      { GIT_AUTHOR_DATE: changedAfter, GIT_COMMITTER_DATE: changedAfter });
+
+  writeFileSync(join(dir, '.auto-context', 'compile', 'generated-manifest.jsonl'),
+    `${JSON.stringify({
+      action: 'created', targetPath: CARD_REL, ts: compileTs,
+      sources: [{ kind: 'file', path: 'docs/a.md', collection: 'proj-docs' }],
+    })}\n`);
+  return { outer, dir };
 }
 
 // 쓰기 실패는 이제 exit 1 이므로 status 를 삼키지 않고 함께 돌려준다.
@@ -273,6 +330,49 @@ test('컴파일 시각이 로컬 오프셋이면 UTC 로 정규화해 base 커�
     assert.equal(result.applied, 0);
   } finally {
     removeTemp(dir);
+  }
+});
+
+test('committer 만 과거로 되돌려진 커밋은 앵커 자격이 없다 — author date 도 본다', () => {
+  // `rev-list --before` 는 **committer date** 만 본다. author 는 컴파일 이후인데
+  // committer 가 과거로 되돌려진 커밋(import·`filter-branch`·`GIT_COMMITTER_DATE`
+  // 명시)이 있으면 그것이 앵커로 뽑히고, 그 blob 은 HEAD blob 과 같으니 대조를
+  // **통과**한다 — 즉 X 로 컴파일된 카드에 Y 의 sha256 을 찍는다. 앵커 자격을
+  // `max(author, committer) <= compiledAt` 로 두면 그 커밋이 탈락하고 base(X)가
+  // 앵커가 되어 blob 이 달라 거부된다. 이 픽스처는 그 한 가지만 어긋나게 한다.
+  const dir = setupProject({
+    commitDate: '2026-01-01T00:00:00+00:00',
+    compileTs: '2026-08-02T00:00:00Z',
+    backdatedCommit: {
+      authorDate: '2026-08-03T00:00:00+00:00',
+      committerDate: '2026-01-01T12:00:00+00:00',
+    },
+  });
+  try {
+    const result = run(dir, ['--apply']);
+    assert.equal(result.counts.source_newer, 1, '앵커는 base(X) 여야 한다');
+    assert.equal(result.counts.backfillable, 0);
+    assert.equal(result.applied, 0, '컴파일 시점 내용이 아닌 blob 을 찍어서는 안 된다');
+  } finally {
+    removeTemp(dir);
+  }
+});
+
+test('프로젝트 루트가 git 저장소 하위면 상위의 동명 파일을 보지 않는다', () => {
+  // `git -C <project> rev-parse HEAD:docs/a.md` 의 경로는 **저장소 top-level 기준**
+  // 이라 접두(`project/`)를 빼면 상위 저장소의 `docs/a.md` blob 이 나온다. 픽스처는
+  // 상위 파일을 하위의 *현재* 본문과 같게 두어 워킹 트리 대조까지 통과시키므로,
+  // 접두가 없으면 "컴파일 이후 안 바뀜"으로 읽혀 **stale 카드에 신뢰가 부여된다**.
+  // 올바른 판정은 하위 파일이 컴파일 이후 바뀐 사실을 본 source_newer 다.
+  const { outer, dir } = setupNestedProject();
+  try {
+    const result = run(dir, ['--apply']);
+    assert.equal(result.counts.source_newer, 1,
+      '하위 프로젝트의 원문이 컴파일 이후 바뀌었다');
+    assert.equal(result.counts.backfillable, 0);
+    assert.equal(result.applied, 0);
+  } finally {
+    removeTemp(outer);
   }
 });
 
@@ -458,6 +558,10 @@ test('카드가 선언한 소스를 읽을 수 없으면 fail-closed — 가드�
 test('백필은 원 frontmatter 의 모든 줄을 순서대로 보존한다', () => {
   // 삽입이 다른 줄을 재작성·재배열하면 title·status·sources 가 조용히 바뀔 수 있다.
   // 판정은 "삽입한 블록을 빼면 원본과 축자 동일"이다(경험적 확인이 아니라 단정).
+  // **범위 단서 — 줄바꿈은 예외다.** `wiki_compile` 의 `read_text`/`write_text_atomic`
+  // 이 universal newline 으로 CRLF 를 LF 로 정규화하므로 CRLF 카드는 바이트가 바뀐다.
+  // 이 계약은 "줄의 내용과 순서"에 대한 것이고 줄바꿈 표기까지 포함하지 않는다
+  // (기존 파이프라인 성질이고 라이브 해당 0장이라 고치지 않기로 한 것).
   const dir = setupProject();
   try {
     const before = readFileSync(join(dir, CARD_REL), 'utf8');

@@ -406,11 +406,26 @@ worktree 내 편집은 collectionPaths 밖이 되어 index·compile enqueue가 �
 "편집 → 컴파일 → 나중에 커밋"이라는 뜻이고, 그래서 git으로 증명 가능한 백필의 상한이 구조적으로 낮다.
 **재컴파일 대상은 97장이지 487장이 아니다** — 이 항목의 값을 "487/167 분해"로 읽던 근거는 그만큼 좁아진다.
 
-**판정은 시각 비교가 아니라 blob 대조다.** 시각은 앵커 커밋을 고르는 데만 쓴다(`rev-list -1 --first-parent
---before=<UTC 정규화 compiledAt> HEAD`), 그 커밋의 blob과 `HEAD:<path>`와 워킹 트리 blob을 대조한다.
+**판정은 시각 비교가 아니라 blob 대조다.** 시각은 앵커 커밋을 고르는 데만 쓴다 — `git log --first-parent
+--format='%H %at %ct' HEAD`를 훑어 **`max(author date, committer date) <= compiledAt`인 첫 커밋**이 앵커다. 그
+커밋의 blob과 `HEAD:<path>`와 워킹 트리 blob을 대조한다. **`rev-list --before`를 쓰면 안 된다** — committer
+date만 보므로 author는 컴파일 이후인데 committer만 과거로 되돌려진 커밋(import·`filter-branch`·명시
+`GIT_COMMITTER_DATE`)이 앵커로 뽑히고, 그 blob은 HEAD blob과 같아 대조를 **통과**해 stale 카드에 신뢰를 준다
+(재현: base X at=ct=01-01 → later Y at=08-03·ct=01-01, 카드 컴파일 08-02 → `--before`는 later를 앵커로 잡아
+통과, `max`는 base를 잡아 blob이 달라 거부). "컴파일 시점에 이미 존재했다"는 **두 날짜 모두** 그 이전이어야
+주장할 수 있다. 그리고 tree 조회 경로에는 `rev-parse --show-prefix`를 붙인다 — `<rev>:<경로>`의 경로는 cwd가
+아니라 **저장소 top-level 기준**이라 프로젝트 루트가 저장소 하위면 접두 없는 조회가 같은 이름의 상위 저장소
+파일을 낸다(접두를 못 얻으면 fail-closed `repo_prefix_unresolved`). 라이브 4프로젝트는 author>committer 커밋
+0건·`show-prefix` 전부 빈 값이라 두 결함의 노출이 0이었고, 이미 찍은 100장은 새 기준으로도 전부 건전하다
+(찍힌 sha256 == 새 앵커 커밋에서의 원문 내용 sha256, 100/100).
 `git log -1 -- <path>`의 시각을 보는 형태는 **pathspec 이력 단순화 때문에 merge로 들어온 내용을 못 본다**
 (base=X → feat=Y → `--no-ff` merge, 컴파일이 그 사이면 feat 커밋 날짜가 컴파일보다 앞서 "원문 그대로"로
 읽히고 sha256(Y)를 X 카드에 찍는다 — service-engineering에서 실제로 2장이 이 경로였다).
+
+**향후**: 컴파일 시점에 `source_body_hash`(원문 bounded 본문 해시)를 `generated-manifest.jsonl`에 함께
+기록하면 이 git 추론 전체가 불필요해지고 `source_absent_at_compile` 341장도 회복 대상이 된다 — 현재 매니페스트의
+`sourceHash`는 `wiki_compile.source_hash`(canonicalKey+summary+sources의 identity 해시, 16자)라 원문 내용과
+무관하다. 별건.
 
 **측정값의 신뢰 근거는 재실행이 아니라 다른 구현이다.** 이 표의 앞선 판이 44장을 보고했고 세 번 재실행해 세 번
 같은 값이 나왔지만 세 번 틀렸다(ISO 문자열을 그대로 비교해 `+09:00`을 UTC보다 9시간 늦게 읽었다 — 편향이 한
