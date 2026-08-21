@@ -430,6 +430,22 @@ date만 보므로 author는 컴파일 이후인데 committer만 과거로 되돌
 **그 뒤에 컴파일되는 카드에만** 유효하다(별건). 341장이 돌아오는 경로는 백필이 아니라 원문 편집에 의한
 재컴파일이다.
 
+**`sourceMismatch` 3장은 손대지 않는다 (조사 완료 2026-08-21).** service-engineering
+`entities/ai-proxy-agentflow.md`·`entities/zigbang-mdviewer-critical-취약점.md`, ai-proxy
+`decisions/n8n-ce-managed-seed-sync.md` — 매니페스트 행의 `sources`가 카드 frontmatter 의 `sources`와
+전혀 겹치지 않는 카드다. 원인은 **가드 이전의 `targetPath` 오지정**이다: SE 두 장은 2026-07-21T06:11:24Z
+한 run 에서 `docs/dulee/works/2026-07/20260721_주간업무정리_0714-0721.md`를 컴파일하며 모델이 무관한
+기존 카드 2장의 경로를 `targetPath`로 지정해 `action: updated`·`targetResolution: explicit`으로 덮었고,
+그 결과 본문은 새 소스인데 `sources:`·`title`은 옛 카드로 남았다. 지금은 `explicit_target_agrees`가 이
+클래스를 `merge-needed`로 보낸다.
+
+**고치지 않는 이유가 핵심이다.** 세 장 모두 `sourceRevisions`가 없어 `is_auto_trusted_card`를 통과하지
+못하므로 **recall 에 주입된 적이 없다**(라이브 피해 0). `sources:`를 매니페스트 값으로 "복구"하면
+`sourceMismatch` 판정이 풀려 백필 대상이 되고, 그러면 **내가 대조한 적 없는 본문이 캐논급으로 승격된다** —
+고치는 방향이 위험한 방향이다. 삭제도 하지 않는다(3단계 `source_missing` 정책과 같은 근거: 그 카드가 유일한
+기록일 수 있고 원장에 본문이 없다). provenance 없이 남겨 두는 것이 fail-closed 상태다. 백필 스크립트는 이
+셋을 `sourceMismatch` 버킷으로 **설계상 거부**하므로(targets 에 들어가지 않는다) 방어는 운이 아니라 구조다.
+
 **측정값의 신뢰 근거는 재실행이 아니라 다른 구현이다.** 이 표의 앞선 판이 44장을 보고했고 세 번 재실행해 세 번
 같은 값이 나왔지만 세 번 틀렸다(ISO 문자열을 그대로 비교해 `+09:00`을 UTC보다 9시간 늦게 읽었다 — 편향이 한
 방향이라 백필 대상이 과소 집계됐다). 지금 숫자는 백필 스크립트와 독립 추출 두 벌이 같은 값을 낸 것이다.
