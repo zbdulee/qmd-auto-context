@@ -1143,6 +1143,69 @@ test('list --limit: pending은 전체를 유지하고 잘린 사실은 returned/
   } finally { removeTemp(dir); }
 });
 
+test('list: 손상된 ts(null·비문자)가 목록 전체를 죽이지 않는다', () => {
+  // 이 CLI는 **원장이 깨졌을 때 쓰는 복구 도구**다. 정렬을 넣으면서 원장 값을 그대로
+  // 비교하게 되면 `ts: null` 한 줄이 `None < str` TypeError를 만들고 run_guarded가 목록
+  // 전체를 오류 JSON으로 바꾼다 — 복구 도구가 복구 대상 때문에 못 뜨는 조합이다.
+  const dir = setupProject();
+  try {
+    writeCard(dir, 'entities/known.md', { sources: [fileSource('docs/gone-known.md')] });
+    writeCard(dir, 'entities/nots.md', { sources: [fileSource('docs/gone-nots.md')] });
+    runScan(dir);
+    // 스캔이 만든 원장의 ts를 손상시킨다(한 줄은 null, 한 줄은 숫자).
+    const ledger = join(dir, LEDGER_REL);
+    const rows = readFileSync(ledger, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+    rows[0].ts = null;
+    if (rows[1]) rows[1].ts = 12345;
+    writeFileSync(ledger, rows.map((r) => JSON.stringify(r)).join('\n') + '\n');
+
+    const out = JSON.parse(runRepair(dir, ['--list']));
+    assert.equal(out.ok, true, `손상된 ts가 목록을 죽였다: ${JSON.stringify(out)}`);
+    assert.equal(out.pending, rows.length);
+    for (const e of out.entries) {
+      assert.equal(typeof e.detectedAt, 'string', 'detectedAt이 str로 정규화되지 않았다');
+    }
+  } finally { removeTemp(dir); }
+});
+
+test('list --limit: 시각을 모르는 행은 등급 안에서 뒤로 간다 (미지 ≠ 가장 오래됨)', () => {
+  // 빈 문자열을 그대로 비교하면 미지 행이 맨 앞을 점유해 "오래된 감지 먼저"가 거짓이 되고,
+  // 배치 드레인이 미지 행만 반복해서 집는다.
+  const dir = setupProject();
+  try {
+    writeCard(dir, 'entities/older.md', { sources: [fileSource('docs/gone-older.md')] });
+    writeCard(dir, 'entities/newer.md', { sources: [fileSource('docs/gone-newer.md')] });
+    writeCard(dir, 'entities/unknown.md', { sources: [fileSource('docs/gone-unknown.md')] });
+    runScan(dir);
+    const ledger = join(dir, LEDGER_REL);
+    const rows = readFileSync(ledger, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+    const byName = (n) => rows.find((r) => r.targetPath.endsWith(n));
+    byName('older.md').ts = '2020-01-01T00:00:00Z';
+    byName('newer.md').ts = '2030-01-01T00:00:00Z';
+    delete byName('unknown.md').ts;
+    writeFileSync(ledger, rows.map((r) => JSON.stringify(r)).join('\n') + '\n');
+
+    const order = JSON.parse(runRepair(dir, ['--list'])).entries.map((e) => e.targetPath);
+    assert.match(order[0], /older\.md$/, `FIFO가 아니다: ${order.join(', ')}`);
+    assert.match(order[1], /newer\.md$/, `FIFO가 아니다: ${order.join(', ')}`);
+    assert.match(order[2], /unknown\.md$/, `미지 시각이 앞을 점유했다: ${order.join(', ')}`);
+  } finally { removeTemp(dir); }
+});
+
+test('list --limit: 음수는 전체 목록으로 정규화된다 (조용한 0건 금지)', () => {
+  const dir = setupProject();
+  try {
+    for (let i = 0; i < 3; i += 1) {
+      writeCard(dir, `entities/n-${i}.md`, { sources: [fileSource(`docs/gone-n${i}.md`)] });
+    }
+    runScan(dir);
+    const out = JSON.parse(runRepair(dir, ['--list', '--limit', '-5']));
+    assert.equal(out.ok, true);
+    assert.equal(out.returned, 3, '음수 상한이 목록을 비웠다');
+    assert.equal(out.truncated, undefined);
+  } finally { removeTemp(dir); }
+});
+
 test('list --limit: trusted 카드가 먼저 온다 (캐논급 주입 중인데 대조 불가라 손해가 가장 크다)', () => {
   const dir = setupProject();
   try {

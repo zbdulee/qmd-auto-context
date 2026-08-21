@@ -121,6 +121,14 @@ def list_pending(root: Path, config: dict, compile_cfg: dict, limit: int = 0) ->
     `verified` 배지로 캐논급 주입되면서 원문 대조가 불가능한 상태라 손해가 가장 크다,
     (2) 오래된 감지 먼저(FIFO — 대기가 무기한 밀리지 않게), (3) 경로(동률 안정화).
 
+    **정렬 키는 원장 값을 그대로 쓰지 않고 정규화한다.** 원장은 손상될 수 있고 이 CLI는
+    바로 그때 쓰는 복구 도구다 — `ts: null` 한 줄이 있으면 `None`과 `str` 비교가
+    TypeError가 되어 `run_guarded`가 목록 **전체**를 오류 JSON으로 바꾼다(정렬을 넣기
+    전에는 비교가 없어 같은 원장이 정상 출력됐다). 그리고 시각을 모르는 행은 빈 문자열로
+    맨 **앞**에 오는데 그것은 "오래된 감지 먼저"가 아니라 미지 행이 배치 앞을 영구 점유하는
+    것이다. 그래서 미지는 자기 trust 등급 안에서 **뒤**로 보낸다(등급을 넘지는 않는다 —
+    trust가 1차 기준이다).
+
     `pending`은 **전체** 대기 건수를 유지한다(기존 wire 키이고 SessionStart 알림의 숫자와
     같은 값이어야 한다). 잘렸다는 사실은 `returned`/`truncated`로 따로 알린다 — 두 값을
     뭉치면 "10건 남았다"로 읽혀 드레인이 끝난 것으로 오인된다.
@@ -129,18 +137,25 @@ def list_pending(root: Path, config: dict, compile_cfg: dict, limit: int = 0) ->
     states = wsm.load_states(ledger)
     rows = []
     for row in wsm.pending_targets(states):
-        target = row.get("targetPath", "")
+        # 정렬·표시에 쓰는 값은 전부 str로 정규화한다(원장은 손상될 수 있다 — docstring).
+        target = row.get("targetPath")
+        target = target if isinstance(target, str) else ""
+        detected = row.get("ts")
+        detected = detected if isinstance(detected, str) else ""
         missing = [p for p in row.get("missingSources", []) if isinstance(p, str)]
         rows.append({
             "targetPath": target,
             "status": row.get("status", ""),
             "trusted": wsm.is_auto_trusted_target(root, config, target),
             "origin": row.get("origin", ""),
-            "detectedAt": row.get("ts", ""),
+            "detectedAt": detected,
             "missingSources": missing,
         })
     total = len(rows)
-    rows.sort(key=lambda r: (not r["trusted"], r["detectedAt"], r["targetPath"]))
+    # 미지 시각(`not r["detectedAt"]`)은 등급 안에서 뒤로 — 빈 문자열을 그대로 비교하면
+    # 미지 행이 맨 앞을 점유해 "오래된 감지 먼저"가 거짓이 된다.
+    rows.sort(key=lambda r: (not r["trusted"], not r["detectedAt"],
+                             r["detectedAt"], r["targetPath"]))
     truncated = limit > 0 and total > limit
     if limit > 0:
         rows = rows[:limit]
