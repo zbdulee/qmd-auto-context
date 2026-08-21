@@ -22,6 +22,11 @@ const LIVE_DIR = join(REPO_ROOT, 'test', 'fixtures', 'live-settings');
 // update.sh --worker의 detached embed fork가 호출자 반환 뒤에도 workdir에 써서
 // removeTemp와 경합한다(ENOTEMPTY). 이 파일 전역에서 끈다.
 process.env.QMD_SKIP_BACKGROUND_EMBED = '1';
+// worker fork 자체도 막는다. 그 자식은 스크립트를 처음부터 재실행하며 선두의
+// `mkdir -p "$_QMD_CACHE_DIR"` 로 이 파일이 이미 지운 임시 디렉터리를 되살린다
+// (`removeTemp` 는 성공하는데 그 **뒤에** 되살아나 정리 쪽에서는 막을 수 없다).
+// embed 가드는 fork **안**의 단계만 끄므로 이 잔해를 막지 못한다.
+process.env.QMD_SKIP_BACKGROUND_WORKER = '1';
 
 const CACHE = tempCacheDir('deprecated-keys');
 const PROJECT_NAME = 'depproj';

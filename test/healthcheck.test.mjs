@@ -32,6 +32,19 @@ test('update.sh: QMD_AUTO_KICKSTART가 설정되어도 launchd를 직접 제어�
 // 1줄로 알리고, TTL marker로 반복 세션 잡음을 억제한다.
 // 주의: 프로젝트는 tmpdir가 아닌 홈 아래에 만든다 — tmp 경로는 risky 게이트로 조기 종료됨
 // (wiki-compile-notice.test.mjs와 동일 이유).
+// core/update.sh 는 **detached** worker 를 포크하고, 그 자식은 execFileSync 반환 뒤에도
+// 살아 스크립트를 처음부터 재실행한다 — 선두의 `mkdir -p "$_QMD_CACHE_DIR"` 가 이 파일이
+// 이미 지운 임시 디렉터리를 되살려, base 아래 빈 `cache/` 만 남은 디렉터리가 `~/.cache` 에
+// 영구 누적됐다(실측 이 파일 1회 실행당 16개, 누적 768개). `removeTemp` 는 성공하는데 그
+// **뒤에** 되살아나므로 정리 쪽에서는 막을 수 없고, fork 를 아예 막아야 한다.
+//
+// 두 스위치의 역할이 다르다 — `QMD_SKIP_BACKGROUND_WORKER` 는 "fork 하지 말라",
+// `QMD_SKIP_BACKGROUND_EMBED` 는 "fork 는 하되 임베딩·dedup 스캔을 건너뛰라"다. 여기
+// 테스트는 동기 경로의 stdout 알림만 단정하고 전부 stub qmd 를 쓰므로 둘 다 켠다(후자는
+// 앞의 것이 유효하면 도달하지 않지만, 가드가 하나 빠져도 비용이 남지 않게 둘 다 둔다).
+process.env.QMD_SKIP_BACKGROUND_WORKER = '1';
+process.env.QMD_SKIP_BACKGROUND_EMBED = '1';
+
 const NOTICE_BASE = join(homedir(), '.cache');
 mkdirSync(NOTICE_BASE, { recursive: true });
 

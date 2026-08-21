@@ -39,6 +39,7 @@ bash core/update.sh --skip [<경로>]                   # 이 프로젝트 임�
 - `QMD_FAKE_PLATFORMS=claude,codex,gemini` — 실제 감지 대신 플랫폼 목록 강제 (`none`도 가능)
 - `QMD_BACKEND_MANAGER=/path/to/manager.sh` — tests/hooks에서 backend manager override
 - `QMD_CLEANUP_LEGACY=1` — managed legacy LaunchAgent cleanup opt-in
+- `QMD_SKIP_BACKGROUND_WORKER=1` — `update.sh`의 **detached worker fork 자체**를 건너뛴다. `QMD_SKIP_BACKGROUND_EMBED`와 역할이 다르다: 그쪽은 "fork 는 하되 embed·dedup 스캔을 건너뛰라"이고 이쪽은 "fork 하지 말라"다. 왜 둘이 필요한가 — worker 는 스크립트를 **처음부터 재실행**하므로 선두의 `mkdir -p "$_QMD_CACHE_DIR"`가 테스트가 이미 지운 임시 디렉터리를 되살린다(`removeTemp`는 성공하는데 그 **뒤에** 되살아나 정리 쪽에서는 막을 수 없다). 실측으로 `~/.cache`에 빈 디렉터리 **4,846개**가 누적돼 있었고 `test/healthcheck.test.mjs` 1회 실행이 16개를 남겼다. 켠 파일: healthcheck·update·orphan-reclaim·deprecated-keys. **worker 가 실제로 돌아야 하는 테스트는 그 자리에서만 `''`로 해제한다**(fork 회귀 가드, 손상 원장 격리) — 파일 전역으로 켜고 예외를 명시하는 형태가 per-site 로 켜는 것보다 낫다(다음에 추가되는 테스트가 자동으로 보호된다). **실환경에서 절대 설정하지 말 것** — 인덱스 갱신·소실 스캔·dedup 이 전부 이 worker 에 붙어 있어 SessionStart 가 아무 유지보수도 하지 않는다
 - `QMD_QUERY_FIXTURE=test/fixtures/*.json` — 데몬 응답을 파일로 주입 (라이브 데몬 없이 결정적 검증)
 - `QMD_SANDBOX` / `GEMINI_SANDBOX` / `--sandbox` — 디스패처·코어 즉시 무출력 종료
 

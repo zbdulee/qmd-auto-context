@@ -1932,6 +1932,20 @@ PY
     fi
   fi
 
+  # 테스트 전용 가드. worker 는 **detached** 라 호출자 반환 뒤에도 살아 있고, 스크립트를
+  # 처음부터 재실행하므로 선두의 `mkdir -p "$_QMD_CACHE_DIR"` 가 **테스트가 이미 지운**
+  # 임시 디렉터리를 되살린다. 실측: `test/healthcheck.test.mjs` 1회 실행이 `~/.cache` 에
+  # 빈 디렉터리 16개를 남기고 누적 768개였다(용량 0 — 잔해가 문제다). `removeTemp` 는
+  # 성공하는데 그 뒤에 되살아나므로 정리 쪽에서는 막을 수 없다.
+  # `QMD_SKIP_BACKGROUND_EMBED` 로는 못 막는다 — 그것은 worker **안**의 embed 단계
+  # 게이트이고 fork 자체와 선두 mkdir 은 그대로 일어난다. 그래서 게이트가 둘로 갈린다:
+  # 이 스위치는 "fork 하지 말라", 그쪽은 "fork 는 하되 임베딩은 건너뛰라"다.
+  # **실환경에서 설정하지 말 것** — 인덱스 갱신·소실 스캔·dedup 이 전부 이 worker 에 붙어
+  # 있어 켜면 SessionStart 가 아무 유지보수도 하지 않는다.
+  if [ -n "${QMD_SKIP_BACKGROUND_WORKER:-}" ]; then
+    log "WORKER: skipped (QMD_SKIP_BACKGROUND_WORKER)"
+    exit 0
+  fi
   # main()이 이미 계산한 STATUS/STATUS_WORKDIR을 worker에 env로 넘겨 재계산을
   # 없앤다(resolve_workdir_meta의 QMD_UPDATE_STATUS+QMD_CANONICAL_WORKDIR 단락).
   QMD_UPDATE_STATUS="$STATUS" QMD_CANONICAL_WORKDIR="$STATUS_WORKDIR" \

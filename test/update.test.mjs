@@ -31,6 +31,11 @@ function resolvePaths(cwd, configJson) {
 // measured ~1 run in 4). Every test here uses a stub qmd, so that background work is
 // meaningless; the one test that verifies the fork itself opts out below.
 process.env.QMD_SKIP_BACKGROUND_EMBED = '1';
+// 그 fork 는 스크립트를 처음부터 재실행하므로 선두의 `mkdir -p "$_QMD_CACHE_DIR"` 가 테스트가
+// 이미 지운 임시 디렉터리를 되살린다(`removeTemp` 는 성공하는데 그 **뒤에** 되살아나므로 정리
+// 쪽에서는 막을 수 없다). embed 가드는 fork **안**의 단계만 끄므로 이 잔해를 막지 못한다 —
+// fork 자체를 막는 스위치가 따로 필요하다. 아래 fork 검증 테스트만 이것도 함께 해제한다.
+process.env.QMD_SKIP_BACKGROUND_WORKER = '1';
 
 // 정리 재시도(removeTemp)와 임시 디렉터리 base(repoTemp)는 test/helpers/temp.mjs 가 SSOT다
 // — 예전엔 이 파일에만 있어서 나머지 테스트 40여 개가 맨 rmSync 로 같은 경합에 노출됐다.
@@ -1072,6 +1077,7 @@ test('update core: dedup scanner actually runs inside the embed subshell at runt
         QMD_SYNC_STATE_DIR: join(work, 'sync-state'),
         // this test IS the fork's regression guard, so it must actually fork
         QMD_SKIP_BACKGROUND_EMBED: '',
+        QMD_SKIP_BACKGROUND_WORKER: '',
       },
     });
 
@@ -1374,7 +1380,11 @@ test('SessionStart: 손상된 원문 갱신 원장을 격리하고 그 사실을
     }) + '\n{"engine": "claude", "eventId": "aaa", "sourceP');
     writeFileSync(join(bin, 'curl'), '#!/usr/bin/env sh\nexit 1\n', { mode: 0o755 });
     writeFileSync(join(bin, 'qmd'), '#!/usr/bin/env sh\nexit 0\n', { mode: 0o755 });
-    const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, HOME: fakeHome, QMD_CACHE_DIR: CACHE_DIR };
+    // 이 테스트는 **worker 가 실제로 돌아야** 한다 — 손상 원장 격리는 worker 단계에서
+    // 일어난다. 파일 전역 QMD_SKIP_BACKGROUND_WORKER 를 여기서만 해제한다(위 fork
+    // 검증 테스트가 embed 가드를 같은 방식으로 해제하는 것과 같은 이유).
+    const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, HOME: fakeHome,
+                  QMD_CACHE_DIR: CACHE_DIR, QMD_SKIP_BACKGROUND_WORKER: '' };
     // 절대 경로로 부른다 — 상대 경로면 update.sh 안의 `dirname "$0"` 파생 경로가
     // workdir 기준으로 풀려 config import가 죽고 sessionStart가 통째로 skip된다.
     const run = () => execFileSync('bash', [join(process.cwd(), 'core', 'update.sh')], {

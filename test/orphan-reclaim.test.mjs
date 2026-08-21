@@ -456,6 +456,9 @@ test('update.sh: collection remove 성공이 pending 마커를 남긴다 (1차 �
         QMD_LOCK_BASE: join(work, 'locks'),
         QMD_HOOK_LOG: join(work, 'hook.log'),
         QMD_SKIP_BACKGROUND_EMBED: '1',
+        // detached worker 는 스크립트를 재실행하며 선두에서 캐시 디렉터리를 다시 만들어
+        // 테스트가 지운 임시 디렉터리를 되살린다. embed 가드로는 못 막는다(fork 안의 단계다).
+        QMD_SKIP_BACKGROUND_WORKER: '1',
       },
     });
     assert.match(readFileSync(join(work, 'qmd.log'), 'utf8'), /^collection remove p-archive$/m);
@@ -487,6 +490,9 @@ test('update.sh main: 회수 실패 상태를 SessionStart에서 1회 표면화�
       QMD_HOOK_LOG: join(work, 'hook.log'),
       QMD_DIRTY_QUEUE: join(work, 'dirty-queue'),
       QMD_SKIP_BACKGROUND_EMBED: '1',
+        // detached worker 는 스크립트를 재실행하며 선두에서 캐시 디렉터리를 다시 만들어
+        // 테스트가 지운 임시 디렉터리를 되살린다. embed 가드로는 못 막는다(fork 안의 단계다).
+        QMD_SKIP_BACKGROUND_WORKER: '1',
     };
     const first = spawnSync('bash', [join(process.cwd(), 'core', 'update.sh')], {
       input: JSON.stringify({ cwd: work }), encoding: 'utf8', env,
