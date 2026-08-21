@@ -1,6 +1,12 @@
-"""읽기 전용: 카드 인구조사(§1/§2 갱신) + 3.8 건전 백필 분류(dry-run)."""
-import sys, os, glob, json, subprocess, collections
-from datetime import datetime, timezone
+"""읽기 전용: 카드 인구조사(§1/§2 갱신).
+
+**3.8 백필 분류는 여기서 하지 않는다** — `scripts/wiki-revision-backfill.py --json` 이 SSOT다.
+한때 이 파일에도 같은 판정이 있었고 두 벌이 갈렸다: 여기는 `git log -1 -- <path>` 의 시각을
+봤는데 그것은 pathspec 이력 단순화로 merge 로 들어온 내용을 못 보므로, 백필 스크립트가
+blob 대조로 올바르게 거부한 카드를 이 파일은 계속 후보로 보고했다. 판정을 두 곳에 두면
+어느 쪽이 맞는지 알 수 없다.
+"""
+import sys, glob, json, collections
 from pathlib import Path
 sys.path.insert(0, '/Users/dulee/work/qmd-auto-context/core')
 import recall as R, wiki_freshness as WF, yaml_scalars as YS
@@ -16,49 +22,11 @@ def wiki_root(root):
     w = root / cfg.get('wikiPath', '.auto-context/wiki')
     return (w if w.is_dir() else None), cfg
 
-def at(value):
-    """ISO 문자열 → aware datetime.
-
-    **문자열끼리 비교하면 안 된다.** git `%cI`는 로컬 오프셋(`+09:00`)으로, 매니페스트 `ts`는
-    UTC(`Z`)로 찍힌다 — 같은 순간을 문자열로 비교하면 `+09:00` 쪽이 9시간 늦게 읽히고,
-    편향이 **한 방향**이라 "원문이 컴파일보다 새로움"이 과다 집계된다(= 건전 백필 가능이
-    과소 집계). 실측으로 이 한 줄이 3.8 대상을 44장으로 보고했고 시각 비교로는 105장이다.
-    같은 실행을 여러 번 해도 같은 답이 나오므로 **재현성으로는 이 오류를 잡을 수 없다.**
-    """
-    if not isinstance(value, str) or not value:
-        return None
-    try:
-        d = datetime.fromisoformat(value.replace('Z', '+00:00'))
-    except ValueError:
-        return None
-    return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
-
-
-def git_last_commit(root, rel, cache):
-    if rel in cache: return cache[rel]
-    r = subprocess.run(['git', '-C', str(root), 'log', '-1', '--format=%cI', '--', rel],
-                       capture_output=True, text=True)
-    cache[rel] = r.stdout.strip() or None
-    return cache[rel]
-
 for name in PROJECTS:
     root = Path.home() / 'work' / name
     w, cfg = wiki_root(root)
     if w is None:
         print(f'{name}: wiki 없음 (indexing={cfg.get("indexing")})'); continue
-
-    # 매니페스트: targetPath -> 최신 created/updated 레코드
-    latest = {}
-    mf = root / '.auto-context/compile/generated-manifest.jsonl'
-    if mf.is_file():
-        for ln in mf.open(errors='replace'):
-            try: o = json.loads(ln)
-            except Exception: continue
-            tp, ts = o.get('targetPath'), o.get('ts')
-            if not (isinstance(tp, str) and isinstance(ts, str)): continue
-            if o.get('action') not in ('created', 'updated'): continue
-            prev = latest.get(tp)
-            if prev is None or ts > prev['ts']: latest[tp] = o
 
     pending = WF.unresolved_pending_refreshes(root)
     pmap = {}
@@ -66,10 +34,7 @@ for name in PROJECTS:
         sp = ev.get('sourcePath')
         if isinstance(sp, str): pmap[sp] = ev
 
-    c = collections.Counter(); cls = collections.Counter(); gl = {}
-    dirty = {l[3:].strip() for l in subprocess.run(
-        ['git', '-C', str(root), 'status', '--porcelain'],
-        capture_output=True, text=True).stdout.split('\n') if len(l) > 3}
+    c = collections.Counter()
 
     for f in glob.glob(str(w / '**/*.md'), recursive=True):
         p = Path(f)
@@ -83,21 +48,10 @@ for name in PROJECTS:
             c['foreign'] += 1; continue
         revs = R.frontmatter_source_revisions(txt)
         if not revs:
+            # provenance 결측 총량만 센다. 이 카드들이 어느 경로로 가야 하는지(백필 /
+            # 재컴파일 / source-missing)의 판정은 `wiki-revision-backfill.py --json` 이
+            # SSOT다 — 모듈 docstring 참고.
             c['norev'] += 1
-            rel = os.path.relpath(f, root)
-            o = latest.get(rel)
-            srcs = [s.get('path') for s in (o.get('sources') or [])
-                    if isinstance(s, dict) and s.get('kind') == 'file'
-                    and isinstance(s.get('path'), str)] if o else []
-            if not o or len(srcs) != 1: cls['판정불가(ts없음/다중소스)'] += 1; continue
-            src = srcs[0]
-            if not (root / src).is_file(): cls['원문소실→source-missing'] += 1; continue
-            if src in dirty: cls['워킹트리 dirty'] += 1; continue
-            lc = git_last_commit(root, src, gl)
-            if not lc: cls['git이력없음'] += 1; continue
-            lcd, tsd = at(lc), at(o['ts'])
-            if lcd is None or tsd is None: cls['시각파싱실패'] += 1; continue
-            cls['원문이 컴파일보다 새로움→재컴파일' if lcd > tsd else '건전 백필 가능'] += 1
             continue
         # freshness (raw) + pending cutoff (effective)
         state = 'fresh'
@@ -119,4 +73,3 @@ for name in PROJECTS:
 
     print(f'== {name}: 카드 {c["cards"]}  |  fresh {c["fresh"]} (실효 {c["fresh_eff"]}, pending컷 {c["pending_cut"]})  '
           f'stale {c["stale"]}  unknown {c["unknown"]}  norev {c["norev"]}  미검수 {c["not_verified"]}  foreign {c["foreign"]}')
-    if cls: print('     3.8 분류:', dict(cls))
