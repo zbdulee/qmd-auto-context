@@ -205,7 +205,7 @@ distinct **35장**이 각 **20~21회** 재시도되며 큐(`verify-queue.jsonl` 
 - **검증**: 재실행 후 `verify-queue.jsonl`이 줄어드는지, `verify-log`에 `deferred` 아닌 결과가
   나타나는지 본다.
 
-### 3.3 상태 보고형 알림을 지시형으로
+### 3.3 상태 보고형 알림을 지시형으로 (완료)
 
 알림 채널은 살아 있다. 증거: SessionStart 힌트를 받은 모델이 사용자 요청 없이
 `wiki-dedup-resolver`를 **자율 스폰**해 5쌍을 병합하고 큐를 비웠다(`7b473c84`).
@@ -437,7 +437,7 @@ git으로 검증하면 40장이다 — 10배 차이이고, 나머지 375장에 �
 | 5 | **2.1** ai-proxy 수동 복구 | 3.5와 함께 | 단독으로 하면 다음 worktree 세션에 다시 뺏긴다 |
 | 6 | **3.5** 경로 대조(양방향) | 정규화·fail 방향 명시 후 | resolve 없이 켜면 매 세션 전량 재색인 |
 | 7 | **3.2** verify defer 종점 | **선행 진단 필요** | 재컴파일이 이미 실패·억제 중. `source_unreadable` 원인부터 |
-| 8 | **3.3** 지시형 알림 | 3.5 선행 해소 | `source-missing`·`dead-registration` 전환. `wiki-ineligible`은 3.8 의존 |
+| 8 | **3.3** 지시형 알림 | **완료** | `source-missing`·`dead-registration` 전환. `wiki-ineligible`은 3.8 의존 |
 | 9 | **3.6** worktree 정규화 | 부분 결정 | wiki=메인 공유 / raw=worktree 로컬(확정). root 범위는 미정 |
 | 10 | **3.7** merge 큐잉 | **as-written 기각** | (b) baseline 시딩부터, (a)는 별도 matcher로 재설계 |
 
