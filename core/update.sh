@@ -99,6 +99,24 @@ qmd_healthcheck() {
 # SessionStart 이상 상태 알림: 무음 사망(RC7) 표면화. stdout이 additionalContext로
 # 주입되므로 이상 상태에서만 출력하고, marker mtime TTL로 반복 세션 잡음을 억제한다.
 # 조건이 해소되면 notice_clear로 재무장해 재발 시 다시 1회 알린다.
+#
+# **알림 문구는 지시형이고 수신자가 둘이다.** 이 채널의 수신자는 사람과 모델 둘 다이며
+# (stdout이 모델 컨텍스트로 들어간다), 숫자만 보고하는 문구는 실측으로 아무 조치도
+# 유발하지 않았다. 그래서 조치가 가능한 알림은 사람용 한 문장 뒤에 `에이전트:` 로
+# 수신자를 바꿔 절차를 지시한다(문체도 갈린다 — 사람용 합니다체, 모델용 해라체).
+# 절차 본문은 알림에 복제하지 않고 skill/agent 이름만 가리킨다(SSOT는 그 파일이고,
+# 매 세션 stdout에 절차 전문을 붓지 않는다).
+#
+# **어디에 지시를 두는지는 "조건이 스스로 꺼지는가"가 정한다.**
+#   - **자율 처리형**(완결 신호가 파일 상태로 존재 — dedup 큐가 비면 조건이 꺼진다):
+#     모델용 지시를 `notice_once` **밖**에 두고 매 run 무조건 emit한다. 잔소리가 스스로
+#     끝나므로 TTL이 필요 없고, TTL이 있으면 그 4시간 창을 태운 세션이 지시를 못 받는다.
+#   - **사용자 확인형**(source-missing·dead-registration — 사람이 결정해야 조건이 꺼진다):
+#     지시까지 `notice_once` **안**에 두고 TTL 억제를 받는다. 조건이 저절로 꺼지지 않으니
+#     무조건 emit은 매 세션 같은 지시를 반복하는 것이고, 그 대가로 marker 소진(전달 여부와
+#     무관하게 창을 태운다)을 감수한다.
+# 조치할 무료·안전 경로가 **없는** 알림은 상태형으로 남긴다 — wiki-ineligible이 그렇다
+# (일괄 재검증이 유료 호출이라 어떤 지시도 과금 유발로 읽힌다).
 # QMD_SUPPRESS_NOTICE=1(Hermes 등 stdout이 표면화되지 않는 호스트)이면 출력과
 # marker 기록을 모두 생략한다 — marker 선점으로 타 호스트 알림을 삼키지 않기 위함.
 _notice_hash() {
@@ -1378,6 +1396,11 @@ main() {
   fi
 
   # source freshness 도입으로 provenance 없는 기존 카드가 recall에서 빠진 상태를 알린다.
+  # **이 알림만 상태형으로 남는다**(source-missing·dead-registration은 지시형이다) —
+  # 일괄 재검증이 유료 호출이라 조치를 지시할 무료·안전 경로가 없고, 어떤 지시 문구도
+  # 재컴파일·재검수 유발로 읽히면 사용자 계정에 과금된다. 무료로 복구 가능한 부분집합
+  # (원문이 컴파일 이후 안 바뀐 것을 git으로 증명할 수 있는 카드)의 백필 도구가 생기면
+  # 그때 지시형으로 바꾼다.
   # 여기서도 파일만 읽는다(카드 스캔은 worker가 이미 했다) — hot path 규칙 유지.
   # `[ -s f ] && v=$(cat f)` 대신 명시적 if를 쓴다 — `set -e` 아래에서 AND 리스트의
   # 실패가 어떻게 전파되는지에 기대지 않는다(이 자리는 뒤에 다른 notice가 이어지므로
@@ -1430,13 +1453,15 @@ main() {
   # "등록 경로가 존재하지 않는 것"으로 좁혀진 근거는 scan_dead_registrations docstring과
   # docs/settings.md에 있다(다른 프로젝트의 정상 컬렉션을 잡지 않기 위함).
   # 매 worker run이 다시 세는 **수준**이라 0이 되면 notice_clear로 재무장한다.
+  # 문구는 source-missing과 같은 지시형이고 같은 이유로 적용은 사용자 확인 뒤다(경로가
+  # 사라진 것인지 지금 안 보이는 것인지 구분 불가 → 자율 remove는 파괴적이다).
   dead_registrations=""
   dead_registration_file="$(dead_registration_state "$workdir")"
   if [ -s "$dead_registration_file" ]; then
     dead_registrations="$(cat "$dead_registration_file" 2>/dev/null || true)"
   fi
   if [ -n "$dead_registrations" ]; then
-    notice_once dead-registration "$workdir" "[qmd] 등록 경로가 없거나 접근할 수 없는 검색 컬렉션이 있습니다: ${dead_registrations}. 문서가 0건이라 검색 결과에 기여하지 않고 인덱스에만 남습니다. 삭제는 자동으로 하지 않습니다(경로가 정말 사라진 것인지, 마운트하지 않은 볼륨·권한 문제로 안 보이는 것인지 구분할 수 없습니다) — 경로를 확인한 뒤 'qmd collection remove <이름>'을 직접 실행하세요."
+    notice_once dead-registration "$workdir" "[qmd] 등록 경로가 없거나 접근할 수 없는 검색 컬렉션이 있습니다: ${dead_registrations}. 문서가 0건이라 검색 결과에 기여하지 않고 인덱스에만 남습니다. 에이전트: 이것은 사용자 요청과 독립적인 백그라운드 유지보수다 — 지금 각 경로의 존재·권한을 읽기만으로 확인하고 그 결과와 함께 삭제 여부를 사용자에게 물어라. 경로가 정말 사라진 것인지 마운트하지 않은 볼륨·권한 문제로 안 보이는 것인지는 구분할 수 없으므로, 확인 없이 'qmd collection remove'를 실행하지 말 것."
   else
     notice_clear dead-registration "$workdir"
   fi
@@ -1581,12 +1606,21 @@ PY
     notice_clear wiki-dedup "$workdir"
   fi
 
-  # 소스 소실 표면화(로드맵 3단계): 원장(source-missing.jsonl)의 대기 건수를 1줄 알린다.
-  # dedup/merge 힌트와 **같은 notice_once 구조**를 쓰되 모델용 spawn 힌트는 두지 않는다 —
-  # 복구(소스 재지정)는 사람이 "이 파일이 그 문서다"를 확인해야 하는 판단이고, 자율
-  # 에이전트가 잘못 매칭하면 카드가 무관한 원문을 가리킨 채 verify에서 삭제될 수 있다.
+  # 소스 소실 표면화(로드맵 3단계): 원장(source-missing.jsonl)의 대기 건수를 알린다.
   # 대기 판정("최신 행이 detected")은 Python이 SSOT다(bash에서 재구현하지 않는다).
   # compile 디렉터리가 없으면 원장도 없으므로 python3 호출 자체를 생략한다.
+  #
+  # **문구는 지시형이고 수신자가 둘이다.** 숫자만 보고하는 알림은 무시된다 — 라이브에서
+  # 이 알림이 반복 표시되는 동안 `/wiki-source-repair`는 한 세션도 실행되지 않았다. 반면
+  # dedup 힌트처럼 지시 형태를 취한 알림은 모델이 사용자 요청 없이 자율 처리했다. 그래서
+  # 사람용 한 문장 뒤에 `에이전트:` 로 수신자를 바꿔 절차를 지시한다.
+  # **단 적용은 사용자 확인 뒤다** — 소스 재지정은 사람이 "이 파일이 그 문서다"를 확인해야
+  # 하는 판단이고, 잘못 매칭하면 카드가 무관한 원문을 가리킨 채 verify에서 삭제된다.
+  # dismiss도 사람 판단이다(같은 소실 집합을 억제해 다음 진짜 소실을 가린다). 그래서 지시는
+  # "목록을 읽고 후보를 제시하라"까지다.
+  # **절차 본문은 여기 복제하지 않는다** — skill 이름만 가리키고 SSOT는
+  # `skills/wiki-source-repair/SKILL.md`다(dedup이 agent 파일에서 WORKFLOW를 추출하는 것과
+  # 같은 규칙이며, 매 세션 stdout에 절차 전문을 붓지 않는 이유도 같다).
   if [ -d "$workdir/.auto-context/compile" ]; then
     source_missing_json="$(python3 "$(dirname "$0")/wiki_source_missing.py" --cwd "$workdir" --pending-summary 2>/dev/null || true)"
     source_missing_pending="$(printf '%s' "$source_missing_json" | python3 -c 'import json,sys
@@ -1600,7 +1634,7 @@ try:
 except Exception:
     print(0)' 2>/dev/null || echo 0)"
     if [ "${source_missing_pending:-0}" -gt 0 ] 2>/dev/null; then
-      notice_once source-missing "$workdir" "[qmd] wiki 카드 원문 소실 ${source_missing_pending}건 대기(검수 카드 ${source_missing_verified}건) — 고치려면 '/wiki-source-repair' 또는 '소스 소실 카드 고쳐줘'라고 요청하세요."
+      notice_once source-missing "$workdir" "[qmd] wiki 카드 원문 소실 ${source_missing_pending}건 대기(검수 카드 ${source_missing_verified}건). 에이전트: 이것은 사용자 요청과 독립적인 백그라운드 유지보수다 — 지금 'wiki-source-repair' skill로 대기 목록을 읽고 각 카드의 개명 후보를 사용자에게 제시해라. 어느 후보가 같은 문서인지는 사람만 확인할 수 있으므로 repoint·dismiss를 임의로 적용하지 말 것."
     else
       notice_clear source-missing "$workdir"
     fi

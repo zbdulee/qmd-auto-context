@@ -1399,3 +1399,90 @@ test('SessionStart: 손상된 원문 갱신 원장을 격리하고 그 사실을
     assert.doesNotMatch(run(), /격리했습니다/, '사건 1회당 알림 1회');
   } finally { removeTemp(work); }
 });
+
+// ── 알림 문구의 지시형 계약 ────────────────────────────────────────────────────
+// 이 채널의 수신자는 사람과 모델 둘 다다(stdout이 모델 컨텍스트로 들어간다). 실측:
+// 지시 형태를 취한 dedup 힌트는 모델이 사용자 요청 없이 자율 처리했고, 숫자만 보고한
+// 알림은 전부 무시됐다 — 이 알림이 반복 표시되는 동안 `/wiki-source-repair`는 한 세션도
+// 실행되지 않았다. 아래 세 테스트가 그 계약(지시형 / 자율 적용 금지 / 상태형 예외)을 고정한다.
+
+test('update core: source-missing 알림은 지시형이고, 자율 적용은 금지하며, TTL 억제를 받는다', () => {
+  const work = repoTemp('qmd-source-missing-notice');
+  const bin = join(work, 'bin');
+  const fakeHome = join(work, 'home');
+  const cacheDir = tempCacheDir('source-missing-notice');
+  try {
+    mkdirSync(join(work, '.auto-context', 'compile'), { recursive: true });
+    mkdirSync(bin, { recursive: true });
+    mkdirSync(fakeHome, { recursive: true });
+    writeFileSync(join(work, '.auto-context', 'settings.json'), JSON.stringify({
+      indexing: true, collections: ['x'],
+    }));
+    // 대기 = 카드별 최신 행이 `detected`. 카드 파일은 없어도 되고(verified 집계만 0),
+    // 판정은 Python(wiki_source_missing.pending_summary)이 SSOT다.
+    writeFileSync(
+      join(work, '.auto-context', 'compile', 'source-missing.jsonl'),
+      JSON.stringify({
+        targetPath: 'concepts/a.md', action: 'detected', status: 'generated',
+        missingSources: ['docs/gone-07-20.md'], origin: 'scan', ts: '2026-08-21T00:00:00Z',
+      }) + '\n',
+    );
+    writeFileSync(join(bin, 'curl'), '#!/usr/bin/env sh\nexit 1\n', { mode: 0o755 });
+    writeFileSync(join(bin, 'qmd'), '#!/usr/bin/env sh\nexit 0\n', { mode: 0o755 });
+
+    const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, HOME: fakeHome, QMD_CACHE_DIR: cacheDir };
+    const run = () => execFileSync('bash', [join(process.cwd(), 'core', 'update.sh')], {
+      encoding: 'utf8', input: JSON.stringify({ cwd: work }), env,
+    });
+
+    const out = run();
+    // (a) 사람용: 정확한 대기 건수
+    assert.match(out, /원문 소실 1건 대기/);
+    // (b) 모델용: 수신자 전환 + 실행할 skill + 자율 처리 근거
+    assert.match(out, /에이전트:/, '모델용 지시가 없다 (상태 보고만 하는 알림은 무시된다)');
+    assert.match(out, /wiki-source-repair/, '실행할 skill 이름이 지시에 없다');
+    assert.match(out, /사용자 요청과 독립적인 백그라운드 유지보수/);
+    // (c) 경계: 후보 선택은 사람 판단이다. 잘못 매칭하면 카드가 무관한 원문을 가리킨 채
+    //     verify에서 삭제되고, 임의 dismiss는 같은 소실 집합의 다음 진짜 소실을 가린다.
+    assert.match(out, /repoint·dismiss를 임의로 적용하지 말 것/,
+      '자율 적용 금지가 지시에 없다');
+
+    // (d) 사용자 확인형이라 조건이 저절로 꺼지지 않는다 → 지시까지 notice_once 안에 두고
+    //     TTL 억제를 받는다(dedup의 모델 힌트는 반대로 매 run 무조건 나간다 — 큐가 비면
+    //     조건이 스스로 꺼지므로 잔소리가 끝난다).
+    const out2 = run();
+    assert.doesNotMatch(out2, /원문 소실 1건 대기/, 'TTL 억제가 동작하지 않았다');
+    assert.doesNotMatch(out2, /wiki-source-repair/,
+      '지시가 notice_once 밖에 있어 매 세션 반복된다');
+  } finally {
+    removeTemp(work);
+  }
+});
+
+test('update core: 알림은 절차 본문을 복제하지 않는다 (SSOT는 skill/agent 파일)', () => {
+  // 절차를 알림 문구에 복제하면 (1) 매 세션 stdout에 전문이 실려 고정비가 되고
+  // (2) skill 파일과 갈리는 순간 알림이 틀린 절차를 지시한다. dedup은 agent 파일에서
+  // WORKFLOW 블록을 awk로 추출해 이 규칙을 지킨다 — 알림 문구는 이름만 가리킨다.
+  const sh = readFileSync('core/update.sh', 'utf8');
+  const skill = readFileSync('skills/wiki-source-repair/SKILL.md', 'utf8');
+  assert.match(sh, /wiki-source-repair/, '지시가 skill을 가리키지 않는다');
+  // 래퍼 호출 형태(절차의 본체)는 skill에만 있어야 한다.
+  assert.match(skill, /wiki-source-repair\.sh/);
+  assert.doesNotMatch(sh, /wiki-source-repair\.sh/,
+    'update.sh가 repair 래퍼 호출 절차를 복제했다');
+});
+
+test('update core: wiki-ineligible은 상태형으로 남는다 (지시형 스윕 금지)', () => {
+  // 조치할 **무료·안전** 경로가 없는 알림은 지시형으로 바꾸지 않는다. 일괄 재검증은
+  // host CLI 호출이고 사용자 계정에 과금되므로, 어떤 지시 문구도 과금 유발로 읽힌다.
+  // 판정은 실제 emit 문구가 아니라 소스의 그 한 줄이다 — 이 테스트가 막는 것은 라이브
+  // 동작이 아니라 "전부 지시형으로" 스윕이고, 그 스윕은 소스에서 일어난다.
+  const line = readFileSync('core/update.sh', 'utf8')
+    .split('\n')
+    .find((l) => l.includes('notice_once wiki-ineligible'));
+  assert.ok(line, 'wiki-ineligible 알림이 사라졌다');
+  assert.doesNotMatch(line, /에이전트:/,
+    'wiki-ineligible을 지시형으로 바꿨다 — 일괄 재검증은 유료 호출이다');
+  assert.match(line, /일괄 재검증은 유료 호출이라 하지 않습니다/,
+    '유료라서 하지 않는다는 근거가 문구에서 빠졌다');
+});

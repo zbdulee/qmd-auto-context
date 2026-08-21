@@ -394,7 +394,12 @@ test('registry path: 등록 경로가 없는 컬렉션은 알리기만 하고 �
     assert.match(out, /등록 경로가 없거나 접근할 수 없는 검색 컬렉션/);
     assert.match(out, /t-wiki/);
     assert.doesNotMatch(out, /p-docs/, '경로가 살아 있는 컬렉션이 목록에 섞였다');
-    assert.match(out, /자동으로 하지 않습니다/, '자동 삭제하지 않는다는 사실이 안내에 없다');
+    // 문구는 지시형이다 — 숫자·상태만 보고하는 알림은 실측으로 아무 조치도 유발하지
+    // 않았다. 다만 지시 범위는 "읽기만으로 확인하고 사용자에게 물어라"까지이고 자율
+    // remove는 금지다(경로가 사라진 것인지 지금 안 보이는 것인지 구분 불가 → 파괴적).
+    assert.match(out, /에이전트:/, '모델용 지시가 없다 (상태 보고만 하는 알림은 무시된다)');
+    assert.match(out, /확인 없이 'qmd collection remove'를 실행하지 말 것/,
+      '자율 remove 금지가 지시에 없다');
 
     const all = cacheFiles(work, 'notice-dead-registration');
     assert.equal(all.filter(n => n.includes('-state-')).length, 1);
