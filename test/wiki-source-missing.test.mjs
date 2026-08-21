@@ -1112,3 +1112,60 @@ test('source scan: ineligible은 순환 커서 창이 아니라 전량을 센다
     assert.equal(r.ineligible, 5, 'ineligible은 창과 무관하게 전량이다');
   } finally { removeTemp(dir); }
 });
+
+// ── 목록 배치 상한 ─────────────────────────────────────────────────────────────
+// 이 목록은 사람·모델 컨텍스트로 들어간다. 라이브 실측으로 한 프로젝트의 대기가 278건,
+// 전량 JSON이 111KB였다 — 상한 없이 "제시하라"고 지시하면 그 한 번으로 세션 예산이 타고
+// 결국 아무도 손대지 않는다(그 상태가 3.3의 출발점이다). 상한은 정렬과 한 쌍이어야
+// 배치 드레인이 세션 사이에 재현된다.
+test('list --limit: pending은 전체를 유지하고 잘린 사실은 returned/truncated로 알린다', () => {
+  const dir = setupProject();
+  try {
+    for (let i = 0; i < 5; i += 1) {
+      writeCard(dir, `entities/card-${i}.md`, { sources: [fileSource(`docs/gone-${i}.md`)] });
+    }
+    runScan(dir);
+    const all = JSON.parse(runRepair(dir, ['--list']));
+    assert.equal(all.pending, 5);
+    assert.equal(all.returned, 5);
+    assert.equal(all.truncated, undefined, '자르지 않았는데 truncated가 붙었다');
+
+    const two = JSON.parse(runRepair(dir, ['--list', '--limit', '2']));
+    // pending은 기존 wire 키이고 SessionStart 알림의 숫자와 같은 값이어야 한다 —
+    // returned로 덮으면 "2건 남았다"로 읽혀 드레인이 끝난 것으로 오인된다.
+    assert.equal(two.pending, 5, 'pending이 슬라이스 크기로 바뀌었다');
+    assert.equal(two.returned, 2);
+    assert.equal(two.entries.length, 2);
+    assert.equal(two.truncated, true);
+
+    // 0·미지정은 전체(기존 동작 무변화).
+    assert.equal(JSON.parse(runRepair(dir, ['--list', '--limit', '0'])).returned, 5);
+  } finally { removeTemp(dir); }
+});
+
+test('list --limit: trusted 카드가 먼저 온다 (캐논급 주입 중인데 대조 불가라 손해가 가장 크다)', () => {
+  const dir = setupProject();
+  try {
+    // generated 3장을 먼저 써서 원장 순서상 앞에 오게 한다 — 정렬이 없으면 이것들이
+    // 슬라이스를 차지하고 trusted 카드가 영구히 밀린다.
+    for (let i = 0; i < 3; i += 1) {
+      writeCard(dir, `entities/plain-${i}.md`, { sources: [fileSource(`docs/gone-p${i}.md`)] });
+    }
+    writeCard(dir, 'entities/canon.md', {
+      status: 'verified', sourceRevisions: true, sources: [fileSource('docs/gone-canon.md')],
+    });
+    runScan(dir);
+
+    const all = JSON.parse(runRepair(dir, ['--list']));
+    assert.equal(all.pending, 4);
+    const trustedCount = all.entries.filter((e) => e.trusted).length;
+    assert.equal(trustedCount, 1, `trusted 판정이 예상과 다르다: ${JSON.stringify(all.entries.map((e) => [e.targetPath, e.trusted]))}`);
+
+    const one = JSON.parse(runRepair(dir, ['--list', '--limit', '1']));
+    assert.equal(one.entries.length, 1);
+    assert.equal(one.entries[0].trusted, true, 'trusted 카드가 슬라이스 밖으로 밀렸다');
+    assert.match(one.entries[0].targetPath, /canon\.md$/);
+    // 후보 제안은 자른 뒤에만 계산한다(버릴 항목의 디렉터리 스캔은 순손실).
+    assert.ok(one.entries[0].candidates, '슬라이스 안 항목에 후보가 없다');
+  } finally { removeTemp(dir); }
+});

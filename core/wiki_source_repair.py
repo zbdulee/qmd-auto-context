@@ -108,7 +108,23 @@ def suggest(root: Path, missing_rel: str) -> list[dict]:
     return scored[:MAX_CANDIDATES]
 
 
-def list_pending(root: Path, config: dict, compile_cfg: dict) -> dict:
+def list_pending(root: Path, config: dict, compile_cfg: dict, limit: int = 0) -> dict:
+    """대기 목록. `limit > 0`이면 상위 그만큼만 `entries`에 담는다.
+
+    **상한이 필요한 이유는 이 목록이 사람·모델 컨텍스트로 들어가기 때문이다.** 라이브
+    실측에서 한 프로젝트의 대기가 278건이고 전량 JSON이 111KB였다 — 배치 없이 한 번에
+    제시하면 그것만으로 세션 예산을 태우고, 그래서 실제로는 아무도 손대지 않는다. 상한을
+    두면 같은 큐를 여러 세션에 걸쳐 조금씩 빼낼 수 있다.
+
+    **정렬이 상한과 한 쌍이다.** 무순서 목록을 자르면 어느 N개가 오는지가 원장 순서에
+    의존해 배치 드레인이 재현되지 않는다. 순서는 (1) `trusted` 먼저 — 그 카드는 지금
+    `verified` 배지로 캐논급 주입되면서 원문 대조가 불가능한 상태라 손해가 가장 크다,
+    (2) 오래된 감지 먼저(FIFO — 대기가 무기한 밀리지 않게), (3) 경로(동률 안정화).
+
+    `pending`은 **전체** 대기 건수를 유지한다(기존 wire 키이고 SessionStart 알림의 숫자와
+    같은 값이어야 한다). 잘렸다는 사실은 `returned`/`truncated`로 따로 알린다 — 두 값을
+    뭉치면 "10건 남았다"로 읽혀 드레인이 끝난 것으로 오인된다.
+    """
     ledger = wsm.ledger_path(root, compile_cfg)
     states = wsm.load_states(ledger)
     rows = []
@@ -122,9 +138,20 @@ def list_pending(root: Path, config: dict, compile_cfg: dict) -> dict:
             "origin": row.get("origin", ""),
             "detectedAt": row.get("ts", ""),
             "missingSources": missing,
-            "candidates": {rel: suggest(root, rel) for rel in missing},
         })
-    return {"ok": True, "pending": len(rows), "entries": rows}
+    total = len(rows)
+    rows.sort(key=lambda r: (not r["trusted"], r["detectedAt"], r["targetPath"]))
+    truncated = limit > 0 and total > limit
+    if limit > 0:
+        rows = rows[:limit]
+    # 후보 제안은 자른 **뒤에** 계산한다 — `suggest`는 missing 경로마다 디렉터리를 훑으므로
+    # 버릴 항목의 후보를 계산하는 것은 순손실이다(278건 전량에서 실측 대부분의 비용).
+    for entry in rows:
+        entry["candidates"] = {rel: suggest(root, rel) for rel in entry["missingSources"]}
+    out = {"ok": True, "pending": total, "returned": len(rows), "entries": rows}
+    if truncated:
+        out["truncated"] = True
+    return out
 
 
 def repoint_entry(text: str, old: str, new: str) -> tuple[str | None, str]:
@@ -244,6 +271,8 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--cwd", default=os.getcwd())
     parser.add_argument("--list", action="store_true")
+    parser.add_argument("--limit", type=int, default=0,
+                        help="목록 상한(0=전체). 큰 큐를 여러 세션에 걸쳐 빼낼 때 쓴다.")
     parser.add_argument("--repoint")
     parser.add_argument("--from", dest="from_path")
     parser.add_argument("--to", dest="to_path")
@@ -261,7 +290,8 @@ def main() -> int:
         return do_repoint(root, config, compile_cfg, args.repoint, args.from_path, args.to_path)
     if args.dismiss:
         return do_dismiss(root, config, compile_cfg, args.dismiss)
-    print(json.dumps(list_pending(root, config, compile_cfg), ensure_ascii=False))
+    limit = args.limit if args.limit and args.limit > 0 else 0
+    print(json.dumps(list_pending(root, config, compile_cfg, limit), ensure_ascii=False))
     return 0
 
 

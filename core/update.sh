@@ -1461,7 +1461,7 @@ main() {
     dead_registrations="$(cat "$dead_registration_file" 2>/dev/null || true)"
   fi
   if [ -n "$dead_registrations" ]; then
-    notice_once dead-registration "$workdir" "[qmd] 등록 경로가 없거나 접근할 수 없는 검색 컬렉션이 있습니다: ${dead_registrations}. 문서가 0건이라 검색 결과에 기여하지 않고 인덱스에만 남습니다. 에이전트: 이것은 사용자 요청과 독립적인 백그라운드 유지보수다 — 지금 각 경로의 존재·권한을 읽기만으로 확인하고 그 결과와 함께 삭제 여부를 사용자에게 물어라. 경로가 정말 사라진 것인지 마운트하지 않은 볼륨·권한 문제로 안 보이는 것인지는 구분할 수 없으므로, 확인 없이 'qmd collection remove'를 실행하지 말 것."
+    notice_once dead-registration "$workdir" "[qmd] 등록 경로가 없거나 접근할 수 없는 검색 컬렉션이 있습니다: ${dead_registrations}. 문서가 0건이라 검색 결과에 기여하지 않고 인덱스에만 남습니다. 에이전트: 이것은 사용자 요청과 독립적인 백그라운드 유지보수다 — 사용자의 현재 요청을 먼저 처리하고 그 답변 끝에 각 경로의 존재·권한을 읽기만으로 확인하고 그 결과와 함께 삭제 여부를 사용자에게 물어라. 경로가 정말 사라진 것인지 마운트하지 않은 볼륨·권한 문제로 안 보이는 것인지는 구분할 수 없으므로, 확인 없이 'qmd collection remove'를 실행하지 말 것."
   else
     notice_clear dead-registration "$workdir"
   fi
@@ -1618,6 +1618,15 @@ PY
   # 하는 판단이고, 잘못 매칭하면 카드가 무관한 원문을 가리킨 채 verify에서 삭제된다.
   # dismiss도 사람 판단이다(같은 소실 집합을 억제해 다음 진짜 소실을 가린다). 그래서 지시는
   # "목록을 읽고 후보를 제시하라"까지다.
+  # **지시에 실행 순서를 명시한다.** dedup 힌트는 "지금 즉시"인데 이 알림은 아니다 — 그 차이는
+  # 위임 가능성이다: dedup은 subagent가 자율 처리해 메인 턴을 쓰지 않지만, 이 작업은 사용자
+  # 확인이 필수라 정의상 메인 턴에서 일어난다. "지금 즉시"로 두면 세션 첫 턴이 사용자 질문
+  # 대신 유지보수로 소모된다(알림은 SessionStart에 붙는다).
+  # **지시에 배치 상한을 명시한다** — 라이브 실측으로 한 프로젝트의 대기가 278건이고 전량
+  # 목록이 111KB다. 상한 없이 "제시하라"고 지시하면 그 한 번으로 세션 예산이 타고, 그러면
+  # 지시형으로 바꾼 목적(실제로 조치가 일어나게 하는 것)이 그 자리에서 무너진다. 같은 큐를
+  # 여러 세션에 걸쳐 빼내는 것이 정상 동작이고 `--limit`의 정렬(trusted 먼저)이 그것을
+  # 재현 가능하게 만든다.
   # **절차 본문은 여기 복제하지 않는다** — skill 이름만 가리키고 SSOT는
   # `skills/wiki-source-repair/SKILL.md`다(dedup이 agent 파일에서 WORKFLOW를 추출하는 것과
   # 같은 규칙이며, 매 세션 stdout에 절차 전문을 붓지 않는 이유도 같다).
@@ -1634,7 +1643,7 @@ try:
 except Exception:
     print(0)' 2>/dev/null || echo 0)"
     if [ "${source_missing_pending:-0}" -gt 0 ] 2>/dev/null; then
-      notice_once source-missing "$workdir" "[qmd] wiki 카드 원문 소실 ${source_missing_pending}건 대기(검수 카드 ${source_missing_verified}건). 에이전트: 이것은 사용자 요청과 독립적인 백그라운드 유지보수다 — 지금 'wiki-source-repair' skill로 대기 목록을 읽고 각 카드의 개명 후보를 사용자에게 제시해라. 어느 후보가 같은 문서인지는 사람만 확인할 수 있으므로 repoint·dismiss를 임의로 적용하지 말 것."
+      notice_once source-missing "$workdir" "[qmd] wiki 카드 원문 소실 ${source_missing_pending}건 대기(검수 카드 ${source_missing_verified}건). 에이전트: 이것은 사용자 요청과 독립적인 백그라운드 유지보수다 — 사용자의 현재 요청을 먼저 처리하고 그 답변 끝에 'wiki-source-repair' skill로 대기 목록을 최대 10건씩 읽고(전량을 한 번에 제시하지 말 것 — 대기가 많으면 목록만으로 세션 예산을 태운다) 각 카드의 개명 후보를 사용자에게 제시해라. 어느 후보가 같은 문서인지는 사람만 확인할 수 있으므로 repoint·dismiss를 임의로 적용하지 말 것."
     else
       notice_clear source-missing "$workdir"
     fi

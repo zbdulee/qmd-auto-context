@@ -23,7 +23,8 @@ downgrades `verified` → `generated` (that would hide the card from recall unde
 
    ```bash
    ROOT="${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:-$(git rev-parse --show-toplevel)}}"
-   bash "$ROOT/skills/wiki-source-repair/scripts/wiki-source-repair.sh" "$PWD" list
+   # third arg = batch limit (omit or 0 for the whole queue)
+   bash "$ROOT/skills/wiki-source-repair/scripts/wiki-source-repair.sh" "$PWD" list 10
    ```
 
    `pending: 0` → tell the user there is nothing to repair and stop. Each entry carries
@@ -32,6 +33,14 @@ downgrades `verified` → `generated` (that would hide the card from recall unde
    `trusted` is true only for a current card with `status: verified`,
    `createdBy: qmd-auto-context`, and non-empty compiler-owned `sourceRevisions`; the ledger's
    stored status alone never grants trust.
+
+   **Work in batches.** `pending` is the whole queue; `returned`/`truncated` describe the
+   slice you got. A live project measured 278 pending entries and 111KB of JSON for the full
+   list — presenting that in one go spends the session on the list itself, which is why the
+   queue went untouched. Entries are ordered `trusted` first (those cards are injected as
+   canon right now while their sources cannot be checked), then oldest detection first, so a
+   batch drain is reproducible across sessions. Tell the user how many remain and stop; the
+   next session continues.
 
 2. For each entry, show the user the card's title/summary, the missing source path, and the
    suggested candidates. **Ask which candidate is the same document** (or whether the source
