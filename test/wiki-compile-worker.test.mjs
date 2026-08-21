@@ -3,10 +3,11 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { removeTemp } from './helpers/temp.mjs';
+import { stampVerified, wikiTrustState } from './helpers/wiki_trust.mjs';
 
 function setupProject(extraCompile = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'qwiki-worker-'));
@@ -1678,4 +1679,145 @@ claim_queue(Path('${compileDir}/${q.name}'))
   } finally {
     removeTemp(project);
   }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// provenance 소유권: `sourceRevisions` 는 **워커가 읽은 파일**에서 나오고 모델 값은
+// 채택되지 않는다. 이 필드가 비면 그 카드는 `recall.is_auto_trusted_card`(status +
+// createdBy + **비어 있지 않은** sourceRevisions)를 영구히 통과하지 못해 recall 에
+// 절대 주입되지 않는다 — 즉 모델이 값을 안 주거나 형식을 틀리는 것만으로 카드가
+// 조용히 무용해진다. 라이브 census 로 그 손실을 셌다(service-engineering 2026-08
+// 카드 중 128장이 provenance 없음).
+const PROVENANCE_EXTRACTOR = `#!/usr/bin/env python3
+import json, sys
+payload = json.loads(sys.stdin.read())
+assert 'content' in payload['source']
+decoy = {'kind': 'file', 'path': 'decoy.md', 'collection': 'proj-docs',
+         'sha256': '0' * 64, 'size': 1, 'mtimeNs': 1}
+print(json.dumps({'candidates': [
+  {
+    'title': 'Silent Model',
+    'summary': 'The extractor returned no provenance at all.',
+    'suggestedType': 'concept', 'confidence': 'high',
+    'targetPath': '.auto-context/wiki/concepts/silent-model.md',
+  },
+  {
+    'title': 'Malformed Model',
+    'summary': 'The extractor returned a provenance record missing required keys.',
+    'suggestedType': 'concept', 'confidence': 'high',
+    'targetPath': '.auto-context/wiki/concepts/malformed-model.md',
+    'sourceRevisions': [{'kind': 'file', 'path': 'docs/source.md'}],
+  },
+  {
+    'title': 'Decoy Model',
+    'summary': 'The extractor pointed provenance at a file it never read.',
+    'suggestedType': 'concept', 'confidence': 'high',
+    'targetPath': '.auto-context/wiki/concepts/decoy-model.md',
+    'sourceRevisions': [decoy],
+    'authoritativeSources': [{'kind': 'file', 'path': 'decoy.md', 'collection': 'proj-docs'}],
+    'sources': [{'kind': 'url', 'ref': 'https://example.invalid/decoy'}],
+  },
+]}))
+`;
+
+function provenanceProject() {
+  const extractor = join(mkdtempSync(join(tmpdir(), 'extractor-provenance-')), 'extract.py');
+  writeFileSync(extractor, PROVENANCE_EXTRACTOR);
+  return setupProject({
+    extractor: { backends: { claude: ['python3', extractor] }, timeout: 30 },
+    verify: { enabled: false },
+  });
+}
+
+test('worker 가 sourceRevisions 를 소유한다: 모델이 안 주든 malformed 든 decoy 든 실제 읽은 소스가 실린다', () => {
+  // 세 후보를 한 run 에 태우는 이유: 세 실패 형태가 **같은 대입 한 줄**로 막히는지를
+  // 보는 것이고, 하나만 통과해도 나머지가 새면 계약이 아니다. decoy 후보는
+  // authoritativeSources·sources 까지 위조해 "검증 근거와 provenance 가 함께 모델
+  // 손에 넘어가는" 최악 형태를 만든다.
+  const project = provenanceProject();
+  try {
+    runWorker(project, {}, ['--flush-all']);
+    const real = createHash('sha256')
+      .update(readFileSync(join(project, 'docs', 'source.md'))).digest('hex');
+    for (const slug of ['silent-model', 'malformed-model', 'decoy-model']) {
+      const rel = join('.auto-context', 'wiki', 'concepts', `${slug}.md`);
+      const text = readFileSync(join(project, rel), 'utf8');
+      assert.match(text, /^sourceRevisions:$/m, `${slug}: provenance 블록이 있어야 한다`);
+      assert.match(text, new RegExp(`sha256: "${real}"`), `${slug}: 실제 원문 해시여야 한다`);
+      assert.match(text, /path: "docs\/source\.md"/, `${slug}: 워커가 읽은 경로여야 한다`);
+      assert.doesNotMatch(text, /decoy\.md/, `${slug}: 모델이 준 경로가 새면 안 된다`);
+      assert.doesNotMatch(text, new RegExp('sha256: "0{64}"'), `${slug}: 모델 해시가 새면 안 된다`);
+    }
+  } finally { removeTemp(project); }
+});
+
+test('워커가 찍은 provenance 카드는 검수 후 recall 신뢰를 통과하고 freshness 가 fresh 다', () => {
+  // 목적은 "블록을 썼다"가 아니라 "그 카드가 recall 에 나온다"다. status·createdBy·
+  // sourceRevisions 세 조건이 실제 predicate 를 함께 통과하는지, 그리고 원문을 고치면
+  // 그 신뢰가 stale 로 무너지는지(= 해시가 파일 전체에 결속돼 있다)까지 본다.
+  const project = provenanceProject();
+  const cardRel = join('.auto-context', 'wiki', 'concepts', 'silent-model.md');
+  try {
+    runWorker(project, {}, ['--flush-all']);
+    assert.equal(wikiTrustState(project, cardRel).trusted, false, 'generated 는 아직 신뢰되지 않는다');
+
+    stampVerified(project, cardRel);
+    const state = wikiTrustState(project, cardRel);
+    assert.equal(state.trusted, true, 'is_auto_trusted_card 를 통과해야 한다');
+    assert.equal(state.revisions.length, 1);
+    assert.equal(state.revisions[0].path, 'docs/source.md');
+    assert.equal(state.freshness.state, 'fresh');
+
+    writeFileSync(join(project, 'docs', 'source.md'), '# Source\n\n다른 결론으로 바뀌었다.\n');
+    assert.equal(wikiTrustState(project, cardRel).freshness.state, 'stale',
+      '원문이 바뀌면 파일 전체 해시가 어긋나 stale 이어야 한다');
+  } finally { removeTemp(project); }
+});
+
+test('절단된 소스에서도 sourceRevisions 의 sha256 은 파일 전체 기준이다', () => {
+  // extractor 에는 `maxSourceChars` 로 자른 본문을 준다. provenance 는 그 층이 아니라
+  // 파일 전체 스냅샷이어야 하고(`recall.card_freshness` 도 전체 파일로 대조한다),
+  // 절단 사실을 해시에 섞으면 편집 없이도 영구 stale 이 된다.
+  const project = provenanceProject();
+  const source = join(project, 'docs', 'source.md');
+  writeFileSync(source, `# Source\n\n${'가'.repeat(20000)}\n`);
+  try {
+    runWorker(project, {}, ['--flush-all']);
+    const text = readFileSync(join(project, '.auto-context', 'wiki', 'concepts', 'silent-model.md'), 'utf8');
+    const whole = createHash('sha256').update(readFileSync(source)).digest('hex');
+    assert.match(text, new RegExp(`sha256: "${whole}"`));
+    const size = Number(/size: (\d+)/.exec(text)[1]);
+    assert.equal(size, statSync(source).size, 'size 도 절단본이 아니라 파일 전체다');
+    assert.ok(size > 12000, '이 소스는 실제로 maxSourceChars 를 넘겨야 한다');
+    const card = wikiTrustState(project, join('.auto-context', 'wiki', 'concepts', 'silent-model.md'));
+    assert.equal(card.freshness.state, 'fresh', '절단 소스라도 편집 없이 fresh 여야 한다');
+  } finally { removeTemp(project); }
+});
+
+test('갱신(updated) 경로의 provenance 는 새 소스 기준으로 갱신된다', () => {
+  // 카드가 이미 있으면 `rewrite_generated_card` 가 옛 sourceRevisions 를 버리고 새
+  // 블록을 넣는다. 여기가 새면 원문을 고쳐도 카드가 옛 해시를 들고 있어 영구 stale 이
+  // 되고, `recallVerifiedOnly` 아래에서 그 카드는 다시 나오지 않는다.
+  const project = provenanceProject();
+  const source = join(project, 'docs', 'source.md');
+  const cardRel = join('.auto-context', 'wiki', 'concepts', 'silent-model.md');
+  try {
+    runWorker(project, {}, ['--flush-all']);
+    const first = wikiTrustState(project, cardRel).revisions[0].sha256;
+
+    writeFileSync(source, '# Source\n\n갱신된 결론: 카드는 새 원문을 가리켜야 한다.\n');
+    writeFileSync(join(project, '.auto-context', 'compile', 'source-queue.jsonl'),
+      JSON.stringify({
+        ts: '2026-06-27T00:00:00Z', trigger: 'post_tool_source', engine: 'claude', cwd: project,
+        source: { kind: 'file', path: 'docs/source.md', collection: 'proj-docs' },
+      }) + '\n');
+    runWorker(project, {}, ['--flush-all']);
+
+    const after = wikiTrustState(project, cardRel);
+    assert.equal(after.revisions.length, 1, 'provenance 블록이 중복되지 않는다');
+    assert.notEqual(after.revisions[0].sha256, first, '옛 해시가 남아 있으면 안 된다');
+    assert.equal(after.revisions[0].sha256,
+      createHash('sha256').update(readFileSync(source)).digest('hex'));
+    assert.equal(after.freshness.state, 'fresh');
+  } finally { removeTemp(project); }
 });

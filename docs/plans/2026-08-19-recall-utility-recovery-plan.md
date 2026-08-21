@@ -422,10 +422,13 @@ date만 보므로 author는 컴파일 이후인데 committer만 과거로 되돌
 (base=X → feat=Y → `--no-ff` merge, 컴파일이 그 사이면 feat 커밋 날짜가 컴파일보다 앞서 "원문 그대로"로
 읽히고 sha256(Y)를 X 카드에 찍는다 — service-engineering에서 실제로 2장이 이 경로였다).
 
-**향후**: 컴파일 시점에 `source_body_hash`(원문 bounded 본문 해시)를 `generated-manifest.jsonl`에 함께
-기록하면 이 git 추론 전체가 불필요해지고 `source_absent_at_compile` 341장도 회복 대상이 된다 — 현재 매니페스트의
-`sourceHash`는 `wiki_compile.source_hash`(canonicalKey+summary+sources의 identity 해시, 16자)라 원문 내용과
-무관하다. 별건.
+**`source_absent_at_compile` 341장은 복구 불가다.** 그 카드들의 컴파일 시점 원문 내용은 어디에도 기록돼
+있지 않다 — 매니페스트의 `sourceHash`는 `wiki_compile.source_hash`(canonicalKey+summary+sources의 identity
+해시, 16자)라 원문 바이트와 무관하고, git mainline 에도 그 시점의 파일이 없어 대조 대상 자체가 없다. 지금
+해시를 계산해 찍는 것은 "컴파일 이후 원문이 바뀌지 않았다"를 근거 없이 만들어내는 것이므로 §6의 금지에
+그대로 걸린다. 컴파일 시점에 원문 본문 해시를 매니페스트에 함께 남기면 이 git 추론이 불필요해지지만, 그것은
+**그 뒤에 컴파일되는 카드에만** 유효하다(별건). 341장이 돌아오는 경로는 백필이 아니라 원문 편집에 의한
+재컴파일이다.
 
 **측정값의 신뢰 근거는 재실행이 아니라 다른 구현이다.** 이 표의 앞선 판이 44장을 보고했고 세 번 재실행해 세 번
 같은 값이 나왔지만 세 번 틀렸다(ISO 문자열을 그대로 비교해 `+09:00`을 UTC보다 9시간 늦게 읽었다 — 편향이 한
@@ -537,9 +540,10 @@ PostToolUse는 건당 3배 무겁고 건수도 2배다. 두 프로젝트 합쳐 
 
 - **기존 카드 일괄 재검증.** 933장 × host CLI 호출은 사용자 계정 청구다. 원문을 편집하면
   자동으로 재생성·재검수되는 경로가 이미 있다.
-- **`sourceRevisions` 일괄 백필.** 이유는 비용이 아니다 — 그 필드는 워커가 소유하는 파일시스템
-  해시이고 모델 출력이 아니므로(`wiki_compile_worker.py:907`, 모델이 낸 revisions는 `same_revision`으로
-  기각된다) 채우는 것 자체는 **무료다**. 하지 않는 이유는 **건전성**이다. 지금 해시를 계산해 찍으면
+- **`sourceRevisions` 일괄 백필.** 이유는 비용이 아니다 — 그 필드는 컴파일러가 소유하는 파일시스템
+  해시이고 모델 출력이 아니므로(자동 경로는 `wiki_compile_worker.py`가 `snapshot_bytes` 단일 읽기로
+  잡은 스냅샷을 candidate 에 대입하고, 수동 경로는 `wiki_extract.attach_compiler_provenance`가 compile
+  직전에 같은 일을 한다. 모델·caller 가 낸 revisions 는 채택되지 않는다) 채우는 것 자체는 **무료다**. 하지 않는 이유는 **건전성**이다. 지금 해시를 계산해 찍으면
   "컴파일 이후 원문이 바뀌지 않았다"는 주장을 **근거 없이 만들어내는** 것이고, 그것은 이 신뢰 경계가
   존재하는 목적 자체다. 매니페스트의 `sourceHash`는 도움이 되지 않는다 — `wiki_compile.source_hash`는
   원문 바이트가 아니라 candidate의 identity·summary·sources(모델 출력)를 해시한다.

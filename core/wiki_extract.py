@@ -16,6 +16,12 @@ import sys
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).parent.resolve()))
+import recall as qmd_recall
+import resolve_paths as qmd_resolve_paths
+import wiki_compile as wc
+import wiki_freshness
+
 TYPE_DIRS = {
     "concept": "concepts",
     "entity": "entities",
@@ -30,6 +36,108 @@ TYPE_DIRS = {
     "style": "style",
 }
 TRANSCRIPT_RE = re.compile(r"(?im)^\s*(user|assistant|system|human|ai)\s*:")
+
+# 검증에 쓰이는 파일 소스 수는 `wiki_verify_worker.MAX_SOURCES`가 상한이고
+# `authoritativeSources`는 그 상한으로 **잘리지 않는다**(verifier가 반드시 읽어야 하는
+# 근거이기 때문이다). 즉 caller 목록 길이가 곧 유료 검수 호출의 읽기 폭이 되므로 수동
+# 경로에서도 같은 폭으로 유계여야 한다. 두 값이 갈리면 안 되고 test/wiki-extract가
+# 코드에서 유도해 단정한다.
+MAX_PROVENANCE_FILE_SOURCES = 3
+
+
+def compiler_provenance(cwd: str, sources: Any) -> tuple[list[dict], list[dict]]:
+    """수동 경로에서 컴파일러가 직접 읽은 파일 소스의 `(authoritative, revisions)`.
+
+    **사실은 컴파일러가 정하고 caller 는 의견만 낸다.** 자동 훅 경로는
+    `wiki_compile_worker`가 자기가 읽은 파일의 스냅샷을 candidate 에 대입해 provenance 를
+    소유한다(모델 값 미채택). 수동 경로에는 큐도 worker 도 없어 provenance 가 아예 비고,
+    그러면 그 카드는 `recall.is_auto_trusted_card`(status + createdBy + **비어 있지 않은**
+    `sourceRevisions`)를 영구히 통과하지 못해 **recall 에 절대 주입되지 않는다**. 그래서
+    같은 규칙을 여기서도 적용한다 — 파일 소스를 **컴파일러가 직접 읽어** 스냅샷한다.
+
+    수동 경로에서 caller 가 정하는 것은 **어느 파일인가**뿐이다(큐가 없으므로 불가피하다).
+    그 선택이 틀리면 기계 검수가 카드 주장 vs 그 원문을 대조해 걸러낸다 — 여기서 만드는
+    사실은 "컴파일러가 그 파일을 열어 이 내용을 봤다"이며 그 이상을 주장하지 않는다.
+
+    규칙 4개를 지킨다:
+    - **두 필드는 한 번의 읽기에서 함께 나온다**(`snapshot_bytes`는 fstat 를 같은 fd 에서
+      두 번 떠 안정 이미지만 돌려준다). 소스 집합을 두 벌로 만들면 "검증은 A 를 보는데
+      provenance 는 B 를 가리킨다"가 된다.
+    - **`kind: file` 만**(`recall.SOURCE_KIND_FILE`). url/slack 등 비파일 출처는 스냅샷
+      대상이 아니고, 그런 항목만 있는 카드는 기존대로 provenance 없이 나간다.
+    - **전부 아니면 전무.** 나열된 파일 소스 중 하나라도 스냅샷하지 못하면 아무것도 내지
+      않는다 — `yaml_scalars.dump_source_revisions`가 형제 하나가 깨지면 목록 전체를
+      버리는 것과 같은 이유로, 부분 목록이 완결된 근거처럼 보이면 안 된다.
+    - **경로는 project root 상대 POSIX.** `recall.card_freshness`(경유
+      `resolve_existing_source`)와 `wiki_verify_worker.load_sources`(`root / rel`)가 그
+      base 로 되읽는다. root 밖(allowRoots) 파일은 후자가 어차피 거부하므로 스냅샷하지
+      않는다 — 여기서 통과시키면 provenance 는 있는데 검수는 못 읽는 카드가 된다.
+    """
+    if not isinstance(sources, list):
+        return [], []
+    # root 해석은 실제로 카드를 쓰는 쪽(`wiki_compile.project_paths`)과 **같은 함수**여야
+    # 한다 — 갈리면 여기서 만든 root 상대 경로가 카드 안에서 다른 파일을 가리킨다.
+    try:
+        root, project_config = wc.project_paths(cwd)
+    except (OSError, ValueError, KeyError):
+        return [], []
+    allow_roots = qmd_resolve_paths.allowed_roots(project_config or {})
+    file_sources = [
+        item for item in sources
+        if isinstance(item, dict) and item.get("kind") == qmd_recall.SOURCE_KIND_FILE
+    ]
+    if not file_sources or len(file_sources) > MAX_PROVENANCE_FILE_SOURCES:
+        return [], []
+    authoritative: list[dict] = []
+    revisions: list[dict] = []
+    seen: set[str] = set()
+    for item in file_sources:
+        raw_path = item.get("path")
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            return [], []
+        # 존재·격리 판정 SSOT. base 는 cwd 가 아니라 project root 다.
+        resolved, _reason = qmd_recall.resolve_existing_source(raw_path, root, allow_roots)
+        if resolved is None:
+            return [], []
+        try:
+            rel = resolved.relative_to(root).as_posix()
+        except ValueError:
+            # allowRoots 로 root 밖을 가리킨 소스 — 검수가 읽지 못하므로 근거가 못 된다.
+            return [], []
+        if rel in seen:
+            # 같은 파일을 두 번 읽지 않는다(판정은 정규화된 rel 로 한다).
+            continue
+        # `snapshot_bytes`는 같은 fd 에서 fstat 를 두 번 떠 안정 이미지만 돌려준다. 본문
+        # 바이트는 쓰지 않고 버린다 — 수동 경로는 원문을 요약하지 않으므로(요약은 caller
+        # 가 준다) "읽은 뒤 스냅샷" 사이의 창 자체가 없고, 읽기는 이 한 번뿐이다.
+        snapshot = wiki_freshness.snapshot_bytes(resolved)
+        if snapshot is None:
+            return [], []
+        seen.add(rel)
+        collection = item.get("collection")
+        collection = collection if isinstance(collection, str) else ""
+        authoritative.append({"kind": "file", "path": rel, "collection": collection})
+        revisions.append({
+            "kind": "file", "path": rel, "collection": collection, **snapshot[0],
+        })
+    return authoritative, revisions
+
+
+def attach_compiler_provenance(cwd: str, candidate: dict[str, Any]) -> None:
+    """compile 직전에 provenance 를 **대입**한다(caller 값은 채택하지 않는다).
+
+    `setdefault`가 아니라 pop + 대입인 이유는 `wiki_compile_worker`가 `engine`/`trigger`
+    를 대입으로 덮는 것과 같다 — caller 가 낸 `sourceRevisions`가 채택되면 recall 신뢰의
+    근거를 caller 가 스스로 발급하게 된다. 스냅샷할 파일 소스가 없으면 두 키 모두 만들지
+    않아 기존 잡 형태가 그대로 유지된다.
+    """
+    candidate.pop("sourceRevisions", None)
+    candidate.pop("authoritativeSources", None)
+    authoritative, revisions = compiler_provenance(cwd, candidate.get("sources"))
+    if revisions:
+        candidate["authoritativeSources"] = authoritative
+        candidate["sourceRevisions"] = revisions
+
 
 
 def load_payload() -> dict[str, Any]:
@@ -147,6 +255,9 @@ def main() -> int:
         candidate = to_candidate(payload, item)
         if candidate is None:
             continue
+        # 모델/caller 가 후보를 만든 **뒤에** 컴파일러가 provenance 를 소유한다(순서가 곧
+        # 보장이다 — 자동 경로의 `wiki_compile_worker` 대입과 같은 자리).
+        attach_compiler_provenance(args.cwd, candidate)
         out = run_compile(args.cwd, candidate, regenerate=args.regenerate)
         if out:
             outputs.append(out)
