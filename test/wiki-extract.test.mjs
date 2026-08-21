@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, linkSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { removeTemp } from './helpers/temp.mjs';
@@ -249,4 +249,84 @@ test('wiki_extract: 검수가 읽는 파일 소스 폭은 wiki_verify_worker.MAX
     'print(json.dumps([we.MAX_PROVENANCE_FILE_SOURCES, vw.MAX_SOURCES]))',
   ].join('\n')], { cwd: process.cwd(), encoding: 'utf8' }));
   assert.equal(values[0], values[1]);
+});
+
+// 같은 물리 파일의 **별칭**은 별개 provenance 가 아니다. 그리고 상한이 중복 제거보다 먼저
+// 걸리면 별칭 4개짜리 목록이 provenance 를 통째로 없애고(= 그 카드는
+// `recall.is_auto_trusted_card` 를 영구히 통과하지 못해 recall 에 절대 나오지 않는다) 별칭
+// 2개는 같은 파일을 두 번 세어 유료 검수의 읽기 폭을 헛되게 소진한다.
+test('wiki_extract: 같은 파일의 별칭은 접히고 상한은 서로 다른 파일 수에 걸린다', () => {
+  const work = repoTemp('wiki-extract-alias-provenance');
+  try {
+    writeSettings(work);
+    const sha = seedSource(work, 'docs/api.md', '# API\n\n포트는 8080이다.\n');
+    // 별칭은 **하드링크**로 만든다. 대소문자 무시·NFC↔NFD 별칭은 마운트마다 성립 여부가
+    // 다르고, 심볼릭 링크는 `resolve()` 가 정규화해 중복 제거에 도달조차 하지 않는다.
+    // 하드링크는 어떤 문자열 정규화로도 같아지지 않으므로 `(st_dev, st_ino)` 동치
+    // (= `os.path.samefile`) 판정만이 접을 수 있다.
+    const aliases = ['docs/a1.md', 'docs/a2.md', 'docs/a3.md'];
+    for (const alias of aliases) linkSync(join(work, 'docs/api.md'), join(work, alias));
+
+    runExtract(work, {
+      trigger: 'manual',
+      candidates: [{
+        title: 'Alias Card',
+        summary: 'The API listens on port 8080 per docs/api.md.',
+        suggestedType: 'concept',
+        sources: ['docs/api.md', ...aliases].map((path) => ({ kind: 'file', path })),
+      }],
+    });
+    const cardRel = join('.auto-context', 'wiki', 'concepts', 'alias-card.md');
+    const state = wikiTrustState(work, cardRel);
+    assert.equal(state.revisions.length, 1, '별칭 4개는 서로 다른 파일 1개다(상한에 걸리지 않는다)');
+    assert.equal(state.revisions[0].path, 'docs/api.md', '겹치면 먼저 나온 rel 이 남는다(first-wins)');
+    assert.equal(state.revisions[0].sha256, sha);
+    // caller 가 준 `sources:` 는 그대로 남는다(그것은 caller 의 의견이다) — 접히는 것은
+    // **컴파일러가 소유한** provenance 쪽이다. 그래서 별칭 부재는 그 블록에서만 단정한다.
+    const revisionLines = readFileSync(join(work, cardRel), 'utf8')
+      .split('\n')
+      .filter((line) => line.startsWith('  - {') && line.includes('sha256:'));
+    assert.equal(revisionLines.length, 1, 'sourceRevisions 항목은 하나뿐이다');
+    for (const alias of aliases) {
+      assert.ok(!revisionLines[0].includes(alias), `${alias}: 같은 파일을 두 번 세지 않는다`);
+    }
+    const job = JSON.parse(readFileSync(
+      join(work, '.auto-context', 'compile', 'verify-queue.jsonl'), 'utf8').trim().split('\n').at(-1));
+    assert.deepEqual(job.authoritativeSources.map((entry) => entry.path), ['docs/api.md'],
+      '검수가 읽는 근거도 같은 집합이어야 한다');
+
+    // 상한 자체는 그대로다 — 서로 다른 파일이 상한을 넘으면 여전히 전무(검수 읽기 폭).
+    for (const rel of ['docs/d1.md', 'docs/d2.md', 'docs/d3.md', 'docs/d4.md']) {
+      seedSource(work, rel, `# ${rel}\n\nDistinct body for ${rel}.\n`);
+    }
+    // 조사할 항목 수도 상한의 2배로 유계다 — 별칭이든 아니든 창을 넘기면 전무다.
+    for (const [slug, sources] of [
+      ['four-distinct', ['docs/d1.md', 'docs/d2.md', 'docs/d3.md', 'docs/d4.md']],
+      ['over-scan-budget', ['docs/api.md', ...aliases, 'docs/d1.md', 'docs/d2.md', 'docs/d3.md']],
+    ]) {
+      runExtract(work, {
+        trigger: 'manual',
+        candidates: [{
+          title: slug, summary: `Provenance must stay absent for ${slug} input.`,
+          suggestedType: 'concept', sources: sources.map((path) => ({ kind: 'file', path })),
+        }],
+      });
+      const text = readFileSync(join(work, '.auto-context', 'wiki', 'concepts', `${slug}.md`), 'utf8');
+      assert.doesNotMatch(text, /^sourceRevisions:$/m, `${slug}: 상한·조사 예산은 유지된다`);
+    }
+  } finally {
+    removeTemp(work);
+  }
+});
+
+test('wiki_extract: provenance 조사 예산은 파일 소스 상한의 2배로 유계다', () => {
+  // 중복 제거는 항목을 다 열어 본 뒤에야 확정되므로 상한을 항목 수에 걸 수 없다. 그렇다고
+  // 무한히 조사하면 caller 목록 길이가 곧 syscall 수가 되므로 예산을 코드에서 유도해 단정한다.
+  const values = JSON.parse(execFileSync('python3', ['-c', [
+    'import json, sys',
+    'sys.path.insert(0, "core")',
+    'import wiki_extract as we',
+    'print(json.dumps([we.MAX_PROVENANCE_FILE_SOURCES, we.MAX_PROVENANCE_SOURCE_SCAN]))',
+  ].join('\n')], { cwd: process.cwd(), encoding: 'utf8' }));
+  assert.equal(values[1], values[0] * 2);
 });

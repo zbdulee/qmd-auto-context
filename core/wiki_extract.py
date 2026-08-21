@@ -39,10 +39,16 @@ TRANSCRIPT_RE = re.compile(r"(?im)^\s*(user|assistant|system|human|ai)\s*:")
 
 # 검증에 쓰이는 파일 소스 수는 `wiki_verify_worker.MAX_SOURCES`가 상한이고
 # `authoritativeSources`는 그 상한으로 **잘리지 않는다**(verifier가 반드시 읽어야 하는
-# 근거이기 때문이다). 즉 caller 목록 길이가 곧 유료 검수 호출의 읽기 폭이 되므로 수동
+# 근거이기 때문이다). 즉 여기서 내는 목록 길이가 곧 유료 검수 호출의 읽기 폭이 되므로 수동
 # 경로에서도 같은 폭으로 유계여야 한다. 두 값이 갈리면 안 되고 test/wiki-extract가
-# 코드에서 유도해 단정한다.
+# 코드에서 유도해 단정한다. **상한이 걸리는 대상은 중복 제거 뒤 서로 다른 파일 수**다 —
+# 항목 수에 걸면 같은 파일의 별칭이 폭을 소진한다.
 MAX_PROVENANCE_FILE_SOURCES = 3
+# 조사할 **항목** 수는 상한의 2배로 따로 유계다(`recall.collect_source_paths`가 카드당 조사
+# 예산을 같은 방식으로 두는 것과 같은 이유 — 목록은 caller 가 주므로 개수 보장이 없고,
+# 중복 제거는 항목을 다 열어 본 뒤에야 확정된다). 별칭 중복은 이 창 안에서 접히고, 창을
+# 넘기면 기존 ">상한" 과 같이 전무다.
+MAX_PROVENANCE_SOURCE_SCAN = MAX_PROVENANCE_FILE_SOURCES * 2
 
 
 def compiler_provenance(cwd: str, sources: Any) -> tuple[list[dict], list[dict]]:
@@ -72,6 +78,10 @@ def compiler_provenance(cwd: str, sources: Any) -> tuple[list[dict], list[dict]]
       `resolve_existing_source`)와 `wiki_verify_worker.load_sources`(`root / rel`)가 그
       base 로 되읽는다. root 밖(allowRoots) 파일은 후자가 어차피 거부하므로 스냅샷하지
       않는다 — 여기서 통과시키면 provenance 는 있는데 검수는 못 읽는 카드가 된다.
+    - **중복 제거가 상한보다 먼저다.** 상한은 항목 수가 아니라 **서로 다른 파일 수**에
+      걸린다. 항목 수에 먼저 걸면 같은 파일의 별칭 4개가 provenance 를 통째로 없애고
+      (= 그 카드는 영구히 recall 에 나오지 않는다) 별칭 2개는 같은 파일을 두 번 세어
+      검수 읽기 폭을 헛되게 소진한다.
     """
     if not isinstance(sources, list):
         return [], []
@@ -86,11 +96,11 @@ def compiler_provenance(cwd: str, sources: Any) -> tuple[list[dict], list[dict]]
         item for item in sources
         if isinstance(item, dict) and item.get("kind") == qmd_recall.SOURCE_KIND_FILE
     ]
-    if not file_sources or len(file_sources) > MAX_PROVENANCE_FILE_SOURCES:
+    if not file_sources or len(file_sources) > MAX_PROVENANCE_SOURCE_SCAN:
         return [], []
     authoritative: list[dict] = []
     revisions: list[dict] = []
-    seen: set[str] = set()
+    seen: set[tuple[int, int]] = set()
     for item in file_sources:
         raw_path = item.get("path")
         if not isinstance(raw_path, str) or not raw_path.strip():
@@ -104,16 +114,33 @@ def compiler_provenance(cwd: str, sources: Any) -> tuple[list[dict], list[dict]]
         except ValueError:
             # allowRoots 로 root 밖을 가리킨 소스 — 검수가 읽지 못하므로 근거가 못 된다.
             return [], []
-        if rel in seen:
-            # 같은 파일을 두 번 읽지 않는다(판정은 정규화된 rel 로 한다).
+        try:
+            info = resolved.stat()
+        except OSError:
+            return [], []
+        # **같은 물리 파일의 별칭을 접는다.** 판정은 `(st_dev, st_ino)` 동치이고 그것은
+        # `os.path.samestat`(= `os.path.samefile`)이 보는 값과 같다 — `core/update.sh`의
+        # 등록 경로 대조가 같은 근거를 쓴다. 문자열 정규화로 흉내내지 말 것: 대소문자 무시
+        # 여부는 마운트마다 다르고 한글은 NFC↔NFD 로 갈리며, 하드링크는 어느 정규화로도
+        # 같아지지 않는다. 양쪽 존재는 `resolve_existing_source`가 이미 확인했으므로
+        # `samefile`이 성립하고 realpath 문자열 폴백이 필요없다.
+        identity = (info.st_dev, info.st_ino)
+        if identity in seen:
+            # 별칭이 겹치면 **먼저 나온 rel** 을 쓴다(frontmatter 중복 키의 first-wins 와
+            # 같은 규약). 뒤 항목은 같은 파일이므로 스냅샷도 다시 뜨지 않는다.
             continue
+        if len(seen) >= MAX_PROVENANCE_FILE_SOURCES:
+            # 상한은 중복 제거 **뒤** 서로 다른 파일 수에 걸린다. `snapshot_bytes` 앞에서
+            # 끊는 이유는 그것이 파일 전체를 읽기 때문이다 — 전무로 끝낼 판에 4번째 파일을
+            # 읽지 않는다.
+            return [], []
         # `snapshot_bytes`는 같은 fd 에서 fstat 를 두 번 떠 안정 이미지만 돌려준다. 본문
         # 바이트는 쓰지 않고 버린다 — 수동 경로는 원문을 요약하지 않으므로(요약은 caller
         # 가 준다) "읽은 뒤 스냅샷" 사이의 창 자체가 없고, 읽기는 이 한 번뿐이다.
         snapshot = wiki_freshness.snapshot_bytes(resolved)
         if snapshot is None:
             return [], []
-        seen.add(rel)
+        seen.add(identity)
         collection = item.get("collection")
         collection = collection if isinstance(collection, str) else ""
         authoritative.append({"kind": "file", "path": rel, "collection": collection})

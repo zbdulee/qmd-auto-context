@@ -156,7 +156,7 @@ test('a failed verification stamp preserves the job instead of logging success',
   writeFileSync(verifier, `#!/usr/bin/env python3
 import json, sys
 json.loads(sys.stdin.read())
-print(json.dumps({'verdict': 'pass', 'claims': [], 'reasons': []}))
+print(json.dumps({'verdict': 'pass', 'claims': [{'claim': 'c', 'supported': True, 'quote': 'q', 'sourcePath': 'docs/source.md'}], 'reasons': []}))
 `);
   writeFileSync(join(dir, 'docs', 'source.md'), '# s\n\nDurable claim: the source cites markdown.\n');
   writeFileSync(join(dir, '.auto-context', 'settings.json'), JSON.stringify({

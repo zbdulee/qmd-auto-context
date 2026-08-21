@@ -1189,7 +1189,7 @@ test('모델이 candidate.engine/trigger를 위조해도 큐 잡의 값이 이�
 import json, sys
 payload = json.loads(sys.stdin.read())
 if payload.get("task") == "verify":
-    print(json.dumps({"verdict": "pass", "claims": [], "reasons": []}))
+    print(json.dumps({"verdict": "pass", "claims": [{"claim": "c", "supported": True, "quote": "q", "sourcePath": "docs/source.md"}], "reasons": []}))
 else:
     print(json.dumps({"candidates": [{
         "title": "Forged Engine Card",
@@ -1232,7 +1232,7 @@ payload = json.loads(sys.stdin.read())
 if payload.get("task") == "verify":
     pathlib.Path(${JSON.stringify(seen)}).write_text(
         json.dumps([s["path"] for s in payload["sources"]]), encoding="utf-8")
-    print(json.dumps({"verdict": "pass", "claims": [], "reasons": []}))
+    print(json.dumps({"verdict": "pass", "claims": [{"claim": "c", "supported": True, "quote": "q", "sourcePath": "docs/source.md"}], "reasons": []}))
 else:
     print(json.dumps({"candidates": [{
         "title": "Decoy Sources Card",

@@ -57,7 +57,7 @@ try:
     seen = {}
     def fake_run(argv, payload, timeout, project):
         seen['payload'] = payload
-        return {'verdict':'pass','claims':[],'reasons':[], '_qmd': {'reasoningEffort': {'requested':'high','applied':'high','status':'applied','reason':'capability_flag'}}}, None, 0
+        return {'verdict':'pass','claims':[{'claim': 'c', 'supported': True, 'quote': 'q', 'sourcePath': 'docs/source.md'}],'reasons':[], '_qmd': {'reasoningEffort': {'requested':'high','applied':'high','status':'applied','reason':'capability_flag'}}}, None, 0
     old = v.wcw.run_extractor
     v.wcw.run_extractor = fake_run
     try:

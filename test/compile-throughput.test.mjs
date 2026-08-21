@@ -25,7 +25,7 @@ log = pathlib.Path(${JSON.stringify(logPath)})
 if payload.get('task') == 'verify':
     with log.open('a') as handle:
         handle.write('verify\\t' + payload['card']['path'] + '\\n')
-    print(json.dumps({'verdict': 'pass', 'claims': [], 'reasons': []}))
+    print(json.dumps({'verdict': 'pass', 'claims': [{'claim': 'c', 'supported': True, 'quote': 'q', 'sourcePath': 'docs/source.md'}], 'reasons': []}))
     raise SystemExit(0)
 rel = payload['source']['path']
 stem = pathlib.Path(rel).stem

@@ -161,7 +161,7 @@ test('source change after verifier load but before stamp preserves job and never
 import json, pathlib, sys
 payload = json.loads(sys.stdin.read())
 pathlib.Path(payload['cwd'], 'docs/source.md').write_text('# Changed during verify\\n', encoding='utf-8')
-print(json.dumps({'verdict': 'pass', 'claims': [], 'reasons': []}))
+print(json.dumps({'verdict': 'pass', 'claims': [{'claim': 'c', 'supported': True, 'quote': 'q', 'sourcePath': 'docs/source.md'}], 'reasons': []}))
 `);
   const project = setupProject({ extractorArgv: ['python3', verifier] });
   try {
@@ -185,7 +185,7 @@ import json, pathlib, sys
 payload = json.loads(sys.stdin.read())
 pathlib.Path(${JSON.stringify(seen)}).write_text(payload['sources'][0]['content'], encoding='utf-8')
 pathlib.Path(payload['cwd'], 'docs/source.md').write_text(${JSON.stringify(sourceA)}, encoding='utf-8')
-print(json.dumps({'verdict': 'pass', 'claims': [], 'reasons': []}))
+print(json.dumps({'verdict': 'pass', 'claims': [{'claim': 'c', 'supported': True, 'quote': 'q', 'sourcePath': 'docs/source.md'}], 'reasons': []}))
 `);
   const project = setupProject({ extractorArgv: ['python3', verifier] });
   try {
@@ -416,7 +416,7 @@ test('verify.enabled=false → 큐 미소비(무동작)', () => {
 });
 
 test('pass: legacy reviewed scalar does not block automatic verification', () => {
-  const verifier = mockVerifier({ verdict: 'pass', claims: [], reasons: [] });
+  const verifier = mockVerifier({ verdict: 'pass', claims: [{ claim: 'c', supported: true, quote: 'q', sourcePath: 'docs/source.md' }], reasons: [] });
   const project = setupProject({ extractorArgv: ['python3', verifier], cardExtraFm: 'reviewed: true' });
   try {
     runVerifyWorker(project);
@@ -428,7 +428,7 @@ test('pass: legacy reviewed scalar does not block automatic verification', () =>
 });
 
 test('job sourceHash와 카드 블록 hash 불일치 → stale_job skip', () => {
-  const verifier = mockVerifier({ verdict: 'pass', claims: [], reasons: [] });
+  const verifier = mockVerifier({ verdict: 'pass', claims: [{ claim: 'c', supported: true, quote: 'q', sourcePath: 'docs/source.md' }], reasons: [] });
   const project = setupProject({ extractorArgv: ['python3', verifier], jobOverrides: { sourceHash: 'deadbeef' } });
   try {
     runVerifyWorker(project);
@@ -439,7 +439,7 @@ test('job sourceHash와 카드 블록 hash 불일치 → stale_job skip', () => 
 });
 
 test('소스 전부 소실 → source_missing skip, generated 유지(미검수 배지 유지)', () => {
-  const verifier = mockVerifier({ verdict: 'pass', claims: [], reasons: [] });
+  const verifier = mockVerifier({ verdict: 'pass', claims: [{ claim: 'c', supported: true, quote: 'q', sourcePath: 'docs/source.md' }], reasons: [] });
   const project = setupProject({ extractorArgv: ['python3', verifier], withSource: false });
   try {
     runVerifyWorker(project);
@@ -450,7 +450,7 @@ test('소스 전부 소실 → source_missing skip, generated 유지(미검수 �
 });
 
 test('source_missing은 트림되지 않는 원장(source-missing.jsonl)에도 남는다', () => {
-  const verifier = mockVerifier({ verdict: 'pass', claims: [], reasons: [] });
+  const verifier = mockVerifier({ verdict: 'pass', claims: [{ claim: 'c', supported: true, quote: 'q', sourcePath: 'docs/source.md' }], reasons: [] });
   const project = setupProject({ extractorArgv: ['python3', verifier], withSource: false });
   try {
     runVerifyWorker(project);
@@ -467,7 +467,7 @@ test('source_missing은 트림되지 않는 원장(source-missing.jsonl)에도 �
 });
 
 test('소스가 살아 있으면(읽기 실패 등) 원장에 소실로 기록하지 않는다', () => {
-  const verifier = mockVerifier({ verdict: 'pass', claims: [], reasons: [] });
+  const verifier = mockVerifier({ verdict: 'pass', claims: [{ claim: 'c', supported: true, quote: 'q', sourcePath: 'docs/source.md' }], reasons: [] });
   const project = setupProject({ extractorArgv: ['python3', verifier] });
   try {
     // 소스가 존재하지만 job이 kind를 file이 아닌 것으로 들고 있는 경우: load_sources는
@@ -619,7 +619,7 @@ test('end-to-end 피기백: compile worker 1회 실행으로 생성→검증→v
 import json, sys
 payload = json.loads(sys.stdin.read())
 if payload.get('task') == 'verify':
-    print(json.dumps({'verdict': 'pass', 'claims': [], 'reasons': []}))
+    print(json.dumps({'verdict': 'pass', 'claims': [{'claim': 'c', 'supported': True, 'quote': 'q', 'sourcePath': 'docs/source.md'}], 'reasons': []}))
 else:
     print(json.dumps({'candidates': [{
       'title': 'E2E Decision',
@@ -1256,4 +1256,55 @@ test('verify: job_hash가 없는 레거시 잡은 해시 대조 없이 기존대
   assert.equal(changedDuringVerify({ jobHash: '', freshHash: 'anything' }), false);
   assert.equal(changedDuringVerify({ jobHash: '', freshHash: '', status: 'verified' }), true,
     '해시를 못 봐도 status 축은 여전히 막는다');
+});
+
+// `pass`는 `status: verified`의 유일한 입구이고 `verified`는 `recall.is_auto_trusted_card`를
+// 통과해 캐논급으로 주입된다. 즉 근거 0인 `pass`가 통하면 **무관한 요약이 trusted 카드가
+// 된다**(원문과 정반대인 카드 요약 + `{"verdict":"pass","claims":[]}` → `verified` 로 재현).
+// 여기서 검사하는 것은 stamp 함수가 아니라 **verify 경로 관통**이다 — `stamp_verification`을
+// 직접 부르는 프로브는 이 정책을 덮지 못한다(그 함수는 verdict 를 보지 않는다).
+test('근거 없는 pass는 verified 로 스탬프되지 않고 카드도 삭제되지 않는다 (invalid_verdict)', () => {
+  // `pass` + 퇴화한 `claims` 네 형태. `[]`만 막고 `[null]`·`[""]`·`[{}]`를 통과시키면
+  // 근거 요구가 이름만 남는다(항목은 모델이 주므로 모양 보장이 없다).
+  for (const claims of [[], [null], ['c'], [{}]]) {
+    const verifier = mockVerifier({ verdict: 'pass', claims, reasons: [] });
+    // 후보 풀이 claude 하나 → 첫 시도가 종점이다(degrade 할 곳이 없다).
+    const project = setupProject({ extractorArgv: ['python3', verifier] });
+    try {
+      const label = JSON.stringify(claims);
+      assert.equal(JSON.parse(runVerifyWorker(project)).processed, 1, label);
+      const text = readFileSync(join(project, CARD_REL), 'utf8');
+      // 삭제 방향으로 강등하지 않는다 — `fail`/`inconclusive`는 기본 동작이 카드 삭제인데
+      // 근거 없는 pass 는 "원문과 모순"도 "판정 불가"도 아니고 출력이 못 쓸 것이다.
+      assert.equal(existsSync(join(project, CARD_REL)), true, `${label}: 카드 삭제 금지`);
+      assert.match(text, /^status: generated$/m, `${label}: generated 유지(recall 비가시)`);
+      assert.doesNotMatch(text, /^verifiedBy:/m, `${label}: 증명 필드도 남지 않는다`);
+      assert.equal(existsSync(join(project, '.auto-context', 'compile', 'verify-deleted.jsonl')),
+        false, `${label}: 삭제 원장 행이 생기면 안 된다`);
+      const log = jsonl(join(project, '.auto-context', 'compile', 'verify-log.jsonl'));
+      assert.equal(log.at(-1).reason, 'invalid_verdict', label);
+      assert.equal(log.at(-1).result, 'skipped', `${label}: 후보 소진 → 종점(과금 루프 방지)`);
+    } finally { removeTemp(project); }
+  }
+});
+
+// 과잉 방어 회귀 방지. 라이브 3프로젝트의 `pass` 319건이 전부 `claims > 0`이므로 이 조건은
+// 실제 verifier 출력을 하나도 거부하지 않아야 한다 — 프롬프트 계약대로 온 pass 는 그대로
+// `verified`가 된다.
+test('프롬프트 계약대로 온 claims 하나면 pass 는 그대로 verified 다', () => {
+  const verifier = mockVerifier({
+    verdict: 'pass',
+    claims: [{ claim: 'the source documents cite markdown', supported: true, quote: 'cite markdown', sourcePath: 'docs/source.md' }],
+    reasons: [],
+  });
+  const project = setupProject({ extractorArgv: ['python3', verifier] });
+  try {
+    assert.equal(JSON.parse(runVerifyWorker(project)).processed, 1);
+    const text = readFileSync(join(project, CARD_REL), 'utf8');
+    assert.match(text, /^status: verified$/m);
+    assert.match(text, /^verifiedBy: "?claude"?$/m);
+    const log = jsonl(join(project, '.auto-context', 'compile', 'verify-log.jsonl'));
+    assert.equal(log.at(-1).result, 'verified');
+    assert.equal(log.at(-1).claims, 1, '로그는 개수만 남긴다 — 모양 근거는 프롬프트 계약이다');
+  } finally { removeTemp(project); }
 });

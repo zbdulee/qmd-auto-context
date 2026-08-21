@@ -781,6 +781,39 @@ def process_verify_job(
     reasons = parsed.get("reasons") if isinstance(parsed.get("reasons"), list) else []
     reasons = [str(item)[:200] for item in reasons[:5]]
     claims = parsed.get("claims") if isinstance(parsed.get("claims"), list) else []
+    if verdict == "pass" and not any(isinstance(item, dict) and item for item in claims):
+        # **`pass`는 근거를 요구한다.** `pass`가 `status: verified`의 유일한 입구이고
+        # `verified`는 `recall.is_auto_trusted_card`를 통과해 캐논급으로 주입되므로, 근거 0인
+        # `pass`는 곧 "무관한 요약이 trusted 카드가 된다"다(재현: 원문 `blue` · 카드 요약
+        # `red` · verifier `{"verdict":"pass","claims":[]}` → `verified`). 자동 경로도 같은
+        # 성질이지만 수동 경로는 caller 가 **어느 파일인가**까지 정하므로 노출이 넓다.
+        #
+        # **실패 방향이 중요하다 — `fail`/`inconclusive`로 강등하지 않는다.** 둘 다 기본
+        # 동작이 카드 삭제(`onFail`/`onInconclusive` 기본 `delete`)인데 근거 없는 `pass`는
+        # "원문과 모순"도 "판정 불가"도 아니고 **출력이 못 쓸 것**이다. `invalid_verdict`는
+        # 카드를 지우지 않고 `generated`로 남긴다(= recall 비가시) — 안전한 방향이다.
+        #
+        # **어디까지 검사하는지와 그 근거는 둘로 갈린다.**
+        #  - *비어 있지 않음*: 라이브 3프로젝트(ai-proxy·rccar·ktlo-check) `verify-log.jsonl`
+        #    의 `pass` 319건이 전부 `claims > 0`이고 `pass + claims=0`은 0건이다 — 이 조건은
+        #    실제 verifier 출력을 하나도 거부하지 않는다.
+        #  - *항목이 비어 있지 않은 dict*: 라이브 근거가 없다(로그는 `len(claims)`만 남긴다).
+        #    근거는 프롬프트 계약(`extractors/lib._VERIFY_PROMPT_TEMPLATE`의
+        #    `{"claim","supported","quote","sourcePath"}`)과 `lib.emit_verdict`가 list 이기만
+        #    하면 항목을 그대로 통과시킨다는 사실뿐이다. `[]`를 막고 `[null]`·`[""]`를 통과
+        #    시키면 근거 요구가 이름만 남는다.
+        #
+        # **`supported`/`quote` 값까지는 보지 않는다.** (1) 그것은 프롬프트가 모델에 맡긴
+        # verdict 규칙을 소비자에서 재구현하는 것이고, (2) **모양 검사는 퇴화한 출력을 거부할
+        # 뿐 거짓말하는 adapter 를 막지 못한다** — `[{}]`를 만들 수 있는 adapter 는
+        # `[{"claim":"x","supported":true,"quote":"y"}]`도 만든다. 그래서 경계를 "퇴화 거부"
+        # 에서 멈춘다(더 깊은 검사는 방어를 늘리지 않고 카드 소실 위험만 늘린다).
+        #
+        # **`lib.emit_verdict`에서 exit 1로 막지 않는다.** 비127 종료는 transient 로 분류돼
+        # 잡이 영구 보존되고 cooldown 만료마다 재호출된다(= 이 저장소가 억제 마커로 반복해서
+        # 닫아 온 과금 루프). worker 쪽이 유일하게 옳은 층이고, 명시 argv/`backends` adapter
+        # (lib 우회)도 여기서 함께 덮인다.
+        return defer_or_drop(root, vcfg, job, attempt, has_more, provenance, "invalid_verdict", log_path)
 
     try:
         with cp.card_write_lock(root):
@@ -813,7 +846,9 @@ def defer_or_drop(
         이 저장소가 억제 마커로 반복해서 닫아 온 클래스다. 폐기의 대가는 카드가 `generated`로
         남는 것뿐이다(삭제되지 않으며 소스를 고치면 재컴파일→재검증이 다시 열린다).
         0.x는 이 사유를 **첫 후보에서 즉시 폐기**했으므로 degrade가 순증이다.
-        builtin adapter로는 도달할 수 없다(`lib.emit_verdict`가 exit 1 → 비127 경로).
+        builtin adapter가 내는 쓰레기 stdout 은 `lib.emit_verdict`가 exit 1로 걸러 비127
+        경로로 흐르지만, **근거 없는 `pass`는 그 검사를 통과하므로**(emit 은 verdict 값만
+        본다) builtin 경로에서도 이 사유에 도달한다.
 
     cooldown 쓰기 실패는 **반드시 표면화한다**: 그 기록이 없으면 다음 run이 같은 후보를 다시
     부르고 degrade가 일어나지 않는다(= MAJOR 1 영구 정지의 재발). 조용히 넘기면 진단 불가다.
