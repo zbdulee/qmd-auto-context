@@ -1582,6 +1582,41 @@ def format_context(results: list[dict], prefix_style: str = "full", collection_r
     lines.append(TAIL_GATED if lex_gated else TAIL)
     return "\n".join(lines)
 
+# 이 recall 실행이 속한 프로젝트 루트. QMD_RECALL_LOG 는 프로젝트별 파일이 아니라
+# **전역 파일 하나**라(라이브: ~/.claude/settings.json 의 env), 줄에 귀속이 없으면 여러
+# 프로젝트의 진단이 한 파일에 섞여 "이 프로젝트의 recall 이 나아졌는가"를 물을 수 없다.
+# 3.8 백필 검증에서 실제로 막혔다 — `dropped_stale` 이 프로젝트별로 집계되지 않아 census
+# 델타로 우회했다. 계획서 §5("측정 없이는 개선을 확인할 수 없다")가 프로젝트 단위로
+# 성립하려면 이 필드가 필요하다.
+#
+# 인자가 아니라 모듈 상태인 이유: 기록 지점이 20곳이 넘고 그 절반이 조기 return 이라
+# 파라미터로 스레딩하면 **다음에 추가되는 지점이 빠뜨린다** — per-site try/except 를
+# hook_main.py 한 곳으로 모은 것과 같은 클래스다. 훅은 프로세스당 main() 1회라
+# 모듈 상태의 유일한 위험(다음 실행으로의 이월)이 구조적으로 성립하지 않는다.
+_LOG_PROJECT_ROOT: str | None = None
+
+
+def set_log_project_root(project_root: str | None) -> None:
+    """이후 모든 로그 줄에 붙일 프로젝트 루트를 고정한다(main() 에서 1회).
+
+    cwd 가 아니라 project root 인 이유: 같은 프로젝트의 하위 디렉터리에서 시작한 세션은
+    cwd 가 갈리므로 cwd 로 묶으면 한 프로젝트가 여러 갈래로 쪼개진다. project root 는
+    한 recall 호출 안에서 불변이고(`wiki_roots` 와 같은 값) 설정 파일의 위치라 프로젝트
+    자체의 이름이다.
+
+    **그 불변성의 범위는 HOME 하위다** — `config._project_search_dirs` 는 HOME 밖에서는
+    부모를 탐색하지 않으므로(cwd 하나만 본다) HOME 밖 하위 디렉터리 세션은 자기 cwd 를
+    루트로 받는다. 집계에는 영향이 없다: 그런 경로에는 설정 파일이 발견되지 않아 recall
+    이 `no_collections` 로 끝나고 묶을 진단이 애초에 없다. 라이브 프로젝트는 전부 HOME
+    하위다. (보장을 전 경로의 보장으로 서술하지 않는다 — 어느 범위에서 참인지 함께 적는다.)
+
+    설정을 못 찾은 디렉터리에서도 `find_project_config` 가 resolve 된 cwd 를 돌려주므로
+    값은 항상 있다 — 즉 "어디서 나온 줄인가"는 언제나 답이 된다.
+    """
+    global _LOG_PROJECT_ROOT
+    _LOG_PROJECT_ROOT = str(project_root) if project_root else None
+
+
 def log_score_observation(log_path: str | None, results: list[dict], collections: list[str]) -> None:
     if not log_path or not results:
         return
@@ -1590,6 +1625,10 @@ def log_score_observation(log_path: str | None, results: list[dict], collections
         "ts": datetime.now(timezone.utc).isoformat(),
         "event": "qmd_score_observation",
         "engine": os.environ.get("QMD_ENGINE", "gemini"),
+        # cwd 를 알기 전 줄(empty_stdin·invalid_payload_json·prompt_too_short)은 null 이다
+        # — 키 부재(구포맷)와 "아직 프로젝트를 모른다"를 구분해야 한다(`lex_hits` 의
+        # "안 물었다 ≠ 물었는데 0" 과 같은 규약).
+        "project_root": _LOG_PROJECT_ROOT,
         "transport": "http",
         "collections": collections,
         "top_n": len(results),
@@ -1626,6 +1665,10 @@ def log_recall_event(log_path: str | None, reason: str, **fields) -> None:
         "ts": datetime.now(timezone.utc).isoformat(),
         "event": event,
         "engine": os.environ.get("QMD_ENGINE", "gemini"),
+        # cwd 를 알기 전 줄(empty_stdin·invalid_payload_json·prompt_too_short)은 null 이다
+        # — 키 부재(구포맷)와 "아직 프로젝트를 모른다"를 구분해야 한다(`lex_hits` 의
+        # "안 물었다 ≠ 물었는데 0" 과 같은 규약).
+        "project_root": _LOG_PROJECT_ROOT,
         "reason": reason,
     }
     payload.update(fields)
@@ -1911,8 +1954,13 @@ def main():
 
     cwd = payload.get("cwd") or os.getcwd()
 
-    # Load configuration
-    config = load_project_config(cwd)
+    # Load configuration.
+    # load_project_config(cwd) == find_project_config(cwd)["config"] 이므로 이 스왑은
+    # 탐색을 한 번 더 하지 않는다 — 같은 1회 조회에서 projectRoot 를 함께 꺼내
+    # 이후 모든 로그 줄의 귀속으로 고정한다.
+    found_config = qmd_config.find_project_config(cwd)
+    config = found_config["config"]
+    set_log_project_root(found_config.get("projectRoot"))
     if not qmd_config.event_enabled(config, payload.get("hook_event_name", "UserPromptSubmit")):
         log_recall_event(log_path, "event_disabled")
         return 0

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { readFileSync, existsSync, mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { readFileSync, existsSync, mkdtempSync, mkdirSync, writeFileSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { removeTemp } from './helpers/temp.mjs';
@@ -24,6 +24,17 @@ function selectionEvents(logPath) {
     .filter(Boolean)
     .map((line) => JSON.parse(line))
     .filter((e) => e.event === 'qmd_recall_selection');
+}
+
+// 로그의 **모든** 이벤트(두 writer + shadow 진단). 귀속 필드는 event 종류와 무관하게
+// 붙어야 하므로 selection 만 걸러 보면 다른 writer 의 누락을 못 잡는다.
+function allEvents(logPath) {
+  if (!existsSync(logPath)) return [];
+  return readFileSync(logPath, 'utf8')
+    .trim()
+    .split('\n')
+    .filter((line) => line.startsWith('{'))
+    .map((line) => JSON.parse(line));
 }
 
 function withProject(config, fn) {
@@ -198,4 +209,66 @@ test('sandbox는 로그 파일조차 만들지 않는다 (즉시 무출력 종�
     assert.equal(out.trim(), '');
     assert.equal(existsSync(logPath), false, 'sandbox는 부작용이 0이어야 한다');
   });
+});
+
+// ── 프로젝트 귀속 ───────────────────────────────────────────────────────────
+// QMD_RECALL_LOG 는 프로젝트별 파일이 아니라 **전역 파일 하나**다(라이브 설정이
+// ~/.claude/settings.json 의 env 로 한 경로를 준다). 줄에 귀속이 없으면 여러 프로젝트의
+// 진단이 한 파일에 섞여 "이 프로젝트의 recall 이 나아졌는가"를 물을 수 없다 — 3.8 백필
+// 검증에서 실제로 막혀 census 델타로 우회했다.
+test('모든 로그 줄에 project_root 귀속이 붙는다 (writer 두 종류 공통)', () => {
+  withProject({ collections: ['sample'] }, (dir, logPath) => {
+    run({ prompt: PROMPT, cwd: dir }, { QMD_RECALL_LOG: logPath });
+    // tmpdir 은 macOS 에서 /var → /private/var 심볼릭 링크라 resolve 된 값과 비교한다.
+    const root = realpathSync(dir);
+    const events = allEvents(logPath);
+    const kinds = new Set(events.map((e) => e.event));
+    assert.ok(kinds.has('qmd_recall_selection'), `selection 줄이 있어야 한다: ${[...kinds]}`);
+    // log_score_observation 은 log_recall_event 와 **다른 writer** 라 한쪽만 고치면
+    // 조용히 갈린다. 라이브 로그의 9,051줄이 이 writer 소산이다.
+    assert.ok(kinds.has('qmd_score_observation'), `score observation 줄이 있어야 한다: ${[...kinds]}`);
+    for (const ev of events) {
+      assert.equal(ev.project_root, root, `${ev.event} 줄의 project_root`);
+    }
+  });
+});
+
+test('cwd 를 알기 전 줄은 project_root 가 null 이고 키 자체는 존재한다', () => {
+  // 키 부재(귀속 도입 전 포맷)와 "아직 프로젝트를 모른다"는 다른 사실이다. 뭉치면
+  // 옛 줄과 새 줄이 구분되지 않는다 — `lex_hits` 의 "안 물었다 ≠ 물었는데 0" 과 같은 규약.
+  withProject({ collections: ['sample'] }, (dir, logPath) => {
+    execFileSync('python3', ['core/recall.py'], {
+      input: '', encoding: 'utf8',
+      env: { ...process.env, QMD_RECALL_LOG: logPath },
+    });
+    const ev = selectionEvents(logPath);
+    assert.equal(ev.length, 1);
+    assert.equal(ev[0].reason, 'empty_stdin');
+    assert.ok('project_root' in ev[0], '키는 언제나 있어야 한다');
+    assert.equal(ev[0].project_root, null, 'cwd 를 모르는 줄은 null');
+  });
+});
+
+test('하위 디렉터리에서 시작한 세션도 같은 project_root 로 묶인다', () => {
+  // cwd 로 묶으면 한 프로젝트가 세션 시작 위치마다 여러 갈래로 쪼개져 집계가 무의미해진다.
+  // HOME 을 가짜로 두는 이유: `config._project_search_dirs` 는 **HOME 하위에서만** 부모를
+  // 탐색한다(HOME 밖이면 cwd 하나만 본다). tmpdir 은 HOME 밖이라 그대로 두면 이 테스트가
+  // 검증하려는 상향 탐색 자체가 일어나지 않는다 — 라이브 프로젝트는 전부 HOME 하위다.
+  const home = mkdtempSync(join(tmpdir(), 'qmd-sel-home-'));
+  const dir = join(home, 'proj');
+  const sub = join(dir, 'packages', 'inner');
+  mkdirSync(join(dir, '.agents'), { recursive: true });
+  mkdirSync(sub, { recursive: true });
+  writeFileSync(join(dir, '.agents', 'qmd-recall.json'), JSON.stringify({ collections: ['sample'] }));
+  const logPath = join(home, 'recall.log');
+  try {
+    run({ prompt: PROMPT, cwd: dir }, { QMD_RECALL_LOG: logPath, HOME: home });
+    run({ prompt: PROMPT, cwd: sub }, { QMD_RECALL_LOG: logPath, HOME: home });
+    const events = selectionEvents(logPath);
+    assert.equal(events.length, 2, `두 세션 모두 줄을 남긴다: ${events.map((e) => e.reason)}`);
+    const roots = new Set(events.map((e) => e.project_root));
+    assert.deepEqual([...roots], [realpathSync(dir)], '두 세션이 한 프로젝트로 묶인다');
+  } finally {
+    removeTemp(home);
+  }
 });

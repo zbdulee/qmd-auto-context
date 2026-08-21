@@ -523,8 +523,14 @@ PostToolUse는 건당 3배 무겁고 건수도 2배다. 두 프로젝트 합쳐 
 
 ## 5. 측정 방법 — 이것 없이는 개선을 확인할 수 없다
 
-지금 `QMD_RECALL_LOG`가 어디에도 켜져 있지 않아, "주입 0건"의 사유(데몬 부재 / 필터 전멸 / 무결과)를
-사후에 구분할 수 없다. 리뷰 내내 라이브 재현으로 메웠다.
+`QMD_RECALL_LOG`가 켜져 있으면 `qmd_recall_selection` 줄의 `reason`으로 "주입 0건"의 사유
+(데몬 부재 / 필터 전멸 / 무결과)를 사후에 구분할 수 있다.
+
+**프로젝트 귀속 확보 (완료).** 이 로그는 프로젝트별 파일이 아니라 전역 파일 하나이므로, 줄에
+귀속이 없으면 아래 지표를 프로젝트 단위로 쓸 수 없다 — 3.8 백필 검증에서 실제로 막혀
+`dropped_stale` 대신 census 델타로 우회했다. 이제 두 writer(`log_recall_event`·
+`log_score_observation`) 모든 줄에 `project_root`가 붙는다(라이브 2프로젝트 실측 확인). 즉
+아래 `reason` 분포는 `project_root`로 group by 하면 된다.
 
 - 프로젝트 한 곳에 `QMD_RECALL_LOG`를 상시로 켜고 2주치를 모은다.
 - 판정 지표로는 주입 건수 대신 **`reason` 분포**를 쓴다. `selected` 대비 `no_results_after_filter`가
