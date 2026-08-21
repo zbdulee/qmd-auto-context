@@ -1000,9 +1000,8 @@ def insert_source_revisions(path: Path, revisions: list) -> bool:
     patcher by construction: ``frontmatter_patch_scalar`` runs ``str(value)``
     through ``yaml_scalars.dump``, so a list lands as one quoted scalar line, and
     its ``None`` removal path drops only the ``key:`` line and would orphan a
-    block value's indented children.  Teaching it a second shape puts every
-    scalar caller (``stamp_verification``, ``clear_verification_updates``) behind
-    a branch none of them need.  Block-shaped frontmatter surgery already has a
+    block value's indented children.  Teaching it a second shape puts its only
+    scalar caller (``stamp_verification``) behind a branch it does not need.  Block-shaped frontmatter surgery already has a
     primitive here — ``_frontmatter_sections`` — and ``rewrite_generated_card``
     uses it exactly this way.  Serialization stays in ``yaml_scalars``.
 
@@ -1113,15 +1112,6 @@ def stamp_verification(path: Path, status: str, engine: str, mode: str,
         # 형태이고, 그것이 필요한 경로는 지금 없다(양 호출부 모두 값을 넘긴다).
         "verifiedBodyHash": body_hash,
     })
-
-
-def clear_verification_updates(meta: dict) -> dict:
-    """Proof fields to REMOVE when a card is reset out of a verified/contested state.
-
-    Keys present in `meta` map to None (patch_frontmatter_fields deletes those); keys
-    that were never there are left alone so the patch stays minimal.
-    """
-    return {key: None for key in qmd_config.VERIFY_PROOF_FIELDS if key in meta}
 
 
 def update_index(wiki_root: Path, target: Path, title: str) -> bool:
