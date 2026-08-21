@@ -1,5 +1,6 @@
 """읽기 전용: 카드 인구조사(§1/§2 갱신) + 3.8 건전 백필 분류(dry-run)."""
 import sys, os, glob, json, subprocess, collections
+from datetime import datetime, timezone
 from pathlib import Path
 sys.path.insert(0, '/Users/dulee/work/qmd-auto-context/core')
 import recall as R, wiki_freshness as WF, yaml_scalars as YS
@@ -14,6 +15,24 @@ def wiki_root(root):
     if cfg.get('indexing') is not True: return None, cfg
     w = root / cfg.get('wikiPath', '.auto-context/wiki')
     return (w if w.is_dir() else None), cfg
+
+def at(value):
+    """ISO 문자열 → aware datetime.
+
+    **문자열끼리 비교하면 안 된다.** git `%cI`는 로컬 오프셋(`+09:00`)으로, 매니페스트 `ts`는
+    UTC(`Z`)로 찍힌다 — 같은 순간을 문자열로 비교하면 `+09:00` 쪽이 9시간 늦게 읽히고,
+    편향이 **한 방향**이라 "원문이 컴파일보다 새로움"이 과다 집계된다(= 건전 백필 가능이
+    과소 집계). 실측으로 이 한 줄이 3.8 대상을 44장으로 보고했고 시각 비교로는 105장이다.
+    같은 실행을 여러 번 해도 같은 답이 나오므로 **재현성으로는 이 오류를 잡을 수 없다.**
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        d = datetime.fromisoformat(value.replace('Z', '+00:00'))
+    except ValueError:
+        return None
+    return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+
 
 def git_last_commit(root, rel, cache):
     if rel in cache: return cache[rel]
@@ -76,7 +95,9 @@ for name in PROJECTS:
             if src in dirty: cls['워킹트리 dirty'] += 1; continue
             lc = git_last_commit(root, src, gl)
             if not lc: cls['git이력없음'] += 1; continue
-            cls['원문이 컴파일보다 새로움→재컴파일' if lc > o['ts'] else '건전 백필 가능'] += 1
+            lcd, tsd = at(lc), at(o['ts'])
+            if lcd is None or tsd is None: cls['시각파싱실패'] += 1; continue
+            cls['원문이 컴파일보다 새로움→재컴파일' if lcd > tsd else '건전 백필 가능'] += 1
             continue
         # freshness (raw) + pending cutoff (effective)
         state = 'fresh'
