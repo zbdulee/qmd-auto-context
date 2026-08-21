@@ -164,6 +164,31 @@ COLLAPSE_BLANKS_RE = re.compile(r"\n{3,}")
 CONTROL_OR_SPACE_RE = re.compile(r"[\s\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028\u2029\ufeff]+")
 
 
+def read_card_text_full(path: Path) -> str | None:
+    """카드 전문을 **본문 지문 대조와 같은 정규화로** 읽는다(창 상한 없음).
+
+    본문 지문(`yaml_scalars.card_body_hash`)은 "LF 로 접힌 디코딩 텍스트"에 대한 해시이고
+    쓰는 쪽(`wiki_verify_worker.card_state` = `read_text`, universal newlines)과 읽는 쪽이
+    **같은 결과**를 내야 한다. 그래서 여기서도 `newline=""` 로 열고 `normalize_newlines`
+    로 명시 정규화한다(io 기본 변환에 의존하지 않는 이 파일의 관례와 같다).
+
+    `errors="replace"` 인 이유: 비UTF-8 카드에서 훅 전체가 죽지 않게 한다. 그런 카드는
+    `card_state` 의 `read_text` 가 예외를 내 애초에 검수를 통과할 수 없으므로
+    `verifiedBodyHash` 를 가질 수 없다 — 즉 이 경로에서 대체문자로 인한 오탐은 구조적으로
+    생기지 않는다.
+
+    본문 읽기(`read_wiki_meta`)의 창 상한을 여기서 풀어도 되는 근거: 이 읽기는 카드에
+    `verifiedBodyHash` 가 **있을 때만** 일어나고, 그때도 창을 소진한 카드에서만 일어난다.
+    라이브 1,491장 실측 median 1.6KB / p99 6.2KB / max 11.6KB, 창은 8,192자라 대부분은
+    첫 읽기로 이미 전문을 가진다. 전문 read+sha256 실측 0.113ms/장이다.
+    """
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace", newline="") as handle:
+            return normalize_newlines(handle.read())
+    except (OSError, ValueError):
+        return None
+
+
 def wiki_card_read_limit(summary_max_chars: int) -> int:
     return max(WIKI_CARD_READ_BASE_CHARS, 2048 + 2 * max(0, summary_max_chars))
 
@@ -414,7 +439,7 @@ def display_card_path(path: Path, cwd: str) -> str:
         return str(path)
 
 
-FRONTMATTER_KEYS = ("status", "createdBy", "title")
+FRONTMATTER_KEYS = ("status", "createdBy", "title", "verifiedBodyHash")
 
 
 def parse_frontmatter_scalars(block: str, issues: dict | None = None) -> dict:
@@ -877,7 +902,12 @@ def read_wiki_meta(result: dict, config: dict, cwd: str, summary_max_chars: int 
             "displayPath": "", "bodyReason": "", "decodeReplaced": False,
             "cardRead": False, "windowTruncated": False, "bodyIncomplete": False,
             "metaIssues": [], "sources": [], "sourceEntries": 0, "sourceReasons": {},
-            "sourcePresent": 0, "matchPositioned": False}
+            "sourcePresent": 0, "matchPositioned": False,
+            # 본문 지문 대조 결과: absent(결속 없는 legacy) | match | mismatch |
+            # unreadable. 초기값이 absent 인 이유 — 카드를 못 읽은 경로(path_unresolved·
+            # read_error)는 어긋남이 아니고, 그 실패는 이미 `bodyReason` 이 말한다.
+            # 여기서 mismatch 로 초기화하면 읽기 실패가 어긋남으로 오집계된다.
+            "bodyHashState": "absent"}
     if roots is None:
         # 여기서 한 번만 계산한다(예전엔 resolve_wiki_result_path가 카드마다 재탐색했다).
         roots = wiki_roots(config, cwd)
@@ -956,7 +986,35 @@ def read_wiki_meta(result: dict, config: dict, cwd: str, summary_max_chars: int 
         meta["metaIssues"].append(f"title_{issues['title']}" if "title" in issues else "title_missing")
     created_by = fields.get("createdBy", "")
     meta["createdBy"] = created_by
-    meta["trusted"] = is_auto_trusted_card(meta)
+    # 본문 지문 대조. **`is_auto_trusted_card` 안에 넣지 않는다** — 그 함수는 meta dict 만
+    # 받는 순수 predicate 이고 다른 소비자(`wiki_source_scan`·`wiki_source_missing`)가
+    # 파일 전문 읽기를 강제당하면 안 된다. 신선도 검사(`card_freshness`)가 별도 단계인 것과
+    # 같은 구조다. 그 비대칭의 대가: 그 소비자들이 매기는 `trusted` 라벨은 본문 어긋남을
+    # 반영하지 않는다(주입 경로만 fail-closed 다).
+    #
+    # 필드가 **없으면 기존 동작 그대로**다. 결속 도입 전에 검수된 카드가 전부 그 상태이고
+    # (라이브 verified 1,177장 전원), 부재를 불신으로 읽으면 그 전량이 recall 에서 사라진다
+    # — 되살리는 유일한 길은 카드 1장당 유료 host CLI 호출 1회이므로 사용자 계정 청구다.
+    # 부재는 "결속 없음"이지 "어긋남"이 아니다. 이 fail-open 이 적대자 앞에서 경계가 아닌
+    # 것은 맞지만, 그것은 이 지문의 위협 모델이 아니다(yaml_scalars.card_body_hash 참조).
+    expected_body_hash = fields.get("verifiedBodyHash", "")
+    if not expected_body_hash:
+        meta["bodyHashState"] = "absent"
+    else:
+        # 창을 소진하지 않았으면 `text` 가 이미 전문이다 — 추가 I/O 0.
+        full = text if not meta["windowTruncated"] else read_card_text_full(path)
+        actual = yaml_scalars.card_body_hash(full) if full is not None else None
+        if actual is None:
+            meta["bodyHashState"] = "unreadable"
+        elif actual == expected_body_hash:
+            meta["bodyHashState"] = "match"
+        else:
+            meta["bodyHashState"] = "mismatch"
+    # 어긋남·대조 실패는 신뢰를 주지 않는다(fail-closed). wiki trust 는 설정으로 완화할 수
+    # 없는 경계이고, 어긋난 카드는 "검증된 본문"이 아니다.
+    meta["trusted"] = (
+        is_auto_trusted_card(meta) and meta["bodyHashState"] in ("absent", "match")
+    )
     # `\n---` 이후: 개행 1 + 구분선 3 = 4자를 건너뛴다.
     meta["summary"], complete = extract_card_body(text, end + 4)
     _apply_match_position(meta, text, end + 4, result, summary_max_chars)
@@ -1013,6 +1071,11 @@ def annotate_wiki_result(result: dict, config: dict, cwd: str, summary_max_chars
         result["title"] = ""
     if meta.get("decodeReplaced"):
         result["_wiki_decode_replaced"] = True
+    if meta.get("bodyHashState") not in ("absent", "match"):
+        # 이상값만 얹는다 — absent(legacy)·match 는 흔한 정상값이라 매 결과에 붙이면
+        # 로그 줄만 키운다. drop 된 후보까지 집계돼야 하므로 주입 여부와 무관하게 붙인다
+        # (`dropped_unverified` 만으로는 "미검수"와 "본문 어긋남"이 구분되지 않는다).
+        result["_wiki_body_hash_state"] = meta["bodyHashState"]
     if meta.get("metaIssues"):
         result["_wiki_meta_issues"] = list(meta["metaIssues"])
     # 카드 읽기 실패는 **주입 여부와 무관하게** 기록한다. path_unresolved면 reviewed가
@@ -2660,10 +2723,17 @@ def main():
             source_reasons[reason] = source_reasons.get(reason, 0) + count
     card_read_reasons: dict[str, int] = {}
     meta_issues: dict[str, int] = {}
+    body_hash_states: dict[str, int] = {}
     for result in annotated_cards:
         failure = result.get("_wiki_read_failure")
         if failure:
             card_read_reasons[failure] = card_read_reasons.get(failure, 0) + 1
+        # 본문 지문 이상값. 이 카운터 없이는 `dropped_unverified` 가 "정말 미검수"와
+        # "검수됐지만 본문이 그 뒤로 바뀌었다"를 같은 숫자로 뭉친다 — 후자는 사용자가
+        # 카드를 고쳤다는 뜻이라 조치가 정반대다(재검증 vs 원문 편집).
+        state = result.get("_wiki_body_hash_state")
+        if state:
+            body_hash_states[state] = body_hash_states.get(state, 0) + 1
         # frontmatter 부재·title 누락/블록스칼라/절단처럼 "읽기는 됐지만 메타가 온전치
         # 않은" 경우. body가 살아 있어 card_read_failures에는 안 잡히지만 title 결손은
         # 1단계 목표의 결손이므로 흔적이 남아야 한다.
@@ -2743,6 +2813,9 @@ def main():
         cards_read=len(annotated_cards),
         card_read_failures=sum(1 for r in annotated_cards if r.get("_wiki_read_failure")),
         card_read_reasons=card_read_reasons,
+        # 본문 지문 대조 이상값(mismatch|unreadable). 정상값(absent=결속 없는 legacy,
+        # match)은 남기지 않는다 — 매 프롬프트 로그 줄이 커진다.
+        card_body_hash_states=body_hash_states,
         cards_decode_replaced=sum(1 for r in annotated_cards if r.get("_wiki_decode_replaced")),
         dropped_skip=counters["skip"],
         dropped_min_score=counters["min_score"],

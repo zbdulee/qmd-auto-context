@@ -36,8 +36,14 @@ export function stampVerified(projectDir, cardRel, engine = 'codex', mode = 'cro
     'from pathlib import Path',
     'sys.path.insert(0, "core")',
     'import wiki_compile as wc',
+    'import yaml_scalars as ys',
     'root = Path(sys.argv[1]).resolve()',
-    'print(wc.stamp_verification(root / sys.argv[2], "verified", sys.argv[3], sys.argv[4]))',
+    'card = root / sys.argv[2]',
+    // 실제 caller(`wiki_verify_worker`)와 같다: 검증기가 읽은 본문의 지문을 넘긴다.
+    // 헬퍼가 None 을 넘기면 결속 없는 legacy 카드를 만들어 이 결속을 테스트에서
+    // 구조적으로 우회하게 된다.
+    'body_hash = ys.card_body_hash(card.read_text(encoding="utf-8"))',
+    'print(wc.stamp_verification(card, "verified", sys.argv[3], sys.argv[4], body_hash))',
   ].join('\n'), projectDir, cardRel, engine, mode], { cwd: process.cwd(), encoding: 'utf8' }).trim();
   if (out !== 'True') throw new Error(`stamp_verification failed: ${out}`);
 }

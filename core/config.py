@@ -278,7 +278,11 @@ VERIFIED_MODE_SELF = "self"
 VERIFIED_MODE_UNKNOWN = "unknown"
 VERIFIED_MODES = {VERIFIED_MODE_CROSS, VERIFIED_MODE_SELF, VERIFIED_MODE_UNKNOWN}
 # status: verified/contested와 **함께** 써야 하는 증명 필드. 리셋 시 함께 제거된다.
-VERIFY_PROOF_FIELDS = ("verifiedBy", "verifiedAt", "verifiedMode")
+# 검증 증명 필드. 리셋 경로(`wiki_compile` frontmatter merge,
+# `wiki_reviewed_migrate`)가 이 튜플을 보고 **키째 제거**하므로, 취소된 검증의
+# 잔재가 남지 않는다. `verifiedBodyHash` 도 증명이다 — 남으면 새 본문에 옛
+# 지문이 붙어 영구 불일치가 된다.
+VERIFY_PROOF_FIELDS = ("verifiedBy", "verifiedAt", "verifiedMode", "verifiedBodyHash")
 # 생성 엔진을 알 수 없을 때 큐/레코드에 쓰는 sentinel. **리터럴을 각자 들고 있으면 안 된다** —
 # `wiki_verify_worker`가 "귀속 불가"를 이 값으로 판정하므로(교차검증 주장 금지) 생산 측
 # (`wiki_compile_enqueue`·`sync`·`wiki_compile_worker`)과 같은 문자열이어야 한다. 갈려 있던

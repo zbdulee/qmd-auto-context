@@ -106,7 +106,9 @@ AUTO_START_RE = re.compile(wiki_markers.AUTO_START_PATTERN)
 AUTO_BLOCK_RE = re.compile(
     wiki_markers.AUTO_START_PATTERN + r"\n.*?\n" + re.escape(wiki_markers.AUTO_END), re.S
 )
-FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---\n", re.S)
+# 정의는 yaml_scalars 가 SSOT다 — 카드 본문 지문(`card_body_hash`)이 이 경계로
+# 자르므로 쓰는 쪽과 읽는 쪽이 같은 객체를 봐야 한다.
+FRONTMATTER_RE = yaml_scalars.FRONTMATTER_RE
 
 
 def now_iso() -> str:
@@ -1083,7 +1085,8 @@ def patch_frontmatter_fields(path: Path, updates: dict) -> bool:
     return write_text_atomic(path, patched)
 
 
-def stamp_verification(path: Path, status: str, engine: str, mode: str) -> bool:
+def stamp_verification(path: Path, status: str, engine: str, mode: str,
+                       body_hash: str | None) -> bool:
     """Write a machine-review outcome — status AND all three proof fields together.
 
     Single writer so a status can never land without its proof. The live corpus shows
@@ -1103,6 +1106,12 @@ def stamp_verification(path: Path, status: str, engine: str, mode: str) -> bool:
         "verifiedBy": str(engine or "unknown"),
         "verifiedAt": now_iso(),
         "verifiedMode": mode if mode in qmd_config.VERIFIED_MODES else qmd_config.VERIFIED_MODE_UNKNOWN,
+        # 검증기가 실제로 읽은 본문의 지문. **호출자가 넘긴다** — 여기서 파일을 다시 읽어
+        # 계산하면 검수 중에 본문이 바뀐 경우 "검증되지 않은 새 본문"에 verified 가 찍힌다.
+        # 호출자 값이면 그 경우 디스크와 불일치해 recall 이 fail-closed 로 거른다.
+        # None 이면 키를 쓰지 않는다(`patch_frontmatter_fields` 규약) = 결속 없는 legacy
+        # 형태이고, 그것이 필요한 경로는 지금 없다(양 호출부 모두 값을 넘긴다).
+        "verifiedBodyHash": body_hash,
     })
 
 

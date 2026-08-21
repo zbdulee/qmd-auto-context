@@ -570,6 +570,7 @@ def source_freshness(root: Path, config: dict, job: dict) -> dict | None:
 
 def card_changed_during_verify(
     job_hash: str, fresh_meta: dict, fresh_status: str, fresh_hash: str,
+    payload_text: str | None, fresh_text: str | None,
 ) -> bool:
     """검수 시작 이후 카드가 바뀌었는가 — 잠금 아래 재확인 규칙의 SSOT.
 
@@ -583,7 +584,29 @@ def card_changed_during_verify(
     본문이 삭제된다(삭제 원장에 본문이 없어 복구 불가).
 
     `markdown_page`가 auto 블록을 항상 쓰므로 정상 카드는 영향이 없고, `job_hash`가 빈
-    잡(레거시·수동 경로)은 예전처럼 해시 대조 없이 status/creator만 본다.
+    잡(레거시·수동 경로)은 예전처럼 블록 해시 대조 없이 status/creator만 본다.
+
+    **파일 전문 동등성이 이 가드의 두 번째 층이고, 위 세 축을 포함한다.** 왜 부분 대조로는
+    부족한지가 이 층의 존재 이유다.
+      - `job_hash` 는 auto 블록 **마커에 박힌** sourceHash 라(`AUTO_START_PATTERN`) 블록을
+        통째로 재생성하는 compile 만 바꾼다. 사람이 블록 **안의 문장**을 고치면 마커는
+        그대로이고 status·creator 도 그대로여서 세 축이 전부 통과한다.
+      - frontmatter 의 `sourceRevisions` 만 교체돼도 세 축이 통과한다. 그런데 검수 근거의
+        freshness 는 `source_freshness` 가 **잡의** `sourceRevisions` 로 보고, recall 은
+        **카드의** frontmatter 로 본다 — 즉 원문 A 로 받은 verdict 가 원문 B 를 주장하는
+        카드에 찍히고, recall 은 B 기준 freshness 를 통과시켜 그 카드를 캐논급으로 주입한다.
+        본문만 대조하면 이 경로가 열린 채 남는다.
+    그래서 축을 늘려 좇는 대신 **payload 로 보낸 파일 전문과 잠금 아래 다시 읽은 전문이
+    같은가**를 묻는다. 스탬프는 이 판정 **뒤에** 일어나므로 아무것도 바뀌지 않았다면 두
+    텍스트는 축자 동일해야 하고, 이 한 조건이 status·creator·마커·본문·provenance 전부를
+    덮는다. 위 세 축은 남겨 둔다 — 각자 고정한 회귀가 있고(테스트가 그 자리를 못박는다)
+    전문 대조가 언제 완화돼도 판정 granularity 가 남아야 한다.
+
+    **어느 쪽이든 None 이면 "바뀌었다"로 본다** — `fresh_hash` 가 비었을 때와 같은 규칙이고
+    같은 이유다(대조 불가를 통과로 읽으면 이 가드가 막으려는 상황에서 fail-open 한다).
+    **두 인자에 기본값을 두지 않는다** — 기본값이 있으면 다음에 추가되는 호출부가 인자를
+    빼고도 컴파일돼 대조를 조용히 건너뛴다. 대조의 요점이 "빠뜨릴 수 없게 하는 것"이라
+    호출부가 명시하도록 강제한다.
 
     함수로 빼낸 이유는 테스트가 이 규칙을 **재구현하지 않게** 하기 위해서다 — 조건이
     호출부에 인라인이면 테스트는 같은 식을 다시 적을 수밖에 없고, 그러면 규칙이 바뀌어도
@@ -593,18 +616,23 @@ def card_changed_during_verify(
         fresh_status != "generated"
         or fresh_meta.get("createdBy") != "qmd-auto-context"
         or bool(job_hash and job_hash != fresh_hash)
+        or payload_text is None
+        or fresh_text is None
+        or payload_text != fresh_text
     )
 
 
 def apply_verify_verdict_locked(
     root: Path, config: dict, compile_cfg: dict, vcfg: dict, job: dict,
-    target: Path, job_hash: str, engine: str, verified_mode: str,
+    target: Path, job_hash: str, payload_text: str | None,
+    engine: str, verified_mode: str,
     provenance: dict, verdict: str, claims: list, reasons: list[str],
     sources: list[dict], log_path: Path,
 ) -> tuple[bool, bool]:
     """Re-read, decide, and mutate one card while CARD_WRITE_LOCK is held."""
-    _, fresh_meta, fresh_status, fresh_hash = card_state(target)
-    if card_changed_during_verify(job_hash, fresh_meta, fresh_status, fresh_hash):
+    fresh_text, fresh_meta, fresh_status, fresh_hash = card_state(target)
+    if card_changed_during_verify(job_hash, fresh_meta, fresh_status, fresh_hash,
+                                  payload_text, fresh_text):
         log_verdict(log_path, {
             **base_record(job), **provenance,
             "result": "skipped", "reason": "changed_during_verify",
@@ -624,7 +652,10 @@ def apply_verify_verdict_locked(
         "verdict": verdict, "claims": len(claims), "reasons": reasons,
     }
     if verdict == "pass":
-        if not wc.stamp_verification(target, "verified", engine, verified_mode):
+        # 지문은 **검증기에 보낸 전문**에서 파생한다. 가드가 전문 동등성을 통과시켰으므로
+        # 디스크와 같은 값이지만, 출처를 "검증된 텍스트"로 고정해 둔다.
+        if not wc.stamp_verification(target, "verified", engine, verified_mode,
+                                     yaml_scalars.card_body_hash(payload_text)):
             log_verdict(log_path, {**record, "result": "stamp_failed", "stampStatus": "verified"})
             return False, True
         reindex_wiki(root, config)
@@ -634,7 +665,7 @@ def apply_verify_verdict_locked(
     action = vcfg.get("onFail", "delete") if verdict == "fail" else vcfg.get("onInconclusive", "delete")
     applied = apply_negative_verdict(
         root, config, compile_cfg, vcfg, target, engine, verified_mode, action, verdict,
-        sources, record, log_path
+        sources, record, log_path, yaml_scalars.card_body_hash(payload_text)
     )
     return (True, False) if applied else (False, True)
 
@@ -819,6 +850,10 @@ def process_verify_job(
         with cp.card_write_lock(root):
             return apply_verify_verdict_locked(
                 root, config, compile_cfg, vcfg, job, target, job_hash,
+                # payload 로 보낸 파일 전문. 잠금 아래 다시 읽은 전문과 축자 대조해
+                # 검수 중 카드 변경(본문·provenance·status 무엇이든)을 잡고, 통과하면
+                # 이 텍스트에서 파생한 본문 지문이 카드에 찍힌다.
+                text,
                 engine, verified_mode, provenance, verdict, claims, reasons,
                 sources, log_path,
             )
@@ -870,7 +905,7 @@ def defer_or_drop(
 def apply_negative_verdict(
     root: Path, config: dict, compile_cfg: dict, vcfg: dict, target: Path, engine: str,
     verified_mode: str, action: str, verdict: str, sources: list[dict], record: dict,
-    log_path: Path,
+    log_path: Path, body_hash: str | None = None,
 ) -> bool:
     """Apply a fail/inconclusive verdict. Only inconclusive leaves a suppression marker.
 
@@ -918,7 +953,7 @@ def apply_negative_verdict(
         # 남아 recall에서 빠지므로(비가시) 조용히 넘기면 안 된다. 이 함수는 (processed,
         # preserve)를 돌려주지 않으므로 실패 사실을 로그로만 표면화한다 — 다음 소스 변경이
         # 카드를 재생성하고 다시 검수 대상이 된다.
-        if not wc.stamp_verification(target, "contested", engine, verified_mode):
+        if not wc.stamp_verification(target, "contested", engine, verified_mode, body_hash):
             log_verdict(log_path, {**record, "result": "stamp_failed", "stampStatus": "contested"})
             return False
         reindex_wiki(root, config)

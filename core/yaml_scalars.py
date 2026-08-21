@@ -23,6 +23,7 @@ exit 0이어야 한다). 대신 열린 인용부호처럼 **값이 잘렸다고 
 """
 
 from __future__ import annotations
+import hashlib
 import re
 
 BLOCK_SCALAR_HEADERS = {">", "|", ">-", "|-", ">+", "|+", ">>", "|2", ">2"}
@@ -482,3 +483,51 @@ def fold_inline(value) -> str:
     남겨 둔다(다른 필드·미래 입력에 대한 안전망).
     """
     return " ".join(str(value).split())
+
+
+# frontmatter 블록 경계의 SSOT. `wiki_compile.FRONTMATTER_RE` 가 이 객체의 별칭이다 —
+# 카드 본문 지문(`card_body_hash`)을 쓰는 쪽과 읽는 쪽이 **같은 경계**로 잘라야 하고,
+# 정의가 두 벌이면 갈린다(이 모듈이 두 번 깨진 그 클래스다).
+FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---\n", re.S)
+
+
+def card_body_hash(text: str) -> str | None:
+    """카드 본문(frontmatter 뒤 전부)의 지문 — 기계 검수(쓰기)와 recall(읽기)의 SSOT.
+
+    **왜 필요한가.** wiki trust 는 `sourceRevisions`(원문 SHA-256)에만 결속돼 있어
+    "원문이 컴파일 시점 이후 바뀌지 않았다"만 증명한다. 원문을 그대로 둔 채 **카드 본문만**
+    고치면 `verified` 배지를 단 채 그대로 주입된다(실측 재현: `포트는 8080이다` →
+    `포트는 9999이다` 로 바꿔도 `[wiki:verified]` 로 나갔다). 이 지문이 그 어긋남을 잡는다.
+
+    **무엇을 해시하는가 — frontmatter 뒤 전부다.** 셋 중 이것만 두 조건을 함께 만족한다.
+      - 파일 전문이 아닌 이유: `stamp_verification` 이 frontmatter 를 다시 쓰므로 전문
+        해시는 스탬프 직후 자기 자신과 불일치한다(닭-달걀).
+      - auto 블록만이 아닌 이유: verify payload 가 `{"card": {"content": text}}` 로
+        **파일 전문**을 보내므로(`wiki_verify_worker.card_state`) verdict 는 블록 밖
+        내용까지 덮는다. 블록만 결속하면 과소 주장이고, 고유 사실을 `qmd:auto:end` 밖에
+        두라는 이 저장소의 규약 때문에 정확히 그 자리가 결속에서 빠진다.
+      - 본문이 스탬프 전후 동일한 근거: `patch_frontmatter_fields` 가
+        `text[:m.start(1)] + new_frontmatter + text[m.end(1):]` 로 쓴다 — `m.end(1)` 이후가
+        축자 보존되고, 정규식이 그 자리에 `\n---\n` 을 요구하므로 `m.end()` 도 그 보존
+        구간 안이다. 경계를 `m.end()` 로 두는 이유는 **의미와 코드를 일치시키기 위해서**다
+        ("frontmatter 뒤 전부"라 말하면서 닫는 구분선을 포함하면 다음 사람이 정의를 오해한다).
+
+    **바이트가 아니라 "정규화된 텍스트"의 해시다.** 입력은 이미 디코딩된 str 이고 줄끝은
+    LF 로 접혀 있어야 한다(`wiki_verify_worker` 는 `read_text` 의 universal newlines,
+    `recall` 은 `newline=""` + `normalize_newlines` — 두 경로가 같은 결과를 낸다). 즉
+    줄끝만 바뀐 카드는 불일치로 잡히지 않는다. 의도된 것이다 — 에디터가 줄끝을 바꿨다는
+    이유로 카드를 잃으면 안 된다. **한쪽을 `read_bytes()` 로 바꾸지 말 것**: 그 순간
+    정상 카드가 전량 불신된다.
+
+    **위협 모델은 적대자가 아니라 drift 다.** 카드는 사용자 자기 저장소에 있고, 카드에
+    쓸 수 있는 주체는 `sourceRevisions` 도 원문 파일도 고칠 수 있으므로 카드 안의 평문
+    해시는 적대적 쓰기 앞에서 경계가 아니다(같은 머신에 둔 HMAC 키도 경계가 아니다 —
+    그 논리를 받으면 기존 `createdBy`·`sourceRevisions` 검사도 같이 무력해진다). 잡으려는
+    것은 사람 편집·에이전트 consolidation·검수 중 경합이 만드는 **말 없는 어긋남**이다.
+
+    frontmatter 가 없으면 None — 결속할 본문 경계가 정의되지 않는다.
+    """
+    match = FRONTMATTER_RE.match(text)
+    if match is None:
+        return None
+    return hashlib.sha256(text[match.end():].encode("utf-8")).hexdigest()

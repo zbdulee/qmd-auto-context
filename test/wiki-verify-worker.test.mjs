@@ -1224,16 +1224,20 @@ test('만료값 상한 클램프: 오염된 만료값은 후보를 영구 배제
 // 회귀의 실제 형태: 조건이 `job_hash and fresh_hash and job_hash != fresh_hash`였다.
 // auto 블록이 없으면 `card_state`가 `""`를 돌려주므로 대조를 건너뛰어 fail-open했다.
 // dedup consolidation·사람 편집이 정확히 "본문 교체 + 블록 제거" 모양이다.
-function changedDuringVerify({ jobHash, status = 'generated', createdBy = 'qmd-auto-context', freshHash }) {
+function changedDuringVerify({ jobHash, status = 'generated', createdBy = 'qmd-auto-context', freshHash,
+                              // 파일 전문 축. 기본값은 "아무것도 바뀌지 않은" 정상 상태다 —
+                              // 이 축을 검증하는 케이스만 명시로 어긋나게 준다.
+                              payloadText = 'card-text', freshText = 'card-text' }) {
   const py = `import json, sys
 sys.path.insert(0, "core")
 import wiki_verify_worker as vw
 args = json.loads(sys.argv[1])
 print(json.dumps(vw.card_changed_during_verify(
-    args["jobHash"], {"createdBy": args["createdBy"]}, args["status"], args["freshHash"])))`;
-  return JSON.parse(execFileSync('python3', ['-c', py, JSON.stringify({ jobHash, status, createdBy, freshHash })], {
-    cwd: process.cwd(), encoding: 'utf8',
-  }));
+    args["jobHash"], {"createdBy": args["createdBy"]}, args["status"], args["freshHash"],
+    args["payloadText"], args["freshText"])))`;
+  return JSON.parse(execFileSync('python3', ['-c', py, JSON.stringify({
+    jobHash, status, createdBy, freshHash, payloadText, freshText,
+  })], { cwd: process.cwd(), encoding: 'utf8' }));
 }
 
 test('verify: 검수 중 auto 블록이 사라진 카드는 "변경됨"으로 차단한다', () => {
@@ -1247,6 +1251,40 @@ test('verify: 검수 중 auto 블록이 사라진 카드는 "변경됨"으로 �
   // status·작성자 축은 그대로여야 한다.
   assert.equal(changedDuringVerify({ jobHash: 'aaaa1111', freshHash: 'aaaa1111', status: 'verified' }), true);
   assert.equal(changedDuringVerify({ jobHash: 'aaaa1111', freshHash: 'aaaa1111', createdBy: 'human' }), true);
+});
+
+test('verify: 검수 중 카드가 바뀐 경합을 파일 전문 동등성이 잡는다', () => {
+  // 부분 대조로는 두 경로가 열려 있었다.
+  // (1) `job_hash`는 auto 블록 **마커에 박힌** sourceHash 라 블록을 통째로 재생성하는
+  //     compile 만 바꾼다 — 사람이 블록 안 문장을 고치면 마커·status·creator 가 전부
+  //     그대로여서 기존 세 축이 모두 통과한다.
+  // (2) frontmatter 의 `sourceRevisions` 만 교체돼도 세 축이 통과한다. 검수 근거의
+  //     freshness 는 `source_freshness` 가 **잡의** revisions 로 보고 recall 은 **카드의**
+  //     frontmatter 로 보므로, 원문 A 로 받은 verdict 가 원문 B 를 주장하는 카드에 찍히고
+  //     recall 이 그것을 캐논급으로 주입한다.
+  // 두 경로를 축 추가로 좇지 않고 전문 동등성 하나로 덮는다.
+  assert.equal(changedDuringVerify({
+    jobHash: 'aaaa1111', freshHash: 'aaaa1111',
+    payloadText: '---\nstatus: generated\n---\n포트는 8080이다\n',
+    freshText: '---\nstatus: generated\n---\n포트는 9999이다\n',
+  }), true, '마커가 같아도 본문이 바뀌면 차단해야 한다');
+  assert.equal(changedDuringVerify({
+    jobHash: 'aaaa1111', freshHash: 'aaaa1111',
+    payloadText: '---\nstatus: generated\nsourceRevisions:\n  - {path: "a.md"}\n---\nbody\n',
+    freshText: '---\nstatus: generated\nsourceRevisions:\n  - {path: "b.md"}\n---\nbody\n',
+  }), true, 'provenance 만 교체돼도 차단해야 한다(본문만 보면 놓친다)');
+  // 대조 불가는 "바뀌었다"로 본다 — `fresh_hash` 가 비었을 때와 같은 규칙, 같은 이유다.
+  assert.equal(changedDuringVerify({
+    jobHash: 'aaaa1111', freshHash: 'aaaa1111', payloadText: null,
+  }), true, 'payload 쪽 텍스트가 없으면 대조 불가 → 차단');
+  assert.equal(changedDuringVerify({
+    jobHash: 'aaaa1111', freshHash: 'aaaa1111', freshText: null,
+  }), true, '디스크 쪽 텍스트를 못 읽으면 차단');
+  // job_hash 가 없는 레거시 잡에도 이 축은 적용된다 — 면제하면 "레거시 잡으로 위장하면
+  // 우회 가능"해진다.
+  assert.equal(changedDuringVerify({
+    jobHash: '', freshHash: '', payloadText: 'a', freshText: 'b',
+  }), true, '레거시 잡이어도 카드가 바뀌면 차단');
 });
 
 test('verify: job_hash가 없는 레거시 잡은 해시 대조 없이 기존대로 통과한다', () => {
