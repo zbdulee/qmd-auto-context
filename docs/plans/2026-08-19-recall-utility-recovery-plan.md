@@ -551,6 +551,11 @@ PostToolUse는 건당 3배 무겁고 건수도 2배다. 두 프로젝트 합쳐 
 - 프로젝트 한 곳에 `QMD_RECALL_LOG`를 상시로 켜고 2주치를 모은다.
 - 판정 지표로는 주입 건수 대신 **`reason` 분포**를 쓴다. `selected` 대비 `no_results_after_filter`가
   줄어야 개선이다.
+- **주입 0인 프로젝트를 회귀로 읽지 않는다.** 메인 4개(service-engineering·rccar·ai-proxy·
+  ktlo-check) 밖에서는 주입 29건이 전부 raw이고 `[wiki:verified]`가 **0건**이다 — zigbang-wiki·
+  novel은 `indexing:false`, novela는 raw 컬렉션만 있어 wiki 카드가 존재하지 않는다. 즉 wiki
+  결속·검수 개선의 효과가 이 프로젝트들에는 **닿을 대상이 없다**. `project_root`로 group by
+  할 때 이 그룹의 0을 개선 실패로 오독하지 말 것.
 - 활용 판정의 한계를 기억한다. 이번 "확증 소비 7~8건"은 표층 증거(파일 개봉·축자 토큰 일치)만
   본 **하한**이다. ⓐ 무관해서 안 쓴 것 ⓑ 이미 알고 있어서 안 쓴 것 ⓒ 의미는 반영했으나 표현을
   바꾼 것을 구분하지 못한다. 특히 PostToolUse는 ⓑ가 지배적일 가능성이 높다. 확정 사실은
