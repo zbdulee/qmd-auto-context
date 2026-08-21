@@ -14,3 +14,7 @@ __pycache__/
 # Wiki compile queues, verifier logs, cooldowns, and locks are per-machine runtime state.
 .auto-context/compile/
 .tmp-qmd-notice-*/
+
+# Orca 오케스트레이션이 저장소 루트에 만드는 워크트리 런타임 상태(.orca/worktrees/...).
+# 머신 로컬이고, 무시하지 않으면 스크래치가 커밋에 쓸려 들어간다.
+.orca/
