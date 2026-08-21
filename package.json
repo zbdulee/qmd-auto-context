@@ -3,5 +3,7 @@
   "version": "0.33.0",
   "private": true,
   "type": "module",
-  "scripts": { "test": "node --test" }
+  "scripts": {
+    "test": "QMD_RECALL_LOG= node --test"
+  }
 }

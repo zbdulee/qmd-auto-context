@@ -11,10 +11,21 @@ import { removeTemp } from './helpers/temp.mjs';
 // exit), so any uncaught exception in main()'s call tree must be coerced to 0
 // instead of surfacing as a host-visible "hook (failed): exited with code 1".
 
+// 세션 env 의 QMD_RECALL_LOG 를 그대로 물려받으면 이 파일의 예외 테스트가 사용자의
+// **라이브** 진단 로그에 traceback 을 쓴다(실측: 이 파일 1회 실행에 57줄, 누적 610건이
+// ~/.cache/qmd/recall-diag.jsonl 에 남아 있었고 전부 첫 프레임이 hook_main.py 였다).
+// 테스트가 제품 진단 데이터를 오염시키면 안 된다 — backend-manager 테스트가 managerEnv
+// 로 포트 8483 을 assert 로 거부하는 것과 같은 격리 규칙이다. 빈 문자열이면
+// `os.environ.get` 이 falsy 를 돌려주므로 미설정과 같고, 아래 `...env` 로 명시 override
+// 는 그대로 먹는다(순서가 중요하다).
+function cleanEnv(env = {}) {
+  return { ...process.env, QMD_RECALL_LOG: '', PYTHONPATH: 'core', ...env };
+}
+
 function runPy(code, env = {}) {
   return execFileSync('python3', ['-c', code], {
     encoding: 'utf8',
-    env: { ...process.env, PYTHONPATH: 'core', ...env },
+    env: cleanEnv(env),
   }).trim();
 }
 
@@ -126,7 +137,7 @@ assert rc == 0, rc
 `;
     const res = execFileSync('python3', ['-c', code], {
       encoding: 'utf8',
-      env: { ...process.env, PYTHONPATH: 'core' },
+      env: cleanEnv(),
     });
     // stdout must be silent (no partial hook JSON) on the fail-open path.
     assert.equal(res.trim(), '');

@@ -164,3 +164,74 @@ test('plugin-managed backend manager exists and has no user hardcoding', () => {
   assert.match(sh, /kick-index/);
   assert.match(sh, /cleanup-legacy/);
 });
+
+// recall 진단 로그(QMD_RECALL_LOG)는 프로젝트 무관 전역 파일 하나라 방치하면 계속 자란다
+// (실측 14.6MB / 26,493줄, 로테이션 없음). 데몬 로그와 달리 훅이 append 마다 open/close 해
+// 붙잡힌 fd 가 없으므로 mv 만으로 끝이고 데몬을 reload 하면 안 된다.
+test('logrotate가 MAX 초과 recall 진단 로그를 회전한다(데몬 reload 없이)', () => {
+  const d = mkdtempSync(join(tmpdir(), 'qmd-rotate-recall-'));
+  try {
+    const daemonLog = join(d, 'mcp.daemon.log');
+    const recallLog = join(d, 'recall-diag.jsonl');
+    const rlog = join(d, 'manager.log');
+    writeFileSync(daemonLog, 'small\n');            // 데몬 로그는 회전 대상 아님
+    execFileSync('bash', ['-c', `head -c $((11*1024*1024)) /dev/zero > "${recallLog}"`]);
+    const manager = join(d, 'manager.sh');
+    writeFileSync(manager, `#!/bin/bash\necho "$@" >> "${rlog}"\n`, { mode: 0o755 });
+    execFileSync('bash', ['backend/logrotate.sh'], { encoding: 'utf8', env: {
+      ...process.env, QMD_DAEMON_LOG: daemonLog, QMD_RECALL_LOG: recallLog,
+      QMD_BACKEND_MANAGER: manager,
+    }});
+    assert.equal(existsSync(`${recallLog}.1`), true, 'recall 로그가 .1로 회전돼야 함');
+    assert.equal(existsSync(recallLog), false, '회전 후 원 경로는 비어 있다(다음 훅이 새로 만든다)');
+    // 데몬 로그는 작으니 건드리지 않고, 진단 로그 회전만으로 데몬을 흔들어선 안 된다.
+    assert.equal(existsSync(`${daemonLog}.1`), false, '작은 데몬 로그는 회전 대상 아님');
+    assert.equal(existsSync(rlog), false, '진단 로그 회전은 manager reload 를 부르지 않는다');
+  } finally {
+    execFileSync('rm', ['-rf', d]);
+  }
+});
+
+test('logrotate가 MAX 미만 recall 진단 로그는 회전하지 않는다', () => {
+  const d = mkdtempSync(join(tmpdir(), 'qmd-norotate-recall-'));
+  try {
+    const recallLog = join(d, 'recall-diag.jsonl');
+    writeFileSync(recallLog, '{"event":"qmd_recall_selection"}\n');
+    execFileSync('bash', ['backend/logrotate.sh'], { encoding: 'utf8', env: {
+      ...process.env, QMD_DAEMON_LOG: join(d, 'absent.log'), QMD_RECALL_LOG: recallLog,
+    }});
+    assert.equal(existsSync(`${recallLog}.1`), false, '미달 로그는 그대로 둔다');
+    assert.match(readFileSync(recallLog, 'utf8'), /qmd_recall_selection/, '내용 보존');
+  } finally {
+    execFileSync('rm', ['-rf', d]);
+  }
+});
+
+// 회귀: 데몬 로그가 없으면 예전 스크립트는 첫 줄에서 exit 0 했다. 두 대상의 판정이
+// 딸려 있으면 데몬 로그 부재만으로 진단 로그가 영원히 회전되지 않는다.
+test('데몬 로그가 아예 없어도 recall 진단 로그는 회전된다(판정 독립)', () => {
+  const d = mkdtempSync(join(tmpdir(), 'qmd-rotate-indep-'));
+  try {
+    const recallLog = join(d, 'recall-diag.jsonl');
+    execFileSync('bash', ['-c', `head -c $((11*1024*1024)) /dev/zero > "${recallLog}"`]);
+    execFileSync('bash', ['backend/logrotate.sh'], { encoding: 'utf8', env: {
+      ...process.env, QMD_DAEMON_LOG: join(d, 'no-such-daemon.log'), QMD_RECALL_LOG: recallLog,
+    }});
+    assert.equal(existsSync(`${recallLog}.1`), true, '데몬 로그 부재와 무관하게 회전');
+  } finally {
+    execFileSync('rm', ['-rf', d]);
+  }
+});
+
+// QMD_RECALL_LOG 가 비어 있으면(수동 호출) 회전 대상이 없다 — set -u 아래에서 죽지 않아야 한다.
+test('QMD_RECALL_LOG 미설정이면 logrotate는 조용히 통과한다', () => {
+  const d = mkdtempSync(join(tmpdir(), 'qmd-rotate-norecall-'));
+  try {
+    const env = { ...process.env, QMD_DAEMON_LOG: join(d, 'absent.log') };
+    delete env.QMD_RECALL_LOG;
+    const res = execFileSync('bash', ['backend/logrotate.sh'], { encoding: 'utf8', env });
+    assert.equal(res.trim(), '', '무출력');
+  } finally {
+    execFileSync('rm', ['-rf', d]);
+  }
+});

@@ -42,7 +42,7 @@ bash core/update.sh --skip [<경로>]                   # 이 프로젝트 임�
 - `QMD_QUERY_FIXTURE=test/fixtures/*.json` — 데몬 응답을 파일로 주입 (라이브 데몬 없이 결정적 검증)
 - `QMD_SANDBOX` / `GEMINI_SANDBOX` / `--sandbox` — 디스패처·코어 즉시 무출력 종료
 
-테스트 작성 시 주의: `execFileSync`는 반드시 `encoding:'utf8'`을 줄 것 (없으면 Buffer 반환 → `.trim()` 에러). 병렬 실행에서 `core/__pycache__`가 spurious 실패를 유발할 수 있어 `.gitignore` 처리돼 있다.
+**테스트는 세션 env 의 `QMD_RECALL_LOG` 를 물려받으면 안 된다** — 62개 테스트 파일 중 51개가 `{...process.env}` 를 그대로 자식에 넘기고 이 변수를 한 번도 주지 않으므로, 사용자가 그 env 를 전역으로 켜 두면 테스트가 **라이브 진단 로그에 쓴다**(실측: `hook-main.test.mjs` 1회 실행에 57줄, `~/.cache/qmd/recall-diag.jsonl` 에 traceback 610건 누적. 전부 첫 프레임이 `hook_main.py`). 파일별로 고치지 않고 **러너 진입점**에서 막는다 — `npm test` 는 `QMD_RECALL_LOG= node --test` 다(빈 문자열이면 `os.environ.get` 이 falsy 라 미설정과 같고, 테스트가 명시로 주는 경로는 그대로 먹는다). 직접 `node --test <파일>` 로 돌리면 이 가드가 없으므로, 예외를 일부러 던지는 파일은 자기 헬퍼에서도 비운다(`hook-main.test.mjs` 의 `cleanEnv`). 이건 `managerEnv` 가 포트 8483 을 assert 로 거부하는 것과 같은 격리 규칙이다 — 테스트가 제품 데이터를 건드리면 안 된다. 테스트 작성 시 주의: `execFileSync`는 반드시 `encoding:'utf8'`을 줄 것 (없으면 Buffer 반환 → `.trim()` 에러). 병렬 실행에서 `core/__pycache__`가 spurious 실패를 유발할 수 있어 `.gitignore` 처리돼 있다.
 
 ## 아키텍처 (큰 그림)
 
@@ -101,7 +101,7 @@ backend/   ← qmd MCP HTTP 데몬(:8483) launcher + keepalive/logrotate/index w
 ### 백엔드 (`backend/`)
 - `daemon.sh` — qmd HTTP MCP daemon foreground launcher. manager가 필요 시 `nohup`으로 시작한다.
 - `keepalive.sh` — one-shot health-only keepalive. 기본은 `/health`만 확인하고, 전역 vec warm ping은 `QMD_KEEPALIVE_VEC_WARM=1` opt-in일 때만 실행한다.
-- `logrotate.sh` — one-shot log size guard. `QMD_DAEMON_LOG`/`QMD_BACKEND_MANAGER`/`QMD_DAEMON_PID`를 지원한다.
+- `logrotate.sh` — one-shot log size guard. 대상이 둘이고 **회전 방식이 다르다**: 데몬 로그는 데몬이 fd 를 잡고 있어 mv 후 graceful reload 가 필요하지만, recall 진단 로그(`QMD_RECALL_LOG`)는 훅이 append 마다 open/close 하므로 mv 만으로 끝이고 **reload 하지 않는다**(진단 로그가 커졌다고 유료 경로를 흔들면 안 된다. 회전 순간에 쓰던 프로세스는 옛 inode=`.1` 에 그 줄을 쓰고 끝나 유실·섞임이 없다). 이 진단 로그는 프로젝트 무관 전역 파일 하나라 방치하면 계속 자란다(실측 14.6MB·26,493줄). **두 판정은 독립이어야 한다** — 예전엔 데몬 로그 부재 시 첫 줄에서 `exit 0` 했으므로 판정을 딸리게 두면 데몬 로그가 없는 것만으로 진단 로그가 영원히 회전되지 않는다(`test/backend.test.mjs` 가 고정). 세대는 `.1` 하나뿐이라 총량은 대상당 ~2×MAX 다. `QMD_DAEMON_LOG`/`QMD_RECALL_LOG`/`QMD_BACKEND_MANAGER`/`QMD_DAEMON_PID`를 지원한다.
 - `index_worker.sh` — one-shot dirty 큐 drain. writer lock 획득 → `qmd collection add`+`update`+`embed`(embed lock으로 update.sh와 직렬화) → 새 임베딩/삭제 있으면 manager reload. 큐 보존: busy/실패 시 drop 않고 큐를 그대로 둬 다음 kick에 재시도(coalesce).
 
 ### 설치 / cleanup
