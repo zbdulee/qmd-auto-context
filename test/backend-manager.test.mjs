@@ -433,11 +433,16 @@ print(json.dumps({'wakeAfterSeconds': 2 if n < 3 else 0}))
     run(["kick-wiki-compile", cwd], env);
     waitUntil(() => existsSync(count) && readFileSync(count, 'utf8') === '1');
     run(["kick-wiki-compile", cwd], env);
-    // Let both an original and a wrongly duplicated sleeper reach their wake.
-    // **여기는 waitUntil 로 바꾸지 말 것** — 검증 대상이 "중복 sleeper 가 추가로 깨지
-    // 않았다"(부재)라서, count 가 3이 되는 순간 반환하면 그 뒤에 4가 되는 경우를 못 본다.
-    // 조건이 단조 변하는 대기만 폴링으로 바꾼다(근거는 test/helpers/timing.mjs).
-    for (let i = 0; i < 60; i++) {
+    // 대기를 두 조각으로 나눈다. 앞은 **단조 조건**(sleeper 가 깨어 count 가 3 이상이
+    // 된다)이라 폴링이고, 뒤는 **부재 단정**(중복 sleeper 가 추가로 깨지 않았다)이라
+    // 고정 대기다. 예전에는 전체를 고정 3초로 두어, 부하가 걸리면 정상 sleeper 조차
+    // 그 안에 못 깨어 count 가 2로 남아 실패했다(실측: 단독 실행·HEAD 에서는 전부
+    // 통과, 전체 스위트 병렬에서만 실패). 스위트를 커밋 게이트로 쓰는 한 "0 fail"의
+    // 신호 가치를 지켜야 하고, 벽시계 단정은 부하의 함수다(근거는 test/helpers/timing.mjs).
+    waitUntil(() => existsSync(count) && Number(readFileSync(count, 'utf8')) >= 3);
+    // `>= 3` 인 이유: 중복이 있으면 3→4 가 빠르게 지나갈 수 있어 `=== '3'` 으로 기다리면
+    // 그 순간을 놓쳐 timeout 이 된다(버그가 있는 세계에서 실패 사유가 엉뚱해진다).
+    for (let i = 0; i < 20; i++) {
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
     }
     assert.equal(readFileSync(count, 'utf8'), '3', 'second kick must reuse the live sleeper instead of scheduling a duplicate');
