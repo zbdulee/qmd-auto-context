@@ -1383,8 +1383,17 @@ test('SessionStart: 손상된 원문 갱신 원장을 격리하고 그 사실을
     // 이 테스트는 **worker 가 실제로 돌아야** 한다 — 손상 원장 격리는 worker 단계에서
     // 일어난다. 파일 전역 QMD_SKIP_BACKGROUND_WORKER 를 여기서만 해제한다(위 fork
     // 검증 테스트가 embed 가드를 같은 방식으로 해제하는 것과 같은 이유).
+    // **QMD_LOCK_BASE 를 반드시 격리한다.** 기본값은 `$TMPDIR/qmd-auto-context-locks-<user>`
+    // 라는 **전역** 경로이고, worker 는 그 아래 writer 락을 잡지 못하면 `acquire_lock` 이
+    // 즉시 실패해 "SKIP: qmd update already running" 으로 **exit 0** 한다 — 기다리지 않는다.
+    // 즉 락을 다투면 격리가 아예 일어나지 않아 아래 waitUntil 이 예산을 태우고 터진다.
+    // 다투는 상대는 같은 스위트의 다른 worker 와 **실제 세션의 SessionStart 훅**이므로
+    // 부하가 걸릴 때만 실패했다(단독 실행은 늘 통과 → flake 로 보였다).
+    // 전역 락을 살아 있는 pid 로 점유하면 이 테스트는 100% 재현 실패한다.
+    // 대기 예산을 늘리는 것으로는 절대 고쳐지지 않는다(worker 가 포기하고 나간다).
     const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, HOME: fakeHome,
-                  QMD_CACHE_DIR: CACHE_DIR, QMD_SKIP_BACKGROUND_WORKER: '' };
+                  QMD_CACHE_DIR: CACHE_DIR, QMD_LOCK_BASE: join(work, 'locks'),
+                  QMD_SKIP_BACKGROUND_WORKER: '' };
     // 절대 경로로 부른다 — 상대 경로면 update.sh 안의 `dirname "$0"` 파생 경로가
     // workdir 기준으로 풀려 config import가 죽고 sessionStart가 통째로 skip된다.
     const run = () => execFileSync('bash', [join(process.cwd(), 'core', 'update.sh')], {
