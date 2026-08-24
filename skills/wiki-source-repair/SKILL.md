@@ -19,53 +19,71 @@ downgrades `verified` → `generated` (that would hide the card from recall unde
 
 ## Workflow
 
-1. Resolve the plugin root and read the pending detections:
+1. Resolve the plugin root and read the pending detections, **grouped by missing source file**:
 
    ```bash
    ROOT="${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:-$(git rev-parse --show-toplevel)}}"
-   # third arg = batch limit (omit or 0 for the whole queue)
+   # third arg = batch limit, counted in MISSING FILES (omit or 0 for the whole queue)
    bash "$ROOT/skills/wiki-source-repair/scripts/wiki-source-repair.sh" "$PWD" list 10
    ```
 
-   `pending: 0` → tell the user there is nothing to repair and stop. Each entry carries
-   `targetPath` (the card), `status`/`trusted`, `missingSources`, and `candidates` — rename
-   suggestions found in the missing path's own directory, ranked by filename similarity.
-   `trusted` is true only for a current card with `status: verified`,
+   `pending: 0` → tell the user there is nothing to repair and stop.
+
+   **The decision unit is the missing file, not the card.** Measured on the live corpus: 73
+   pending cards cited only **13 distinct missing files** (one project had 65 cards ← 9
+   files, and a single file was cited by 30 cards). A per-card list therefore showed the same
+   file over and over and split 13 decisions across many sessions.
+
+   Each entry is one missing file: `missingSource`, `cardCount` (how many pending cards cite
+   it), `trustedCount`, `detectedAt` (the oldest card's detection), `candidates` (rename
+   suggestions from that path's own directory, ranked by filename similarity, computed once
+   per file), and `cards` — a sample of the citing cards, capped, with `cardsTruncated` when
+   there are more. `pending` stays the **card** count (it must equal the SessionStart notice
+   number); `groups` is the number of distinct missing files and `returned`/`truncated`
+   describe the slice you got.
+
+   `trusted` on a card is true only for a current card with `status: verified`,
    `createdBy: qmd-auto-context`, and non-empty compiler-owned `sourceRevisions`; the ledger's
-   stored status alone never grants trust.
+   stored status alone never grants trust. Cards that no longer exist are not listed — the
+   ledger is append-only, so a deleted card's `detected` row would otherwise inflate the queue
+   forever.
 
-   **Work in batches.** `pending` is the whole queue; `returned`/`truncated` describe the
-   slice you got. A live project measured 278 pending entries and 111KB of JSON for the full
-   list — presenting that in one go spends the session on the list itself, which is why the
-   queue went untouched. Entries are ordered `trusted` first (those cards are injected as
-   canon right now while their sources cannot be checked), then oldest detection first, so a
-   batch drain is reproducible across sessions. Tell the user how many remain and stop; the
-   next session continues.
+   **Work in batches.** Groups come `trustedCount` first (those cards are injected as canon
+   right now while their sources cannot be checked), then the largest card count (a decision
+   that resolves more cards is worth more), then oldest detection — so a batch drain is
+   reproducible across sessions. Tell the user how many files remain and stop.
 
-2. For each entry, show the user the card's title/summary, the missing source path, and the
-   suggested candidates. **Ask which candidate is the same document** (or whether the source
-   is genuinely gone). Never pick a candidate on the user's behalf: repointing to the wrong
-   file makes the card cite an unrelated source, and a later verify run would then delete it.
+2. For each entry, show the user the missing file, how many cards cite it, and the suggested
+   candidates. **Ask which candidate is the same document** (or whether the source is
+   genuinely gone). Never pick a candidate on the user's behalf — and this matters more for
+   the bulk verbs: repointing to the wrong file makes **every citing card** point at an
+   unrelated source, and a later verify run would then delete them all.
 
-3. Apply the user's decision, one entry at a time:
+3. Apply the user's decision **once per missing file**:
 
    ```bash
-   # the source was renamed -> point the card at the new file
+   # the file was renamed -> repoint every pending card that cites it
    bash "$ROOT/skills/wiki-source-repair/scripts/wiki-source-repair.sh" "$PWD" \
-     repoint <cardPath> <oldSourcePath> <newSourcePath>
+     repoint-source <oldSourcePath> <newSourcePath>
 
-   # the source is really gone; keep the card as the only record
+   # the file is really gone; keep the cards as the only record
    bash "$ROOT/skills/wiki-source-repair/scripts/wiki-source-repair.sh" "$PWD" \
-     dismiss <cardPath>
+     dismiss-source <sourcePath>
    ```
 
-   `repoint` rewrites only that one `sources` entry's `path` in the card's frontmatter. If a
-   card had several missing sources and one is still missing afterwards, it stays pending
-   (`stillMissing` in the output). `dismiss` stops the notice for that card until its set of
-   missing sources changes.
+   Both print **per-card results** (`cards[]`) plus `applied`/`failed`; `ok` is false if any
+   single card failed, so a partial failure can never read as success. Use the per-card verbs
+   (`repoint <cardPath> <old> <new>`, `dismiss <cardPath>`) only when cards citing the same
+   file need different decisions.
 
-4. Report per entry: what was repointed (from → to) or dismissed, and the remaining pending
-   count from a final `list`.
+   `repoint` rewrites only that one `sources` entry's `path` in each card's frontmatter and
+   never touches `status`. A card with several missing sources reports the rest in
+   `stillMissing`; it leaves the pending queue because **only cards whose sources are all
+   missing** are pending (a card with one live source can still be checked against it) — the
+   remaining broken link is filtered out of recall injection rather than shown as stale.
+
+4. Report per file: what was repointed (from → to) or dismissed, how many cards it covered,
+   and the remaining count from a final `list`.
 
 ## Safety
 

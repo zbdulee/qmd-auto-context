@@ -307,7 +307,7 @@ test('source repair: 사라진 카드는 대기에서 빠진다 (유령 행 방�
     rmSync(a);
     const listed = JSON.parse(runRepair(dir, ['--list']));
     assert.equal(listed.pending, 1, '사라진 카드는 대기에서 빠진다');
-    assert.deepEqual(listed.entries.map((e) => e.targetPath),
+    assert.deepEqual(listed.entries.flatMap((e) => e.cards.map((c) => c.targetPath)),
       ['.auto-context/wiki/entities/b.md'], '남은 카드만 목록에 온다');
     // 원장 행은 그대로다(감사 추적) — 걸러내는 것은 읽는 쪽이다.
     const ledger = join(dir, '.auto-context', 'compile', 'source-missing.jsonl');
@@ -323,11 +323,14 @@ test('source repair: 개명 후보를 제안하고 사람이 지정한 재지정
     runScan(dir);
 
     const listed = JSON.parse(runRepair(dir, ['--list']));
-    assert.equal(listed.pending, 1);
+    assert.equal(listed.pending, 1, 'pending 은 여전히 카드 수다');
+    assert.equal(listed.groups, 1, '소실 파일 1개 = 그룹 1개');
     const entry = listed.entries[0];
-    assert.equal(entry.trusted, true);
-    assert.equal('reviewed' in entry, false);
-    assert.deepEqual(entry.candidates['docs/2026-07-20.md'].map((c) => c.path), ['docs/2026-07-21.md']);
+    assert.equal(entry.missingSource, 'docs/2026-07-20.md');
+    assert.equal(entry.cardCount, 1);
+    assert.equal(entry.trustedCount, 1);
+    assert.equal('reviewed' in entry.cards[0], false);
+    assert.deepEqual(entry.candidates.map((c) => c.path), ['docs/2026-07-21.md']);
     // 제안만 했고 카드는 아직 그대로다(자동 재지정 금지).
     assert.match(readFileSync(card, 'utf8'), /docs\/2026-07-20\.md/);
 
@@ -368,7 +371,7 @@ test('source missing trust labels and pending counts use recall ownership + prov
 
     const listed = JSON.parse(runRepair(dir, ['--list']));
     const trustByTarget = Object.fromEntries(
-      listed.entries.map((entry) => [entry.targetPath, entry.trusted]),
+      listed.entries.flatMap((entry) => entry.cards.map((c) => [c.targetPath, c.trusted])),
     );
     assert.equal(trustByTarget['.auto-context/wiki/entities/trusted.md'], true);
     assert.equal(trustByTarget['.auto-context/wiki/entities/foreign.md'], false);
@@ -1209,7 +1212,9 @@ test('list --limit: 시각을 모르는 행은 등급 안에서 뒤로 간다 (�
     delete byName('unknown.md').ts;
     writeFileSync(ledger, rows.map((r) => JSON.stringify(r)).join('\n') + '\n');
 
-    const order = JSON.parse(runRepair(dir, ['--list'])).entries.map((e) => e.targetPath);
+    // 카드 1장 = 그룹 1개인 구성이라 그룹 정렬이 카드 FIFO 를 그대로 드러낸다.
+    const order = JSON.parse(runRepair(dir, ['--list']))
+      .entries.flatMap((e) => e.cards.map((c) => c.targetPath));
     assert.match(order[0], /older\.md$/, `FIFO가 아니다: ${order.join(', ')}`);
     assert.match(order[1], /newer\.md$/, `FIFO가 아니다: ${order.join(', ')}`);
     assert.match(order[2], /unknown\.md$/, `미지 시각이 앞을 점유했다: ${order.join(', ')}`);
@@ -1245,14 +1250,156 @@ test('list --limit: trusted 카드가 먼저 온다 (캐논급 주입 중인데 
 
     const all = JSON.parse(runRepair(dir, ['--list']));
     assert.equal(all.pending, 4);
-    const trustedCount = all.entries.filter((e) => e.trusted).length;
-    assert.equal(trustedCount, 1, `trusted 판정이 예상과 다르다: ${JSON.stringify(all.entries.map((e) => [e.targetPath, e.trusted]))}`);
+    const trustedGroups = all.entries.filter((e) => e.trustedCount > 0).length;
+    assert.equal(trustedGroups, 1, `trusted 판정이 예상과 다르다: ${JSON.stringify(all.entries.map((e) => [e.missingSource, e.trustedCount]))}`);
 
     const one = JSON.parse(runRepair(dir, ['--list', '--limit', '1']));
     assert.equal(one.entries.length, 1);
-    assert.equal(one.entries[0].trusted, true, 'trusted 카드가 슬라이스 밖으로 밀렸다');
-    assert.match(one.entries[0].targetPath, /canon\.md$/);
+    assert.equal(one.entries[0].trustedCount, 1, 'trusted 카드가 슬라이스 밖으로 밀렸다');
+    assert.match(one.entries[0].cards[0].targetPath, /canon\.md$/);
     // 후보 제안은 자른 뒤에만 계산한다(버릴 항목의 디렉터리 스캔은 순손실).
     assert.ok(one.entries[0].candidates, '슬라이스 안 항목에 후보가 없다');
+  } finally { removeTemp(dir); }
+});
+
+// ── 소실 파일 단위 그룹핑 ────────────────────────────────────────────────────
+// 결정 단위가 카드가 아니라 소실 파일이다. 라이브 실측으로 대기 카드 73장이 서로 다른
+// 소실 파일 **13개**였고(SE 는 65장 ← 9개), 카드 단위 목록은 같은 파일을 인용하는 카드를
+// 반복해서 보여주며 13개 결정을 8세션에 걸쳐 나눠 물었다.
+test('list: 같은 파일을 잃은 카드들은 한 그룹으로 묶인다', () => {
+  const dir = setupProject();
+  try {
+    for (const n of ['a', 'b', 'c']) {
+      writeCard(dir, `entities/${n}.md`, { sources: [fileSource('docs/shared-gone.md')] });
+    }
+    writeCard(dir, 'entities/solo.md', { sources: [fileSource('docs/solo-gone.md')] });
+    runScan(dir);
+
+    const listed = JSON.parse(runRepair(dir, ['--list']));
+    assert.equal(listed.pending, 4, 'pending 은 카드 수(기존 wire 의미 유지)');
+    assert.equal(listed.groups, 2, '소실 파일 2개');
+    assert.equal(listed.entries.length, 2);
+    const shared = listed.entries.find((e) => e.missingSource === 'docs/shared-gone.md');
+    assert.equal(shared.cardCount, 3);
+    assert.deepEqual(shared.cards.map((c) => c.targetPath).sort(),
+      ['a', 'b', 'c'].map((n) => `.auto-context/wiki/entities/${n}.md`));
+  } finally { removeTemp(dir); }
+});
+
+test('list: 그룹 정렬은 카드 수가 많은 쪽을 먼저 낸다 (카드 정렬과 의도적으로 다르다)', () => {
+  // 카드 목록의 규칙은 "손해가 큰 카드부터"(trusted → FIFO)였다. 그룹은 **결정 단위**라
+  // 같은 노력으로 더 많은 카드를 해소하는 순서가 옳다. 두 정렬은 다른 질문에 답한다 —
+  // 한쪽을 "일관성" 명목으로 다른 쪽에 맞추지 말 것.
+  const dir = setupProject();
+  try {
+    writeCard(dir, 'entities/lonely.md', { sources: [fileSource('docs/aaa-gone.md')] });
+    for (const n of ['x', 'y', 'z']) {
+      writeCard(dir, `entities/${n}.md`, { sources: [fileSource('docs/zzz-gone.md')] });
+    }
+    runScan(dir);
+    const order = JSON.parse(runRepair(dir, ['--list'])).entries.map((e) => e.missingSource);
+    assert.deepEqual(order, ['docs/zzz-gone.md', 'docs/aaa-gone.md'],
+      '카드 3장 그룹이 1장 그룹보다 먼저 와야 한다(경로 순서로는 반대다)');
+  } finally { removeTemp(dir); }
+});
+
+test('list: 그룹 안 카드 목록에는 상한이 있다 (그룹핑으로 줄인 컨텍스트를 되돌리지 않는다)', () => {
+  const dir = setupProject();
+  try {
+    for (let i = 0; i < 8; i += 1) {
+      writeCard(dir, `entities/m-${i}.md`, { sources: [fileSource('docs/many-gone.md')] });
+    }
+    runScan(dir);
+    const entry = JSON.parse(runRepair(dir, ['--list'])).entries[0];
+    assert.equal(entry.cardCount, 8, '전체 수는 cardCount 가 말한다');
+    assert.equal(entry.cards.length, 5, '나열은 상한까지만');
+    assert.equal(entry.cardsTruncated, true);
+  } finally { removeTemp(dir); }
+});
+
+test('repoint-source: 그 파일을 인용하는 대기 카드 전부에 한 번에 적용된다', () => {
+  const dir = setupProject();
+  try {
+    writeFileSync(join(dir, 'docs', 'renamed.md'), 'renamed\n');
+    const cards = ['a', 'b', 'c'].map((n) =>
+      writeCard(dir, `entities/${n}.md`, { status: 'verified', sources: [fileSource('docs/old.md')] }));
+    runScan(dir);
+    assert.equal(JSON.parse(runRepair(dir, ['--list'])).pending, 3);
+
+    const out = JSON.parse(runRepair(dir, [
+      '--repoint-source', 'docs/old.md', '--to', 'docs/renamed.md',
+    ]));
+    assert.equal(out.ok, true);
+    assert.equal(out.action, 'repointed-source');
+    assert.equal(out.cardCount, 3);
+    assert.equal(out.applied, 3);
+    assert.equal(out.failed, 0);
+    assert.equal(out.cards.length, 3, 'per-card 결과를 그대로 낸다(부분 실패를 뭉치지 않는다)');
+    for (const card of cards) {
+      assert.match(readFileSync(card, 'utf8'), /path: "docs\/renamed\.md"/);
+      assert.match(readFileSync(card, 'utf8'), /^status: verified$/m, 'status는 건드리지 않는다');
+    }
+    assert.equal(JSON.parse(runRepair(dir, ['--list'])).pending, 0, '그룹이 통째로 해소된다');
+  } finally { removeTemp(dir); }
+});
+
+test('repoint-source: 없는 대상으로는 한 장도 바꾸지 않는다', () => {
+  const dir = setupProject();
+  try {
+    const card = writeCard(dir, 'entities/a.md', { sources: [fileSource('docs/old.md')] });
+    runScan(dir);
+    let out = '';
+    try {
+      runRepair(dir, ['--repoint-source', 'docs/old.md', '--to', 'docs/nope.md']);
+      assert.fail('없는 경로 재지정은 실패해야 한다');
+    } catch (err) { out = err.stdout; }
+    const parsed = JSON.parse(out);
+    assert.equal(parsed.ok, false, '한 장이라도 실패하면 ok:false');
+    assert.equal(parsed.applied, 0);
+    assert.equal(parsed.cards[0].error, 'new_source_missing');
+    assert.match(readFileSync(card, 'utf8'), /docs\/old\.md/, '카드는 그대로');
+  } finally { removeTemp(dir); }
+});
+
+test('dismiss-source: 그 파일을 인용하는 카드 전부를 거절 처리한다', () => {
+  const dir = setupProject();
+  try {
+    for (const n of ['a', 'b']) {
+      writeCard(dir, `entities/${n}.md`, { sources: [fileSource('docs/really-gone.md')] });
+    }
+    runScan(dir);
+    const out = JSON.parse(runRepair(dir, ['--dismiss-source', 'docs/really-gone.md']));
+    assert.equal(out.ok, true);
+    assert.equal(out.applied, 2);
+    assert.equal(JSON.parse(runRepair(dir, ['--list'])).pending, 0);
+    // 재스캔해도 되살아나지 않는다(per-card dismiss 와 같은 원장 행 형태를 쓴다).
+    runScan(dir);
+    assert.equal(JSON.parse(runRepair(dir, ['--list'])).pending, 0, 'dismiss 는 sticky');
+  } finally { removeTemp(dir); }
+});
+
+test('repoint-source: 소실 소스가 둘인 카드는 한쪽을 고치면 대기에서 빠지고 잔여는 stillMissing 으로 알린다', () => {
+  // **전부 소실만 대기 대상**이라는 기존 계약을 그대로 따른다 — 일부만 소실인 카드는
+  // 살아 있는 원문으로 대조가 되므로 스캐너도 대기로 올리지 않는다. 그래서 한쪽을 고치면
+  // 그 카드는 대기에서 빠지고, 남은 깨진 링크는 조용히 사라지지 않고 `stillMissing` 으로
+  // 사용자에게 보고된다(그 링크는 recall 주입에서 미존재로 걸러지고 stale 링크가 되지 않는다).
+  const dir = setupProject();
+  try {
+    writeFileSync(join(dir, 'docs', 'fixed.md'), 'fixed\n');
+    writeCard(dir, 'entities/two.md', {
+      sources: [fileSource('docs/gone-1.md'), fileSource('docs/gone-2.md')],
+    });
+    runScan(dir);
+    const before = JSON.parse(runRepair(dir, ['--list']));
+    assert.equal(before.pending, 1);
+    assert.equal(before.groups, 2, '한 카드가 두 그룹에 나타난다');
+
+    const out = JSON.parse(runRepair(dir, ['--repoint-source', 'docs/gone-1.md', '--to', 'docs/fixed.md']));
+    assert.equal(out.ok, true);
+    assert.deepEqual(out.cards[0].stillMissing, ['docs/gone-2.md'],
+      '남은 깨진 링크를 보고해야 한다');
+    const after = JSON.parse(runRepair(dir, ['--list']));
+    assert.equal(after.pending, 0, '일부만 소실은 대기 대상이 아니다(스캐너와 같은 규칙)');
+    assert.equal(after.groups, 0);
   } finally { removeTemp(dir); }
 });

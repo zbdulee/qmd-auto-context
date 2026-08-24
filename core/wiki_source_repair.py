@@ -43,6 +43,11 @@ def _nullcontext():
     return contextlib.nullcontext()
 
 
+# 한 그룹 안에 나열할 카드 수 상한. 결정 단위는 **파일**이므로 카드 목록은 참고용이고,
+# 45장을 그대로 뿌리면 그룹핑으로 줄인 컨텍스트를 되돌린다. 전체 수는 `cardCount`가 말한다.
+MAX_GROUP_CARDS = 5
+
+
 def fail(message: str) -> int:
     print(json.dumps({"ok": False, "error": message}, ensure_ascii=False))
     return 1
@@ -133,49 +138,88 @@ def list_pending(root: Path, config: dict, compile_cfg: dict, limit: int = 0) ->
     같은 값이어야 한다). 잘렸다는 사실은 `returned`/`truncated`로 따로 알린다 — 두 값을
     뭉치면 "10건 남았다"로 읽혀 드레인이 끝난 것으로 오인된다.
     """
+    cards = _pending_cards(root, config, compile_cfg)
+    # 소실 파일 → 그 파일을 인용하는 카드들. 한 카드가 두 파일을 잃었으면 두 그룹에
+    # 나타난다(한쪽을 고쳐도 나머지 때문에 대기로 남는 기존 `stillMissing` 의미와 같다).
+    groups: dict[str, list[dict]] = {}
+    for card in cards:
+        for rel in card["missingSources"]:
+            groups.setdefault(rel, []).append(card)
+    entries = []
+    for rel, members in groups.items():
+        stamps = [c["detectedAt"] for c in members if c["detectedAt"]]
+        entries.append({
+            "missingSource": rel,
+            "cardCount": len(members),
+            "trustedCount": sum(1 for c in members if c["trusted"]),
+            # 그룹의 감지 시각은 **가장 오래된** 카드 것이다(FIFO 드레인의 기준).
+            "detectedAt": min(stamps) if stamps else "",
+            "_members": members,
+        })
+    # **그룹 정렬은 카드 정렬과 의도적으로 다르다.** 카드 목록은 trusted → FIFO 였고
+    # 그것은 "손해가 큰 카드부터"의 규칙이다. 그룹은 **결정 단위**이므로 같은 노력으로
+    # 더 많은 카드를 해소하는 순서가 옳다 — trusted 포함 그룹 우선, 그다음 카드 수
+    # 내림차순, 그다음 오래된 감지, 마지막 경로. 한쪽을 "일관성" 명목으로 다른 쪽에
+    # 맞추지 말 것: 두 정렬은 서로 다른 질문에 답한다.
+    entries.sort(key=lambda e: (not e["trustedCount"], -e["cardCount"],
+                                not e["detectedAt"], e["detectedAt"], e["missingSource"]))
+    truncated = limit > 0 and len(entries) > limit
+    if limit > 0:
+        entries = entries[:limit]
+    for entry in entries:
+        # 후보 제안은 자른 **뒤에** 그룹당 1회 계산한다. 예전엔 카드마다 같은 경로의
+        # 디렉터리를 다시 훑어 같은 후보를 중복 계산했다(실측 45장이 파일 3개를 인용).
+        entry["candidates"] = suggest(root, entry["missingSource"])
+        members = entry.pop("_members")
+        members.sort(key=lambda c: (not c["trusted"], not c["detectedAt"],
+                                    c["detectedAt"], c["targetPath"]))
+        entry["cards"] = [{k: c[k] for k in ("targetPath", "status", "trusted", "detectedAt")}
+                          for c in members[:MAX_GROUP_CARDS]]
+        if len(members) > MAX_GROUP_CARDS:
+            entry["cardsTruncated"] = True
+    return {
+        # `pending`은 **서로 다른 카드 수**를 유지한다 — 기존 wire 키이고 SessionStart
+        # 알림의 숫자와 같아야 한다. 그룹 수는 `groups`로 따로 낸다.
+        "ok": True,
+        "pending": len(cards),
+        "groups": len(groups),
+        "returned": len(entries),
+        "entries": entries,
+        **({"truncated": True} if truncated else {}),
+    }
+
+
+def _pending_cards(root: Path, config: dict, compile_cfg: dict) -> list[dict]:
+    """대기 중인 카드 행. "무엇이 대기인가"의 단일 정의 — 목록·일괄 동사가 공유한다.
+
+    세 번째 구현을 만들지 않는다: 목록이 걸러내는 것과 일괄 repoint/dismiss가 대상으로
+    삼는 것이 갈리면 "목록에 없는데 고쳐진다"가 된다.
+    """
     ledger = wsm.ledger_path(root, compile_cfg)
     states = wsm.load_states(ledger)
-    rows = []
+    cards = []
     for row in wsm.pending_targets(states):
-        # 정렬·표시에 쓰는 값은 전부 str로 정규화한다(원장은 손상될 수 있다 — docstring).
+        # 정렬·표시에 쓰는 값은 전부 str로 정규화한다(원장은 손상될 수 있다).
         target = row.get("targetPath")
         target = target if isinstance(target, str) else ""
         # **카드가 사라졌으면 대기가 아니다.** 원장은 append-only 이고 스캐너는 존재하는
-        # 카드만 훑으므로, 사람이 카드를 지우면 그 카드의 `detected` 행이 최신 상태로
-        # 영원히 남아 대기 수를 부풀린다 — 실측으로 261건 중 79건이 이미 없는 카드였고
-        # (ktlo-check 는 50건 중 49건), SessionStart 알림이 그 유령을 계속 지시한다.
-        # 원장에 `dismissed` 를 써서 지우는 방법도 있지만 그러면 사람이 카드를 지울 때마다
-        # 원장 쓰기가 필요해지고(그 시점에 이 코드가 실행되지도 않는다) 행이 계속 늘어난다.
-        # 여기서 걸러내는 것이 자기유지적이다 — 없는 카드에는 고칠 원문 문제가 없다.
+        # 카드만 훑으므로, 사람이 카드를 지우면 그 `detected` 행이 최신 상태로 영원히 남아
+        # 대기 수를 부풀린다(실측 261건 중 79건, ktlo-check 는 50건 중 49건). 원장에
+        # `dismissed`를 쓰는 방법은 성립하지 않는다 — 사람이 지우는 시점에 이 코드가
+        # 실행되지 않는다. 읽는 쪽에서 걸러내고 원장 행은 감사 추적으로 남긴다.
         if not target or not (root / target).is_file():
             continue
         detected = row.get("ts")
         detected = detected if isinstance(detected, str) else ""
-        missing = [p for p in row.get("missingSources", []) if isinstance(p, str)]
-        rows.append({
+        cards.append({
             "targetPath": target,
             "status": row.get("status", ""),
             "trusted": wsm.is_auto_trusted_target(root, config, target),
             "origin": row.get("origin", ""),
             "detectedAt": detected,
-            "missingSources": missing,
+            "missingSources": [p for p in row.get("missingSources", []) if isinstance(p, str)],
         })
-    total = len(rows)
-    # 미지 시각(`not r["detectedAt"]`)은 등급 안에서 뒤로 — 빈 문자열을 그대로 비교하면
-    # 미지 행이 맨 앞을 점유해 "오래된 감지 먼저"가 거짓이 된다.
-    rows.sort(key=lambda r: (not r["trusted"], not r["detectedAt"],
-                             r["detectedAt"], r["targetPath"]))
-    truncated = limit > 0 and total > limit
-    if limit > 0:
-        rows = rows[:limit]
-    # 후보 제안은 자른 **뒤에** 계산한다 — `suggest`는 missing 경로마다 디렉터리를 훑으므로
-    # 버릴 항목의 후보를 계산하는 것은 순손실이다(278건 전량에서 실측 대부분의 비용).
-    for entry in rows:
-        entry["candidates"] = {rel: suggest(root, rel) for rel in entry["missingSources"]}
-    out = {"ok": True, "pending": total, "returned": len(rows), "entries": rows}
-    if truncated:
-        out["truncated"] = True
-    return out
+    return cards
 
 
 def repoint_entry(text: str, old: str, new: str) -> tuple[str | None, str]:
@@ -224,16 +268,23 @@ def repoint_entry(text: str, old: str, new: str) -> tuple[str | None, str]:
     return None, "source_entry_not_found"
 
 
-def do_repoint(root: Path, config: dict, compile_cfg: dict, target_rel: str,
-               old: str, new: str) -> int:
+def repoint_one(root: Path, config: dict, compile_cfg: dict, target_rel: str,
+                old: str, new: str) -> dict:
+    """카드 1장의 `sources` 항목 하나를 재지정하고 **결과 dict**를 낸다(출력하지 않는다).
+
+    일괄 재지정(`--repoint-source`)이 이 함수를 카드마다 부른다 — 락·원자적 쓰기·원장
+    기록을 담은 경로를 두 벌로 만들지 않기 위해서다(이 저장소에서 반복된 클래스이고,
+    새 쓰기 경로를 만들면 truncate 회귀가 되살아난다).
+    """
     path = card_path(root, config, target_rel)
     if path is None or not path.is_file():
-        return fail("card_not_found")
+        return {"ok": False, "targetPath": target_rel, "error": "card_not_found"}
     allow_roots = wsm.allow_roots_of(config)
     resolved, reason = qmd_recall.resolve_existing_source(new, root, allow_roots)
     if resolved is None:
         # 없는/루트 밖 경로로 재지정하면 카드가 무관한 곳을 가리킨 채 "정상"이 된다.
-        return fail(f"new_source_{reason or 'invalid'}")
+        return {"ok": False, "targetPath": target_rel,
+                "error": f"new_source_{reason or 'invalid'}"}
     new_rel = resolved.relative_to(root).as_posix() if resolved.is_relative_to(root) else new
     ledger = wsm.ledger_path(root, compile_cfg)
     # 카드 read-modify-write와 원장 append를 **한 락 안에서** 한다. 동시 repoint에서는
@@ -244,15 +295,15 @@ def do_repoint(root: Path, config: dict, compile_cfg: dict, target_rel: str,
         try:
             text = path.read_text(encoding="utf-8")
         except OSError:
-            return fail("card_unreadable")
+            return {"ok": False, "targetPath": target_rel, "error": "card_unreadable"}
         updated, why = repoint_entry(text, old, new_rel)
         if updated is None:
-            return fail(why)
+            return {"ok": False, "targetPath": target_rel, "error": why}
         # 원자적 쓰기는 wiki_compile이 SSOT다(자동 경로와 같은 구현) — 구현을 두 벌로
         # 만들면 한쪽만 고쳐진다. 이 저장소에서 반복된 클래스다.
         if not wc.write_text_atomic(path, updated):
             # 원본은 그대로다(임시파일만 버려진다) — 실패 반환과 디스크 상태가 일치한다.
-            return fail("card_unwritable")
+            return {"ok": False, "targetPath": target_rel, "error": "card_unwritable"}
         info = wsm.classify_card(updated, root, allow_roots)
         # 카드 쓰기(주 효과)는 위에서 이미 확인했고 이 원장 행은 부기다 — 실패해도 다음
         # 스캔이 재감지해 자기치유한다(그 자체로는 "실패 방향이 안전" 분류). 그래도
@@ -272,23 +323,72 @@ def do_repoint(root: Path, config: dict, compile_cfg: dict, target_rel: str,
                                     str((wc.parse_frontmatter(updated)[0] or {}).get("status") or "generated"),
                                     info["missing"], "repair"):
             ledger_ok = False
-    print(json.dumps({"ok": True, "action": "repointed", "targetPath": target_rel,
-                      "from": old, "to": new_rel, "stillMissing": info["missing"],
-                      **({} if ledger_ok else {"ledgerWriteFailed": True})},
-                     ensure_ascii=False))
-    return 0
+    return {"ok": True, "action": "repointed", "targetPath": target_rel,
+            "from": old, "to": new_rel, "stillMissing": info["missing"],
+            **({} if ledger_ok else {"ledgerWriteFailed": True})}
 
 
-def do_dismiss(root: Path, config: dict, compile_cfg: dict, target_rel: str) -> int:
+def do_repoint(root: Path, config: dict, compile_cfg: dict, target_rel: str,
+               old: str, new: str) -> int:
+    result = repoint_one(root, config, compile_cfg, target_rel, old, new)
+    print(json.dumps(result, ensure_ascii=False))
+    return 0 if result.get("ok") else 1
+
+
+def dismiss_one(root: Path, config: dict, compile_cfg: dict, target_rel: str) -> dict:
+    """카드 1장을 거절 처리하고 **결과 dict**를 낸다(출력하지 않는다).
+
+    일괄 거절(`--dismiss-source`)도 이 함수를 카드마다 부른다 — 원장 행 형태를 새로
+    발명하면 per-card dismiss 의 재무장 계약("소실 집합이 바뀌면 다시 대기")이 일괄
+    경로에서만 갈린다.
+    """
     # "대기 중인가" 확인과 append는 한 락 안에서 한다(check-then-act) — 밖에서 하면
     # 동시 실행이 같은 카드에 dismissed를 여러 줄 남긴다.
     written, state = wsm.record_dismissal(root, compile_cfg, target_rel)
     if not written:
-        return fail("not_pending")
-    print(json.dumps({"ok": True, "action": "dismissed", "targetPath": target_rel,
-                      "missingSources": state.get("missingSources", [])},
-                     ensure_ascii=False))
-    return 0
+        return {"ok": False, "targetPath": target_rel, "error": "not_pending"}
+    return {"ok": True, "action": "dismissed", "targetPath": target_rel,
+            "missingSources": state.get("missingSources", [])}
+
+
+def do_dismiss(root: Path, config: dict, compile_cfg: dict, target_rel: str) -> int:
+    result = dismiss_one(root, config, compile_cfg, target_rel)
+    print(json.dumps(result, ensure_ascii=False))
+    return 0 if result.get("ok") else 1
+
+
+def _bulk(root: Path, config: dict, compile_cfg: dict, source: str, action: str,
+          apply_one) -> int:
+    """소실 파일 하나를 인용하는 **대기 카드 전부**에 같은 결정을 적용한다.
+
+    **per-card 결과를 그대로 낸다.** 45장 중 20장째에서 쓰기가 실패하면 집계 하나로
+    뭉치면 부분 실패가 "성공"으로 읽힌다 — 이 저장소의 "쓰기 반환값" 기준 1번(거짓 성공
+    보고)에 정확히 걸리는 자리다. 하나라도 실패하면 `ok:false`이고 종료 코드도 non-zero다.
+
+    대상 선정은 `_pending_cards` 한 곳이 정한다(목록이 보여주는 것과 같은 집합이다).
+    """
+    cards = [c for c in _pending_cards(root, config, compile_cfg)
+             if source in c["missingSources"]]
+    if not cards:
+        return fail("no_pending_card_cites_source")
+    results = [apply_one(c["targetPath"]) for c in sorted(cards, key=lambda c: c["targetPath"])]
+    applied = sum(1 for r in results if r.get("ok"))
+    print(json.dumps({"ok": applied == len(results), "action": action,
+                      "missingSource": source, "cardCount": len(results),
+                      "applied": applied, "failed": len(results) - applied,
+                      "cards": results}, ensure_ascii=False))
+    return 0 if applied == len(results) else 1
+
+
+def do_repoint_source(root: Path, config: dict, compile_cfg: dict,
+                      old: str, new: str) -> int:
+    return _bulk(root, config, compile_cfg, old, "repointed-source",
+                 lambda rel: repoint_one(root, config, compile_cfg, rel, old, new))
+
+
+def do_dismiss_source(root: Path, config: dict, compile_cfg: dict, source: str) -> int:
+    return _bulk(root, config, compile_cfg, source, "dismissed-source",
+                 lambda rel: dismiss_one(root, config, compile_cfg, rel))
 
 
 def main() -> int:
@@ -301,6 +401,11 @@ def main() -> int:
     parser.add_argument("--from", dest="from_path")
     parser.add_argument("--to", dest="to_path")
     parser.add_argument("--dismiss")
+    # 일괄 동사: 결정 단위가 카드가 아니라 **소실 파일**이다(실측 카드 73장 ← 파일 13개).
+    # 자동 적용이 아니라는 계약은 그대로다 — 잘못 매칭한 일괄 재지정은 카드 수십 장을
+    # 한 번에 verify-삭제 코스로 보낸다.
+    parser.add_argument("--repoint-source", dest="repoint_source")
+    parser.add_argument("--dismiss-source", dest="dismiss_source")
     args = parser.parse_args()
 
     if os.environ.get("QMD_SANDBOX"):
@@ -312,6 +417,12 @@ def main() -> int:
         if not args.from_path or not args.to_path:
             return fail("repoint_requires_from_and_to")
         return do_repoint(root, config, compile_cfg, args.repoint, args.from_path, args.to_path)
+    if args.repoint_source:
+        if not args.to_path:
+            return fail("repoint_source_requires_to")
+        return do_repoint_source(root, config, compile_cfg, args.repoint_source, args.to_path)
+    if args.dismiss_source:
+        return do_dismiss_source(root, config, compile_cfg, args.dismiss_source)
     if args.dismiss:
         return do_dismiss(root, config, compile_cfg, args.dismiss)
     limit = args.limit if args.limit and args.limit > 0 else 0

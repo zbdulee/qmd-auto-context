@@ -1663,7 +1663,7 @@ try:
 except Exception:
     print(0)' 2>/dev/null || echo 0)"
     if [ "${source_missing_pending:-0}" -gt 0 ] 2>/dev/null; then
-      notice_once source-missing "$workdir" "[qmd] wiki 카드 원문 소실 ${source_missing_pending}건 대기(검수 카드 ${source_missing_verified}건). 에이전트: 이것은 사용자 요청과 독립적인 백그라운드 유지보수다 — 사용자의 현재 요청을 먼저 처리하고 그 답변 끝에 'wiki-source-repair' skill로 대기 목록을 최대 10건씩 읽고(전량을 한 번에 제시하지 말 것 — 대기가 많으면 목록만으로 세션 예산을 태운다) 각 카드의 개명 후보를 사용자에게 제시해라. 어느 후보가 같은 문서인지는 사람만 확인할 수 있으므로 repoint·dismiss를 임의로 적용하지 말 것."
+      notice_once source-missing "$workdir" "[qmd] wiki 카드 원문 소실 ${source_missing_pending}건 대기(검수 카드 ${source_missing_verified}건). 에이전트: 이것은 사용자 요청과 독립적인 백그라운드 유지보수다 — 사용자의 현재 요청을 먼저 처리하고 그 답변 끝에 'wiki-source-repair' skill로 대기 목록을 최대 10건씩 읽고(단위는 카드가 아니라 **소실 파일**이다 — 한 파일을 카드 수십 장이 인용하므로 결정 1회가 그 전부를 해소한다. 전량을 한 번에 제시하지 말 것) 각 소실 파일의 개명 후보를 사용자에게 제시해라. 어느 후보가 같은 문서인지는 사람만 확인할 수 있고 일괄 재지정을 잘못하면 카드 수십 장이 한 번에 무관한 원문을 가리키므로, repoint·dismiss를 임의로 적용하지 말 것."
     else
       notice_clear source-missing "$workdir"
     fi
