@@ -140,6 +140,15 @@ def list_pending(root: Path, config: dict, compile_cfg: dict, limit: int = 0) ->
         # 정렬·표시에 쓰는 값은 전부 str로 정규화한다(원장은 손상될 수 있다 — docstring).
         target = row.get("targetPath")
         target = target if isinstance(target, str) else ""
+        # **카드가 사라졌으면 대기가 아니다.** 원장은 append-only 이고 스캐너는 존재하는
+        # 카드만 훑으므로, 사람이 카드를 지우면 그 카드의 `detected` 행이 최신 상태로
+        # 영원히 남아 대기 수를 부풀린다 — 실측으로 261건 중 79건이 이미 없는 카드였고
+        # (ktlo-check 는 50건 중 49건), SessionStart 알림이 그 유령을 계속 지시한다.
+        # 원장에 `dismissed` 를 써서 지우는 방법도 있지만 그러면 사람이 카드를 지울 때마다
+        # 원장 쓰기가 필요해지고(그 시점에 이 코드가 실행되지도 않는다) 행이 계속 늘어난다.
+        # 여기서 걸러내는 것이 자기유지적이다 — 없는 카드에는 고칠 원문 문제가 없다.
+        if not target or not (root / target).is_file():
+            continue
         detected = row.get("ts")
         detected = detected if isinstance(detected, str) else ""
         missing = [p for p in row.get("missingSources", []) if isinstance(p, str)]

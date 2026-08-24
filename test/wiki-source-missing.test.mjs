@@ -291,6 +291,30 @@ test('source scan: opt-out 프로젝트와 sandbox에서는 무동작', () => {
   } finally { removeTemp(dir); }
 });
 
+test('source repair: 사라진 카드는 대기에서 빠진다 (유령 행 방지)', () => {
+  // 원장은 append-only 이고 스캐너는 **존재하는 카드만** 훑는다. 그래서 사람이 카드를
+  // 지우면 그 카드의 `detected` 행이 최신 상태로 영원히 남아 대기 수를 부풀리고,
+  // SessionStart 알림이 없는 카드를 계속 지시한다. 라이브 실측으로 261건 중 79건이
+  // 이미 없는 카드였다(ktlo-check 는 50건 중 49건). 원장에 `dismissed` 를 써서 지우는
+  // 방법도 있지만 사람이 카드를 지우는 시점에 이 코드가 실행되지 않으므로 성립하지 않는다.
+  const dir = setupProject();
+  try {
+    const a = writeCard(dir, 'entities/a.md', { status: 'verified', sources: [fileSource('docs/gone-a.md')] });
+    writeCard(dir, 'entities/b.md', { status: 'verified', sources: [fileSource('docs/gone-b.md')] });
+    runScan(dir);
+    assert.equal(JSON.parse(runRepair(dir, ['--list'])).pending, 2, '둘 다 대기');
+
+    rmSync(a);
+    const listed = JSON.parse(runRepair(dir, ['--list']));
+    assert.equal(listed.pending, 1, '사라진 카드는 대기에서 빠진다');
+    assert.deepEqual(listed.entries.map((e) => e.targetPath),
+      ['.auto-context/wiki/entities/b.md'], '남은 카드만 목록에 온다');
+    // 원장 행은 그대로다(감사 추적) — 걸러내는 것은 읽는 쪽이다.
+    const ledger = join(dir, '.auto-context', 'compile', 'source-missing.jsonl');
+    assert.match(readFileSync(ledger, 'utf8'), /entities\/a\.md/, '원장에는 흔적이 남는다');
+  } finally { removeTemp(dir); }
+});
+
 test('source repair: 개명 후보를 제안하고 사람이 지정한 재지정만 적용한다', () => {
   const dir = setupProject();
   try {
