@@ -1140,6 +1140,39 @@ def update_index(wiki_root: Path, target: Path, title: str) -> bool:
     return write_text_atomic(index, text.rstrip() + "\n" + line)
 
 
+def remove_from_index(wiki_root: Path, target: Path) -> bool:
+    """index.md에서 카드 1줄을 제거한다. **`update_index`의 역연산이고 같은 이유로 원자적이다.**
+
+    이 함수가 없던 동안 인덱스는 append-only였다 — 카드가 지워져도(dedup merge, 기계 검수
+    삭제) 줄이 남아 인덱스가 실제 카드보다 계속 커졌다(실측: 항목 1,629개 중 253개가 없는
+    파일을 가리켰다). 이게 조용히 넘어가지 않는 이유는 `wiki_compile_worker.orientation()`이
+    이 파일 **앞 12,000자**를 컴파일 워커의 항법 정보로 넘기기 때문이다. 그 창 안의 죽은
+    줄은 워커에게 "이미 있는 카드"로 보인다.
+
+    **줄 매칭에 `rel in text`를 쓰지 않는다.** `update_index`의 중복 검사가 그 부분 문자열
+    비교인데, 제거에 같은 방식을 쓰면 `foo.md`를 지우라는 요청이 `foo-bar.md` 줄이나 경로를
+    본문에 포함한 제목 줄까지 지운다. 여기서는 `update_index`가 쓰는 형식 그대로
+    `- {rel} - `로 시작하는 줄만 지운다.
+
+    반환값은 `update_index`와 대칭이다 — "인덱스가 카드와 어긋나지 않았는가". 줄이 애초에
+    없었거나 index.md 자체가 없으면 True다(어긋난 게 없다). False는 쓰기 실패뿐이다.
+    인덱스는 캐논이 아니라 항법이므로 호출자는 실패에 fail-closed하지 않는다.
+    """
+    index = wiki_root / "index.md"
+    if not index.exists():
+        return True
+    rel = target.relative_to(wiki_root).as_posix()
+    prefix = f"- {rel} - "
+    try:
+        text = index.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    kept = [line for line in text.splitlines(keepends=True) if not line.startswith(prefix)]
+    if len(kept) == len(text.splitlines(keepends=True)):
+        return True
+    return write_text_atomic(index, "".join(kept))
+
+
 def append_log(wiki_root: Path, action: str, target: Path, title: str) -> None:
     """log.md에 1줄 append. **원자적 쓰기가 필요 없다** — 사유는 `update_index` docstring."""
     log = wiki_root / "log.md"

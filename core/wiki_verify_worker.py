@@ -943,10 +943,22 @@ def apply_negative_verdict(
                 })
                 return False
         # tombstone은 세우지 않는다 — 소스가 고쳐지면 재컴파일→재검증이 다시 열려야 한다.
+        # 제목은 **삭제 전에** 읽는다 — unlink 후에는 프론트매터를 더 못 읽는다.
+        _, dead_meta, _, _ = card_state(target)
+        dead_title = str(dead_meta.get("title") or target.stem)
         target.unlink(missing_ok=True)
+        # 인덱스 줄도 같이 걷는다(사유는 wiki_compile.remove_from_index). 위 감사 원장·억제
+        # 마커와 달리 여기는 fail-closed하지 않는다 — 인덱스는 캐논이 아니라 항법이고,
+        # 실패해도 이 함수가 없던 시절의 어긋남으로 되돌아갈 뿐 새 손상은 아니다.
+        wiki_root = (root / config.get("wikiPath", ".auto-context/wiki")).resolve()
+        index_ok = wc.remove_from_index(wiki_root, target)
+        wc.append_log(wiki_root, "deleted", target, dead_title)
         record_machine_delete(root, compile_cfg, record, verdict)
         reindex_wiki(root, config)
-        log_verdict(log_path, {**record, "result": "deleted", "suppressedSources": suppressed})
+        log_verdict(log_path, {
+            **record, "result": "deleted",
+            "suppressedSources": suppressed, "indexOk": index_ok,
+        })
         return True
     if action == "contested":
         # pass 경로와 같은 이유로 반환값을 확인한다. 여기서 실패하면 카드가 `generated`로

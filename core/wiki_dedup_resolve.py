@@ -137,7 +137,14 @@ def resolve_entry(root: Path, wiki_root: Path, compile_dir: Path, entry: dict, a
             # cap it so it can't grow unbounded.
             wc.trim_jsonl(deleted_path)
         target.unlink()
-        return {"action": "deleted", "deletedPath": delete_rel}
+        # 카드가 사라졌으니 인덱스 줄도 걷는다. 순서는 unlink 다음이다 — 먼저 지웠다가
+        # unlink가 실패하면 살아 있는 카드가 인덱스에서만 사라진다(반대 방향의 어긋남).
+        # 인덱스는 항법이라 실패에 fail-closed하지 않고 결과에 실어 보낸다.
+        meta, _ = wc.parse_frontmatter(content)
+        title = str(meta.get("title") or Path(delete_rel).stem)
+        index_ok = wc.remove_from_index(wiki_root, target)
+        wc.append_log(wiki_root, "deleted", target, title)
+        return {"action": "deleted", "deletedPath": delete_rel, "indexOk": index_ok}
 
     return {"action": "rejected", "reason": "unknown_action"}
 

@@ -234,6 +234,27 @@ test('verify fail + onFail 기본(delete) → 카드 삭제, tombstone 없음, �
   } finally { removeTemp(project); }
 });
 
+// index.md는 카드 생성 때 1줄씩 append만 되던 파일이라, 기계 삭제가 줄을 남기면
+// compile worker의 orientation(앞 12,000자)이 없는 카드를 있는 것으로 읽는다.
+test('verify fail delete → index.md에서 카드 줄이 사라지고 log.md에 deleted가 남는다', () => {
+  const verifier = mockVerifier({ verdict: 'fail', claims: [{ claim: 'c', supported: false, quote: '', sourcePath: 'docs/source.md' }], reasons: ['source contradicts claim'] });
+  const project = setupProject({ extractorArgv: ['python3', verifier] });
+  try {
+    const wiki = join(project, '.auto-context', 'wiki');
+    writeFileSync(join(wiki, 'index.md'),
+      '# Auto-context Wiki Index\n\n- concepts/\n- concepts/test-card.md - Test Card\n- concepts/keeper.md - Keeper\n');
+    runVerifyWorker(project);
+    assert.equal(existsSync(join(project, CARD_REL)), false);
+    const lines = readFileSync(join(wiki, 'index.md'), 'utf8').split('\n');
+    assert.ok(!lines.some((l) => l.startsWith('- concepts/test-card.md ')), '삭제된 카드 줄이 남으면 안 된다');
+    assert.ok(lines.includes('- concepts/keeper.md - Keeper'), '다른 항목은 그대로');
+    assert.ok(lines.includes('- concepts/'), '섹션 표시 줄은 항목이 아니다');
+    assert.match(readFileSync(join(wiki, 'log.md'), 'utf8'), /deleted concepts\/test-card\.md - Test Card/);
+    const log = jsonl(join(project, '.auto-context', 'compile', 'verify-log.jsonl'));
+    assert.equal(log[0].indexOk, true, '인덱스 정합 여부가 판정 로그에 표면화된다');
+  } finally { removeTemp(project); }
+});
+
 // 기계 판정이 카드를 지우는 유일한 게이트이므로 삭제 사유는 pass 트래픽과 분리된
 // 파일에 남아야 한다 — fail은 억제 마커(verify-skipped)를 남기지 않으므로 이 원장이
 // 유일한 지속 기록이다.
