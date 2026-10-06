@@ -15,8 +15,11 @@ def queue_path():
     return dirty_queue.queue_path()
 
 
-def enqueue(selected):
-    dirty_queue.enqueue_collections(selected)
+def enqueue(selected, *, project_root=None):
+    if project_root is None:
+        dirty_queue.enqueue_collections(selected)
+    else:
+        dirty_queue.enqueue_project_collections(project_root, selected)
 
 
 def main():
@@ -52,7 +55,13 @@ def main():
     }
     if not selected:
         return 0
-    enqueue(selected)
+    try:
+        root = qmd_config.find_project_config(cwd).get('projectRoot', cwd)
+        enqueue(selected, project_root=root)
+    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+        # Do not emit a two-column queue item when this project's selected
+        # pointer is damaged; that could route its external collection globally.
+        return 0
     return 0
 
 

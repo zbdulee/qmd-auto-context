@@ -46,6 +46,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.resolve()))
 import config as qmd_config
 import cooldown as qmd_cooldown
+import qmd_route
 
 # `qmd cleanup` also clears the LLM cache and hard-deletes inactive document rows.
 # Both are qmd's own maintenance semantics for this command; we do not hand-roll
@@ -179,17 +180,13 @@ def touch_cooldown() -> None:
 # --- index --------------------------------------------------------------------
 
 
-def index_db_path() -> Path | None:
-    """Mirror of qmd's getDefaultDbPath() (store.js): INDEX_PATH override, else
-    $XDG_CACHE_HOME|~/.cache + /qmd/index.sqlite. We never pass `--index` to qmd,
-    so the shared default index is the only one this plugin can be looking at."""
-    override = os.environ.get("INDEX_PATH")
-    if override:
-        candidate = Path(override)
-        return candidate if candidate.is_file() else None
-    base = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
-    candidate = Path(base) / "qmd" / "index.sqlite"
-    return candidate if candidate.is_file() else None
+def index_db_path(cwd=None) -> Path | None:
+    """Read the exact index selected for the project being maintained."""
+    try:
+        candidate = Path(qmd_route.project_paths(cwd or os.getcwd())['INDEX_PATH'])
+        return candidate if candidate.is_file() and not candidate.is_symlink() else None
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
 
 
 def count_orphans(db_path: Path) -> tuple[int, int] | None:
@@ -222,7 +219,7 @@ def resolve_qmd_bin(explicit: str = "") -> str:
     if explicit:
         return explicit
     env_bin = os.environ.get("QMD_BIN_RESOLVED") or os.environ.get("QMD_BIN")
-    return env_bin or "qmd"
+    return env_bin or qmd_route.binary_info()['QMD_BIN']
 
 
 def run_cleanup(qmd_bin: str, timeout: float) -> tuple[bool, str]:
@@ -280,7 +277,7 @@ def decide(cwd: str) -> dict:
         # letting a broken cleanup vacuum once per session.
         return {"action": "skip", "reason": "cooldown", "pending": pending}
 
-    db_path = index_db_path()
+    db_path = index_db_path(cwd)
     counts = count_orphans(db_path) if db_path else None
     result: dict = {"pending": pending}
     if counts is not None:

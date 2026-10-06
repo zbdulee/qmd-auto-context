@@ -22,18 +22,30 @@ function assertStandardHooks(file) {
 test('claude hooks.json 표준 구조', () => assertStandardHooks('hooks/hooks.json'));
 test('codex hooks-codex.json 표준 구조', () => assertStandardHooks('hooks/hooks-codex.json'));
 
+test('prompt hooks stay synchronous with bounded host timeouts', () => {
+  for (const file of ['hooks/hooks.json', 'hooks/hooks-codex.json']) {
+    const hooks = JSON.parse(readFileSync(file, 'utf8')).hooks;
+    assert.equal(hooks.UserPromptSubmit[0].hooks[0].timeout, 22);
+    assert.notEqual(hooks.UserPromptSubmit[0].hooks[0].async, true);
+    assert.equal(hooks.PostToolUse[0].hooks[0].timeout, 22);
+    assert.equal(hooks.SessionStart[0].hooks[0].timeout, 5);
+    assert.ok(hooks.SessionStart[0].hooks[0].command.includes('update-queued'));
+    assert.equal(hooks.Stop[0].hooks[0].timeout, 3);
+  }
+});
+
 // 공식 스펙 이벤트명 (developers.openai.com/codex/hooks, code.claude.com/docs/hooks)
 function events(file) {
   return Object.keys(JSON.parse(readFileSync(file, 'utf8')).hooks || {});
 }
 
-test('claude 이벤트명: SessionStart/UserPromptSubmit/PreToolUse/PostToolUse', () => {
-  assert.deepEqual(events('hooks/hooks.json').sort(), ['PostToolUse', 'PreToolUse', 'SessionStart', 'UserPromptSubmit']);
+test('claude 이벤트명: SessionStart/UserPromptSubmit/PreToolUse/PostToolUse/Stop', () => {
+  assert.deepEqual(events('hooks/hooks.json').sort(), ['PostToolUse', 'PreToolUse', 'SessionStart', 'Stop', 'UserPromptSubmit']);
 });
 
 test('codex 이벤트명: PascalCase (공식 — snake_case 아님)', () => {
   const e = events('hooks/hooks-codex.json');
-  assert.deepEqual(e.sort(), ['PostToolUse', 'PreToolUse', 'SessionStart', 'UserPromptSubmit']);
+  assert.deepEqual(e.sort(), ['PostToolUse', 'PreToolUse', 'SessionStart', 'Stop', 'UserPromptSubmit']);
   assert.ok(!e.includes('session_start'), 'snake_case는 Codex가 인식 못함');
 });
 

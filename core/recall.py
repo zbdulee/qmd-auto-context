@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import os
 import json
+import hashlib
 import math
 import re
 import time
@@ -19,6 +20,9 @@ import resolve_paths as qmd_resolve_paths
 import wiki_markers
 import wiki_freshness
 import yaml_scalars
+import hook_budget
+import qmd_route
+import qmd_project_query
 
 DEFAULT_DAEMON_URL = "http://localhost:8483"
 DEFAULT_HEALTH_TIMEOUT = 2.0
@@ -61,7 +65,7 @@ def health_timeout() -> float:
 def daemon_alive(daemon_url: str) -> bool:
     try:
         req = urllib.request.Request(f"{daemon_url}/health", method="GET")
-        with urllib.request.urlopen(req, timeout=health_timeout()) as resp:
+        with urllib.request.urlopen(req, timeout=hook_budget.remaining(health_timeout())) as resp:
             return resp.status == 200
     except (urllib.error.URLError, OSError, ValueError):
         return False
@@ -164,7 +168,7 @@ COLLAPSE_BLANKS_RE = re.compile(r"\n{3,}")
 CONTROL_OR_SPACE_RE = re.compile(r"[\s\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028\u2029\ufeff]+")
 
 
-def read_card_text_full(path: Path) -> str | None:
+def read_card_text_full(path: Path, *, bounded_shadow=False) -> str | None:
     """카드 전문을 **본문 지문 대조와 같은 정규화로** 읽는다(창 상한 없음).
 
     본문 지문(`yaml_scalars.card_body_hash`)은 "LF 로 접힌 디코딩 텍스트"에 대한 해시이고
@@ -183,6 +187,10 @@ def read_card_text_full(path: Path) -> str | None:
     첫 읽기로 이미 전문을 가진다. 전문 read+sha256 실측 0.113ms/장이다.
     """
     try:
+        if bounded_shadow:
+            from context_learning.seam import _snapshot
+            snapshot = _snapshot(path)
+            return normalize_newlines(snapshot[1].decode('utf-8', errors='replace')) if snapshot else None
         with open(path, "r", encoding="utf-8", errors="replace", newline="") as handle:
             return normalize_newlines(handle.read())
     except (OSError, ValueError):
@@ -883,7 +891,7 @@ def _apply_match_position(meta: dict, text: str, body_start: int, result: dict,
 def read_wiki_meta(result: dict, config: dict, cwd: str, summary_max_chars: int = DEFAULT_INJECT_SUMMARY_MAX_CHARS,
                    roots: tuple[Path, Path] | None = None,
                    source_opts: tuple[int, list[Path]] | None = None,
-                   pending_cutoffs: dict[str, int | None] | None = None) -> dict:
+                   pending_cutoffs: dict[str, int | None] | None = None, *, bounded_shadow=False) -> dict:
     """Read a wiki result's status, automatic trust, title, and body.
 
     Trust is fail-closed: only verified qmd-owned cards with non-empty compiler
@@ -1002,7 +1010,7 @@ def read_wiki_meta(result: dict, config: dict, cwd: str, summary_max_chars: int 
         meta["bodyHashState"] = "absent"
     else:
         # 창을 소진하지 않았으면 `text` 가 이미 전문이다 — 추가 I/O 0.
-        full = text if not meta["windowTruncated"] else read_card_text_full(path)
+        full = text if not meta["windowTruncated"] else read_card_text_full(path, bounded_shadow=bounded_shadow)
         actual = yaml_scalars.card_body_hash(full) if full is not None else None
         if actual is None:
             meta["bodyHashState"] = "unreadable"
@@ -1033,14 +1041,14 @@ def read_wiki_meta(result: dict, config: dict, cwd: str, summary_max_chars: int 
 def annotate_wiki_result(result: dict, config: dict, cwd: str, summary_max_chars: int,
                          roots: tuple[Path, Path] | None = None,
                          source_opts: tuple[int, list[Path]] | None = None,
-                         pending_cutoffs: dict[str, int | None] | None = None) -> None:
+                         pending_cutoffs: dict[str, int | None] | None = None, *, bounded_shadow=False) -> None:
     """wiki role 결과에 `_wiki_*` 메타를 붙인다(카드 파일 읽기 1회).
 
     본문·title·표시 경로는 wiki role 결과에만 붙으므로, raw 결과에는 어떤 경우에도
     본문이 실리지 않는다(wikiOnly 경계 유지).
     """
     meta = read_wiki_meta(
-        result, config, cwd, summary_max_chars, roots, source_opts, pending_cutoffs)
+        result, config, cwd, summary_max_chars, roots, source_opts, pending_cutoffs, bounded_shadow=bounded_shadow)
     result["_wiki_status"] = meta["status"]
     result["_wiki_trusted"] = meta["trusted"]
     result["_wiki_created_by"] = meta["createdBy"]
@@ -1333,7 +1341,7 @@ def run_df_probe(daemon_url: str, collections: list[str], terms: list[str],
     """
     if not collections or not terms:
         return None
-    deadline = time.monotonic() + budget
+    deadline = min(time.monotonic() + budget, hook_budget.deadline())
     present = set()
     for term in terms:
         remaining = deadline - time.monotonic()
@@ -1839,7 +1847,7 @@ def run_shadow_query(
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         return {"status": "budget_exhausted"}
-    timeout = min(shadow_query_timeout(), remaining)
+    timeout = min(shadow_query_timeout(), remaining, hook_budget.remaining())
     payload = {
         "searches": searches,
         "collections": collections,
@@ -1989,6 +1997,7 @@ def main():
     # If QMD_SANDBOX is set or --sandbox option is in sys.argv, exit immediately with no output
     if os.environ.get("QMD_SANDBOX") or "--sandbox" in sys.argv:
         return 0
+    hook_budget.arm()
 
     # sandbox 다음에 바로 읽는다 — stdin 파싱 실패도 사유를 남겨야 하기 때문이다.
     # (sandbox는 예외다: "즉시 무출력 종료"가 계약이므로 파일에도 쓰지 않는다.)
@@ -2027,6 +2036,8 @@ def main():
     if not qmd_config.event_enabled(config, payload.get("hook_event_name", "UserPromptSubmit")):
         log_recall_event(log_path, "event_disabled")
         return 0
+    live_selection = config.get('contextLearning', {}).get('liveSelection') is True
+    primary_limit = 15 if live_selection else DAEMON_QUERY_LIMIT
     
     # Extract keywords + identifiers(정확 토큰) + lexical terms.
     # EP 게이팅과 조립 순서는 keywords.build_lexical_terms가 SSOT다 — CLI(main)와
@@ -2116,7 +2127,7 @@ def main():
     lex_terms_absent_in_cut = 0
     lex_identifier_present = False
 
-    def query_daemon(query_collections: list[str]) -> list[dict] | None:
+    def query_daemon(query_collections: list[str], limit=DAEMON_QUERY_LIMIT) -> list[dict] | None:
         return None
 
     def load_fixture(path: str) -> list[dict] | None:
@@ -2127,6 +2138,13 @@ def main():
             return None
         loaded = fixture_data.get("results", [])
         return loaded if isinstance(loaded, list) else []
+
+    try:
+        qmd_paths = qmd_route.project_paths(found_config.get('projectRoot') or cwd)
+    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+        log_recall_event(log_path, "project_index_invalid")
+        return 0
+    project_index = qmd_paths if qmd_paths['selected'] else None
 
     if fixture_path:
         results = load_fixture(fixture_path)
@@ -2144,19 +2162,33 @@ def main():
                 queried_collections = list(_wiki)
                 raw_collections = qmd_config.recall_raw_collections(collections, roles_config)
     else:
-        if not daemon_alive(daemon_url):
+        if project_index:
+            # A selected project index is never queried through the global daemon.
+            shadow_on = False
+            lex_df = "project_local_cli"
+            def query_daemon(query_collections: list[str], limit=DAEMON_QUERY_LIMIT) -> list[dict] | None:
+                try:
+                    budget = float(config.get("queryTimeout", QUERY_TIMEOUT))
+                    if limit != primary_limit:
+                        budget = min(1.0, budget)
+                    return qmd_project_query.query(project_index,
+                        list(lex_searches) + [{"type":"vec","query":vector_query}],
+                        query_collections,limit,timeout=hook_budget.remaining(budget))
+                except (OSError, ValueError, hook_budget.HookDeadlineExceeded):
+                    return None
+        elif not daemon_alive(daemon_url):
             log_recall_event(log_path, "daemon_unreachable", daemon=daemon_url)
             return 0
         else:
-            def query_daemon(query_collections: list[str]) -> list[dict] | None:
+            def query_daemon(query_collections: list[str], limit=DAEMON_QUERY_LIMIT) -> list[dict] | None:
                 query_payload = {
                     "searches": list(lex_searches) + [
                         {"type": "vec", "query": vector_query},
                     ],
                     "collections": query_collections,
-                    "limit": DAEMON_QUERY_LIMIT,
+                    "limit": limit,
                     "minScore": 0,
-                    "timeout": config.get("queryTimeout", QUERY_TIMEOUT),
+                    "timeout": hook_budget.remaining(min(1.0, float(config.get("queryTimeout", QUERY_TIMEOUT))) if limit != primary_limit else float(config.get("queryTimeout", QUERY_TIMEOUT))),
                     "rerank": False,
                 }
 
@@ -2169,33 +2201,39 @@ def main():
                 )
                 try:
                     timeout = float(config.get("queryTimeout", QUERY_TIMEOUT))
-                    with urllib.request.urlopen(req, timeout=timeout) as resp:
-                        body = resp.read().decode("utf-8")
+                    if limit != primary_limit:
+                        timeout = min(1.0, timeout)
+                    with urllib.request.urlopen(req, timeout=hook_budget.remaining(timeout)) as resp:
+                        raw_body = resp.read(262145) if limit != primary_limit else resp.read()
+                        if limit != primary_limit and len(raw_body) > 262144:
+                            return None
+                        body = raw_body.decode("utf-8")
                     parsed = json.loads(body)
                     daemon_results = parsed.get("results", [])
                     return daemon_results if isinstance(daemon_results, list) else []
                 except (urllib.error.URLError, OSError, ValueError, json.JSONDecodeError):
                     return None
 
-            strategy = config.get("recallStrategy")
-            if strategy in ("hierarchical", "wikiOnly"):
-                wiki_collections = qmd_config.wiki_collections(collections, roles_config)
-                raw_collections = qmd_config.recall_raw_collections(collections, roles_config)
-                if wiki_collections:
-                    queried_wiki_first = True
-                    queried_collections = list(wiki_collections)
-                else:
-                    # hierarchical without wiki role → flat처럼 전 컬렉션 query.
-                    # (wikiOnly + wiki role 없음은 상단에서 이미 조기 종료됨)
-                    queried_collections = list(collections)
+        strategy = config.get("recallStrategy")
+        if strategy in ("hierarchical", "wikiOnly"):
+            wiki_collections = qmd_config.wiki_collections(collections, roles_config)
+            raw_collections = qmd_config.recall_raw_collections(collections, roles_config)
+            if wiki_collections:
+                queried_wiki_first = True
+                queried_collections = list(wiki_collections)
             else:
+                # hierarchical without wiki role → flat처럼 전 컬렉션 query.
+                # (wikiOnly + wiki role 없음은 상단에서 이미 조기 종료됨)
                 queried_collections = list(collections)
+        else:
+            queried_collections = list(collections)
 
-            # lex term 좁히기는 **본 질의를 보내기 전에, 여기 한 곳에서만** 한다.
-            # 게이트 프로브도 raw backfill도 같은 `lex_searches`를 재사용하므로,
-            # 이 지점을 지나면 "게이트가 판정한 문자열 ≠ recall이 보낸 문자열"이
-            # 구조적으로 불가능하다. 질의 대상 컬렉션이 정해진 **뒤**여야 하는 이유:
-            # DF 는 코퍼스에 대한 사실이고 hierarchical 은 wiki 컬렉션만 먼저 본다.
+        # lex term 좁히기는 **본 질의를 보내기 전에, 여기 한 곳에서만** 한다.
+        # 게이트 프로브도 raw backfill도 같은 `lex_searches`를 재사용하므로,
+        # 이 지점을 지나면 "게이트가 판정한 문자열 ≠ recall이 보낸 문자열"이
+        # 구조적으로 불가능하다. 질의 대상 컬렉션이 정해진 **뒤**여야 하는 이유:
+        # DF 는 코퍼스에 대한 사실이고 hierarchical 은 wiki 컬렉션만 먼저 본다.
+        if not project_index:
             narrowing = narrow_general_lex(
                 lex_searches, built_terms["generalTerms"],
                 identifiers=built_terms["identifiers"],
@@ -2206,15 +2244,17 @@ def main():
             lex_terms_absent = narrowing["absent"]
             lex_terms_absent_in_cut = narrowing["absent_in_cut"]
             lex_identifier_present = narrowing["identifier_present"]
-            results = query_daemon(queried_collections)
+        results = query_daemon(queried_collections, primary_limit)
 
-            if results is None:
-                log_recall_event(log_path, "query_failed", daemon=daemon_url)
-                return 0
+        if results is None:
+            log_recall_event(log_path, "query_failed", daemon=daemon_url)
+            return 0
 
     # The daemon's requested limit is not a trust boundary.  Enforce the
     # primary phase bound locally before any wiki card annotation or hashing.
-    results = results[:DAEMON_QUERY_LIMIT]
+    learning_primary_unbounded = results if fixture_path or len(results) >= 30 else None
+    learning_primary_returned = min(len(results), primary_limit) if live_selection else len(results)
+    results = results[:primary_limit]
 
     # Log raw score observation if requested (log_path read once near the top)
     if log_path:
@@ -2259,7 +2299,7 @@ def main():
     # 단계까지 포괄해야 오설정을 진단할 수 있다(M3).
     annotated_cards: list[dict] = []
 
-    def annotate_all(items: list[dict]) -> None:
+    def annotate_all(items: list[dict], *, bounded_shadow=False) -> None:
         roles_map = qmd_config.role_map(config)
         for result in items:
             if "_collection" not in result:
@@ -2274,7 +2314,7 @@ def main():
                 continue
             annotate_wiki_result(
                 result, config, cwd, summary_max_chars, card_roots,
-                card_source_opts, card_pending_cutoffs)
+                card_source_opts, card_pending_cutoffs, bounded_shadow=bounded_shadow)
             annotated_cards.append(result)
 
     annotate_all(results)
@@ -2461,7 +2501,7 @@ def main():
             freshness_cache[cache_key] = snapshot
         return freshness_cache[cache_key]
 
-    def card_freshness(result: dict) -> str:
+    def card_freshness(result: dict, *, snapshotter=None) -> str:
         if card_pending_unknown:
             return wiki_freshness.UNKNOWN
         revisions = result.get("_wiki_source_revisions")
@@ -2487,7 +2527,7 @@ def main():
                 normalized["path"], card_roots[0], freshness_allow_roots)
             if resolved is None:
                 return wiki_freshness.STALE if reason == "missing" else wiki_freshness.UNKNOWN
-            current = current_snapshot_cached(resolved)
+            current = (snapshotter or current_snapshot_cached)(resolved)
             if current is None:
                 return wiki_freshness.UNKNOWN
             if current["sha256"] != normalized["sha256"]:
@@ -2500,7 +2540,7 @@ def main():
             return items
         selected: list[dict] = []
         for result in items:
-            if len(selected) >= top_n:
+            if len(selected) >= (primary_limit if live_selection else top_n):
                 break
             if not qmd_config.is_wiki_collection(roles, result.get("_collection", "")):
                 selected.append(result)
@@ -2518,6 +2558,8 @@ def main():
     # rescue 기록(로그 전용): (원래 rank, phase). phase는 wiki-scoped primary는 "wiki",
     # raw backfill은 "raw", 그 밖의 flat primary는 "primary".
     rank_fallback: tuple[int, str] | None = None
+
+    learning_phases = [{'name': 'primary', 'results': list(results), 'wiki_scoped': queried_wiki_first, 'returned_count': learning_primary_returned, 'unbounded_results': learning_primary_unbounded}] if config.get('contextLearning', {}).get('capture') is True else []
 
     filtered_results = prefer_wiki(apply_cutoff(results, min_score, wiki_scoped=queried_wiki_first))
     if not filtered_results and rescue_allowed():
@@ -2560,14 +2602,18 @@ def main():
                 log_recall_event(log_path, "fixture_error", fixture=raw_fixture_path)
                 return 0
         else:
-            raw_results = query_daemon(raw_collections)
+            raw_results = query_daemon(raw_collections, primary_limit)
             if raw_results is None:
                 log_recall_event(log_path, "query_failed", daemon=daemon_url)
                 return 0
         # Raw backfill is a separate phase with its own local daemon bound.  It
         # is never source-hashed, but an over-return must not expand injection.
-        raw_results = raw_results[:DAEMON_QUERY_LIMIT]
+        learning_raw_unbounded = raw_results if fixture_path or len(raw_results) >= 30 else None
+        learning_raw_returned = min(len(raw_results), primary_limit) if live_selection else len(raw_results)
+        raw_results = raw_results[:primary_limit]
         annotate_all(raw_results)
+        if learning_phases:
+            learning_phases.append({'name': 'raw', 'results': list(raw_results), 'wiki_scoped': False, 'returned_count': learning_raw_returned, 'unbounded_results': learning_raw_unbounded})
         # backfill이면 최종 선택은 raw에서 나오므로 original_rank도 raw 기준이다.
         rank_index.update(build_rank_index(raw_results))
         # backfill이 이미 raw를 질의했으면 shadow는 그 결과를 재사용한다(중복 query 방지).
@@ -2594,8 +2640,69 @@ def main():
         top_n_eligible_count = len(filtered_results)
         primary_freshness_drops_before_fallback = 0
 
-    # Limit to topN
-    final_results = filtered_results[:top_n]
+    # The normal path retains topN. An explicitly enabled local selector sees
+    # the same fifteen trusted wiki candidates that optional capture records.
+    # Any missing/invalid local prerequisite restores the bounded QMD choice.
+    final_results = filtered_results[:min(top_n, 3) if live_selection else top_n]
+    live_reason = 'disabled'
+    live_chose_zero = False
+    if live_selection:
+        candidate_count = min(len(filtered_results), primary_limit)
+        resources = {}
+        current_corpus = None
+        try:
+            from context_learning.corpus import snapshot as corpus_snapshot
+            from context_learning.live_select import choose
+            from context_learning.seam import _private_state, _snapshot
+            state = _private_state(config, card_roots[0])
+            current_corpus = corpus_snapshot(card_roots[0], config, qmd_paths=qmd_paths)
+            indexed_hashes = ({(collection, relative): revision
+                for collection, relative, revision in current_corpus['material']['activeDocuments']}
+                if current_corpus else {})
+            if state is None:
+                live_reason = 'private_state_unavailable'
+            elif not filtered_results:
+                live_reason = 'no_candidates'
+            elif any(not qmd_config.is_wiki_collection(roles, r.get('_collection', ''))
+                     for r in filtered_results[:primary_limit]):
+                live_reason = 'non_wiki_pool'
+            else:
+                model_rows = []
+                for hit in filtered_results[:primary_limit]:
+                    path = resolve_wiki_result_path(hit, config, cwd, card_roots)
+                    if path is None:
+                        raise ValueError('candidate_path_unavailable')
+                    snapped = _snapshot(path)
+                    if snapped is None:
+                        raise ValueError('candidate_snapshot_unavailable')
+                    revision, content = snapped
+                    collection, separator, relative = hit['file'].removeprefix('qmd://').partition('/')
+                    if not separator or indexed_hashes.get((collection, relative)) != revision['sha256']:
+                        raise ValueError('candidate_index_stale')
+                    model_rows.append({'id': hit['file'].removeprefix('qmd://'),
+                                       'revision_sha256': revision['sha256'],
+                                       'source_text': content.decode('utf8')})
+                selected_ids, live_reason, resources = choose(
+                    state, prompt, model_rows,
+                    corpus_fingerprint=current_corpus['fingerprint'] if current_corpus else None,
+                    deadline=hook_budget.deadline())
+                if selected_ids is not None:
+                    by_id = {r['file'].removeprefix('qmd://'): r
+                             for r in filtered_results[:primary_limit]}
+                    final_results = [by_id[cid] for cid in selected_ids]
+                    live_chose_zero = not selected_ids
+        except (OSError, ValueError, UnicodeError, KeyError, TypeError):
+            live_reason = 'candidate_unavailable'
+        log_recall_event(log_path, live_reason, event_override='qmd_laya_selection',
+                         candidates=candidate_count, selected=len(final_results),
+                         fallback=live_reason != 'selected',
+                         candidate_id_hashes=[hashlib.sha256(str(r.get('file', '')).encode()).hexdigest()[:16]
+                                              for r in filtered_results[:primary_limit]],
+                         selected_id_hashes=[hashlib.sha256(str(r.get('file', '')).encode()).hexdigest()[:16]
+                                             for r in final_results],
+                         corpus_fingerprint=current_corpus['fingerprint'] if current_corpus else None,
+                         elapsed_seconds=resources.get('elapsed_seconds'),
+                         observed_peak_rss_kib=resources.get('observed_peak_rss_kib'))
 
     # ── lex 게이트 ────────────────────────────────────────────────────────────
     # 상세 근거는 위 `lex_probe_searches` 블록 주석 참고. 여기서는 배치 규칙만:
@@ -2680,7 +2787,7 @@ def main():
         strip_gated_injection(gate_targets)
 
     # Record why recall produced (or withheld) output — file-only, never stdout.
-    selection_reason = "selected" if final_results else "no_results_after_filter"
+    selection_reason = "selected" if final_results else "laya_selected_zero" if live_chose_zero else "no_results_after_filter"
     dropped_top_n = max(
         0,
         top_n_eligible_count
@@ -2850,6 +2957,78 @@ def main():
             }
         }
         print(json.dumps(output, ensure_ascii=False))
+
+    # Optional learning observes eligible returned candidates; never changes output.
+    if config.get('contextLearning', {}).get('capture') is True:
+        try:
+            from context_learning.seam import observe
+            from context_learning.seam import _snapshot
+            def learning_verdict(hit, wiki_scoped):
+                verdict = classify(hit, wiki_scoped=wiki_scoped)
+                if verdict != 'eligible':
+                    return verdict
+                if qmd_config.is_wiki_collection(roles, hit.get('_collection', '')):
+                    limited = [False]
+                    def bounded_source(path):
+                        try:
+                            value = _snapshot(path)
+                        except OSError:
+                            value = None
+                        if value is None:
+                            limited[0] = True
+                            return None
+                        return value[0]
+                    state = card_freshness(hit, snapshotter=bounded_source)
+                    if limited[0]:
+                        return 'observation_budget'
+                    if state != wiki_freshness.FRESH:
+                        return 'freshness_' + str(state)
+                return 'eligible'
+            capture_phases = learning_phases
+            capture_verdict = learning_verdict
+            candidate_limit = None
+            requested_k = config.get('contextLearning', {}).get('candidateTopK', 8)
+            if live_selection:
+                # The live QMD query itself returned up to 15. Capture that
+                # exact pool rather than issuing a different shadow search.
+                candidate_limit = 15
+            elif requested_k != 8:
+                try:
+                    from context_learning.pool import expand
+                    def prepare_learning(hits):
+                        # Bound each wiki file before the existing annotation reader.
+                        for hit in hits:
+                            collection = qmd_uri_to_collection(hit.get('file', ''))
+                            if qmd_config.is_wiki_collection(roles, collection):
+                                base = config.get('collectionPaths', {}).get(collection)
+                                relative = hit.get('file', '').removeprefix('qmd://').partition('/')[2]
+                                path = (Path(found_config.get('projectRoot')) / base / relative).resolve() if isinstance(base, str) else None
+                                allowed = (Path(found_config.get('projectRoot')) / base).resolve() if isinstance(base, str) else None
+                                if path is None or Path(found_config.get('projectRoot')).resolve() not in path.parents or allowed not in path.parents or _snapshot(path) is None:
+                                    hit['_learning_precheck_failed'] = True
+                        annotate_all([h for h in hits if not h.get('_learning_precheck_failed')], bounded_shadow=True)
+                        if 'ep' in config.get('lexicalPatterns', []):
+                            promote_ep_exact_matches(hits, ep_numbers(prompt))
+                    capture_phases, capture_verdict = expand(
+                        learning_phases, top_k=requested_k,
+                        retrieve=lambda phase, limit: query_daemon(raw_collections if phase['name']=='raw' else queried_collections, limit),
+                        prepare=prepare_learning,
+                        hard_verdict=lambda hit, scope: 'observation_budget' if hit.get('_learning_precheck_failed') else classify(hit, wiki_scoped=scope),
+                        fresh_verdict=learning_verdict,
+                        cutoff=lambda name: raw_fallback_min_score if name=='raw' else min_score,
+                        is_wiki=lambda hit: qmd_config.is_wiki_collection(roles, hit.get('_collection', '')),
+                        hierarchical=strategy=='hierarchical')
+                    candidate_limit = requested_k
+                except Exception:
+                    # Original output is already emitted. Keep the old capture
+                    # and explicitly record expansion failure, never claim Top15.
+                    log_recall_event(log_path, 'learning_expansion_failed', event_override='qmd_context_capture', status='baseline_pool_fallback')
+            status = observe(payload, config, found_config.get('projectRoot'), final_results,
+                             phases=capture_phases, verdict=capture_verdict,
+                             candidate_limit=candidate_limit, qmd_paths=qmd_paths)
+            log_recall_event(log_path, 'learning_capture', event_override='qmd_context_capture', status=status)
+        except Exception:
+            pass
 
     if shadow_on:
         log_shadow_diagnostics(

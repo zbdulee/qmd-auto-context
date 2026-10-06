@@ -121,6 +121,56 @@ fi
 echo "$$" > "$WRITER_LOCK/pid" 2>/dev/null || true
 trap 'rm -f "$WRITER_LOCK/pid" 2>/dev/null; rmdir "$WRITER_LOCK" 2>/dev/null || true; rm -f "$WORKER_LOCK/pid" 2>/dev/null; rmdir "$WORKER_LOCK" 2>/dev/null || true' EXIT
 
+# Resolve every dirty collection before any QMD write. Mixed project queues
+# must never be handed to a single global-index update.
+ROUTES=()
+has_project_index=0
+for e in "${ENTRIES[@]}"; do
+  remainder="${e#*$'\t'}"
+  path="${remainder%%$'\t'*}"
+  owner=""
+  [[ "$remainder" == *$'\t'* ]] && owner="${remainder#*$'\t'}"
+  route="$(python3 "$_QMD_ROOT/core/qmd_route.py" resolve-env "${owner:-$path}")" || {
+    log "invalid project index pointer — requeue"
+    requeue "${ENTRIES[@]}"
+    exit 0
+  }
+  if [ -n "$owner" ] && [ -z "$route" ]; then
+    log "selected project index missing — requeue"
+    requeue "${ENTRIES[@]}"
+    exit 0
+  fi
+  ROUTES+=("$route")
+  [ -n "$route" ] && has_project_index=1
+done
+if [ "$has_project_index" = 1 ]; then
+  # The existing writer lock is held throughout. Each subshell receives only
+  # its own project index environment; no project DB can absorb another queue.
+  touched_global=0
+  for i in "${!ENTRIES[@]}"; do
+    e="${ENTRIES[$i]}"; name="${e%%$'\t'*}"
+    remainder="${e#*$'\t'}"; path="${remainder%%$'\t'*}"
+    [ -d "$path" ] || continue
+    route="${ROUTES[$i]}"
+    [ -z "$route" ] && touched_global=1
+    if ! (
+      if [ -n "$route" ]; then
+        IFS=$'\t' read -r INDEX_PATH QMD_CONFIG_DIR XDG_CACHE_HOME <<< "$route"
+        export INDEX_PATH QMD_CONFIG_DIR XDG_CACHE_HOME
+      fi
+      add_out="$("$QMD" collection add "$path" --name "$name" 2>&1)" || {
+        printf '%s\n' "$add_out" | grep -qi 'already exists' || exit 1
+      }
+      "$QMD" update >>"$LOG" 2>&1 && "$QMD" embed >>"$LOG" 2>&1
+    ); then
+      log "project-routed update failed — requeue: $name"
+      requeue "$e"
+    fi
+  done
+  if [ "$touched_global" = 1 ] && [ -z "${QMD_NO_RELOAD:-}" ]; then reload_daemon; fi
+  exit 0
+fi
+
 added=0
 for e in "${ENTRIES[@]}"; do
   name="${e%%	*}"; path="${e#*	}"

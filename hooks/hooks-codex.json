@@ -1,24 +1,31 @@
 {
   "hooks": {
     "SessionStart": [
-      { "hooks": [ { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook\" update codex" } ] }
+      { "hooks": [
+          { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook\" update-queued codex", "timeout": 5 },
+          { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook\" topical-reconcile codex", "timeout": 3 }
+        ] }
     ],
     "UserPromptSubmit": [
-      { "hooks": [ { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook\" recall codex" } ] }
+      { "hooks": [ { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook\" recall codex", "timeout": 22 } ] }
     ],
     "PreToolUse": [
       { "matcher": "apply_patch|Edit|Write",
         "hooks": [
-          { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook\" gate codex" }
+          { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook\" gate codex", "timeout": 3 }
         ] }
     ],
     "PostToolUse": [
       { "matcher": "apply_patch|Edit|Write",
         "hooks": [
-          { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook\" posttool codex" },
-          { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook\" index codex" },
-          { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook\" compile codex" }
+          { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook\" posttool codex", "timeout": 22 },
+          { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook\" index codex", "timeout": 5 },
+          { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook\" compile codex", "timeout": 5 },
+          { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook\" topical-event codex", "timeout": 5 }
         ] }
+    ],
+    "Stop": [
+      { "hooks": [ { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook\" topical-stop codex", "timeout": 3 } ] }
     ]
   }
 }

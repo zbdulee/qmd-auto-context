@@ -23,7 +23,7 @@ import config as qmd_config
 import wiki_dedup_judge
 import wiki_markers
 import yaml_scalars
-from dirty_queue import enqueue_collections
+from dirty_queue import enqueue_project_collections
 
 ALLOWED_TYPES = {
     "concept",
@@ -1672,7 +1672,7 @@ def _compile_locked(root: Path, config: dict, compile_cfg: dict, mode: str,
 
     collection, collection_path = find_wiki_collection(config)
     if collection and collection_path:
-        enqueue_collections({collection: str((root / collection_path).resolve())})
+        enqueue_project_collections(root, {collection: str((root / collection_path).resolve())})
 
     # 기계 검수(auto-verify) enqueue: generated로 쓰인 카드만 대상. verify worker가
     # 카드 주장 vs 원문을 대조해 verified 승격 또는 (onFail) 삭제한다.

@@ -999,6 +999,19 @@ def deprecated_key_notice(input_config):
 
 def normalize_config(input_config):
     config = dict(DEFAULT_CONFIG)
+    learning = input_config.get('contextLearning')
+    if isinstance(learning, dict):
+        live_selection = learning.get('liveSelection') is True
+        config['contextLearning'] = {
+            'capture': learning.get('capture') is True,
+            'autoCycle': learning.get('autoCycle') is True,
+            'liveSelection': live_selection,
+            # Expansion is independently opt-in; invalid values retain the old pool.
+            # Live selection and an optional capture of its candidates must see
+            # the same 15-result pool. The ordinary observer keeps default 8.
+            'candidateTopK': 15 if live_selection else learning.get('candidateTopK') if type(learning.get('candidateTopK')) is int and 1 <= learning['candidateTopK'] <= 15 else 8,
+            'stateRoot': learning.get('stateRoot') if isinstance(learning.get('stateRoot'), str) else None,
+        }
     config["name"] = input_config.get("name", DEFAULT_CONFIG["name"]) if isinstance(input_config.get("name", ""), str) else DEFAULT_CONFIG["name"]
     config["collections"] = string_list(input_config.get("collections"), DEFAULT_CONFIG["collections"])
     config["minScore"] = coerce_float(input_config.get("minScore", DEFAULT_CONFIG["minScore"]), DEFAULT_CONFIG["minScore"])

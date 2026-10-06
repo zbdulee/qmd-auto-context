@@ -21,7 +21,7 @@ import compile_paths as cp
 import config as qmd_config
 import wiki_compile as wc
 import wiki_dedup_scan as dedup_scan
-from dirty_queue import enqueue_collections
+from dirty_queue import enqueue_project_collections
 from wiki_compile_worker import claim_queue, requeue_lines
 
 ACTIONS = {"merge", "skip"}
@@ -218,7 +218,7 @@ def main() -> int:
     if result.get("action") == "deleted":
         collection, collection_path = wc.find_wiki_collection(config)
         if collection and collection_path:
-            enqueue_collections({collection: str((root / collection_path).resolve())})
+            enqueue_project_collections(root, {collection: str((root / collection_path).resolve())})
 
     print(json.dumps(result, ensure_ascii=False))
     return 0 if result.get("action") != "rejected" else 1

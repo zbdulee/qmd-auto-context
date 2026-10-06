@@ -52,7 +52,7 @@ import wiki_compile_worker as wcw
 import wiki_freshness
 import wiki_source_missing as wsm
 import yaml_scalars
-from dirty_queue import enqueue_collections
+from dirty_queue import enqueue_project_collections
 from wiki_compile_enqueue import _safe_queue_path
 
 # 경로는 전부 `compile_paths` 상수 테이블에서 온다(설정 키 4개는 제거됐다 —
@@ -412,7 +412,7 @@ def record_verify_suppression(
 def reindex_wiki(root: Path, config: dict) -> None:
     collection, collection_path = wc.find_wiki_collection(config)
     if collection and collection_path:
-        enqueue_collections({collection: str((root / collection_path).resolve())})
+        enqueue_project_collections(root, {collection: str((root / collection_path).resolve())})
 
 
 def card_state(target: Path) -> tuple[str | None, dict, str, str]:

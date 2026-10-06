@@ -107,7 +107,7 @@ fi
   }
 });
 
-test("posttool action waits for backend before posttool core", () => {
+test("posttool action starts backend without waiting before posttool core", () => {
   const d = mkdtempSync(join(tmpdir(), "qmd-runhook-posttool-"));
   try {
     const managerLog = join(d, "manager.log");
@@ -119,7 +119,8 @@ test("posttool action waits for backend before posttool core", () => {
       QMD_CORE_POSTTOOL_SCRIPT: posttoolCore,
     });
     assert.equal(out, "");
-    assert.equal(readFileSync(managerLog, "utf8"), "ensure --wait\n");
+    assert.notEqual(waitForFile(managerLog, () => true), "");
+    assert.equal(readFileSync(managerLog, "utf8"), "ensure\n");
     assert.equal(readFileSync(coreLog, "utf8"), "posttool\n");
   } finally {
     removeTemp(d);

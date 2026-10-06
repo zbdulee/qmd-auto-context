@@ -2,13 +2,46 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { resolve } from 'node:path';
+import { performance } from 'node:perf_hooks';
 import { removeTemp } from './helpers/temp.mjs';
 
 const PROJ = resolve('test/fixtures/story-proj');
+
+test('posttool bounds its child recall inside the shared hook deadline', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'qmd-posttool-deadline-'));
+  try {
+    const fake = join(dir, 'python3');
+    writeFileSync(fake, '#!/bin/sh\nsleep 5\n');
+    chmodSync(fake, 0o700);
+    const started = performance.now();
+    const out = execFileSync('/usr/bin/python3', ['core/posttool.py'], {
+      input: JSON.stringify({hook_event_name: 'PostToolUse', tool_name: 'Write',
+        tool_input: {file_path: `${PROJ}/04_Manuscript/ep004-상가-음식.md`,
+          content: 'Synthetic source content long enough for a search hint.'}, cwd: PROJ}),
+      encoding: 'utf8', timeout: 4000,
+      env: {...process.env, QMD_RECALL_LOG: '', QMD_HOOK_TOTAL_SECONDS: '2',
+        PATH: `${dir}:${process.env.PATH}`},
+    });
+    assert.equal(out.trim(), '');
+    assert.ok(performance.now() - started < 3500);
+  } finally {
+    removeTemp(dir);
+  }
+});
+
+test('apply_patch search text uses added lines, never headers or delete commands', () => {
+  const patch = '*** Begin Patch\n*** Delete File: 04_Manuscript/old.md\n*** Update File: 04_Manuscript/new.md\n@@\n-old text\n+새로 쓰인 실제 본문입니다.\n+++counter\n*** End Patch';
+  const script = 'import json,sys;sys.path.insert(0,"core");import posttool;print(json.dumps([posttool.extract_text({"tool_name":"apply_patch","tool_input":{"command":p}}) for p in json.load(sys.stdin)]))';
+  const out = execFileSync('python3', ['-c', script], {
+    input: JSON.stringify([patch, '*** Begin Patch\n*** Delete File: 04_Manuscript/old.md\n*** End Patch']),
+    encoding: 'utf8',
+  });
+  assert.deepEqual(JSON.parse(out), ['새로 쓰인 실제 본문입니다.\n++counter', '']);
+});
 
 function posttool(payload, env = {}) {
   const out = execFileSync('python3', ['core/posttool.py'], {

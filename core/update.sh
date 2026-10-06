@@ -1099,6 +1099,17 @@ run_update() {
   qmd() { "$qmd_bin" "$@"; }
 
   workdir="$1"
+  # A selected project shadow DB is the only writable index for this project.
+  # Invalid pointers fail closed instead of falling back to the user's DB.
+  local selected_qmd_env
+  selected_qmd_env="$(python3 "$_QMD_CORE_DIR/qmd_route.py" resolve-env "$workdir")" || {
+    log "ABORT: project QMD index pointer invalid"
+    exit 0
+  }
+  if [ -n "$selected_qmd_env" ]; then
+    IFS=$'\t' read -r INDEX_PATH QMD_CONFIG_DIR XDG_CACHE_HOME <<< "$selected_qmd_env"
+    export INDEX_PATH QMD_CONFIG_DIR XDG_CACHE_HOME QMD_PROJECT_SHADOW_INDEX=1
+  fi
   set_status_for_workdir "$workdir"
   notice_hash_prime "$workdir"
   cd "$workdir" 2>/dev/null || exit 0
@@ -1147,6 +1158,11 @@ run_update() {
   if [ "$refused" = "True" ]; then
     log "ABORT: resolve-only refused path '$workdir' after prune"
     exit 0
+  fi
+
+  local auto_cycle_enabled=0
+  if [[ "$config_json" == *'"autoCycle": true'* || "$config_json" == *'"autoCycle":true'* ]]; then
+    auto_cycle_enabled=1
   fi
 
   preflight_remove_risky
@@ -1228,11 +1244,11 @@ run_update() {
     elif ! mkdir "$EMBED_LOCK" 2>/dev/null; then
       log "EMBED: already running, skip"
     else
-      LOG="$LOG" EMBED_LOCK="$EMBED_LOCK" QMD_BIN_RESOLVED="$qmd_bin" QMD_DAEMON_PORT="${QMD_DAEMON_PORT:-8483}" QMD_BACKEND_MANAGER="${QMD_BACKEND_MANAGER:-}" WORKDIR="$workdir" CORE_DIR="$(dirname "$0")" nohup bash -c '
+      LOG="$LOG" EMBED_LOCK="$EMBED_LOCK" QMD_BIN_RESOLVED="$qmd_bin" QMD_DAEMON_PORT="${QMD_DAEMON_PORT:-8483}" QMD_BACKEND_MANAGER="${QMD_BACKEND_MANAGER:-}" QMD_AUTO_CYCLE_ENABLED="$auto_cycle_enabled" WORKDIR="$workdir" CORE_DIR="$(dirname "$0")" nohup bash -c '
         echo "$$" > "$EMBED_LOCK/pid" 2>/dev/null || true
         trap "rm -f \"$EMBED_LOCK/pid\" 2>/dev/null; rmdir \"$EMBED_LOCK\" 2>/dev/null" EXIT
-        out=$("$QMD_BIN_RESOLVED" embed 2>&1); printf "%s\n" "$out" >> "$LOG"
-        if printf "%s" "$out" | grep -qiE "embedded|chunks"; then
+        out=$("$QMD_BIN_RESOLVED" embed 2>&1); embed_rc=$?; printf "%s\n" "$out" >> "$LOG"
+        if [ -z "${QMD_PROJECT_SHADOW_INDEX:-}" ] && printf "%s" "$out" | grep -qiE "embedded|chunks"; then
           # SIGTERM 으로 graceful shutdown 유도 → 데몬이 SQLite clean close 하며 WAL checkpoint.
           # SIGKILL 강제종료는 clean close 차단 → WAL checkpoint 누락 → vec query 저하.
           if [ -n "${QMD_BACKEND_MANAGER:-}" ] && [ -x "$QMD_BACKEND_MANAGER" ]; then
@@ -1240,6 +1256,13 @@ run_update() {
           else
             printf "[%s] EMBED reload skipped: QMD_BACKEND_MANAGER unavailable\n" "$(date +%H:%M:%S)" >> "$LOG"
           fi
+        fi
+        # Current-corpus cycles must see the index after update AND embed.
+        # The policy helper itself skips projects without explicit opt-in.
+        if [ "$embed_rc" -eq 0 ] && [ "$QMD_AUTO_CYCLE_ENABLED" = 1 ]; then
+          python3 "$CORE_DIR/context_learning_auto.py" launch-current "$WORKDIR" >> "$LOG" 2>&1 || true
+        elif [ "$embed_rc" -ne 0 ] && [ "$QMD_AUTO_CYCLE_ENABLED" = 1 ]; then
+          printf "[%s] AUTO-CYCLE: deferred because qmd embed failed (rc=%s)\n" "$(date +%H:%M:%S)" "$embed_rc" >> "$LOG"
         fi
         # Retroactive wiki dedup scan: must run strictly after embed completes
         # (this line), never after run_update()/--worker itself returns.
@@ -1383,7 +1406,7 @@ main() {
   fi
 
   # SessionStart sweep: flush any debounced wiki-compile batch (best-effort, background).
-  if [ -n "${QMD_BACKEND_MANAGER:-}" ] && [ -x "$QMD_BACKEND_MANAGER" ]; then
+  if [ -z "${QMD_AUTO_COMPILE_DISABLED:-}" ] && [ -n "${QMD_BACKEND_MANAGER:-}" ] && [ -x "$QMD_BACKEND_MANAGER" ]; then
     bash "$QMD_BACKEND_MANAGER" kick-wiki-compile "$workdir" --flush >/dev/null 2>&1 &
   fi
 
@@ -1930,6 +1953,15 @@ PY
     else
       notice_clear root-collection-path "$workdir"
     fi
+  fi
+
+  # Explicit project/private-state opt-in only. The launcher returns before
+  # training; its one-shot child checks the durable due schedule and all split,
+  # validation and promotion gates. It never invokes a teacher or global job.
+  if [[ "$config_json" == *'"autoCycle": true'* || "$config_json" == *'"autoCycle":true'* ]]; then
+    # A historical snapshot is pinned and need not wait for the QMD worker.
+    # Current-corpus work launches in the embed child after QMD update/embed.
+    python3 "$(dirname "$0")/context_learning_auto.py" launch-historical "$workdir" >/dev/null 2>&1 || true
   fi
 
   # 테스트 전용 가드. worker 는 **detached** 라 호출자 반환 뒤에도 살아 있고, 스크립트를

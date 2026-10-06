@@ -135,7 +135,7 @@ test('모든 codex hook command가 검증된 관례 형태(${CLAUDE_PLUGIN_ROOT}
   assert.ok(commands.length >= 6, 'codex hook command 개수 부족');
   for (const cmd of commands) {
     // 모든 codex 플러그인이 쓰는 관례: "${CLAUDE_PLUGIN_ROOT}/hooks/run-hook" <action> codex
-    assert.match(cmd, /"\$\{CLAUDE_PLUGIN_ROOT\}\/hooks\/run-hook" \w+ codex/, `관례 형태 누락: ${cmd}`);
+    assert.match(cmd, /^"\$\{CLAUDE_PLUGIN_ROOT\}\/hooks\/run-hook" [a-z][a-z-]* codex$/, `관례 형태 누락: ${cmd}`);
     // 템플릿 치환 메커니즘에서 깨질 수 있는 novel 파라미터 확장 금지.
     assert.ok(!/:-/.test(cmd), `novel 파라미터 확장(:-) 사용 금지: ${cmd}`);
     // 미검증 가정(codex hook의 shell 연산자 해석)을 피하기 위해 제어 연산자 금지.

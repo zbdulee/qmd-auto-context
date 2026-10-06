@@ -1,0 +1,206 @@
+# Local continual context learning (development only)
+
+This code is opt-in. An enabled `autoCycle` project can launch a detached,
+one-shot local cycle at SessionStart; `liveSelection` can choose wiki cards
+at recall. Neither is enabled by installing this development checkout alone.
+These synthetic tests leave the operating QMD database, plugin configuration,
+and global hooks unchanged. Use an owner-only absolute `state-dir` dedicated
+to one project. Do not put that directory in the repository.
+
+## Evidence and labels
+
+`contextLearning.capture` records a bounded candidate pool only when enabled.
+Candidate relevance labels (`necessary`, `supporting`, `irrelevant`) and the
+reviewed request-level 0–3 final-card selection are separate records. A model
+prediction is never written as selection gold. `review-selection` requires the
+captured input hash, reviewer ID and reference. `build-manifest` pins reviewed
+pair labels, revisions and train/calibration/validation/evaluation family splits.
+The local selection queue also requires an intact reviewed selection, every
+candidate reviewed, complete captured input text, a complete returned pool for
+v2/v3 samples, and current revision hashes. Deletion revokes dependent manifests
+and removes local labels and request-linked teacher ledger entries; aggregate
+project budget counters remain to prevent deleted calls from reopening spend.
+Deletion does not unlearn weights.
+
+The teacher-facing capture stores at most 2,000 prompt characters and 600
+characters per candidate. For an eligible wiki card, those 600 characters are
+from the **body after frontmatter**, so a long title or metadata cannot consume
+the body budget. Separately, the exact complete compact body is pinned in the
+private `compact_inputs` table with the source-file and body SHA-256 values.
+Its hard limit is 16 KiB of body and 64 KiB of source-file bytes. The body is
+never silently truncated: missing, malformed or oversized snapshots exclude
+the request from local training. A 600-character lead is an authoring guideline
+for immediate hook context, not an arbitrary Laya input cutoff. Local training
+uses the complete compact body when available; the explicit `inspect-labels`
+review view exposes that same pinned body to a local reviewer. Long original novel manuscripts
+are still unsupported; they need a separate full-source contract. The Laya
+0.3.20 adapter tokenizes the exact prompt and full compact body, checks both
+option markers and the complete state token IDs, and rejects a case if the
+model's configured sequence budget cannot hold it. The Mini's multilingual
+checkpoint declares `max_len=1024` even though its tokenizer advertises 8192;
+the adapter uses the **model's 1024-token budget**. Thus 16 KiB is a storage
+ceiling, not a guarantee that every body fits Laya. There is no silent
+truncation. `laya_raw.py` is a separate raw-data adapter with an assumed 0.3.23
+candidate pin, not this verified 0.3.20 integration.
+
+## One local cycle
+
+`run-local-cycle` accepts an immutable manifest version, a private revisions
+JSON file, a private trainer argv JSON file, and an owner-only incumbent artifact.
+The fixed local executable receives `train` with only reviewed train cases, or
+`predict` with unlabeled validation/evaluation cases. It writes one opaque
+artifact file and bounded JSON predictions. The parent monitors wall time and
+sampled process-group RSS, caps row/file sizes, strips credentials and proxy environment
+variables, and requests offline Hugging Face/Transformers mode. The executable
+must itself be trusted local code; these environment variables are not an OS
+network sandbox. Only one cycle holds the state lock. A repeated cycle ID
+returns its recorded verdict, and interrupted local training can resume from
+the queued phase. Changed source revisions or labels reject the cycle.
+
+The first 100 reviewed questions are the minimum train count. Validation and
+independent evaluation each need at least 50 questions, 10 reviewed `none`
+questions and 5 families. Validation compares challenger and incumbent on the
+same questions. Promotion requires exact selection improvement without a drop
+in necessary-card recall or `none` success, and without an increase in
+irrelevant-card injection. Evaluation is reported after the decision and is
+not used to select the checkpoint. Reusing those questions across cycles
+makes later reports exploratory rather than a fresh independent estimate.
+Promotion atomically changes only the
+private `active-checkpoint.json` pointer. `rollback-local-checkpoint` restores
+its previous artifact pointer; no weights are deleted.
+
+`run-due-cycle` is a schedule gate, not a daemon. The 95%
+goal adjusts the **interval between learning cycles**. The interval is 24 hours
+to 14 days, can at most double or halve per assessment, and shortens on weak
+recent incumbent validation quality, new families, source churn or recent
+failure. It needs at least 50 validation questions including 10 `none` cases
+and five families before extending. For pacing, it divides the observed Wilson
+lower bound by the best attainable bound at the same sample count and caps
+that ratio by exact accuracy. A score near 95% extends smoothly; at 95% it
+doubles the interval. This normalized signal is not a claim that true accuracy
+exceeds 95%, and it never activates a model. Insufficient evidence cannot
+extend the interval.
+
+## Current corpus and live selection
+
+Each opt-in capture records a SHA-256 fingerprint of active QMD document
+paths/hashes and search configuration when that snapshot is available.
+Changing the active corpus or index configuration creates a new immutable
+snapshot and queues old candidate pools for review; it does not rewrite old
+samples. Automatic cycles default to `dataMode: current` and refuse an
+evaluation manifest containing older or unavailable corpus fingerprints.
+`historical_snapshot` must be chosen explicitly for frozen-snapshot work.
+Re-search, whole-body review, and approval of replacement labels remain human
+steps. Capture or an attempted current auto cycle performs reconciliation;
+there is no continuous corpus watcher.
+
+`contextLearning.liveSelection: true` changes the primary QMD request cap to
+15. After source freshness and eligibility checks, the local Laya adapter sees
+each candidate's complete compact wiki body and returns 0–3 card IDs. The
+hook logs hashed candidate and selected IDs, snapshot fingerprint, fallback
+reason and observed time/RSS. Missing state, invalid model output, changed
+checkpoint or runtime failure restores the ordinary bounded QMD choice.
+`live-selector.json` and an active local checkpoint are separately required;
+this development checkout does not install either in an operating project.
+
+## Optional external teacher
+
+No teacher call occurs during capture, local cycles or the schedule gate.
+`budgeted-label-request` and `budgeted-second-opinion` require an explicit
+private policy with project ID, host, exact request IDs, separate creation and
+review models, maximum calls, bytes per call, total bytes and a conservative
+USD reservation per call. The project ID binds to the private state root.
+Attempt IDs prevent duplicate paid calls; retries need a new ID and consume a
+new reservation. Provider billing cannot be hard-capped by this local ledger;
+the configured USD reservation is an upper-bound assumption supplied by the
+operator. Second opinions are advisory and never become reviewed gold.
+
+## Verification
+
+`test/context-learning-cycle.test.mjs` runs synthetic selection-gold,
+cadence/promotion, teacher-budget and 200-question end-to-end fixtures.
+The mock trainer fails once, resumes, compares on validation, reports separate
+evaluation, promotes, rolls back, and rejects a stale source. No private data,
+Laya runtime, external model or operating QMD state is used by these tests.
+`test/context-learning-real-laya.test.mjs` is opt-in and runs the actual Mini
+Laya runtime and local multilingual checkpoint on synthetic cards only. It
+exercises runtime attestation, train/predict protocol, a head-only update,
+private temporary checkpoint save/reload and a >600-byte complete body.
+
+## Real Laya 0.3.20 adapter
+
+The Mini has a separate existing runtime at
+`~/work/local-llm/data/decision-eval/envs/laya/bin/python` (Python 3.12.14,
+Laya 0.3.20, Torch 2.14.0). Its editable Laya source is at
+`~/work/local-llm/data/decision-eval/repos/laya` commit `23a1752`, and the
+existing multilingual checkpoint is under
+`~/work/local-llm/data/decision-eval/hf/hub/models--convaiinnovations--laya`.
+This is distinct from an iCloud `laya-runtime/.venv` whose `bin/python`
+points to a removed pyenv 3.12.6 interpreter. Do not repair that old link or
+copy the old environment. Past Mini reports identify Laya 0.3.20 and MPS but
+do not record the exact Python executable for each run.
+
+`core/context_learning/laya_adapter.py` implements the trusted local
+`train`/`predict` executable. The `LocalTrainer` command prefix is the
+absolute Mini Python path, the absolute adapter path, then the absolute
+multilingual checkpoint directory. It reads Laya's local tokenizer, config
+and safetensors directly; it does not call `laya.Agent`, whose tokenizer repair
+may write inside a shared model snapshot. A SHA-256 bundle identity covers
+model weights, Laya config, encoder config and tokenizer files. Training
+validates every exact input before any update, freezes the encoder and uses
+only reviewed train choices for a head-only SGD epoch. A single safetensors
+artifact holds the changed head and pinned base/policy identity. Prediction
+loads the base plus that head, rejects held-out gold fields and returns 0–3
+candidate IDs using the frozen `p>=0.5`, score-ranked policy. A private base
+manifest may reference the unchanged checkpoint without copying its weights;
+`prepare-local-laya-base` creates that owner-only artifact for an explicit
+state directory. The threshold is not claimed to be calibrated for wiki
+selection: held-out validation decides whether a trained head is promoted.
+The one-update synthetic MPS smoke saved a 59,880,984-byte head artifact,
+reloaded it into a fresh model and compared its logits. No private novel
+training or new external model call was part of that check.
+
+## Runtime ownership and installation gate
+
+`runtime_setup.py` provides read-only discovery, an installation plan, a real
+synthetic compatibility proof and an explicit runtime-selection gate. Importing
+it does not download Python, install packages or change an active runtime.
+The default selection mode is a plugin-owned generation under
+`~/Library/Application Support/qmd-auto-context/runtimes/laya` on macOS. A
+managed interpreter must resolve inside that owner-only root and match the
+pinned Python 3.12.14 and package versions. An existing interpreter may be
+reused only with an explicit path and an attestation bound to the interpreter,
+base-model and adapter hashes. That attestation must record successful
+synthetic compact-wiki tokenization without truncation, inference, one-step
+training, checkpoint reload and fixed selection mapping. `attest_runtime()`
+now generates that proof by running the real local synthetic smoke; it hashes
+the adapter and base bundle before and after. The Mini runtime passed and can
+be explicitly selected for a local cycle with that proof. This did not
+activate a project, a global hook or a background worker.
+
+`runtime_installer.py` now contains the explicit managed staging, activation
+and rollback functions. Staging requires a SHA-pinned uv 0.12.20 executable
+and a complete hash-locked PyPI requirements file. It installs Python 3.12.14
+inside a new owner-only generation with no global executable link, creates a
+venv whose interpreter resolves inside that generation, syncs only hashed
+wheels using a private cache and checks the exact managed package versions.
+Activation runs the real synthetic proof before atomically changing the
+owner-only active pointer. The pointer records the runtime, adapter and model
+hashes; a later managed selection rechecks them. Rollback rechecks the previous
+generation and restores the pointer. Old generations are kept, never updated
+in place. Base-model cache reuse is read-only and requires verified hashes;
+mutable trained checkpoints belong to private per-project state. The proposed
+sources are Astral uv's managed Python distribution and `laya==0.3.20` from
+PyPI; `managed_install_plan()` records the proposed exact dependency pins.
+Managed stage/activate/rollback was tested with a fake uv runner. On the Mac
+mini, the official uv 0.12.20 executable was hash-checked and reused, then a
+new inactive owner-only generation was actually installed with managed Python
+3.12.14 and 35 SHA-256 locked PyPI packages. The lock is
+`core/context_learning/locks/laya-macos-arm64-py312.lock` (SHA-256
+`354c3c985a390d5045019e98871cc8a223237f25d891f36525e49f9a42e46447`).
+The installed generation is under `~/Library/Application Support/qmd-auto-context/runtimes/laya/generations/g-7687971256c743dd88b286718ea8195f`.
+The real local synthetic MPS smoke and trainer protocol passed. No Laya
+`active.json`, project selector, or plugin/hook activation followed. The
+installed wheels were fetched with `uv pip sync --require-hashes --no-build`
+against `https://pypi.org/simple`; this is an observed Mini installation, not
+a claim about every target platform or a production upgrade.

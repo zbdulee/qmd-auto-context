@@ -53,12 +53,6 @@ normalize_qmd_path() {
 }
 
 resolve_qmd_bin() {
-  if [ -n "${QMD_BIN:-}" ]; then
-    [ -x "$QMD_BIN" ] || return 1
-    printf '%s\n' "$QMD_BIN"
-    return 0
-  fi
-
   normalize_qmd_path
-  command -v qmd
+  python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/qmd_route.py" resolve-bin
 }

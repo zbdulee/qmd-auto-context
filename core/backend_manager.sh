@@ -458,6 +458,7 @@ schedule_wiki_compile_retry() {
 }
 
 kick_wiki_compile() {
+  [ -n "${QMD_AUTO_COMPILE_DISABLED:-}" ] && return 0
   local cwd="${1:-}"
   local flush="${2:-}"
   local flush_arg=""

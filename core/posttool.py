@@ -51,12 +51,15 @@ def paths_from_patch(patch: str) -> list[str]:
         match = re.match(r"\*\*\* (?:Update|Add|Delete) File: (.+)", line)
         if match:
             paths.append(match.group(1).strip())
+        moved = re.match(r"\*\*\* Move to: (.+)", line)
+        if moved:
+            paths.append(moved.group(1).strip())
     return paths
 
 def added_text_from_patch(patch: str) -> str:
     lines = []
     for line in patch.splitlines():
-        if not line.startswith("+") or line.startswith("+++"):
+        if not line.startswith("+"):
             continue
         text = line[1:].strip()
         if text:
@@ -72,7 +75,6 @@ def extract_text(payload: dict) -> str:
     for key in (
         "content",
         "new_string",
-        "command",
         "CodeContent",
         "ReplacementContent",
         "Content",
@@ -83,6 +85,8 @@ def extract_text(payload: dict) -> str:
             chunks.append(value)
 
     patch = tool_input.get("patch")
+    if not isinstance(patch, str) and payload.get("tool_name") == "apply_patch":
+        patch = tool_input.get("command")
     if isinstance(patch, str):
         chunks.append(added_text_from_patch(patch))
 
@@ -145,6 +149,10 @@ def main():
     # If QMD_SANDBOX is set or --sandbox option is in sys.argv, exit immediately with no output
     if os.environ.get("QMD_SANDBOX") or "--sandbox" in sys.argv:
         return 0
+    import hook_budget
+    # subprocess.run's own timeout kills the recall child; a parent SIGALRM
+    # during Popen.__exit__ could instead wait for an orphaned subprocess.
+    hook_budget.arm(watchdog=False)
 
     raw = sys.stdin.read().strip()
     if not raw:
@@ -189,16 +197,25 @@ def main():
     env["QMD_ENGINE"] = env.get("QMD_ENGINE", "posttool")
     
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             ["python3", recall_script],
-            input=json.dumps(recall_input),
-            capture_output=True,
-            text=True,
-            env=env
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, env=env, start_new_session=True
         )
+        try:
+            output, _ = proc.communicate(input=json.dumps(recall_input),
+                                          timeout=hook_budget.remaining())
+        except subprocess.TimeoutExpired:
+            import signal
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            proc.communicate(timeout=1)
+            return 0
         
         # If recall succeeded and output something, print it
-        output = proc.stdout.strip()
+        output = output.strip() if proc.returncode == 0 else ''
         if output:
             # Format event name to PostToolUse
             try:

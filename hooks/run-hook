@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # qmd auto-context 공통 hook 디스패처.
 # usage: run-hook <action> <engine> [--sandbox]
-#   action: recall | update | posttool | index | compile | gate
+#   action: recall | update | update-queued | posttool | index | compile | gate
+#   sandbox-only prototype: topical-event | topical-stop | topical-reconcile
 #   engine: claude | codex | gemini
 # 플러그인 루트는 CLAUDE_PLUGIN_ROOT/PLUGIN_ROOT(있으면) 또는 스크립트 위치(dirname)로 결정.
 set -u
@@ -11,8 +12,22 @@ ENGINE="${2:-claude}"
 
 # 인자 없이 호출 시 usage 안내
 if [ -z "$ACTION" ]; then
-  echo "usage: run-hook <recall|update|posttool|index|compile|gate> <claude|codex|gemini>" >&2
+  echo "usage: run-hook <recall|update|update-queued|posttool|index|compile|gate> <claude|codex|gemini>" >&2
   exit 1
+fi
+
+# Sandbox and headless guards precede plugin-root files and all hook work.
+_qmd_sandbox=0
+case " $* " in *" --sandbox "*) _qmd_sandbox=1 ;; esac
+[ -n "${QMD_SANDBOX:-}" ] && _qmd_sandbox=1
+case "$ENGINE" in
+  claude) { [ "${CLAUDE_HEADLESS:-}" = "1" ] || [ -n "${CLAUDE_SANDBOX:-}" ]; } && _qmd_sandbox=1 ;;
+  codex)  [ -n "${CODEX_SANDBOX:-}" ] && _qmd_sandbox=1 ;;
+  gemini) [ -n "${GEMINI_SANDBOX:-}" ] && _qmd_sandbox=1 ;;
+esac
+if [ "$_qmd_sandbox" = 1 ]; then
+  [ "$ACTION" = "topical-stop" ] && printf '{}\n'
+  exit 0
 fi
 
 # 1) 플러그인 루트 결정 — 변수 우선, 없으면 스크립트 위치 기준(hooks/run-hook → 루트)
@@ -21,16 +36,60 @@ if [ -z "$ROOT" ]; then
   ROOT="$(cd "$(dirname "$0")/.." && pwd)" || { echo "run-hook: cannot resolve plugin root" >&2; exit 1; }
 fi
 
-# 2) sandbox/headless → 무출력 종료 (정상 동작)
-case " $* " in *" --sandbox "*) exit 0 ;; esac
-[ -n "${QMD_SANDBOX:-}" ] && exit 0
-case "$ENGINE" in
-  claude) { [ "${CLAUDE_HEADLESS:-}" = "1" ] || [ -n "${CLAUDE_SANDBOX:-}" ]; } && exit 0 ;;
-  codex)  [ -n "${CODEX_SANDBOX:-}" ] && exit 0 ;;
-  gemini) [ -n "${GEMINI_SANDBOX:-}" ] && exit 0 ;;
+# Local trial installs may ship this marker to keep existing auto-wiki projects
+# from sending source text to a model. It does not affect manual skills.
+[ -f "$ROOT/.qmd-local-auto-compile-disabled" ] && export QMD_AUTO_COMPILE_DISABLED=1
+
+# A local trial may supply only validated data assignments, never shell code.
+_qmd_runtime_file="$ROOT/.qmd-local-runtime.env"
+if [ -e "$_qmd_runtime_file" ] || [ -L "$_qmd_runtime_file" ]; then
+  _qmd_parser="$(cd "$(dirname "$0")/.." && pwd)/core/local_runtime_env.py"
+  if ! _qmd_assignments="$(python3 "$_qmd_parser" "$_qmd_runtime_file")"; then
+    exit 0
+  fi
+  while IFS= read -r _qmd_assignment; do
+    [ -n "$_qmd_assignment" ] && export "$_qmd_assignment"
+  done <<< "$_qmd_assignments"
+fi
+
+# An explicitly marked project may request one bounded v2 refresh turn. The
+# owner-only project config is checked by the Python worker before any model
+# call; merely installing this hook does not activate a project.
+if [ "$ACTION" = "topical-reconcile" ] && [ -n "${QMD_TOPICAL_PROJECT_ROOT:-}" ]; then
+  python3 "$ROOT/core/topical_hook_queue.py" reconcile "$QMD_TOPICAL_PROJECT_ROOT" </dev/null >/dev/null 2>&1 || true
+  exit 0
+fi
+
+# Opt-in sandbox adapter only. Package manifests reference these actions,
+# but without an explicit sandbox root they never start a backend or model.
+case "$ACTION" in
+  topical-event|topical-stop|topical-reconcile)
+    if [ -z "${QMD_TOPICAL_SANDBOX_ROOT:-}" ]; then
+      [ "$ACTION" = "topical-stop" ] && printf '{}\n'
+      exit 0
+    fi
+    case "$ACTION" in
+      topical-event) topical_action=event ;;
+      topical-stop) topical_action=boundary ;;
+      *) topical_action=reconcile ;;
+    esac
+    if [ "$ACTION" = "topical-event" ]; then
+      python3 "$ROOT/core/wiki_topical_reconcile.py" "$topical_action" \
+        --root "$QMD_TOPICAL_SANDBOX_ROOT" \
+        --settings-json "$QMD_TOPICAL_SANDBOX_ROOT/.topical-reconcile-hook.json" >/dev/null || exit $?
+    else
+      # Full source scans and model/QMD work are durable jobs. Stop records
+      # only the turn key, never the assistant message or source body.
+      python3 "$ROOT/core/topical_hook_queue.py" "$topical_action" "$QMD_TOPICAL_SANDBOX_ROOT" >/dev/null || true
+    fi
+    # Stop requires JSON output. No hook action exposes source paths or queue
+    # internals to the model; the durable state is the handoff.
+    [ "$ACTION" = "topical-stop" ] && printf '{}\n'
+    exit 0
+    ;;
 esac
 
-# 3) engine 라벨 + 로그 경로 기본값
+# 2) engine 라벨 + 로그 경로 기본값
 # 기본 로그는 유저 격리 경로($HOME/.cache/qmd, backend_manager의 MANAGER_LOG/DAEMON_LOG와 동일 베이스).
 # 예측가능한 /tmp 경로는 멀티유저 symlink 선점 클래스 문제라 기본값에서 제거한다.
 # QMD_RECALL_LOG override는 반드시 유지(테스트가 주입한다).
@@ -44,6 +103,10 @@ export QMD_RECALL_LOG
 MANAGER="${QMD_BACKEND_MANAGER:-$ROOT/core/backend_manager.sh}"
 
 case "$ACTION" in
+  update-queued)
+    QMD_BACKEND_MANAGER="$MANAGER" python3 "$ROOT/core/update_hook_queue.py" enqueue 2>/dev/null || true
+    exit 0
+    ;;
   recall)
     if [ -z "${QMD_QUERY_FIXTURE:-}" ]; then
       bash "$MANAGER" ensure >/dev/null 2>&1 &
@@ -60,11 +123,11 @@ case "$ACTION" in
       bash "$MANAGER" ensure
       bash "$MANAGER" warm
       bash "$MANAGER" rotate
-    } >/dev/null 2>&1 &
+    } >/dev/null 2>&1 </dev/null &
     QMD_BACKEND_MANAGER="$MANAGER" exec bash "${QMD_CORE_UPDATE_SCRIPT:-$ROOT/core/update.sh}"
     ;;
   posttool)
-    bash "$MANAGER" ensure --wait >/dev/null 2>&1 || true
+    bash "$MANAGER" ensure >/dev/null 2>&1 </dev/null &
     exec python3 "${QMD_CORE_POSTTOOL_SCRIPT:-$ROOT/core/posttool.py}"
     ;;
   index)
@@ -75,6 +138,7 @@ case "$ACTION" in
     exit 0
     ;;
   compile)
+    [ -n "${QMD_AUTO_COMPILE_DISABLED:-}" ] && exit 0
     tmp="$(mktemp 2>/dev/null || true)"
     if [ -z "$tmp" ]; then
       cat >/dev/null 2>&1 || true

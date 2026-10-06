@@ -25,6 +25,7 @@ from __future__ import annotations
 import os
 import sys
 import traceback
+import hook_budget
 
 
 def run(main) -> int:
@@ -41,6 +42,14 @@ def run(main) -> int:
     """
     try:
         main()
+    except hook_budget.HookDeadlineExceeded:
+        try:
+            path = os.environ.get('QMD_RECALL_LOG')
+            if path:
+                with open(path, 'a', encoding='utf-8') as handle:
+                    handle.write('qmd_hook_deadline_exceeded\n')
+        except BaseException:
+            pass
     except BaseException:  # noqa: BLE001 — hooks must never crash the host
         try:
             _log_exception()

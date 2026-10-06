@@ -430,7 +430,7 @@ def run(cwd, *, json_output=False, dry_run=False, baseline_only=False):
                 # enqueue와 스냅샷 전진은 해야 한다 — 안 하면 그 변경이 매 sync마다
                 # 재검출되고 compile이 같은 파일을 반복 큐잉한다(유료 호출 반복).
                 if indexed_changed:
-                    dirty_queue.enqueue_collections(indexed_changed)
+                    dirty_queue.enqueue_project_collections(project_root, indexed_changed)
                 # compile enqueue를 스냅샷 기록 "전"에 한다: 상한으로 미룬 파일의 스냅샷
                 # 엔트리를 되돌려 다음 sync가 다시 집게 하기 때문이다.
                 compile_result = enqueue_compile_sources(
