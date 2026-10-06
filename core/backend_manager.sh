@@ -505,7 +505,23 @@ has_marker() {
   [ -f "$1" ] && grep -q "managed-by: qmd-auto-context" "$1" 2>/dev/null
 }
 
+daemon_identity() {
+  local pid
+  # Identity is an inspection command: discover a managed process without
+  # adopting it into PID_FILE or changing backend state.
+  pid="$(read_pid)"
+  pid_is_daemon "$pid" || pid="$(discover_daemon_pid)"
+  if [ -z "$pid" ]; then
+    health && return 2  # A healthy service without a managed PID is not "absent".
+    return 1
+  fi
+  printf '%s\t%s\n' "$pid" "$(pid_command "$pid")"
+  health && return 0
+  return 3  # Managed PID exists, but its health endpoint failed.
+}
+
 case "${1:-}" in
+  identity) daemon_identity ;;
   health) health || true ;;
   check-qmd) shift; check_qmd "${1:-}" ;;
   start) start_daemon ;;
@@ -516,5 +532,5 @@ case "${1:-}" in
   kick-index) kick_index ;;
   kick-wiki-compile) shift; kick_wiki_compile "${1:-}" "${2:-}" ;;
   cleanup-legacy) cleanup_legacy ;;
-  *) echo "usage: backend_manager.sh health|check-qmd [--manual]|start|ensure [--wait]|warm|rotate|reload|kick-index|kick-wiki-compile <cwd> [--flush]|cleanup-legacy" >&2; exit 2 ;;
+  *) echo "usage: backend_manager.sh identity|health|check-qmd [--manual]|start|ensure [--wait]|warm|rotate|reload|kick-index|kick-wiki-compile <cwd> [--flush]|cleanup-legacy" >&2; exit 2 ;;
 esac

@@ -45,6 +45,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.resolve()))
+import wiki_mutation_lock
 import compile_paths as cp
 import config as qmd_config
 import wiki_compile as wc
@@ -847,7 +848,7 @@ def process_verify_job(
         return defer_or_drop(root, vcfg, job, attempt, has_more, provenance, "invalid_verdict", log_path)
 
     try:
-        with cp.card_write_lock(root):
+        with cp.card_write_lock(root), wiki_mutation_lock.lock(root):
             return apply_verify_verdict_locked(
                 root, config, compile_cfg, vcfg, job, target, job_hash,
                 # payload 로 보낸 파일 전문. 잠금 아래 다시 읽은 전문과 축자 대조해

@@ -8,7 +8,6 @@ source-fresh backend attestation can authorize the publication.
 from __future__ import annotations
 
 import argparse
-import fcntl
 import hashlib
 import json
 import os
@@ -22,6 +21,7 @@ import tempfile
 
 import config as qmd_config
 import wiki_compile
+import wiki_mutation_lock
 import wiki_topical as topical
 import wiki_topical_backend as backend
 import wiki_topical_experiment as experiment
@@ -180,16 +180,8 @@ def _read_backend_record(root: Path, generation_id: str, card_id: str):
 
 def publish(root: Path, generation_id: str, card_id: str) -> dict:
     root=experiment.require_sandbox(root)
-    lock=root/'.topical-publish.lock'
-    fd=os.open(lock,os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW,0o600)
-    try:
-        info=os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode) or info.st_uid!=os.getuid() or info.st_mode & 0o077:
-            raise topical.TopicalError('unsafe_publish_lock')
-        fcntl.flock(fd,fcntl.LOCK_EX)
+    with wiki_mutation_lock.lock(root):
         return _publish_locked(root,generation_id,card_id)
-    finally:
-        os.close(fd)
 
 
 def _publish_locked(root: Path, generation_id: str, card_id: str) -> dict:
@@ -252,6 +244,13 @@ def _publish_locked(root: Path, generation_id: str, card_id: str) -> dict:
 
 def retire_stale(root: Path, generation_id: str, card_id: str,
                  source_roots: list[str], cards: list[dict]) -> dict:
+    root = experiment.require_sandbox(root)
+    with wiki_mutation_lock.lock(root):
+        return _retire_stale_locked(root, generation_id, card_id, source_roots, cards)
+
+
+def _retire_stale_locked(root: Path, generation_id: str, card_id: str,
+                         source_roots: list[str], cards: list[dict]) -> dict:
     """Reversibly remove one source-stale card from an isolated QMD collection.
 
     The real source reverse projection, not a tool hint or mock completion,

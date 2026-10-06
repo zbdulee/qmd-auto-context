@@ -4,7 +4,13 @@
 
 **S-02 연결 상태.** `core/qmd_installer.py`와 lockfile은 신규 QMD 2.5.3을 공식 lock으로 관리형 비활성 세대에 실제 설치했고, 격리 합성 DB의 collection add/update/embed/query smoke가 통과했다. 운영 active pointer는 그대로다. 명시적 프로젝트 shadow-index pointer가 있으면 `recall.py`는 전역 daemon 대신 선택된 DB/config/cache를 사용하는 로컬 QMD CLI를 호출한다. `update.sh`, SessionStart update worker, `backend/index_worker.sh`도 같은 프로젝트 pointer를 따른다. pointer가 손상되면 전역 DB로 우회하지 않는다. 합성 E2E에서만 활성화·rollback했고 실제 프로젝트나 plugin hook은 활성화하지 않았다. 자세한 설치기·네이티브 의존성 및 검증 범위는 [`qmd-installer-scope-20261006.md`](qmd-installer-scope-20261006.md)를 참조한다.
 
+**설치 조정기 개발 상태.** `skills/setup/SKILL.md`는 host plugin 등록 후 자연어 설치 요청을 `core/install_update.py`의 읽기 전용 조사, 검토된 JSON 요청의 비활성 준비, 명시적 적용, rollback으로 연결한다. 합성 fixture는 기존/신규 QMD, 기존/신규 Laya 배선, 프로젝트 shadow DB, 구형 설정과 v1 wiki 카드의 보존·검토, 중단 재시도를 확인했다. 원장이 있는 동안 기존 SessionStart 자동 설정 이주는 레거시 원본을 이동하지 않는다. v1 카드의 검증된 v2 대응 관계가 없으면 적용하지 않으며, 새 대응 카드가 생긴 뒤 shadow DB를 다시 만든다. 실제 운영 pointer·학습 정책·hook trust는 바꾸지 않았다. [`install-update-contract-20261006.md`](install-update-contract-20261006.md)에 정확한 요청 필드와 미검증 범위를 적었다.
+
+**INSTALL-REVIEW-1 보완.** `core/install_update.py`는 완료된 설치 원장을 개인 이력으로 보존하고 다음 검토 요청을 새 트랜잭션으로 시작한다. QMD root는 실제 hook/daemon resolver의 기본 관리형 root로 제한한다. legacy 설정은 기록된 intent 뒤 완성된 바이트만 원자 링크로 게시하며 중단 뒤 재개·rollback한다. shadow cutover 전에 정확한 wiki collection·파일 SHA·모델 벡터·v2 source revision·QMD config를 준비 시와 적용 직전에 다시 비교한다. 기존 관리형 daemon이 실행 중이면 QMD pointer 전환 뒤 재시작·프로세스 entry 검증을 하고 rollback 시 이전 entry로 되돌린다. Codex `hooks-codex.json`과 Claude `hooks.json`은 같은 프로젝트 원장·DB·SessionStart queue에 각자의 engine label로 들어간다. 두 host의 manifest/dispatcher/opt-in/out/동시 호출은 합성 fixture로 검증했고, 실제 Claude CLI는 이 환경에 없다. 기존 비활성 QMD native 설치 및 실제 Codex worker 생존은 하위 모듈 증거이며 새 조정기 host 통합 시험으로 소급하지 않는다.
+
 **REVIEW-3 runtime 결속.** `core/qmd_route.py`가 관리형 실행 파일/Node/JS entry와 프로젝트 DB/config/cache를 함께 해석한다. 활성 프로젝트 index pointer가 있으면 recall·update·publisher·학습 지문이 그 선택을 따른다. v2 publisher는 상충하는 기존 DB 환경값을 거부한다. 학습 corpus fingerprint는 선택 generation도 포함하며, topical worker는 잠금 보유 중 새 job을 재스캔하고 잠금 해제 직후 남은 job을 다시 깨운다. 네 경계는 합성 fixture로만 검증했다.
+
+**설치 전환의 동시성 경계.** 관리형 wiki publish·retire와 프로젝트 shadow DB 전환은 동일한 `.topical-publish.lock`을 사용한다. 조정기는 그 잠금 안에서 corpus/DB를 전환 직전과 전환 후 재확인하고, 수동 편집 경합이 검출되면 포인터를 rollback한다. 살아 있으나 health 실패인 daemon PID도 reload 대상으로 기록하며, 새 세대의 health·JS entry·Node·PID를 확인한다. QMD probe 또는 reload timeout은 JSON 실패와 rollback/recovery 상태로 반환한다.
 
 ## 1. DB 적재와 wiki 생성·수정·삭제
 
@@ -41,3 +47,5 @@
 `core/context_learning/cycle_policy.py:next_interval`의 목표는 95%이다. 기준 간격은 24시간, 상한은 14일이다. 50문항·5가족·0장 10건 이상의 고정 검증에서 Wilson 하한을 같은 표본 크기의 달성 가능 최대 하한으로 나눈 pacing 점수를 exact rate로 제한한다. 95% 이상이면 ×2, 80–95% 사이면 부드럽게 연장하고 그 이하는 ÷2한다. 새 task/document 가족·source revision 변화·최근 실패는 ÷2 쪽으로 가되 최소 24시간이다. 자료 부족은 연장하지 않고 최대 72시간이다. 정규화 점수는 실제 정확도에 대한 95% 신뢰 주장이 아니며 승격 임계값도 아니다.
 
 **현재 자료/모집단 경계.** `contextLearning.capture`는 query·후보·기존 final 선택과 후보 당시 파일 revision SHA 및 compact body를 private DB에 기록할 수 있다. 읽기 전용 QMD active documents의 경로·해시와 검색 설정의 corpus fingerprint가 가능하면 `index_revision`에 저장된다. 지문 변화는 과거 sample을 덮어쓰지 않고 review queue에 등록하며, 현재 corpus와 다른 평가 manifest는 기본 `dataMode: current` 자동 학습에서 제외한다. `selection_queue.build_queue`는 저장된 sample·review·선택 gold와 현재 제공된 revision을 대조하고 요청/문서 가족을 분할한다. 후보 재검색·전체 본문 재검토·새 gold 승인은 사람 작업이며 자동 마이그레이션이 아니다. `historical_snapshot`은 별도 명시한 동결 자료 모드다. 색인 설정·문서 변화 감지는 capture 또는 current auto-cycle 시점에 수행된다. 운영 hook에서 자동 재라벨링하거나 model 품질을 현재 모집단으로 소급 주장하지 않는다.
+
+설치 전환의 일반 wiki writer와 실패 경계 목록은 [`install-update-writer-error-audit-20261006.md`](install-update-writer-error-audit-20261006.md)를 따른다. 일반 compile·verify의 카드/index/log 변경과 topical 게시·퇴역이 동일 프로젝트 잠금을 공유하며, 최종 SQLite 검사 오류도 rollback/recovery JSON 경로로 반환한다.

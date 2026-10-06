@@ -19,6 +19,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.resolve()))
 import compile_paths as cp
 import config as qmd_config
+import wiki_mutation_lock
 import wiki_compile as wc
 import wiki_dedup_scan as dedup_scan
 from dirty_queue import enqueue_project_collections
@@ -103,6 +104,11 @@ def record_skip(root: Path, wiki_root: Path, compile_dir: Path, entry: dict) -> 
 
 
 def resolve_entry(root: Path, wiki_root: Path, compile_dir: Path, entry: dict, action: str, delete_rel: str | None) -> dict:
+    with wiki_mutation_lock.lock(root):
+        return _resolve_entry_locked(root, wiki_root, compile_dir, entry, action, delete_rel)
+
+
+def _resolve_entry_locked(root: Path, wiki_root: Path, compile_dir: Path, entry: dict, action: str, delete_rel: str | None) -> dict:
     page_a = entry.get("pageA")
     page_b = entry.get("pageB")
     valid_choices = {p for p in (page_a, page_b) if isinstance(p, str)}

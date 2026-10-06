@@ -47,6 +47,7 @@ sys.path.insert(0, str(Path(__file__).parent.resolve()))
 import config as qmd_config
 import cooldown as qmd_cooldown
 import qmd_route
+import sqlite_read
 
 # `qmd cleanup` also clears the LLM cache and hard-deletes inactive document rows.
 # Both are qmd's own maintenance semantics for this command; we do not hand-roll
@@ -192,27 +193,18 @@ def index_db_path(cwd=None) -> Path | None:
 def count_orphans(db_path: Path) -> tuple[int, int] | None:
     """(orphan_rows, total_rows) or None when it cannot be determined.
 
-    Read-only (`mode=ro` + query_only) so a concurrent daemon is unaffected;
+    Read-only (shared WAL-aware reader + query_only), so a concurrent daemon is unaffected;
     measured 10ms on the live 16,590-row index.
     """
     try:
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5.0)
-    except sqlite3.Error:
+        with sqlite_read.connect(db_path, timeout=5.0) as conn:
+            total = conn.execute(TOTAL_COUNT_SQL).fetchone()[0]
+            orphans = conn.execute(ORPHAN_COUNT_SQL).fetchone()[0]
+            return int(orphans), int(total)
+    except (sqlite3.Error, OSError, ValueError):
+        # No content_vectors table, locked/corrupt DB, or a concurrent write:
+        # none can safely be interpreted as "reclaim now".
         return None
-    try:
-        conn.execute("PRAGMA query_only=1")
-        total = conn.execute(TOTAL_COUNT_SQL).fetchone()[0]
-        orphans = conn.execute(ORPHAN_COUNT_SQL).fetchone()[0]
-        return int(orphans), int(total)
-    except sqlite3.Error:
-        # No content_vectors table (never embedded), locked, corrupt -- all mean
-        # "cannot judge", which must not be read as "reclaim now".
-        return None
-    finally:
-        try:
-            conn.close()
-        except sqlite3.Error:
-            pass
 
 
 def resolve_qmd_bin(explicit: str = "") -> str:

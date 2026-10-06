@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 import argparse
+import fcntl
 import hashlib
 import json
 import math
 import os
+import stat
 import sys
 import tempfile
 from pathlib import Path
@@ -1315,51 +1317,72 @@ def migrate_legacy_config(cwd):
     if dir_reason:
         return {"migrated": False, "reason": dir_reason, "from": str(legacy_path), "to": str(settings_path)}
     assert settings_dir is not None
-    tmp_path = None
-
-    if settings_path.exists():
-        return {"migrated": False, "reason": "settings_exists"}
-
-    parsed, reason = _read_json_object(legacy_path)
-    if reason:
-        return {"migrated": False, "reason": reason, "from": str(legacy_path)}
-    normalized = normalize_config(parsed)
-
+    # Share the setup transaction lock so SessionStart cannot move a frozen
+    # legacy source between the journal check and the migration write.
+    lock_path = settings_dir / ".install-update.lock"
     try:
-        fd, tmp_name = tempfile.mkstemp(
-            dir=str(settings_dir),
-            prefix=f"{SETTINGS_FILE_NAME}.",
-            suffix=".tmp",
-            text=True,
-        )
-        tmp_path = Path(tmp_name)
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(parsed, handle, ensure_ascii=False, indent=2)
-            handle.write("\n")
+        lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    except OSError:
+        return {"migrated": False, "reason": "unsafe_setup_lock"}
+    try:
+        info = os.fstat(lock_fd)
+        if info.st_uid != os.getuid() or not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077:
+            return {"migrated": False, "reason": "unsafe_setup_lock"}
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return {"migrated": False, "reason": "managed_setup_in_progress"}
+        setup_journal = settings_dir / "install-update-journal.json"
+        if setup_journal.exists() or setup_journal.is_symlink():
+            return {"migrated": False, "reason": "managed_setup_in_progress",
+                    "from": str(legacy_path), "to": str(settings_path)}
+        tmp_path = None
 
-        tmp_parsed, reason = _read_json_object(tmp_path)
-        if reason or normalize_config(tmp_parsed) != normalized:
+        if settings_path.exists():
+            return {"migrated": False, "reason": "settings_exists"}
+
+        parsed, reason = _read_json_object(legacy_path)
+        if reason:
+            return {"migrated": False, "reason": reason, "from": str(legacy_path)}
+        normalized = normalize_config(parsed)
+
+        try:
+            fd, tmp_name = tempfile.mkstemp(
+                dir=str(settings_dir),
+                prefix=f"{SETTINGS_FILE_NAME}.",
+                suffix=".tmp",
+                text=True,
+            )
+            tmp_path = Path(tmp_name)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(parsed, handle, ensure_ascii=False, indent=2)
+                handle.write("\n")
+
+            tmp_parsed, reason = _read_json_object(tmp_path)
+            if reason or normalize_config(tmp_parsed) != normalized:
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
+                return {"migrated": False, "reason": reason or "verification_failed", "from": str(legacy_path), "to": str(settings_path)}
+
+            tmp_path.replace(settings_path)
+
+            final_parsed, reason = _read_json_object(settings_path)
+            if reason or normalize_config(final_parsed) != normalized:
+                return {"migrated": False, "reason": reason or "verification_failed", "from": str(legacy_path), "to": str(settings_path)}
+
+            legacy_path.unlink()
+            return {"migrated": True, "from": str(legacy_path), "to": str(settings_path)}
+        except OSError as exc:
             try:
-                tmp_path.unlink()
+                if tmp_path and tmp_path.exists():
+                    tmp_path.unlink()
             except OSError:
                 pass
-            return {"migrated": False, "reason": reason or "verification_failed", "from": str(legacy_path), "to": str(settings_path)}
-
-        tmp_path.replace(settings_path)
-
-        final_parsed, reason = _read_json_object(settings_path)
-        if reason or normalize_config(final_parsed) != normalized:
-            return {"migrated": False, "reason": reason or "verification_failed", "from": str(legacy_path), "to": str(settings_path)}
-
-        legacy_path.unlink()
-        return {"migrated": True, "from": str(legacy_path), "to": str(settings_path)}
-    except OSError as exc:
-        try:
-            if tmp_path and tmp_path.exists():
-                tmp_path.unlink()
-        except OSError:
-            pass
-        return {"migrated": False, "reason": "write_error", "error": str(exc), "from": str(legacy_path), "to": str(settings_path)}
+            return {"migrated": False, "reason": "write_error", "error": str(exc), "from": str(legacy_path), "to": str(settings_path)}
+    finally:
+        os.close(lock_fd)
 
 
 def load_project_config(cwd):

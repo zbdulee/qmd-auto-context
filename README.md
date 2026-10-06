@@ -22,9 +22,10 @@ qmd auto-context는 프로젝트 안의 문서, 메모, wiki를 자동으로 찾
 ## Quickstart (English)
 
 qmd auto-context injects relevant project documentation into Claude Code, Codex,
-and Hermes Agent sessions. Install a supported qmd CLI, install this plugin for
-your host, then ask the agent to enable auto-context for the project. Projects
-remain inactive until you explicitly opt in.
+and Hermes Agent sessions. Install this plugin for your host, then ask the
+`setup` skill to inspect the project and prepare a reviewed runtime. The managed
+QMD setup is available on macOS arm64; other hosts can use a separately installed
+supported global qmd CLI. Projects remain inactive until you explicitly opt in.
 
 | Host | Installation route | Runtime support |
 |---|---|---|
@@ -38,15 +39,19 @@ continue below.
 
 ## 설치
 
-먼저 qmd CLI가 필요합니다. 지원 버전은 `>=2.5.3 <3.0.0`입니다. 훅은 `python3`을 그대로 실행하므로 PATH의 `python3`이 **3.9 이상**이어야 합니다(macOS 기본 탑재 버전이 하한입니다).
+먼저 사용하는 에이전트에 플러그인을 설치합니다. 훅이 실행할 `python3`은
+3.9 이상이어야 합니다. 설치 후 에이전트에게 “이 프로젝트 auto-context 설치
+상태 보여줘”라고 요청하면 `setup` 스킬이 기존 설정·wiki·QMD·Laya·색인
+상태를 읽기 전용으로 확인합니다. macOS arm64에서는 검토한 요청에 따라
+QMD 2.5.3을 격리된 관리형 세대에 준비하거나 호환되는 기존 설치를
+재사용할 수 있습니다. 준비와 적용은 별도 요청이며 기존 DB와 설정을 보존합니다.
 
-```bash
-bun add -g @tobilu/qmd@2.5.3
-# 또는
-npm install -g @tobilu/qmd@2.5.3
-```
+Linux 및 다른 아키텍처에는 현재 관리형 설치가 제공되지 않습니다. 해당
+환경에서는 지원 버전(`>=2.5.3 <3.0.0`)의 qmd CLI를 별도로 설치한 뒤
+플러그인을 사용할 수 있습니다. 관리형 신규 설치나 기존 버전 갱신에는
+패키지 실행 범위와 원본 데이터 보존 계획을 먼저 검토해야 합니다.
 
-그 다음 사용하는 에이전트에 플러그인을 설치합니다.
+호스트별 플러그인 설치 명령은 다음과 같습니다.
 
 ```bash
 # Claude Code
@@ -64,6 +69,14 @@ hermes plugins enable qmd-auto-context
 
 제품 설치는 각 에이전트의 plugin/marketplace 흐름을 사용합니다. 이 저장소는
 사용자용 `install.sh` 또는 `uninstall.sh`를 제공하지 않습니다.
+
+설치 상태와 안전한 갱신 계획은 에이전트에게 자연어로 요청하세요. 예를 들면
+“이 프로젝트 auto-context 설치 상태 보여줘”, “검토한 설치를 격리해서 준비해줘”,
+“준비된 설치를 적용해줘”, “직전 적용을 되돌려줘”라고 말할 수 있습니다.
+기존 v1 wiki 카드는 검증된 v2 카드로 대응 관계를 검토하기 전까지 유지되며
+전환을 보류합니다. Laya runtime 준비만으로 학습은 활성화되지 않습니다.
+실제 설치·전환 범위와 현재 제한은
+[관리형 설치 계약](docs/install-update-contract-20261006.md)에 정리했습니다.
 
 ## 프로젝트에서 켜기
 

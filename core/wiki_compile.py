@@ -18,6 +18,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.resolve()))
+import wiki_mutation_lock
+from wiki_init import ensure_project_file
 import compile_paths as cp
 import config as qmd_config
 import wiki_dedup_judge
@@ -581,6 +583,7 @@ def trim_jsonl(path: Path, max_bytes: int = LOG_MAX_BYTES) -> None:
         pass
 
 
+@wiki_mutation_lock.guard_path
 def write_text_atomic(path: Path, text: str) -> bool:
     """기존 파일 덮어쓰기의 **단일 원자적 쓰기 경로**(카드·wiki 산출물 공용).
 
@@ -939,6 +942,7 @@ def _frontmatter_sections(frontmatter: str) -> list[tuple[str, list[str]]] | Non
     return sections
 
 
+@wiki_mutation_lock.guard_path
 def rewrite_generated_card(path: Path, old_text: str, generated_page: str) -> bool:
     """Atomically refresh trusted frontmatter and the managed block together.
 
@@ -993,6 +997,7 @@ def rewrite_generated_card(path: Path, old_text: str, generated_page: str) -> bo
     return write_text_atomic(path, rewritten)
 
 
+@wiki_mutation_lock.guard_path
 def insert_source_revisions(path: Path, revisions: list) -> bool:
     """Add the compiler-owned ``sourceRevisions`` block to a card that has none.
 
@@ -1044,6 +1049,7 @@ def insert_source_revisions(path: Path, revisions: list) -> bool:
     return write_text_atomic(path, patched)
 
 
+@wiki_mutation_lock.guard_path
 def patch_frontmatter_fields(path: Path, updates: dict) -> bool:
     """Rewrite only the named top-level scalar frontmatter keys in place.
 
@@ -1084,6 +1090,7 @@ def patch_frontmatter_fields(path: Path, updates: dict) -> bool:
     return write_text_atomic(path, patched)
 
 
+@wiki_mutation_lock.guard_path
 def stamp_verification(path: Path, status: str, engine: str, mode: str,
                        body_hash: str | None) -> bool:
     """Write a machine-review outcome — status AND all three proof fields together.
@@ -1114,6 +1121,7 @@ def stamp_verification(path: Path, status: str, engine: str, mode: str,
     })
 
 
+@wiki_mutation_lock.guard_path
 def update_index(wiki_root: Path, target: Path, title: str) -> bool:
     """index.md에 카드 1줄을 추가한다. **read-modify-write이므로 원자적으로 쓴다.**
 
@@ -1125,13 +1133,13 @@ def update_index(wiki_root: Path, target: Path, title: str) -> bool:
         복구하지 않는다. 카드가 생길 때마다(compile 경로) 호출되므로 노출도 높다.
       - `append_log`는 `open("a")` **append 모드**라 기존 내용을 truncate하지 않는다.
         164KB인데도 안전한 이유가 이것이다. 실패는 마지막 줄이 안 붙는 것으로 끝난다.
-        (두 함수의 최초 생성 `write_text`는 파일이 없을 때만이라 잃을 내용이 없다.)
+        (두 함수의 최초 헤더 생성도 원자 게시해 부분 파일을 남기지 않는다.)
     반환값은 "인덱스가 카드와 어긋나지 않았는가"다 — 인덱스는 캐논이 아니라 항법이므로
     실패가 카드 쓰기만큼 치명적이지는 않지만, 조용히 실패하면 카드와 어긋난 채 남는다.
     """
     index = wiki_root / "index.md"
     if not index.exists():
-        index.write_text("# Auto-context Wiki Index\n\n", encoding="utf-8")
+        ensure_project_file(index, "# Auto-context Wiki Index\n\n")
     rel = target.relative_to(wiki_root).as_posix()
     line = f"- {rel} - {title}\n"
     text = index.read_text(encoding="utf-8")
@@ -1140,6 +1148,7 @@ def update_index(wiki_root: Path, target: Path, title: str) -> bool:
     return write_text_atomic(index, text.rstrip() + "\n" + line)
 
 
+@wiki_mutation_lock.guard_path
 def remove_from_index(wiki_root: Path, target: Path) -> bool:
     """index.md에서 카드 1줄을 제거한다. **`update_index`의 역연산이고 같은 이유로 원자적이다.**
 
@@ -1173,11 +1182,12 @@ def remove_from_index(wiki_root: Path, target: Path) -> bool:
     return write_text_atomic(index, "".join(kept))
 
 
+@wiki_mutation_lock.guard_path
 def append_log(wiki_root: Path, action: str, target: Path, title: str) -> None:
     """log.md에 1줄 append. **원자적 쓰기가 필요 없다** — 사유는 `update_index` docstring."""
     log = wiki_root / "log.md"
     if not log.exists():
-        log.write_text("# Auto-context Wiki Log\n\n", encoding="utf-8")
+        ensure_project_file(log, "# Auto-context Wiki Log\n\n")
     rel = target.relative_to(wiki_root).as_posix()
     with log.open("a", encoding="utf-8") as handle:
         handle.write(f"- {now_iso()} {action} {rel} - {title}\n")
@@ -1435,7 +1445,7 @@ def main() -> int:
         return 1
 
     try:
-        with cp.card_write_lock(root):
+        with cp.card_write_lock(root), wiki_mutation_lock.lock(root):
             return _compile_locked(
                 root, config, compile_cfg, mode, wiki_root, candidate, args.regenerate)
     except OSError:

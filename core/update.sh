@@ -1023,82 +1023,84 @@ if not removed:
 
 sys.path.insert(0, str(core_dir))
 import config as qmd_config
+import wiki_mutation_lock
 
 info = qmd_config.find_project_config(str(workdir))
 if info.get("configFormat") != "auto-context-dir":
     sys.exit(0)
 
-settings = Path(info.get("configPath") or "")
 project_root = Path(info.get("projectRoot") or workdir).resolve()
-settings_dir = project_root / ".auto-context"
-expected = project_root / ".auto-context" / "settings.json"
-try:
-    if settings != expected or settings_dir.is_symlink() or settings.is_symlink():
+with wiki_mutation_lock.lock(project_root):
+    settings = Path(info.get("configPath") or "")
+    settings_dir = project_root / ".auto-context"
+    expected = project_root / ".auto-context" / "settings.json"
+    try:
+        if settings != expected or settings_dir.is_symlink() or settings.is_symlink():
+            sys.exit(2)
+        if settings.resolve() != expected:
+            sys.exit(0)
+    except OSError:
         sys.exit(2)
-    if settings.resolve() != expected:
-        sys.exit(0)
-except OSError:
-    sys.exit(2)
 
-try:
-    raw = json.loads(settings.read_text(encoding="utf-8"))
-except (OSError, json.JSONDecodeError):
-    sys.exit(2)
-if not isinstance(raw, dict):
-    sys.exit(2)
+    try:
+        raw = json.loads(settings.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        sys.exit(2)
+    if not isinstance(raw, dict):
+        sys.exit(2)
 
-collections = [item for item in raw.get("collections", []) if isinstance(item, str)]
-removed_set = set(removed)
-remaining = [collection for collection in collections if collection not in removed_set]
-raw["collections"] = remaining
-if not remaining:
-    raw["indexing"] = False
+    collections = [item for item in raw.get("collections", []) if isinstance(item, str)]
+    removed_set = set(removed)
+    remaining = [collection for collection in collections if collection not in removed_set]
+    raw["collections"] = remaining
+    if not remaining:
+        raw["indexing"] = False
 
-if isinstance(raw.get("collectionPaths"), dict):
-    remaining_set = set(remaining)
-    pruned_paths = {}
-    for pattern, value in raw["collectionPaths"].items():
-        if not isinstance(pattern, str):
+    if isinstance(raw.get("collectionPaths"), dict):
+        remaining_set = set(remaining)
+        pruned_paths = {}
+        for pattern, value in raw["collectionPaths"].items():
+            if not isinstance(pattern, str):
+                pruned_paths[pattern] = value
+                continue
+            if pattern in removed_set:
+                continue
+            if (
+                isinstance(value, str)
+                and any(ch in pattern for ch in "*?[")
+                and not any(fnmatch.fnmatch(collection, pattern) for collection in remaining_set)
+            ):
+                continue
             pruned_paths[pattern] = value
-            continue
-        if pattern in removed_set:
-            continue
-        if (
-            isinstance(value, str)
-            and any(ch in pattern for ch in "*?[")
-            and not any(fnmatch.fnmatch(collection, pattern) for collection in remaining_set)
-        ):
-            continue
-        pruned_paths[pattern] = value
-    raw["collectionPaths"] = pruned_paths
+        raw["collectionPaths"] = pruned_paths
 
-if isinstance(raw.get("collectionRoles"), dict):
-    raw["collectionRoles"] = {
-        key: value
-        for key, value in raw["collectionRoles"].items()
-        if not isinstance(key, str) or key not in removed_set
-    }
+    if isinstance(raw.get("collectionRoles"), dict):
+        raw["collectionRoles"] = {
+            key: value
+            for key, value in raw["collectionRoles"].items()
+            if not isinstance(key, str) or key not in removed_set
+        }
 
-tmp_path = None
-try:
-    fd, tmp_name = tempfile.mkstemp(
-        dir=str(settings.parent),
-        prefix=settings.name + ".",
-        suffix=".tmp",
-        text=True,
-    )
-    tmp_path = Path(tmp_name)
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        json.dump(raw, handle, ensure_ascii=False, indent=2)
-        handle.write("\n")
-    os.replace(tmp_path, settings)
-except OSError:
-    if tmp_path is not None:
-        try:
-            tmp_path.unlink()
-        except OSError:
-            pass
-    sys.exit(2)
+    tmp_path = None
+    try:
+        fd, tmp_name = tempfile.mkstemp(
+            dir=str(settings.parent),
+            prefix=settings.name + ".",
+            suffix=".tmp",
+            text=True,
+        )
+        tmp_path = Path(tmp_name)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(raw, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+        os.replace(tmp_path, settings)
+    except OSError:
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+        sys.exit(2)
 PY
 }
 
@@ -2037,169 +2039,7 @@ if [ "$1" = "--init-wiki" ]; then
     shift 2
   fi
   target="${1:-$PWD}"
-  python3 - "$target" "$preset" <<'PY'
-import json
-import os
-from pathlib import Path
-import sys
-import tempfile
-
-target = Path(sys.argv[1]).resolve()
-preset = sys.argv[2] if len(sys.argv) > 2 else "default"
-settings_dir = target / ".auto-context"
-settings = settings_dir / "settings.json"
-
-def ensure_settings_dir() -> None:
-    if settings_dir.exists():
-        if settings_dir.is_symlink() or not settings_dir.is_dir():
-            print(f"[qmd] unsafe .auto-context path: {settings_dir}", file=sys.stderr)
-            sys.exit(1)
-    else:
-        settings_dir.mkdir(parents=True, exist_ok=False)
-    try:
-        resolved = settings_dir.resolve()
-        resolved.relative_to(target)
-    except (OSError, ValueError):
-        print(f"[qmd] unsafe .auto-context path: {settings_dir}", file=sys.stderr)
-        sys.exit(1)
-    if resolved != settings_dir:
-        print(f"[qmd] unsafe .auto-context path: {settings_dir}", file=sys.stderr)
-        sys.exit(1)
-
-if settings.exists():
-    try:
-        config = json.loads(settings.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        print(f"[qmd] invalid settings.json preserved: {settings}: {exc}", file=sys.stderr)
-        sys.exit(1)
-    if not isinstance(config, dict):
-        print(f"[qmd] invalid settings.json preserved: {settings}: expected object", file=sys.stderr)
-        sys.exit(1)
-else:
-    config = {}
-
-ensure_settings_dir()
-wiki = settings_dir / "wiki"
-
-def ensure_project_dir(path: Path, label: str) -> None:
-    if path.exists():
-        if path.is_symlink() or not path.is_dir():
-            print(f"[qmd] unsafe {label} path: {path}", file=sys.stderr)
-            sys.exit(1)
-    else:
-        path.mkdir(parents=False, exist_ok=False)
-    try:
-        resolved = path.resolve()
-        resolved.relative_to(target)
-    except (OSError, ValueError):
-        print(f"[qmd] unsafe {label} path: {path}", file=sys.stderr)
-        sys.exit(1)
-    if resolved != path:
-        print(f"[qmd] unsafe {label} path: {path}", file=sys.stderr)
-        sys.exit(1)
-
-
-def ensure_project_file(path: Path, content: str) -> bool:
-    if path.is_symlink():
-        print(f"[qmd] unsafe wiki file path: {path}", file=sys.stderr)
-        sys.exit(1)
-    if path.exists():
-        if not path.is_file():
-            print(f"[qmd] unsafe wiki file path: {path}", file=sys.stderr)
-            sys.exit(1)
-        return False
-    path.write_text(content, encoding="utf-8")
-    return True
-
-# scaffold는 **자동 compile이 실제로 채울 수 있는** 타입 디렉터리만 만든다.
-# extractors/lib.ALLOWED_TYPES(프롬프트가 모델에게 제시하는 집합)가 그 목록이고
-# 현재 concept/entity/decision/comparison 4종이다. `sessions`·`queries`는 그 집합에
-# 없어 자동으로는 영영 비어 있었다(라이브 ai-proxy 실측 0건/0건, service-engineering은
-# 두 디렉터리가 아예 없이 정상 동작). 미리 만들 이유가 없는 이유는 두 가지다 —
-# (1) wiki_compile이 카드를 쓰기 전에 `target.parent.mkdir(parents=True)` 하므로
-#     수동 wiki-compile로 session 카드를 쓰면 그때 생긴다(기능은 그대로다),
-# (2) 빈 디렉터리는 "여기에 뭔가 쌓여야 하는데 안 쌓인다"로 읽혀 오진을 부른다.
-# 즉 여기서 지운 것은 **미리 만드는 것**이지 타입 지원이 아니다 —
-# wiki_compile.ALLOWED_TYPES/TYPE_DIRS의 session·query 항목은 그대로 둔다.
-# 목록이 프롬프트와 갈리지 않는지는 test/update.test.mjs가 코드에서 유도해 단정한다.
-base_dirs = ["concepts", "entities", "decisions", "comparisons"]
-novel_dirs = ["characters", "world", "timeline", "plot", "style", "discarded", "decisions", "sessions"]
-dir_names = novel_dirs if preset == "novel" else base_dirs
-dirs = [wiki] + [wiki / name for name in dir_names]
-for path in dirs:
-    ensure_project_dir(path, "wiki")
-
-files = {
-    wiki / "SCHEMA.md": "# Auto-context Wiki Schema\n\nThis wiki stores promoted, durable project knowledge. Do not paste full transcripts here.\n",
-    wiki / "index.md": "# Auto-context Wiki Index\n\n- decisions/\n- concepts/\n- entities/\n- comparisons/\n",
-    wiki / "log.md": "# Auto-context Wiki Log\n\nAppend notable wiki maintenance events here.\n",
-}
-created = []
-for path, content in files.items():
-    if ensure_project_file(path, content):
-        created.append(str(path))
-
-def slug(name: str) -> str:
-    cleaned = "".join(ch.lower() if ch.isalnum() else "-" for ch in name).strip("-")
-    while "--" in cleaned:
-        cleaned = cleaned.replace("--", "-")
-    return cleaned or "project"
-
-wiki_collection = f"{slug(target.name)}-wiki"
-collections = config.get("collections") if isinstance(config.get("collections"), list) else []
-collections = [item for item in collections if isinstance(item, str)]
-if wiki_collection not in collections:
-    collections.append(wiki_collection)
-config["collections"] = collections
-
-collection_paths = config.get("collectionPaths") if isinstance(config.get("collectionPaths"), dict) else {}
-collection_paths = {key: value for key, value in collection_paths.items() if isinstance(key, str) and isinstance(value, str)}
-collection_paths[wiki_collection] = ".auto-context/wiki"
-config["collectionPaths"] = collection_paths
-
-collection_roles = config.get("collectionRoles") if isinstance(config.get("collectionRoles"), dict) else {}
-collection_roles = {key: value for key, value in collection_roles.items() if isinstance(key, str) and isinstance(value, str)}
-for collection in collections:
-    collection_roles.setdefault(collection, "raw")
-collection_roles[wiki_collection] = "wiki"
-config["collectionRoles"] = collection_roles
-# recallStrategy "hierarchical"·wikiPath ".auto-context/wiki"는 DEFAULT_CONFIG 기본값과
-# 같으므로 쓰지 않는다(생성기 delta-only). recallStrategy는 예전에 **대입**이라 기존 값을
-# 강제로 덮었으므로, 안 쓰는 것만으로는 부족하고 키를 지워야 같은 결과가 된다
-# ("키 없음 → 기본값 hierarchical"). wikiPath는 setdefault라 지우면 사용자 커스텀 경로를
-# 파괴하므로 **줄만 없앤다**(없으면 기본값, 있으면 그대로).
-config.pop("recallStrategy", None)
-if preset == "novel":
-    compile_config = config.get("compile") if isinstance(config.get("compile"), dict) else {}
-    # 기본값과 다른 키만 채운다(생성기 delta-only). 활성화는 `mode` 한 값이 담당한다 —
-    # `enabled`·`autoWrite`는 스키마에서 사라졌으므로 쓰면 정규화에서 무시되는 죽은 키다.
-    compile_config.setdefault("mode", "auto-wiki")
-    # post_session_summary는 host가 compact session summary를 hook에 넘겨줄 때만
-    # 자동으로 발화할 수 있고 그런 host가 아직 없다(수동 skills/wiki-compile 경로의
-    # 라벨로만 소비된다). 자동 수집을 실제로 담당하는 트리거는 post_tool_source이므로
-    # 반드시 포함시킨다 — 없으면 세션 노트를 채워도 카드가 생기지 않는다.
-    compile_config.setdefault(
-        "triggers", ["post_tool_source", "manual", "explicit_user_approval", "post_session_summary"]
-    )
-    config["compile"] = compile_config
-if "indexing" not in config:
-    config["indexing"] = True
-
-fd, tmp = tempfile.mkstemp(dir=str(settings_dir), prefix="settings.", suffix=".tmp")
-try:
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        json.dump(config, handle, ensure_ascii=False, indent=2)
-        handle.write("\n")
-    os.replace(tmp, settings)
-except BaseException:
-    try:
-        os.unlink(tmp)
-    except OSError:
-        pass
-    raise
-
-print(f"[qmd] wiki scaffold ready: {wiki} ({len(created)} files created)")
-PY
+  python3 "$(cd "$(dirname "$0")" && pwd)/wiki_init.py" "$target" "$preset"
   exit 0
 fi
 
@@ -2259,75 +2099,77 @@ from pathlib import Path
 sys.path.insert(0, sys.argv[2])
 import wiki_compile_defaults as d
 import config as qmd_config
+import wiki_mutation_lock
 
 target = Path(sys.argv[1]).resolve()
 engines = d.parse_engines(sys.argv[3] or None)
 root = d.plugin_root()
 settings = target / ".auto-context" / "settings.json"
-cfg = json.loads(settings.read_text(encoding="utf-8"))
+with wiki_mutation_lock.lock(target):
+    cfg = json.loads(settings.read_text(encoding="utf-8"))
 
-block = d.compile_block(root, engines)
-existing = cfg.get("compile") if isinstance(cfg.get("compile"), dict) else {}
-# Merge: block wins for the keys it sets (extractor/enabled/mode/...); unrelated existing keys are preserved.
-merged = {**existing, **block}
-# 생성기가 delta라 "기본값과 같아서 안 쓴 키"는 block에 없다. 그런 키가 기존 설정에
-# 비기본값으로 남아 있으면 예전 동작(전체 블록이 덮어써서 기본값으로 리셋)과 갈리므로
-# 여기서 지운다 — "키 없음 → 기본값"이 예전의 "기본값을 명시"와 같은 결과다.
-for key in d.default_valued_compile_keys(root, engines):
-    merged.pop(key, None)
-existing_extractor = existing.get("extractor") if isinstance(existing.get("extractor"), dict) else {}
-block_extractor = block.get("extractor") if isinstance(block.get("extractor"), dict) else {}
-if existing_extractor:
-    # Existing extractor config is explicit user/runtime configuration. Keep it ahead
-    # of generated portable built-in defaults so --enable-compile stays non-destructive.
-    merged["extractor"] = {**block_extractor, **existing_extractor}
-trig = existing.get("triggers") if isinstance(existing.get("triggers"), list) else []
-merged["triggers"] = list(dict.fromkeys(["post_tool_source", *trig, *block["triggers"]]))
-# 스키마에서 사라진 키를 걷어낸다. block(delta)에 없는 키는 기존 파일의 사본이 그대로
-# 살아남고, 그러면 도구가 방금 원자적으로 다시 쓴 자기 출력물에 대해 SessionStart가
-# deprecated 알림을 4h마다 낸다(자기 잔소리 루프). enabled/autoWrite의 의미는
-# compile_config가 이미 mode로 번역했으므로 여기서는 흔적만 지우면 된다.
-# **extractor 병합 뒤에 둔다** — 위에서 지우면 existing_extractor 병합이 dispatch/default를
-# 되살린다(실측).
-def _dig(root_map, dotted, create=False):
-    """"compile." 접두를 뗀 dotted 경로의 (부모 dict, 마지막 키). 없으면 (None, key)."""
-    parts = dotted.split(".")[1:]
-    node = root_map
-    for part in parts[:-1]:
-        child = node.get(part)
-        if not isinstance(child, dict):
-            if not create:
-                return None, parts[-1]
-            child = {}
-            node[part] = child
-        node = child
-    return node, parts[-1]
+    block = d.compile_block(root, engines)
+    existing = cfg.get("compile") if isinstance(cfg.get("compile"), dict) else {}
+    # Merge: block wins for the keys it sets (extractor/enabled/mode/...); unrelated existing keys are preserved.
+    merged = {**existing, **block}
+    # 생성기가 delta라 "기본값과 같아서 안 쓴 키"는 block에 없다. 그런 키가 기존 설정에
+    # 비기본값으로 남아 있으면 예전 동작(전체 블록이 덮어써서 기본값으로 리셋)과 갈리므로
+    # 여기서 지운다 — "키 없음 → 기본값"이 예전의 "기본값을 명시"와 같은 결과다.
+    for key in d.default_valued_compile_keys(root, engines):
+        merged.pop(key, None)
+    existing_extractor = existing.get("extractor") if isinstance(existing.get("extractor"), dict) else {}
+    block_extractor = block.get("extractor") if isinstance(block.get("extractor"), dict) else {}
+    if existing_extractor:
+        # Existing extractor config is explicit user/runtime configuration. Keep it ahead
+        # of generated portable built-in defaults so --enable-compile stays non-destructive.
+        merged["extractor"] = {**block_extractor, **existing_extractor}
+    trig = existing.get("triggers") if isinstance(existing.get("triggers"), list) else []
+    merged["triggers"] = list(dict.fromkeys(["post_tool_source", *trig, *block["triggers"]]))
+    # 스키마에서 사라진 키를 걷어낸다. block(delta)에 없는 키는 기존 파일의 사본이 그대로
+    # 살아남고, 그러면 도구가 방금 원자적으로 다시 쓴 자기 출력물에 대해 SessionStart가
+    # deprecated 알림을 4h마다 낸다(자기 잔소리 루프). enabled/autoWrite의 의미는
+    # compile_config가 이미 mode로 번역했으므로 여기서는 흔적만 지우면 된다.
+    # **extractor 병합 뒤에 둔다** — 위에서 지우면 existing_extractor 병합이 dispatch/default를
+    # 되살린다(실측).
+    def _dig(root_map, dotted, create=False):
+        """"compile." 접두를 뗀 dotted 경로의 (부모 dict, 마지막 키). 없으면 (None, key)."""
+        parts = dotted.split(".")[1:]
+        node = root_map
+        for part in parts[:-1]:
+            child = node.get(part)
+            if not isinstance(child, dict):
+                if not create:
+                    return None, parts[-1]
+                child = {}
+                node[part] = child
+            node = child
+        return node, parts[-1]
 
-# 값 읽기는 **원본(existing)** 에서 한다. merged 쪽은 위 default_valued 정리가 verify·batch
-# 서브트리를 통째로 지운 뒤라 relocated 값이 이미 사라져 있다(실측: verifyPerRun 15,
-# extractorPerRun 4가 조용히 유실됐다).
-for record in qmd_config.deprecated_keys({"compile": existing}):
-    src, src_key = _dig(existing, record["key"])
-    value = src.get(src_key) if src is not None else None
-    # 옮겨진 키는 값이 여전히 유효하므로 새 자리로 이식한다. 지우기만 하면 사용자가 적어 둔
-    # verify.maxPerRun 15가 조용히 기본값 3으로 떨어진다. 새 키에 이미 값이 있으면 그쪽이
-    # 사용자의 최신 의사이므로 덮지 않는다.
-    dest = record.get("replacement")
-    if dest and value is not None:
-        parent, dest_key = _dig(merged, dest, create=True)
-        if parent is not None:
-            parent.setdefault(dest_key, value)
-    # 흔적 제거는 merged에서. enabled/autoWrite의 의미는 compile_config가 이미 mode로
-    # 번역했으므로 여기서는 키만 걷어내면 된다.
-    dead, dead_key = _dig(merged, record["key"])
-    if dead is not None:
-        dead.pop(dead_key, None)
-cfg["compile"] = merged
+    # 값 읽기는 **원본(existing)** 에서 한다. merged 쪽은 위 default_valued 정리가 verify·batch
+    # 서브트리를 통째로 지운 뒤라 relocated 값이 이미 사라져 있다(실측: verifyPerRun 15,
+    # extractorPerRun 4가 조용히 유실됐다).
+    for record in qmd_config.deprecated_keys({"compile": existing}):
+        src, src_key = _dig(existing, record["key"])
+        value = src.get(src_key) if src is not None else None
+        # 옮겨진 키는 값이 여전히 유효하므로 새 자리로 이식한다. 지우기만 하면 사용자가 적어 둔
+        # verify.maxPerRun 15가 조용히 기본값 3으로 떨어진다. 새 키에 이미 값이 있으면 그쪽이
+        # 사용자의 최신 의사이므로 덮지 않는다.
+        dest = record.get("replacement")
+        if dest and value is not None:
+            parent, dest_key = _dig(merged, dest, create=True)
+            if parent is not None:
+                parent.setdefault(dest_key, value)
+        # 흔적 제거는 merged에서. enabled/autoWrite의 의미는 compile_config가 이미 mode로
+        # 번역했으므로 여기서는 키만 걷어내면 된다.
+        dead, dead_key = _dig(merged, record["key"])
+        if dead is not None:
+            dead.pop(dead_key, None)
+    cfg["compile"] = merged
 
-fd, tmp = tempfile.mkstemp(dir=str(settings.parent), prefix="settings.", suffix=".tmp")
-with os.fdopen(fd, "w", encoding="utf-8") as fh:
-    json.dump(cfg, fh, ensure_ascii=False, indent=2); fh.write("\n")
-os.replace(tmp, settings)
+    fd, tmp = tempfile.mkstemp(dir=str(settings.parent), prefix="settings.", suffix=".tmp")
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump(cfg, fh, ensure_ascii=False, indent=2); fh.write("\n")
+    os.replace(tmp, settings)
 print(f"[qmd] wiki auto-compile 활성화: {target}")
 print(f"      엔진: {', '.join(engines)} (해당 host CLI가 없으면 자동 skip)")
 print("      이제 raw/session/source 컬렉션의 .md를 편집하면 백그라운드로 해당 CLI를 실행해")
@@ -2358,6 +2200,8 @@ target = Path(sys.argv[1]).resolve()
 core_dir = sys.argv[2]
 sys.path.insert(0, str(Path(core_dir).resolve()))
 import config as qmd_config
+import wiki_mutation_lock
+import wiki_init
 settings_dir = target / ".auto-context"
 dest = settings_dir / "settings.json"
 legacy_root = target / ".auto-context.json"
@@ -2380,61 +2224,50 @@ def ensure_settings_dir() -> None:
         print(f"[qmd] unsafe .auto-context path: {settings_dir}", file=sys.stderr)
         sys.exit(1)
 
-# 기존 config 존재 시 미덮음
-if dest.exists() or legacy_root.exists() or legacy.exists():
-    existing = dest if dest.exists() else (legacy_root if legacy_root.exists() else legacy)
-    print(f"[qmd] --optin --recommended: {existing} 이(가) 이미 존재합니다. 덮어쓰지 않습니다.", file=sys.stderr)
-    sys.exit(1)
-# recommend_config.py 호출
-result = subprocess.run(
-    [sys.executable, str(Path(core_dir) / "recommend_config.py"), "--cwd", str(target), "--json"],
-    capture_output=True, text=True
-)
-if result.returncode != 0:
-    print(f"[qmd] recommend_config.py 실패: {result.stderr.strip()}", file=sys.stderr)
-    sys.exit(1)
-try:
-    rec = json.loads(result.stdout)
-except json.JSONDecodeError as e:
-    print(f"[qmd] recommend_config.py JSON 파싱 실패: {e}", file=sys.stderr)
-    sys.exit(1)
-if not rec.get("available"):
-    print("[qmd] 추천 가능한 경로를 찾지 못했습니다. --optin 또는 .auto-context/settings.json 직접 작성을 쓰세요.", file=sys.stderr)
-    sys.exit(1)
-config = rec["config"]
-ensure_settings_dir()
-fd, tmp = tempfile.mkstemp(dir=str(settings_dir), prefix="settings.", suffix=".tmp")
-try:
-    with os.fdopen(fd, "w") as fh:
-        json.dump(config, fh, ensure_ascii=False, indent=2)
-    os.replace(tmp, dest)
-except BaseException:
-    try: os.unlink(tmp)
-    except OSError: pass
-    raise
-qmd_config.clear_local_optout(target)
+with wiki_mutation_lock.lock(target):
+    # 기존 config 존재 시 미덮음
+    if dest.exists() or dest.is_symlink() or legacy_root.exists() or legacy.exists():
+        existing = dest if dest.exists() else (legacy_root if legacy_root.exists() else legacy)
+        print(f"[qmd] --optin --recommended: {existing} 이(가) 이미 존재합니다. 덮어쓰지 않습니다.", file=sys.stderr)
+        sys.exit(1)
+    # recommend_config.py 호출
+    result = subprocess.run(
+        [sys.executable, str(Path(core_dir) / "recommend_config.py"), "--cwd", str(target), "--json"],
+        capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        print(f"[qmd] recommend_config.py 실패: {result.stderr.strip()}", file=sys.stderr)
+        sys.exit(1)
+    try:
+        rec = json.loads(result.stdout)
+    except json.JSONDecodeError as e:
+        print(f"[qmd] recommend_config.py JSON 파싱 실패: {e}", file=sys.stderr)
+        sys.exit(1)
+    if not rec.get("available"):
+        print("[qmd] 추천 가능한 경로를 찾지 못했습니다. --optin 또는 .auto-context/settings.json 직접 작성을 쓰세요.", file=sys.stderr)
+        sys.exit(1)
+    config = rec["config"]
+    paths = config.get("collectionPaths") if isinstance(config.get("collectionPaths"), dict) else {}
+    needs_wiki = any(v == ".auto-context/wiki" for v in paths.values()) or config.get("wikiPath") == ".auto-context/wiki"
+    if needs_wiki:
+        # Build the wiki first, then publish settings last within this one
+        # process and lock. Even SIGKILL leaves at most retryable scaffold
+        # files, never visible opt-in settings against an incomplete corpus.
+        wiki_init.init_wiki(target, initial_config=config, quiet=True)
+    else:
+        ensure_settings_dir()
+        fd, tmp = tempfile.mkstemp(dir=str(settings_dir), prefix="settings.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as fh:
+                json.dump(config, fh, ensure_ascii=False, indent=2)
+            os.replace(tmp, dest)
+        except BaseException:
+            try: os.unlink(tmp)
+            except OSError: pass
+            raise
+    qmd_config.clear_local_optout(target)
 print(f"[qmd] --optin --recommended 완료: {dest} ({config.get('collections')}). 다음 세션부터 인덱싱됩니다.")
 PY
-    # Scaffold wiki if the written config contains a wiki collection.
-    # detect wikiPath or any collection whose collectionPaths entry is .auto-context/wiki
-    _needs_wiki="$(python3 - "$target" <<'PYWIKI'
-import json, sys
-from pathlib import Path
-settings = Path(sys.argv[1]) / ".auto-context" / "settings.json"
-try:
-    cfg = json.loads(settings.read_text(encoding="utf-8"))
-except Exception:
-    print("no"); sys.exit(0)
-paths = cfg.get("collectionPaths") if isinstance(cfg.get("collectionPaths"), dict) else {}
-if any(v == ".auto-context/wiki" for v in paths.values()) or cfg.get("wikiPath") == ".auto-context/wiki":
-    print("yes")
-else:
-    print("no")
-PYWIKI
-)"
-    if [ "$_needs_wiki" = "yes" ]; then
-      bash "$0" --init-wiki "$target" >/dev/null 2>&1 || true
-    fi
     exit 0
   fi
   target="${1:-$PWD}"
@@ -2444,6 +2277,7 @@ from pathlib import Path
 mode, target, core_dir = sys.argv[1], Path(sys.argv[2]).resolve(), sys.argv[3]
 sys.path.insert(0, str(Path(core_dir).resolve()))
 import config as qmd_config
+import wiki_mutation_lock
 settings_dir = target / ".auto-context"
 dest = settings_dir / "settings.json"
 legacy_root = target / ".auto-context.json"
@@ -2466,45 +2300,46 @@ def ensure_settings_dir() -> None:
         print(f"[qmd] unsafe .auto-context path: {settings_dir}", file=sys.stderr)
         sys.exit(1)
 
-if mode == "--optout":
-    marker = qmd_config.write_local_optout(target)
-    print(f"[qmd] opt-out 완료: {target}. 로컬 decision store에 기록했습니다: {marker}. 이 폴더는 인덱싱·검색하지 않습니다.")
-    sys.exit(0)
+with wiki_mutation_lock.lock(target):
+    if mode == "--optout":
+        marker = qmd_config.write_local_optout(target)
+        print(f"[qmd] opt-out 완료: {target}. 로컬 decision store에 기록했습니다: {marker}. 이 폴더는 인덱싱·검색하지 않습니다.")
+        sys.exit(0)
 
-base = {}
-used_legacy = False
-used_root_legacy = False
-for src in (dest, legacy_root, legacy):
-    if src.exists():
-        try:
-            base = json.loads(src.read_text())
-            if not isinstance(base, dict): base = {}
-        except (OSError, json.JSONDecodeError): base = {}
-        used_legacy = (src == legacy)   # 레거시를 base로 읽었는지(=dest 없었음)
-        used_root_legacy = (src == legacy_root)
-        break
-if mode == "--optin":
-    base["indexing"] = True
-    if not base.get("collections"):
-        base["collections"] = [target.name.replace(" ", "-")]
-    msg = f"[qmd] opt-in 완료: {target} ({base['collections']}). 다음 세션부터 인덱싱됩니다."
-ensure_settings_dir()
-fd, tmp = tempfile.mkstemp(dir=str(settings_dir), prefix="settings.", suffix=".tmp")
-try:
-    with os.fdopen(fd, "w") as fh:
-        json.dump(base, fh, ensure_ascii=False, indent=2)
-    os.replace(tmp, dest)
-except BaseException:
-    try: os.unlink(tmp)
-    except OSError: pass
-    raise
-# 레거시를 base로 승계했으면(=내용이 .auto-context.json에 담김) 중복 방치 않고 백업 후 제거
-if used_legacy and legacy.exists():
-    os.replace(str(legacy), str(legacy) + ".bak-migrated")
-if used_root_legacy and legacy_root.exists():
-    legacy_root.unlink()
-qmd_config.clear_local_optout(target)
-print(msg)
+    base = {}
+    used_legacy = False
+    used_root_legacy = False
+    for src in (dest, legacy_root, legacy):
+        if src.exists():
+            try:
+                base = json.loads(src.read_text())
+                if not isinstance(base, dict): base = {}
+            except (OSError, json.JSONDecodeError): base = {}
+            used_legacy = (src == legacy)   # 레거시를 base로 읽었는지(=dest 없었음)
+            used_root_legacy = (src == legacy_root)
+            break
+    if mode == "--optin":
+        base["indexing"] = True
+        if not base.get("collections"):
+            base["collections"] = [target.name.replace(" ", "-")]
+        msg = f"[qmd] opt-in 완료: {target} ({base['collections']}). 다음 세션부터 인덱싱됩니다."
+    ensure_settings_dir()
+    fd, tmp = tempfile.mkstemp(dir=str(settings_dir), prefix="settings.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            json.dump(base, fh, ensure_ascii=False, indent=2)
+        os.replace(tmp, dest)
+    except BaseException:
+        try: os.unlink(tmp)
+        except OSError: pass
+        raise
+    # 레거시를 base로 승계했으면(=내용이 .auto-context.json에 담김) 중복 방치 않고 백업 후 제거
+    if used_legacy and legacy.exists():
+        os.replace(str(legacy), str(legacy) + ".bak-migrated")
+    if used_root_legacy and legacy_root.exists():
+        legacy_root.unlink()
+    qmd_config.clear_local_optout(target)
+    print(msg)
 PY
   exit 0
 fi

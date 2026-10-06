@@ -10,8 +10,8 @@ import json
 import os
 from pathlib import Path
 import sqlite3
-from urllib.parse import quote
 import qmd_route
+import sqlite_read
 
 from .contracts import digest
 from .store import canonical, database
@@ -32,9 +32,7 @@ def snapshot(project_root, config, *, qmd_paths=None):
         db_path = Path(route['INDEX_PATH'])
         if db_path is None or not db_path.is_file() or db_path.is_symlink():
             return None
-        uri = 'file:' + quote(str(db_path.resolve()), safe='/') + '?mode=ro'
-        with sqlite3.connect(uri, uri=True, timeout=.2) as db:
-            db.execute('PRAGMA query_only=ON')
+        with sqlite_read.connect(db_path, timeout=.2) as db:
             placeholders = ','.join('?' for _ in names)
             cursor = db.execute(
                 f'SELECT collection,path,hash FROM documents WHERE active=1 '

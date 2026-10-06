@@ -1,4 +1,5 @@
 """Synthetic source mutation/deletion and uncertain CLI attempt via the real hook."""
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -43,15 +44,30 @@ def setup(root):
         'XDG_CACHE_HOME': str(root / 'qmd-cache')}
 
 def hook(env):
+    status = Path(env['QMD_TOPICAL_PROJECT_ROOT']) / 'topical-hook-status.json'
+    previous_job = json.loads(status.read_text()).get('job') if status.is_file() else None
     subprocess.run(['bash','hooks/run-hook','topical-reconcile','codex'],
         input='',text=True,capture_output=True,env=env,timeout=3,check=True)
+    return previous_job
 
-def wait_jobs(root, limit=20):
+def wait_jobs(root, previous_job, limit=20):
     queue = root / '.topical-hook-jobs'
+    status_path = root / 'topical-hook-status.json'
     deadline = time.monotonic() + limit
     while time.monotonic() < deadline:
-        if queue.is_dir() and not list(queue.glob('*.json')):
-            return json.loads((root / 'topical-hook-status.json').read_text())
+        if queue.is_dir() and status_path.is_file() and not list(queue.glob('*.json')):
+            status = json.loads(status_path.read_text())
+            if status.get('job') != previous_job and status.get('status') == 'completed':
+                # The queue entry is removed before status is written. Wait for
+                # the worker to release its lock before cleaning the temp root.
+                with (queue / '.worker.lock').open('a+') as lock:
+                    try:
+                        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        pass
+                    else:
+                        fcntl.flock(lock, fcntl.LOCK_UN)
+                        return status
         time.sleep(.03)
     raise AssertionError('hook job did not finish')
 
@@ -64,10 +80,10 @@ with tempfile.TemporaryDirectory(prefix='qmd-create-races-') as base:
         env['QMD_SYNTHETIC_TEACHER_CHANGE_SOURCE'] = action
         # Opt-in starts with a source already present: bootstrap must not
         # silently mark it settled before any card is created.
-        hook(env); result = wait_jobs(root)
+        previous_job = hook(env); result = wait_jobs(root, previous_job)
         assert result['result']['status'] == 'pending_review', result
         assert not list((root / '.auto-context/wiki').glob('topical-v2/*/*.md'))
-        hook(env); result = wait_jobs(root)
+        previous_job = hook(env); result = wait_jobs(root, previous_job)
         assert result['result']['status'] == 'superseded_source_changed', result
         state = json.loads((root / 'topical-reconcile-state.json').read_text())
         assert state['inFlight'] is None and not (root / 'topical-create-state.json').exists()
@@ -79,7 +95,7 @@ with tempfile.TemporaryDirectory(prefix='qmd-create-races-') as base:
         assert len(calls) == 1
     root = Path(base, 'uncertain').resolve(); root.mkdir()
     env = setup(root)
-    hook(env); wait_jobs(root)
+    previous_job = hook(env); wait_jobs(root, previous_job)
     (root / 'sources/new.md').write_text('Initial synthetic rule.\n')
     env['QMD_SYNTHETIC_TEACHER_WAIT'] = '1'
     hook(env)
@@ -91,7 +107,7 @@ with tempfile.TemporaryDirectory(prefix='qmd-create-races-') as base:
     os.kill(pids['worker'], signal.SIGKILL)
     os.kill(pids['child'], signal.SIGKILL)
     env.pop('QMD_SYNTHETIC_TEACHER_WAIT')
-    hook(env); result = wait_jobs(root)
+    previous_job = hook(env); result = wait_jobs(root, previous_job)
     assert result['result'] == {'status':'pending_review',
                                 'reason':'generation_attempt_reserved'}, result
     calls = (root / 'fake-teacher-calls.jsonl').read_text().splitlines()

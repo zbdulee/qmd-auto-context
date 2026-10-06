@@ -6,6 +6,7 @@ An explicit later cutover must verify the new index and its project routing.
 """
 from __future__ import annotations
 
+from contextlib import nullcontext
 import hashlib
 import fcntl
 import json
@@ -18,6 +19,8 @@ import stat
 import subprocess
 import uuid
 import tempfile
+
+import sqlite_read
 
 REQUIRED_TABLES={'documents','content','content_vectors','store_collections'}
 WIKI_SCHEMA_VERSION=2
@@ -37,9 +40,7 @@ def inspect_index(index, *, include_file_hash=True):
     """Inspect an existing DB without allowing SQLite to create or write it."""
     path=Path(index)
     if path.is_symlink() or not path.is_file():return {'status':'missing_index'}
-    uri='file:'+str(path.resolve())+'?mode=ro'
-    with sqlite3.connect(uri,uri=True) as db:
-        db.execute('PRAGMA query_only=ON')
+    with sqlite_read.connect(path) as db:
         rows=db.execute("SELECT name, sql FROM sqlite_master WHERE type IN ('table','view')").fetchall()
         schema={name:sql for name,sql in rows}
         if not REQUIRED_TABLES<=set(schema):return {'status':'incompatible_schema'}
@@ -142,7 +143,8 @@ def stage_shadow_index(project_root, *, qmd_bin, config_file, wiki_dir, model_ca
             not any(row['model']==expected_model for row in inspected['modelFingerprints'])):
         raise ValueError('shadow_index_probe_failed')
     prepared={'schema':'qmd-shadow-index-v1','index':str(index),
-              'inspection':inspected,'sourceIndex':old,'sourceIndexSha256':_sha(old) if old and Path(old).is_file() else None}
+              'inspection':inspected,'sourceIndex':old,
+              'sourceIndexFingerprint':sqlite_read.snapshot_fingerprint(old) if old else None}
     prepared['configSha256'] = _sha(stage_config/'index.yml')
     path=generation/'prepared.json'
     fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
@@ -165,7 +167,8 @@ def _prepared_shadow(project_root,generation):
     if inspect_index(value['index'])!=value['inspection']:
         raise ValueError('shadow_index_changed')
     source=value.get('sourceIndex')
-    if source is not None and _sha(source)!=value.get('sourceIndexSha256'):
+    if source is not None and (not isinstance(value.get('sourceIndexFingerprint'),dict) or
+                              sqlite_read.snapshot_fingerprint(source)!=value['sourceIndexFingerprint']):
         raise ValueError('source_index_changed_during_migration')
     return value
 
@@ -176,7 +179,6 @@ def activate_shadow_index(project_root,generation):
     generation=Path(generation)
     import wiki_topical as topical
     if not topical.opted_in(root):raise ValueError('project_optin_required')
-    prepared=_prepared_shadow(root,generation)
     pointer=root/'.auto-context/qmd-index-active.json'
     lock=root/'.auto-context/.qmd-index-pointer.lock'
     fd=os.open(lock,os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW,0o600)
@@ -184,15 +186,27 @@ def activate_shadow_index(project_root,generation):
         if os.fstat(fd).st_uid!=os.getuid() or os.fstat(fd).st_mode & 0o077:
             raise ValueError('unsafe_index_pointer_lock')
         fcntl.flock(fd,fcntl.LOCK_EX)
-        if pointer.is_symlink():raise ValueError('unsafe_index_pointer')
-        previous=json.loads(pointer.read_text()) if pointer.is_file() else None
-        if previous is not None: select_runtime(root)
-        value={'schema':'qmd-index-pointer-v1','generation':str(generation),
-               'index':prepared['index'], 'indexSha256':prepared['inspection']['fileSha256'],
-               'preparedSha256':_sha(generation/'prepared.json'),
-               'previous':previous if previous is not None else
-                   {'index':prepared['sourceIndex'],'indexSha256':prepared['sourceIndexSha256']}}
-        _write_pointer(pointer,value)
+        prepared=_prepared_shadow(root,generation)
+        source=prepared['sourceIndex']
+        guard=(sqlite_read.cutover_guard(source,prepared['sourceIndexFingerprint'])
+               if source is not None else nullcontext())
+        wrote=False;previous=None
+        try:
+            with guard:
+                if pointer.is_symlink():raise ValueError('unsafe_index_pointer')
+                previous=json.loads(pointer.read_text()) if pointer.is_file() else None
+                if previous is not None: select_runtime(root)
+                value={'schema':'qmd-index-pointer-v1','generation':str(generation),
+                       'index':prepared['index'], 'indexSha256':prepared['inspection']['fileSha256'],
+                       'preparedSha256':_sha(generation/'prepared.json'),
+                       'previous':previous if previous is not None else
+                           {'index':source,'indexFingerprint':prepared['sourceIndexFingerprint']}}
+                _write_pointer(pointer,value);wrote=True
+        except BaseException:
+            if wrote:
+                if previous is None:pointer.unlink()
+                else:_write_pointer(pointer,previous)
+            raise
     finally:
         os.close(fd)
     return {'status':'index_selected','index':prepared['index']}
@@ -286,10 +300,17 @@ def rollback_shadow_index(project_root):
             restored=select_runtime(root)
             return {'status':'index_rolled_back','index':restored['INDEX_PATH']}
         source=previous.get('index')
-        if source is not None and (_sha(source)!=previous.get('indexSha256') or
-                                   inspect_index(source)['status']!='readable'):
-            raise ValueError('source_index_changed_during_migration')
-        pointer.unlink()
+        guard=(sqlite_read.cutover_guard(source,previous.get('indexFingerprint'))
+               if source is not None else nullcontext())
+        unlinked=False
+        try:
+            with guard:
+                if source is not None and inspect_index(source)['status']!='readable':
+                    raise ValueError('source_index_changed_during_migration')
+                pointer.unlink();unlinked=True
+        except BaseException:
+            if unlinked:_write_pointer(pointer,current)
+            raise
         return {'status':'index_rolled_back_original','index':source}
     finally:
         os.close(fd)

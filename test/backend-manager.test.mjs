@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { removeTemp } from './helpers/temp.mjs';
 import { waitUntil } from './helpers/timing.mjs';
@@ -8,6 +8,7 @@ import {
   existsSync,
   mkdtempSync,
   mkdirSync,
+  unlinkSync,
   readFileSync,
   writeFileSync,
 } from "node:fs";
@@ -42,6 +43,36 @@ test("health exits cleanly and prints nothing when daemon is down", () => {
   const result = run(["health"], { QMD_DAEMON_PORT: "1" });
   assert.equal(result.status, 0);
   assert.equal(result.stdout, "");
+});
+
+test("identity distinguishes an unhealthy live managed daemon from no daemon", async () => {
+  const home = mkdtempSync(join(tmpdir(), "qmd-unhealthy-identity-"));
+  const port = "19484";
+  const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 20000)",
+    "qmd", "mcp", "--http", "--port", port], { stdio: "ignore" });
+  try {
+    writeFileSync(join(home, "daemon.pid"), `${child.pid}\n`);
+    const env = { HOME: home, QMD_DAEMON_PORT: port,
+      QMD_BACKEND_STATE_DIR: home, QMD_DAEMON_PID: join(home, "daemon.pid"),
+      QMD_BACKEND_LOG: join(home, "manager.log"), QMD_DAEMON_LOG: join(home, "daemon.log") };
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const live = run(["identity"], env);
+    assert.equal(live.status, 3, live.stderr);
+    assert.match(live.stdout, new RegExp(`^${child.pid}\\t`));
+    unlinkSync(join(home, "daemon.pid"));
+    const discovered = run(["identity"], env);
+    assert.equal(discovered.status, 3, discovered.stderr);
+    assert.match(discovered.stdout, new RegExp(`^${child.pid}\\t`));
+    assert.equal(existsSync(join(home, "daemon.pid")), false);
+    child.kill("SIGTERM");
+    await new Promise((resolve) => child.once("exit", resolve));
+    const absent = run(["identity"], env);
+    assert.equal(absent.status, 1);
+    assert.equal(absent.stdout, "");
+  } finally {
+    child.kill("SIGKILL");
+    removeTemp(home);
+  }
 });
 
 test("check-qmd manual mode reports missing qmd and exits non-zero", () => {

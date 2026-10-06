@@ -2,14 +2,14 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 
-test("manual skills expose enable-compile sync query update wiki-compile wiki-dedup wiki-source-repair only; review and hint are not skills", () => {
+test("manual skills expose setup and existing skills; review and hint are not skills", () => {
   const skillDirs = readdirSync("skills", { withFileTypes: true })
     .filter((entry) => entry.isDirectory())
     .map((entry) => entry.name)
     .filter((name) => name !== "qmd")
     .sort();
 
-  assert.deepEqual(skillDirs, ["enable-compile", "query", "sync", "update", "wiki-compile", "wiki-dedup", "wiki-source-repair"]);
+  assert.deepEqual(skillDirs, ["enable-compile", "query", "setup", "sync", "update", "wiki-compile", "wiki-dedup", "wiki-source-repair"]);
   assert.equal(existsSync("skills/hint"), false);
   assert.equal(existsSync("test/hint-skill.test.mjs"), false);
 });
@@ -25,9 +25,16 @@ test("plugin descriptions list manual skills without hint", () => {
 
   for (const file of files) {
     const text = readFileSync(file, "utf8");
-    assert.match(text, /sync\/query\/update\/wiki-compile\/wiki-dedup\/wiki-source-repair\/enable-compile manual skills/);
+    assert.match(text, /setup\/sync\/query\/update\/wiki-compile\/wiki-dedup\/wiki-source-repair\/enable-compile manual skills/);
     assert.doesNotMatch(text, /wiki-review/);
   }
+});
+
+test("setup skill exposes the reviewed install coordinator", () => {
+  const skill = readFileSync("skills/setup/SKILL.md", "utf8");
+  assert.match(skill, /^name: setup$/m);
+  assert.match(skill, /core\/install_update\.py/);
+  assert.match(skill, /inspect.*prepare.*activate.*rollback/s);
 });
 
 test("wiki-compile skill metadata and wrapper contract", () => {
