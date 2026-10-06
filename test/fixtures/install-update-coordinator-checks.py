@@ -716,7 +716,9 @@ esac
     actual_env = {**os.environ, 'HOME': str(base / ('home-' + locked.name)),
         'PATH': str(global_bin) + os.pathsep + os.environ.get('PATH', ''),
         'QMD_BACKEND_MANAGER': str(manager)}
-    actual = subprocess.run([sys.executable, str(Path.cwd() / 'core/install_update.py'),
+    # Exercise the CLI lock on Linux CI too; the product platform gate is
+    # tested separately below, and this synthetic wrapper only bypasses it.
+    actual = subprocess.run([sys.executable, str(wrapper),
         'activate', '--project', str(locked)], env=actual_env,
         capture_output=True, text=True, timeout=20)
     writer.wait(timeout=5)

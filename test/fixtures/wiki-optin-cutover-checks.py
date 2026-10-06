@@ -11,6 +11,10 @@ from unittest.mock import patch
 CODE = Path.cwd()
 with tempfile.TemporaryDirectory(prefix='qmd-optin-cutover-') as temporary:
     base = Path(temporary).resolve()
+    setup_cli = base / 'setup-cli-synthetic-platform.py'
+    setup_cli.write_text('import sys\nsys.path.insert(0, ' + repr(str(CODE / 'core')) +
+        ')\nimport install_update as setup\nsetup.supported_platform=lambda: True\n'
+        'raise SystemExit(setup.main(sys.argv[1:]))\n')
     injection = base / 'injection'
     injection.mkdir()
     (injection / 'sitecustomize.py').write_text("""import os
@@ -85,7 +89,7 @@ os.link = guarded_link
     assert (root / '.auto-context/wiki/SCHEMA.md').is_file()
     assert not (root / '.auto-context/settings.json').exists()
     # The real cutover entrypoint must block until scaffold and settings finish.
-    activate = subprocess.Popen([sys.executable, 'core/install_update.py', 'activate',
+    activate = subprocess.Popen([sys.executable, str(setup_cli), 'activate',
         '--project', str(root)], cwd=CODE, env=clean_env,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     time.sleep(.3)
