@@ -300,14 +300,16 @@ def detached_parent_kill_and_duplicate_sessions():
                             capture_output=True, text=True)
     assert parent.returncode == -9
     deadline = time.monotonic() + 8
+    status_path = root / 'topical-hook-status.json'
     while time.monotonic() < deadline:
         state = subject._read(root)
-        if state is not None and not list((root / '.topical-hook-jobs').glob('*.json')):
+        status = json.loads(status_path.read_text()) if status_path.is_file() else None
+        if (state is not None and not list((root / '.topical-hook-jobs').glob('*.json'))
+                and status is not None and status['status'] == 'completed'):
             break
         time.sleep(.04)
     else:
-        raise AssertionError('detached_worker_did_not_survive_parent_kill')
-    assert json.loads((root / 'topical-hook-status.json').read_text())['status'] == 'completed'
+        raise AssertionError('detached_worker_did_not_complete_after_parent_kill')
     # Two SessionStart calls can race; the work is idempotent and lock guarded.
     first = subprocess.Popen(['bash', 'hooks/run-hook', 'topical-reconcile', 'codex'],
                              env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE)
