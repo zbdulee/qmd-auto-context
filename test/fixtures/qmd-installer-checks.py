@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import shlex
 from types import SimpleNamespace
 import sys
 import tempfile
@@ -11,8 +12,8 @@ sys.path.insert(0, 'core')
 import qmd_installer as installer
 import qmd_runtime
 
-node = shutil.which('node')
-if not node:
+host_node = shutil.which('node')
+if not host_node:
     print(json.dumps({'skipped': 'Node unavailable'})); raise SystemExit(0)
 locked = installer.inspect_lock()
 assert locked['packageCount'] > 100
@@ -20,6 +21,10 @@ assert locked['packageIntegrity'] == ('sha512-wUKc4pSPDbgs7mV7JYE8/Qj1pNXXatJFV8
     'T3yLaoAXheFtWu0BgSWwoWGhRkMmxl5Qyitt66NHgbMyeBA==')
 with tempfile.TemporaryDirectory(prefix='qmd-install-fake-') as name:
     base = Path(name).resolve(); root = base / 'managed'
+    node = base / 'synthetic-node24'
+    node.write_text('#!/bin/sh\nif [ "$1" = "--version" ]; then printf "v24.0.0\\n"; '
+        'else exec ' + shlex.quote(str(Path(host_node).resolve())) + ' "$@"; fi\n')
+    node.chmod(0o700)
     npm = base / 'fake-npm'; npm.write_text('#!/bin/sh\nexit 99\n'); npm.chmod(0o700)
     calls = []
     def fake_runner(command, *, cwd, env, **kwargs):

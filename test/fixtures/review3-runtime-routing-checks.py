@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import shlex
 import sqlite3
 import subprocess
 import sys
@@ -72,8 +73,12 @@ results = {}
 with tempfile.TemporaryDirectory(prefix='qmd-review3-') as temporary:
     base = Path(temporary).resolve()
     home = base / 'home'; home.mkdir(mode=0o700)
-    node = Path(shutil.which('node') or '')
-    assert node.is_file(), 'installed Node is required for the synthetic daemon probe'
+    host_node = Path(shutil.which('node') or '')
+    assert host_node.is_file(), 'installed Node is required for the synthetic daemon probe'
+    node = base / 'synthetic-node24'
+    node.write_text('#!/bin/sh\nif [ "$1" = "--version" ]; then printf "v24.0.0\\n"; '
+        'else exec ' + shlex.quote(str(host_node.resolve())) + ' "$@"; fi\n')
+    node.chmod(0o700)
     package = base / 'package'; (package / 'bin').mkdir(parents=True)
     (package / 'dist/cli').mkdir(parents=True)
     (package / 'node_modules/better-sqlite3').mkdir(parents=True)

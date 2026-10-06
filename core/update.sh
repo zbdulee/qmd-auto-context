@@ -154,6 +154,16 @@ _notice_marker() {
   printf '%s' "$_QMD_CACHE_DIR/notice-${key}-${hash}"
 }
 
+# GNU stat accepts -c, while BSD stat uses -f. Check the output because GNU
+# stat -f succeeds with a filesystem report instead of the requested mtime.
+_file_mtime() {
+  local value
+  value=$(stat -c %Y -- "$1" 2>/dev/null) ||
+    value=$(stat -f %m "$1" 2>/dev/null) || return 1
+  case "$value" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' "$value"
+}
+
 notice_once() {
   local key="$1" project="$2" message="$3" marker ttl now mtime age
   [ -n "${QMD_SUPPRESS_NOTICE:-}" ] && return 0
@@ -162,7 +172,7 @@ notice_once() {
   case "$ttl" in ''|*[!0-9]*) ttl=14400 ;; esac
   if [ -f "$marker" ]; then
     now=$(date +%s)
-    mtime=$(stat -f %m "$marker" 2>/dev/null || stat -c %Y "$marker" 2>/dev/null || echo 0)
+    mtime=$(_file_mtime "$marker" || echo 0)
     age=$((now - mtime))
     # 미래 mtime 가드(시계 되돌림·백업 복원·파일시스템 이관). age가 음수면 `-lt $ttl`이
     # 참이 되어 그 marker가 **모든 알림을 영구 억제**한다 — 이 함수는 orphan 회수 실패·
@@ -1792,12 +1802,12 @@ PY
       local marker_path="$(_notice_marker discard-ledger "$workdir")"
       local mtime_before=0
       if [ -f "$marker_path" ]; then
-        mtime_before=$(stat -f %m "$marker_path" 2>/dev/null || stat -c %Y "$marker_path" 2>/dev/null || echo 0)
+        mtime_before=$(_file_mtime "$marker_path" || echo 0)
       fi
       notice_once discard-ledger "$workdir" "[qmd] 고아 배치 회수 중 초과 재시도로 폐기된 잡이 있습니다 — 원장(.auto-context/compile/discard-ledger.jsonl)을 확인하세요."
       local mtime_after=0
       if [ -f "$marker_path" ]; then
-        mtime_after=$(stat -f %m "$marker_path" 2>/dev/null || stat -c %Y "$marker_path" 2>/dev/null || echo 0)
+        mtime_after=$(_file_mtime "$marker_path" || echo 0)
       fi
       if [ "$mtime_after" -gt "$mtime_before" ]; then
         echo "$cur_lines" > "$discard_cursor" 2>/dev/null || true
