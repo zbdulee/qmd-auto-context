@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -15,9 +16,10 @@ import wiki_topical_fake_pipeline as fake
 import wiki_topical_fake_qmd as qmd
 import wiki_topical_reconcile as sync
 
-SNAP = Path("/Users/dulee/work/laya-search-experiments/snapshot-20261003-165529")
-NODE = Path("/Users/dulee/.local/bin/node")
-QMD = SNAP / "runtime/node_modules/@tobilu/qmd/dist/cli/qmd.js"
+FIXTURES = Path(__file__).resolve().parents[1] / "test_support"
+NODE = shutil.which("node")
+QMD = FIXTURES / "topical-fake-qmd-cli.mjs"
+OFFLINE = FIXTURES / "topical-fake-qmd-offline.cjs"
 
 
 def fixture():
@@ -33,12 +35,13 @@ def fixture():
     (root / "sources/a.md").write_text("Amber beacon starts.\n")
     (root / "sources/b.md").write_text("Silver key remains.\n")
     (root / "cards.json").write_text("[]\n")
+    (root / "synthetic-models").mkdir()
     (root / ".topical-reconcile-hook.json").write_text(json.dumps({
         "sourceRoots": ["sources"], "cardsFile": "cards.json",
         "trustedCardIds": [], "skipPaths": []}))
     (root / qmd.CONFIG).write_text(json.dumps({
         "node": str(NODE), "qmdCli": str(QMD),
-        "offlineRequire": str(SNAP / "offline.cjs"), "modelDir": str(SNAP / "models")}))
+        "offlineRequire": str(OFFLINE), "modelDir": str(root / "synthetic-models")}))
     sync.reconcile(root, ["sources"], [])
     return root
 
@@ -56,7 +59,7 @@ def row(db, collection, card_id):
 
 
 def incremental_embedding_failure_delete():
-    assert NODE.is_file() and QMD.is_file() and (SNAP / "models").is_dir()
+    assert NODE and Path(NODE).is_file() and QMD.is_file() and OFFLINE.is_file()
     root = fixture()
     (root / "sources/a.md").write_text("Blue beacon glows.\n")
     env = {**os.environ, "CLAUDE_PLUGIN_ROOT": str(Path.cwd()),
@@ -158,7 +161,8 @@ def incremental_embedding_failure_delete():
                       "changedOnlyNewVector": True, "failedThenResumed": True,
                       "staleEmbedSuperseded": orange != teal["generationId"],
                       "deletedCardExcludedDespiteOldVector": True,
-                      "allDeletedEmptyGeneration": empty["generationId"]}))
+                      "allDeletedEmptyGeneration": empty["generationId"],
+                      "backend": "repository_synthetic_sqlite"}))
 
 
 if __name__ == "__main__":

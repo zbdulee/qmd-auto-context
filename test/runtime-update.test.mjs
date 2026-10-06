@@ -7,6 +7,10 @@ test('update compatibility gates preserve user state and stage a separate index'
     env: {...process.env, PYTHONPATH: 'core', PYTHONDONTWRITEBYTECODE: '1'},
     encoding: 'utf8', timeout: 30000,
   }));
+  assert.equal(report.oldVersionStaged, true);
+  assert.equal(report.v1WikiHeld, true);
+  assert.equal(report.interruptedStageRetry, true);
+  assert.equal(report.rollbackPreservedHistory, true);
   assert.equal(report.compatibleNoReinstall, true);
   assert.equal(report.changedDimensionStagesNewIndex, true);
   assert.equal(report.incompatibleUserStatePreserved, true);

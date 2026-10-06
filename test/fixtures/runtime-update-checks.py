@@ -42,12 +42,21 @@ with tempfile.TemporaryDirectory(prefix='qmd-runtime-update-') as name:
         'checkpointArchitecture':'head-v1','tokenizerSha256':'b'*64,
         'labelSchema':update.LABEL_SCHEMA},'goldSchema':1,'trainingSchema':1}
     assert update.plan_update(current,target)['status']=='compatible'
+    old_versions=dict(current,qmd={'version':'2.4.0','capabilities':[]},wikiVersions=[1,2])
+    old_plan=update.plan_update(old_versions,target)
+    assert old_plan['status']=='review_required'
+    assert 'stage_qmd_runtime' in old_plan['actions']
+    assert 'wiki_version_requires_preserving_migration' in old_plan['holds']
     changed=dict(target,embeddingDimension=1024)
     assert update.plan_update(current,changed)['actions']==['stage_shadow_index_and_reembed']
     incompatible=dict(current,laya=dict(current['laya'],tokenizerSha256='c'*64),goldSchema=2)
     held=update.plan_update(incompatible,target)
     assert set(held['holds'])=={'preserve_incompatible_checkpoint',
                                'preserve_incompatible_gold_and_training_history'}
+    private=root/'.auto-context/context-learning';private.mkdir(parents=True)
+    preserved={name:(private/name) for name in ('checkpoint.bin','gold.jsonl','history.jsonl')}
+    for name,path in preserved.items():path.write_bytes(('synthetic '+name+'\n').encode())
+    preserved_bytes={name:path.read_bytes() for name,path in preserved.items()}
     before=old.read_bytes()
     def runner(command,*,cwd,env,**kwargs):
         assert env['INDEX_PATH']!=str(old)
@@ -56,6 +65,22 @@ with tempfile.TemporaryDirectory(prefix='qmd-runtime-update-') as name:
         if command[1]=='update':make_index(Path(env['INDEX_PATH']),768)
         return SimpleNamespace(returncode=0,stdout='[]' if command[1]=='vsearch' else '')
     os.environ['INDEX_PATH']=str(old)
+    def interrupted(command,*,cwd,env,**kwargs):
+        assert env['INDEX_PATH']!=str(old)
+        if command[1]=='update':make_index(Path(env['INDEX_PATH']),768)
+        return SimpleNamespace(returncode=1 if command[1]=='embed' else 0,stdout='')
+    try:
+        update.stage_shadow_index(root,qmd_bin=qmd,config_file=config,
+            wiki_dir=wiki,model_cache=cache.parent.parent,
+            expected_model='synthetic-model',expected_dimension=768,
+            allow_execution=True,runner=interrupted)
+        raise AssertionError('interrupted shadow build unexpectedly succeeded')
+    except ValueError as error:
+        assert str(error)=='shadow_index_build_failed'
+    assert not (root/'.auto-context/qmd-index-active.json').exists()
+    assert old.read_bytes()==before
+    failed_generations=list((root/'.auto-context/qmd-index-generations').iterdir())
+    assert len(failed_generations)==1 and not (failed_generations[0]/'prepared.json').exists()
     staged=update.stage_shadow_index(root,qmd_bin=qmd,config_file=config,
         wiki_dir=wiki,model_cache=cache.parent.parent,
         expected_model='synthetic-model',expected_dimension=768,
@@ -66,5 +91,13 @@ with tempfile.TemporaryDirectory(prefix='qmd-runtime-update-') as name:
     assert activated['status']=='index_selected'
     assert update.select_index(root)==Path(staged['index'])
     assert old.read_bytes()==before
-    print(json.dumps({'compatibleNoReinstall':True,'changedDimensionStagesNewIndex':True,
+    assert all(path.read_bytes()==preserved_bytes[name] for name,path in preserved.items())
+    rolled=update.rollback_shadow_index(root)
+    assert rolled['status']=='index_rolled_back_original'
+    assert not (root/'.auto-context/qmd-index-active.json').exists()
+    assert old.read_bytes()==before
+    assert all(path.read_bytes()==preserved_bytes[name] for name,path in preserved.items())
+    print(json.dumps({'oldVersionStaged':True,'v1WikiHeld':True,
+        'interruptedStageRetry':True,'rollbackPreservedHistory':True,
+        'compatibleNoReinstall':True,'changedDimensionStagesNewIndex':True,
         'incompatibleUserStatePreserved':True,'oldDbUnchanged':True,'noCutover':True}))
