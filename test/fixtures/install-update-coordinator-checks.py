@@ -18,6 +18,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, 'core')
 import install_update as setup
+import setup_entry
 import config as project_config
 import qmd_installer
 import qmd_runtime
@@ -47,6 +48,22 @@ def cli(action, project, request=None):
             else: os.environ[key] = value
     result = json.loads(output.getvalue())
     return code, result
+
+
+def entry_cli(action, project, *options):
+    args = [action, '--project', str(project), *map(str, options)]
+    output = io.StringIO()
+    previous = {key: os.environ.get(key) for key in ('HOME', 'PATH', 'QMD_BACKEND_MANAGER')}
+    os.environ['HOME'] = str(project.parent / ('home-' + project.name))
+    os.environ['PATH'] = str(project.parent / 'bin') + os.pathsep + (previous['PATH'] or '')
+    os.environ['QMD_BACKEND_MANAGER'] = str(project.parent / 'fake-manager.sh')
+    try:
+        with redirect_stdout(output): code = setup_entry.main(args)
+    finally:
+        for key, value in previous.items():
+            if value is None: os.environ.pop(key, None)
+            else: os.environ[key] = value
+    return code, json.loads(output.getvalue())
 
 
 def make_index(path, wiki=None):
@@ -439,6 +456,22 @@ esac
         return qmd_runtime.prepare_existing(root, qmd, node)
     qmd_installer.install_new = fake_install
     fresh, config, wiki, cache, old, _ = project('fresh', legacy=False)
+    code, missing_v2 = entry_cli('prepare', fresh, '--qmd-mode', 'reuse',
+        '--qmd-entry', qmd, '--node', node, '--qmd-config', config,
+        '--model-cache', cache, '--source-index', old, '--approve-index-execution')
+    assert code == 1 and missing_v2['status'] == 'blocked'
+    assert 'published_v2_wiki_required' in missing_v2['blockers']
+    assert not (fresh / '.auto-context/install-update-journal.json').exists()
+    fake_npm = base / 'fake-npm';fake_npm.write_text('#!/bin/sh\nexit 99\n');fake_npm.chmod(0o700)
+    code, runtime_plan = entry_cli('plan', fresh, '--qmd-mode', 'install',
+        '--node', node, '--npm', fake_npm, '--index-mode', 'none')
+    assert code == 1 and 'package_execution_approval_required' in runtime_plan['blockers']
+    code, approved_install_plan = entry_cli('plan', fresh, '--qmd-mode', 'install',
+        '--node', node, '--npm', fake_npm, '--index-mode', 'none',
+        '--approve-package-execution', '--approve-lifecycle-scripts')
+    assert code == 0 and approved_install_plan['status'] == 'ready_to_prepare'
+    assert approved_install_plan['request']['qmd']['allowExecution'] is True
+    assert not (fresh / '.auto-context/install-update-journal.json').exists()
     req4, data4 = request(fresh, config, wiki, cache, old, qmd_mode='install',
                            index_mode='none', config_mode='preserve')
     code, staged = cli('prepare', fresh, req4)
@@ -446,6 +479,13 @@ esac
     assert not (Path(data4['runtimeRoots']['qmd']) / 'active.json').exists()
     assert cli('activate', fresh)[1]['status'] == 'activated'
     assert cli('rollback', fresh)[1]['status'] == 'rolled_back'
+    runtime_options = ('--qmd-mode', 'reuse', '--qmd-entry', qmd, '--node', node,
+                       '--index-mode', 'none')
+    code, runtime_only = entry_cli('prepare', fresh, *runtime_options)
+    assert code == 0 and runtime_only['status'] == 'prepared', runtime_only
+    assert runtime_only['migrationScope'] == 'runtime_only_no_v2_index'
+    assert entry_cli('activate', fresh)[1]['status'] == 'activated'
+    assert entry_cli('rollback', fresh)[1]['status'] == 'rolled_back'
 
     # Process death just after each pointer write must resume from journal intent.
     qmd_crash, config, wiki, cache, old, _ = project('qmd-pointer-crash', legacy=False)
@@ -945,6 +985,35 @@ esac
     assert old_v1.read_bytes() == old_v1_bytes
     assert cli('rollback', reviewed)[1]['status'] == 'rolled_back'
     assert old_v1.read_bytes() == old_v1_bytes
+    mapping_file = base / 'reviewed-entry-mappings.json'
+    mapping_file.write_text(json.dumps(data_review['wiki']['mappings']));mapping_file.chmod(0o600)
+    external_config = base / 'home-reviewed/.config/qmd/index.yml'
+    external_config.parent.mkdir(parents=True, exist_ok=True)
+    external_config.write_text('models:\n  embed: unrelated-global-model\n')
+    entry_options = ('--qmd-mode', 'reuse', '--qmd-entry', qmd, '--node', node,
+        '--qmd-config', config, '--model-cache', cache, '--source-index', old,
+        '--reviewed-v2-mappings', mapping_file, '--approve-index-execution')
+    code, auto_plan = entry_cli('plan', reviewed, *entry_options)
+    assert code == 0 and auto_plan['status'] == 'ready_to_prepare', auto_plan
+    assert auto_plan['request']['index']['expectedModel'] == 'synthetic-model'
+    assert auto_plan['request']['index']['expectedDimension'] == 768
+    assert auto_plan['request']['index']['config'] == str(config)
+    assert auto_plan['request']['wiki'] == data_review['wiki']
+    code, generated = entry_cli('prepare', reviewed, *entry_options)
+    assert code == 0 and generated['status'] == 'prepared', generated
+    generated_path = Path(generated['generatedRequest'])
+    assert generated_path.is_file() and generated_path.stat().st_mode & 0o077 == 0
+    assert json.loads(generated_path.read_text()) == auto_plan['request']
+    assert entry_cli('activate', reviewed)[1]['status'] == 'activated'
+    code, current_check = entry_cli('check-update', reviewed)
+    assert code == 0 and current_check['status'] == 'up_to_date', current_check
+    assert entry_cli('rollback', reviewed)[1]['status'] == 'rolled_back'
+    assert old_v1.read_bytes() == old_v1_bytes
+    code, update_check = entry_cli('check-update', reviewed)
+    assert code == 0 and update_check['status'] == 'update_review_required'
+    assert 'project_index_not_selected' in update_check['reasons']
+    generated_path.write_text(generated_path.read_text() + ' ')
+    assert entry_cli('prepare', reviewed, *entry_options)[1]['reason'] == 'generated_request_changed'
     drift_data = json.loads(json.dumps(data_review))
     drift_data['config'] = 'copy_legacy'
     drift_req = base / 'reviewed-source-drift-request.json'
@@ -993,6 +1062,7 @@ esac
                                    index_mode='none', config_mode='preserve')
     for name in ('fake-uv', 'fake-lock', 'fake-adapter'):
         (base / name).write_text('synthetic')
+    (base / 'fake-uv').chmod(0o700)
     (base / 'fake-model').mkdir()
     data_laya['laya'] = {'mode': 'install', 'uv': str(base / 'fake-uv'),
         'uvSha256': 'b'*64, 'lock': str(base / 'fake-lock'), 'lockSha256': 'c'*64,
@@ -1011,6 +1081,23 @@ esac
     assert laya_calls == ['stage', 'activate']
     assert cli('rollback', with_laya)[1]['status'] == 'rolled_back'
     assert not (Path(data_laya['runtimeRoots']['laya']) / 'active.json').exists()
+    entry_install, _, _, _, _, _ = project('entry-laya-install', legacy=False)
+    laya_options = ('--qmd-mode', 'reuse', '--qmd-entry', qmd, '--node', node,
+        '--index-mode', 'none', '--laya-mode', 'install', '--uv', base / 'fake-uv',
+        '--laya-lock', base / 'fake-lock', '--laya-adapter', base / 'fake-adapter',
+        '--laya-model-dir', base / 'fake-model')
+    code, denied_laya = entry_cli('plan', entry_install, *laya_options)
+    assert code == 1 and 'laya_install_execution_approval_required' in denied_laya['blockers']
+    approved_options = (*laya_options, '--approve-laya-install')
+    code, laya_plan = entry_cli('plan', entry_install, *approved_options)
+    assert code == 0 and laya_plan['request']['laya']['mode'] == 'install', laya_plan
+    assert laya_plan['request']['laya']['uvSha256'] == sha(base / 'fake-uv')
+    assert laya_plan['request']['laya']['lockSha256'] == sha(base / 'fake-lock')
+    code, laya_entry_prepared = entry_cli('prepare', entry_install, *approved_options)
+    assert code == 0 and laya_entry_prepared['status'] == 'prepared', laya_entry_prepared
+    assert not (Path(laya_plan['request']['runtimeRoots']['laya']) / 'active.json').exists()
+    assert entry_cli('activate', entry_install)[1]['status'] == 'activated'
+    assert entry_cli('rollback', entry_install)[1]['status'] == 'rolled_back'
     laya_installer.stage_generation = laya_original_stage
     laya_installer.activate_generation = laya_original_activate
 
@@ -1034,6 +1121,15 @@ esac
     assert cli('activate', reused_laya)[1]['status'] == 'activated'
     assert not (Path(data_reuse['runtimeRoots']['laya']) / 'active.json').exists()
     assert cli('rollback', reused_laya)[1]['status'] == 'rolled_back'
+    entry_reuse, _, _, _, _, _ = project('entry-laya-reuse', legacy=False)
+    reuse_options = ('--qmd-mode', 'reuse', '--qmd-entry', qmd, '--node', node,
+        '--index-mode', 'none', '--laya-mode', 'reuse', '--laya-executable', laya_binary,
+        '--laya-adapter', base / 'fake-adapter', '--laya-model-dir', base / 'fake-model')
+    code, reuse_plan = entry_cli('plan', entry_reuse, *reuse_options)
+    assert code == 0 and reuse_plan['request']['laya']['mode'] == 'reuse', reuse_plan
+    assert entry_cli('prepare', entry_reuse, *reuse_options)[1]['status'] == 'prepared'
+    assert entry_cli('activate', entry_reuse)[1]['status'] == 'activated'
+    assert entry_cli('rollback', entry_reuse)[1]['status'] == 'rolled_back'
     laya_setup.attest_runtime, laya_setup.choose_runtime = old_attest, old_choose
 
     unsupported, config, wiki, cache, old, _ = project('unsupported', legacy=False)
@@ -1053,5 +1149,5 @@ esac
         'liveWalCommitRejected': True, 'checkpointSameContentAccepted': True,
         'concurrentWalCommitBlocked': True, 'interruptedWalResumeFailsClosed': True,
         'rollbackWalDriftFailsClosed': True,
-        'unsupportedNoMutation': True,
+        'unsupportedNoMutation': True, 'generatedEntryNoAiRequest': True,
         'externalCalls': 0}))

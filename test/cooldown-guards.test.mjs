@@ -283,11 +283,11 @@ test('시간 게이트 판정은 cooldown.py 한 벌을 거친다 (판정이 두
 });
 
 test('lock 획득 지점은 전부 stale 회수를 갖는다 (죽은 프로세스가 파이프라인을 멈추지 못한다)', () => {
-  // bash 5곳은 `find -mmin +10`, 파이썬 2곳은 나이/pid 판정이다. 새 lock이 회수 없이
+  // index worker는 죽은 pid를 즉시 회수하고, 다른 shell 경로는 나이로 회수한다. 새 lock이 회수 없이
   // 추가되면 그 파이프라인은 프로세스 한 번의 비정상 종료로 영구 정지한다.
   const shell = [
     ['backend/keepalive.sh', /-mmin \+10/],
-    ['backend/index_worker.sh', /-mmin \+10/],
+    ['backend/index_worker.sh', /reclaim_dead_lock "\$WORKER_LOCK"/],
     ['core/backend_manager.sh', /-mmin \+10/],
   ];
   for (const [file, pattern] of shell) {

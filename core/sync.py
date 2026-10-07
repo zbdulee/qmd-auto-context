@@ -375,6 +375,10 @@ def enqueue_compile_sources(project_root, config, changed_files, snapshot, previ
 def run(cwd, *, json_output=False, dry_run=False, baseline_only=False):
     if os.environ.get("QMD_SANDBOX"):
         return 0
+    import setup_guard
+    if setup_guard.status(cwd)['status'] != 'ready':
+        emit_json(json_output, {'ok': False, 'reason': 'setup_required'})
+        return 1
 
     lock = acquire_lock()
     if lock is None:

@@ -114,6 +114,33 @@ if sys.argv[1]=='query':
     with sqlite3.connect(staged['index']) as db:
         db.execute('INSERT INTO documents VALUES (?,?,1)',('synthetic','new.md'))
     assert runtime_update.select_runtime(root)['INDEX_PATH']==staged['index']
+    # The model fingerprint comes from vector rows. QMD cleanup removes the
+    # last such row after all documents retire, but a live document without
+    # the staged fingerprint must still fail closed.
+    with sqlite3.connect(staged['index']) as db:
+        db.execute('DELETE FROM content_vectors')
+    try:
+        runtime_update.select_runtime(root)
+    except ValueError as exc:
+        assert str(exc)=='index_pointer_changed'
+    else:
+        raise AssertionError('live_document_without_model_fingerprint_accepted')
+    with sqlite3.connect(staged['index']) as db:
+        db.execute('DELETE FROM documents')
+    assert runtime_update.select_runtime(root)['INDEX_PATH']==staged['index']
+    with sqlite3.connect(staged['index']) as db:
+        db.execute('INSERT INTO documents VALUES (?,?,1)',('synthetic','rogue.md'))
+        db.execute('INSERT INTO content_vectors VALUES (?,?,?,?)',('rogue',0,'other-model','f2'))
+    try:
+        runtime_update.select_runtime(root)
+    except ValueError as exc:
+        assert str(exc)=='index_pointer_changed'
+    else:
+        raise AssertionError('wrong_model_fingerprint_accepted')
+    with sqlite3.connect(staged['index']) as db:
+        db.execute('DELETE FROM content_vectors')
+        db.execute('DELETE FROM documents')
+    assert runtime_update.select_runtime(root)['INDEX_PATH']==staged['index']
     pointer=root/'.auto-context/qmd-index-active.json'
     saved=pointer.read_bytes()
     pointer.write_text('[]\n')
@@ -122,7 +149,9 @@ if sys.argv[1]=='query':
     assert bad.returncode==1 and not bad.stdout
     queue.write_text('synthetic\t'+str(docs)+'\n')
     before_calls=calls.read_bytes()
-    subprocess.run(['bash','backend/index_worker.sh'],env=env,timeout=15,check=True)
+    failed_worker=subprocess.run(['bash','backend/index_worker.sh'],env=env,timeout=15,
+                                 capture_output=True,text=True,check=False)
+    assert failed_worker.returncode==1,failed_worker
     assert queue.read_text()=='synthetic\t'+str(docs)+'\n'
     assert calls.read_bytes()==before_calls
     pointer.write_bytes(saved)
@@ -132,5 +161,7 @@ if sys.argv[1]=='query':
     assert old.read_bytes()==original
     print(json.dumps({'syntheticRecallLocal':True,'syntheticUpdateSelected':True,
         'mutableSelectedIndexValid':True,'externalCollectionRouted':True,
+        'emptySelectedIndexValid':True,'missingLiveFingerprintRejected':True,
+        'wrongModelFingerprintRejected':True,
         'invalidPointerFailsClosed':True,
         'rollbackOriginalPreserved':True,'externalCalls':0}))

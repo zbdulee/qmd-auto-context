@@ -1278,7 +1278,7 @@ def lex_probe_timeout(config: dict) -> float:
 
 
 def run_lex_probe(daemon_url: str, collections: list[str], searches: list[dict],
-                  timeout: float) -> int | None:
+                  timeout: float, *, project_index: dict | None = None) -> int | None:
     """lex 단독 질의의 히트 수. 실패·timeout이면 None(= 게이트를 열어 둔다).
 
     어떤 예외도 밖으로 내지 않는다 — 이 질의는 주입 **정밀도**를 위한 것이고, 그것이
@@ -1286,6 +1286,13 @@ def run_lex_probe(daemon_url: str, collections: list[str], searches: list[dict],
     """
     if not collections or not searches:
         return None
+    if project_index is not None:
+        try:
+            results = qmd_project_query.query(project_index, searches, collections,
+                DAEMON_QUERY_LIMIT, timeout=hook_budget.remaining(timeout))
+            return len(results) if isinstance(results, list) else None
+        except Exception:  # noqa: BLE001 - a failed precision probe is fail-open
+            return None
     payload = {
         "searches": searches,
         "collections": collections,
@@ -2765,6 +2772,7 @@ def main():
             lex_probe_scope = "ep_only" if (distrust and not identifier_path) else "all"
             lex_hits = run_lex_probe(
                 daemon_url, queried_collections, probe_searches, lex_probe_timeout(config),
+                project_index=project_index,
             )
             if distrust:
                 # 히트 0 → 발동(면제 근거가 실제 히트를 요구한다), 실패 → fail-open.

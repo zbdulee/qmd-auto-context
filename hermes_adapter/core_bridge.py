@@ -69,6 +69,20 @@ def _is_noop_env() -> bool:
     )
 
 
+def _setup_allowed(cwd: str) -> bool:
+    try:
+        # This safety check always uses the adapter's own installed core. The
+        # test-only backend root override must not replace the guard itself.
+        guard = Path(__file__).resolve().parent.parent / 'core' / 'setup_guard.py'
+        result = subprocess.run([sys.executable, str(guard),
+                                 'check', cwd], stdin=subprocess.DEVNULL,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                timeout=2.0, env=_env(), check=False)
+        return result.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
 def _manager_path() -> str:
     return os.environ.get("QMD_BACKEND_MANAGER") or str(_core_path("core", "backend_manager.sh"))
 
@@ -194,6 +208,8 @@ def recall_context(
         prompt = user_message or kwargs.get("message") or ""
         if not isinstance(prompt, str) or not prompt.strip():
             return None
+        if not _setup_allowed(_cwd(cwd, **kwargs)):
+            return None
         _ensure_background()
         payload = {
             "hook_event_name": "UserPromptSubmit",
@@ -226,6 +242,8 @@ def session_update(cwd: Optional[str] = None, **kwargs: Any) -> None:
     try:
         if _is_noop_env():
             return None
+        if not _setup_allowed(_cwd(cwd, **kwargs)):
+            return None
         manager = _manager_path()
         _run_quiet(["bash", manager, "ensure", "--wait"])
         _run_quiet(["bash", manager, "warm"])
@@ -253,6 +271,8 @@ def pre_edit_gate(
             return None
         mapped = _map_edit_tool(tool_name, args)
         if mapped is None:
+            return None
+        if not _setup_allowed(_cwd(cwd, **kwargs)):
             return None
         core_tool, tool_input = mapped
         payload = {
@@ -295,6 +315,8 @@ def post_edit_sync(
         mapped = _map_edit_tool(tool_name, args)
         if mapped is None or _result_has_error(result, status):
             return
+        if not _setup_allowed(_cwd(cwd, **kwargs)):
+            return None
         core_tool, tool_input = mapped
         payload = {
             "hook_event_name": "PostToolUse",

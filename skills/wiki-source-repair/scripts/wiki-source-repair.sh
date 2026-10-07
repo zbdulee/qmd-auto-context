@@ -18,6 +18,10 @@ SKILL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PLUGIN_ROOT="$(cd "$SKILL_DIR/../.." && pwd)"
 USAGE="usage: wiki-source-repair.sh <cwd> <list|repoint-source|dismiss-source|repoint|dismiss> [...]"
 TARGET_CWD="${1:?$USAGE}"
+if [ -z "${QMD_SANDBOX:-}" ] && ! python3 "$PLUGIN_ROOT/core/setup_guard.py" check "$TARGET_CWD" >/dev/null 2>&1; then
+  printf '[qmd] setup required: 이 프로젝트의 기존 데이터는 보존 중입니다. setup skill에 설치 계획 검토를 요청하세요.\n' >&2
+  exit 1
+fi
 ACTION="${2:?$USAGE}"
 
 case "$ACTION" in

@@ -21,10 +21,16 @@ with tempfile.TemporaryDirectory(prefix='qmd-update-hook-') as name:
            'QMD_RECALL_LOG': ''}
     payload = json.dumps({'cwd': str(project), 'hook_event_name': 'SessionStart'})
     start = time.monotonic()
+    notices = []
     for _ in range(2):
         hook = subprocess.run(['bash','hooks/run-hook','update-queued','codex'],
             input=payload,text=True,capture_output=True,env=env,timeout=3,check=True)
-        assert not hook.stdout
+        notices.append(hook.stdout)
+    assert 'setup skill' in notices[0] and 'settings_not_ready' in notices[0]
+    assert not notices[1], notices
+    marker = list(queue.glob('setup-notice-*.json'))
+    assert len(marker) == 1
+    assert json.loads(marker[0].read_text())['pluginVersion']
     assert time.monotonic()-start < 1.0
     key = hashlib.sha256(str(project).encode()).hexdigest()[:32]
     status = queue/(key+'.status.json')
@@ -68,5 +74,5 @@ with tempfile.TemporaryDirectory(prefix='qmd-update-hook-') as name:
                    text=True,capture_output=True,env=env,timeout=3,check=True)
     assert json.loads((queue/'enqueue.status.json').read_text())['status']=='enqueue_failed'
     assert 'enqueue failed:JSONDecodeError' in (queue/'enqueue.log').read_text()
-    print(json.dumps({'fastEnqueue':True,'duplicateCoalesced':True,
+    print(json.dumps({'fastEnqueue':True,'oneTimeSetupNotice':True,'duplicateCoalesced':True,
         'durableStatus':True,'failureRetry':True,'enqueueErrorVisible':True,'externalCalls':0}))

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# qmd index-on-edit worker. dirty 큐 drain → 컬렉션 등록 + update + embed (+ reload).
+# qmd index-on-edit worker. durable claim → 컬렉션 등록 + update + embed → success ACK.
 # bash 3.2 호환 (macOS /bin/bash)
 set -u
 
@@ -28,43 +28,35 @@ LOG="${QMD_INDEX_WORKER_LOG:-$_QMD_CACHE_DIR/index-worker.log}"
 
 log() { printf '[%s] index-worker: %s\n' "$(date '+%H:%M:%S')" "$*" >>"$LOG" 2>&1 || true; }
 
-# requeue: 락 밖 직접 append 대신 dirty_queue.py / snapshot과 동일한 fcntl.flock(LOCK_EX)로
-# 큐 파일 자신에 append해 동시 enqueue와 상호배제한다. 엔트리는 argv로 전달(stdin은
-# python -c 스크립트가 차지하지 않으므로 argv가 안전). bash 3.2 호환.
-# python 실패 시에도 큐 엔트리를 유실하지 않도록 셸 append로 fallback한다.
-_REQUEUE_PY='
-import fcntl, os, sys
-queue = os.environ["QMD_QUEUE"]
-entries = [e for e in sys.argv[1:] if e]
-if entries:
-    # append + LOCK_EX 로 enqueue(dirty_queue.py) 및 snapshot truncate와 동일 락으로 직렬화.
-    with open(queue, "a", encoding="utf-8") as f:
-        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-        try:
-            for e in entries:
-                f.write(e + "\n")
-        finally:
-            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-'
-requeue() {
-  [ "$#" -gt 0 ] || return 0
-  if QMD_QUEUE="$QUEUE" python3 -c "$_REQUEUE_PY" "$@" 2>/dev/null; then
-    return 0
+reclaim_dead_lock() {
+  local lockdir="$1" holder
+  [ -d "$lockdir" ] && [ ! -L "$lockdir" ] || return 1
+  holder="$(cat "$lockdir/pid" 2>/dev/null || true)"
+  if [ -z "$holder" ]; then
+    # Another process may be between mkdir and writing its pid.
+    sleep 0.2
+    holder="$(cat "$lockdir/pid" 2>/dev/null || true)"
   fi
-  # fallback (무유실 우선): 락 없이라도 큐에 복원한다.
-  log "requeue: python fcntl append failed — fallback to shell append"
-  for e in "$@"; do printf '%s\n' "$e" >>"$QUEUE"; done
+  [ -n "$holder" ] && kill -0 "$holder" 2>/dev/null && return 1
+  [ -z "$holder" ] || rm -f "$lockdir/pid" 2>/dev/null || return 1
+  rmdir "$lockdir" 2>/dev/null
+}
+
+ack_claim() {
+  python3 "$_QMD_ROOT/core/dirty_queue_claim.py" ack "$QUEUE" || {
+    log "dirty queue ack failed — claim retained"
+    return 1
+  }
 }
 
 reload_daemon() {
   if [ -n "${QMD_BACKEND_MANAGER:-}" ] && [ -x "$QMD_BACKEND_MANAGER" ]; then
-    "$QMD_BACKEND_MANAGER" reload >>"$LOG" 2>&1 || return 0
+    "$QMD_BACKEND_MANAGER" reload >>"$LOG" 2>&1 || return 1
     return 0
   fi
-  log "reload skipped: QMD_BACKEND_MANAGER unavailable"
+  log "reload unavailable: QMD_BACKEND_MANAGER missing"
+  return 1
 }
-
-[ -f "$QUEUE" ] || exit 0
 
 # PATH 보정 (비대화형 hook 환경; update.sh/backend_manager.sh와 동일)
 normalize_qmd_path
@@ -73,36 +65,30 @@ unset BUN_INSTALL; export PATH
 
 # single-flight
 if ! mkdir "$WORKER_LOCK" 2>/dev/null; then
-  if [ -n "$(find "$WORKER_LOCK" -maxdepth 0 -mmin +10 2>/dev/null)" ]; then
-    rm -f "$WORKER_LOCK/pid" 2>/dev/null; rmdir "$WORKER_LOCK" 2>/dev/null || true
-  fi
-  exit 0
+  reclaim_dead_lock "$WORKER_LOCK" || exit 0
+  mkdir "$WORKER_LOCK" 2>/dev/null || exit 1
 fi
 echo "$$" > "$WORKER_LOCK/pid" 2>/dev/null || true
 trap 'rm -f "$WORKER_LOCK/pid" 2>/dev/null; rmdir "$WORKER_LOCK" 2>/dev/null || true' EXIT
 
-# 큐 스냅샷(원자적으로 비우고 처리 — 처리 중 새 enqueue는 다음 tick).
-# macOS엔 flock(1) 명령이 없다. core/dirty_queue.py(enqueue)와 동일한 python fcntl.flock으로
-# 락을 잡아야 실제로 상호배제된다. flock(1)에 의존하지 않는다(cross-platform).
-SNAP="$(mktemp)"
-QMD_QUEUE="$QUEUE" QMD_SNAP="$SNAP" python3 - <<'PY' 2>/dev/null || true
-import fcntl
-import os
+# The durable claim contains the exact queue prefix and is fsynced before QMD
+# work. The live queue remains untouched until every stage succeeds.
+SNAP="$(mktemp)" || exit 1
+python3 "$_QMD_ROOT/core/dirty_queue_claim.py" claim "$QUEUE" "$SNAP"
+claim_rc=$?
+if [ "$claim_rc" -eq 3 ]; then rm -f "$SNAP"; exit 0; fi
+if [ "$claim_rc" -ne 0 ]; then rm -f "$SNAP"; exit 1; fi
 
-queue = os.environ["QMD_QUEUE"]
-snap = os.environ["QMD_SNAP"]
-# r+ 로 열어 enqueue(append + LOCK_EX)와 직렬화. snapshot 후 truncate.
-with open(queue, "r+", encoding="utf-8") as f:
-    fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-    try:
-        data = f.read()
-        with open(snap, "w", encoding="utf-8") as s:
-            s.write(data)
-        f.seek(0)
-        f.truncate()
-    finally:
-        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-PY
+# A previous run may have embedded successfully but failed daemon handoff.
+# Retain this fact across process restarts and incremental 0/0 retries.
+PRIOR_RELOAD_REQUIRED=0
+python3 "$_QMD_ROOT/core/dirty_queue_claim.py" needs-reload "$QUEUE" >/dev/null 2>&1
+reload_state_rc=$?
+if [ "$reload_state_rc" -eq 0 ]; then PRIOR_RELOAD_REQUIRED=1
+elif [ "$reload_state_rc" -ne 3 ]; then rm -f "$SNAP"; exit 1
+fi
+mark_reload_required() { python3 "$_QMD_ROOT/core/dirty_queue_claim.py" reload-required "$QUEUE"; }
+mark_reload_done() { python3 "$_QMD_ROOT/core/dirty_queue_claim.py" reload-done "$QUEUE" || [ "$?" -eq 3 ]; }
 
 # dedupe (name\tpath) — bash 3.2 호환 (mapfile 미사용)
 ENTRIES=()
@@ -110,13 +96,16 @@ while IFS= read -r line; do
   [ -n "$line" ] && ENTRIES+=("$line")
 done < <(sort -u "$SNAP")
 rm -f "$SNAP"
-[ "${#ENTRIES[@]}" -eq 0 ] && exit 0
+[ "${#ENTRIES[@]}" -eq 0 ] && { ack_claim; exit $?; }
 
-# writer lock (update.sh와 공유) — busy면 큐 복원 후 종료
+# writer lock (update.sh와 공유) — busy면 claim과 원본 큐를 유지
 if ! mkdir "$WRITER_LOCK" 2>/dev/null; then
-  log "writer lock busy — requeue & defer"
-  requeue "${ENTRIES[@]}"
-  exit 0
+  if reclaim_dead_lock "$WRITER_LOCK" && mkdir "$WRITER_LOCK" 2>/dev/null; then
+    :
+  else
+  log "writer lock busy — claim retained"
+  exit 75
+  fi
 fi
 echo "$$" > "$WRITER_LOCK/pid" 2>/dev/null || true
 trap 'rm -f "$WRITER_LOCK/pid" 2>/dev/null; rmdir "$WRITER_LOCK" 2>/dev/null || true; rm -f "$WORKER_LOCK/pid" 2>/dev/null; rmdir "$WORKER_LOCK" 2>/dev/null || true' EXIT
@@ -130,15 +119,17 @@ for e in "${ENTRIES[@]}"; do
   path="${remainder%%$'\t'*}"
   owner=""
   [[ "$remainder" == *$'\t'* ]] && owner="${remainder#*$'\t'}"
+  if ! python3 "$_QMD_ROOT/core/setup_guard.py" check "${owner:-$path}" >/dev/null 2>&1; then
+    log "project setup required — claim retained"
+    exit 1
+  fi
   route="$(python3 "$_QMD_ROOT/core/qmd_route.py" resolve-env "${owner:-$path}")" || {
-    log "invalid project index pointer — requeue"
-    requeue "${ENTRIES[@]}"
-    exit 0
+    log "invalid project index pointer — claim retained"
+    exit 1
   }
   if [ -n "$owner" ] && [ -z "$route" ]; then
-    log "selected project index missing — requeue"
-    requeue "${ENTRIES[@]}"
-    exit 0
+    log "selected project index missing — claim retained"
+    exit 1
   fi
   ROUTES+=("$route")
   [ -n "$route" ] && has_project_index=1
@@ -147,12 +138,17 @@ if [ "$has_project_index" = 1 ]; then
   # The existing writer lock is held throughout. Each subshell receives only
   # its own project index environment; no project DB can absorb another queue.
   touched_global=0
+  for route in "${ROUTES[@]}"; do [ -z "$route" ] && touched_global=1; done
+  if { [ "$touched_global" = 1 ] || [ "$PRIOR_RELOAD_REQUIRED" = 1 ]; } && [ -z "${QMD_NO_RELOAD:-}" ]; then
+    mark_reload_required || exit 1
+  fi
+  failed=0
   for i in "${!ENTRIES[@]}"; do
     e="${ENTRIES[$i]}"; name="${e%%$'\t'*}"
     remainder="${e#*$'\t'}"; path="${remainder%%$'\t'*}"
-    [ -d "$path" ] || continue
     route="${ROUTES[$i]}"
     [ -z "$route" ] && touched_global=1
+    [ -d "$path" ] || continue
     if ! (
       if [ -n "$route" ]; then
         IFS=$'\t' read -r INDEX_PATH QMD_CONFIG_DIR XDG_CACHE_HOME <<< "$route"
@@ -163,15 +159,23 @@ if [ "$has_project_index" = 1 ]; then
       }
       "$QMD" update >>"$LOG" 2>&1 && "$QMD" embed >>"$LOG" 2>&1
     ); then
-      log "project-routed update failed — requeue: $name"
-      requeue "$e"
+      log "project-routed update failed — claim retained: $name"
+      failed=1
     fi
   done
-  if [ "$touched_global" = 1 ] && [ -z "${QMD_NO_RELOAD:-}" ]; then reload_daemon; fi
-  exit 0
+  [ "$failed" = 0 ] || exit 1
+  if [ -z "${QMD_NO_RELOAD:-}" ] && { [ "$touched_global" = 1 ] || [ "$PRIOR_RELOAD_REQUIRED" = 1 ]; }; then
+    reload_daemon || exit 1
+    mark_reload_done || exit 1
+  fi
+  ack_claim; exit $?
 fi
 
+# Mark before QMD can alter the index. A crash before handoff conservatively
+# causes one extra reload; a crash after an embed cannot lose the obligation.
+[ -n "${QMD_NO_RELOAD:-}" ] || mark_reload_required || exit 1
 added=0
+failed=0
 for e in "${ENTRIES[@]}"; do
   name="${e%%	*}"; path="${e#*	}"
   [ -n "$name" ] && [ -n "$path" ] || continue
@@ -180,13 +184,20 @@ for e in "${ENTRIES[@]}"; do
     added=1
   elif printf '%s' "$out" | grep -qi "already exists"; then
     added=1
+  else
+    failed=1
   fi
   printf '%s\n' "$out" >>"$LOG"
 done
-[ "$added" = 0 ] && exit 0
+[ "$failed" = 0 ] || { log "collection add failed — claim retained"; exit 1; }
+if [ "$added" = 0 ]; then
+  if [ -z "${QMD_NO_RELOAD:-}" ] && [ "$PRIOR_RELOAD_REQUIRED" = 1 ]; then reload_daemon || exit 1; fi
+  [ -n "${QMD_NO_RELOAD:-}" ] || mark_reload_done || exit 1
+  ack_claim; exit $?
+fi
 
 if ! UPDATE_OUT="$("$QMD" update 2>&1)"; then
-  printf '%s\n' "$UPDATE_OUT" >>"$LOG"; log "update failed"; exit 0
+  printf '%s\n' "$UPDATE_OUT" >>"$LOG"; log "update failed — claim retained"; exit 1
 fi
 printf '%s\n' "$UPDATE_OUT" >>"$LOG"
 
@@ -197,22 +208,31 @@ if [ -d "$EMBED_LOCK" ]; then
   { [ -z "$epid" ] || ! kill -0 "$epid" 2>/dev/null; } && { rm -f "$EMBED_LOCK/pid" 2>/dev/null; rmdir "$EMBED_LOCK" 2>/dev/null || true; }
 fi
 if ! mkdir "$EMBED_LOCK" 2>/dev/null; then
-  log "embed lock busy — requeue & defer"
-  requeue "${ENTRIES[@]}"
-  exit 0
+  log "embed lock busy — claim retained"
+  exit 75
 fi
 echo "$$" > "$EMBED_LOCK/pid" 2>/dev/null || true
 trap 'rm -f "$EMBED_LOCK/pid" 2>/dev/null; rmdir "$EMBED_LOCK" 2>/dev/null || true; rm -f "$WRITER_LOCK/pid" 2>/dev/null; rmdir "$WRITER_LOCK" 2>/dev/null || true; rm -f "$WORKER_LOCK/pid" 2>/dev/null; rmdir "$WORKER_LOCK" 2>/dev/null || true' EXIT
 
 # embed (전체 incremental). 출력에서 새 임베딩 수 파싱.
-EMBED_OUT="$("$QMD" embed 2>&1)"; printf '%s\n' "$EMBED_OUT" >>"$LOG"
+if ! EMBED_OUT="$("$QMD" embed 2>&1)"; then
+  printf '%s\n' "$EMBED_OUT" >>"$LOG"
+  log "embed failed — claim retained"
+  exit 1
+fi
+printf '%s\n' "$EMBED_OUT" >>"$LOG"
 NEW=$(printf '%s' "$EMBED_OUT" | grep -oE 'Embedded [0-9]+ chunks' | grep -oE '[0-9]+' | head -1)
 NEW="${NEW:-0}"
 REMOVED=$(printf '%s' "$UPDATE_OUT" | grep -oE '[1-9][0-9]* removed' | grep -oE '^[0-9]+' | head -1)
 REMOVED="${REMOVED:-0}"
 
-# reload: 새 임베딩이 있거나 삭제된 항목이 있을 때
-if { [ "$NEW" -gt 0 ] || [ "$REMOVED" -gt 0 ]; } && [ -z "${QMD_NO_RELOAD:-}" ]; then
-  reload_daemon
+# The durable claim carries an earlier failed reload through an incremental
+# 0/0 retry. Clear it only after a successful handoff.
+if [ -z "${QMD_NO_RELOAD:-}" ]; then
+  if [ "$PRIOR_RELOAD_REQUIRED" = 1 ] || [ "$NEW" -gt 0 ] || [ "$REMOVED" -gt 0 ]; then
+    reload_daemon || exit 1
+  fi
+  mark_reload_done || exit 1
 fi
-exit 0
+ack_claim
+exit $?

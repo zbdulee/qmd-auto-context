@@ -13,7 +13,10 @@ test('real backend bridge refreshes a multisource synthetic card and retires del
     'forgedRetirementBlocked', 'survivingClaimRegenerated', 'staleCardRetired',
     'lastSourceDeletedFromQmd', 'completedAttemptReused', 'midPublishResumed',
     'staleIndexExcludedDuringCrash', 'committedBatchRecovered',
-    'sessionStartRecovery']) {
+    'sessionStartRecovery', 'preclaimedStopBatchResumed',
+    'unrelatedBatchRejected', 'claimCrashRetried',
+    'concurrentRefreshRejected', 'changedBatchSuperseded',
+    'retiredDocumentAndVectorReclaimed']) {
     assert.equal(report[key], true);
   }
   assert.equal(report.backendCalls, 3);

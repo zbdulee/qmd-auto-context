@@ -7,6 +7,9 @@ test('selected synthetic QMD index serves recall and update without touching ori
     ['test/fixtures/qmd-pointer-e2e.py'], { encoding: 'utf8', timeout: 25000 }));
   assert.equal(result.syntheticRecallLocal, true);
   assert.equal(result.syntheticUpdateSelected, true);
+  assert.equal(result.emptySelectedIndexValid, true);
+  assert.equal(result.missingLiveFingerprintRejected, true);
+  assert.equal(result.wrongModelFingerprintRejected, true);
   assert.equal(result.rollbackOriginalPreserved, true);
   assert.equal(result.externalCalls, 0);
 });

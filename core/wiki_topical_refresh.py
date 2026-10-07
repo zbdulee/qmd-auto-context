@@ -20,6 +20,7 @@ import wiki_topical_backend as backend
 import wiki_topical_experiment as experiment
 import wiki_topical_publish as publisher
 import wiki_topical_reconcile as reconcile
+import topical_stop_budget as stop_budget
 import wiki_topical_similarity as similarity
 import wiki_verify_worker as verifier
 
@@ -32,7 +33,10 @@ def _read(root: Path):
     path = root / JOURNAL
     if not path.exists() and not path.is_symlink():
         return None
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError as exc:
+        raise topical.TopicalError('unsafe_auto_refresh_config') from exc
     try:
         info = os.fstat(fd)
         if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
@@ -202,8 +206,35 @@ def _refresh_locked(root, source_roots, old_card, old_generation_id,
         initial = reconcile.start_batch(root, source_roots, baseline_cards,
                                         trusted_card_ids=[card['cardId'] for card in baseline_cards],
                                         skip_paths=skip_paths)
-        if not initial['started']:
+        source_paths = {row['path'] for row in old_card['sourceRevisions']}
+        if not initial['started'] and initial['reason'] != 'batch_running':
             return {'status': initial['reason']}
+        batch = initial['batch']
+        # Stop may have claimed this exact source batch before SessionStart's
+        # backend worker. The refresh lock serializes refresh/create owners;
+        # an existing create journal or an unrelated source batch is never
+        # adopted as this card's refresh.
+        create_journal = root / 'topical-create-state.json'
+        if (create_journal.exists() or create_journal.is_symlink() or
+                not source_paths.intersection(batch['sources'])):
+            return {'status': 'batch_running'}
+        if not initial['started'] and reconcile._scan(root, source_roots, skip_paths) != batch['snapshot']:
+            # No refresh journal exists, so no backend attempt was made for
+            # this card. Reconcile the changed source and claim its new final
+            # snapshot; an already-running owner cannot pass our refresh lock.
+            if not reconcile.supersede_changed_batch(root, source_roots,
+                    batch['batchId'], skip_paths=skip_paths):
+                return {'status': 'batch_running'}
+            initial = reconcile.start_batch(root, source_roots, baseline_cards,
+                trusted_card_ids=[card['cardId'] for card in baseline_cards],
+                skip_paths=skip_paths)
+            if not initial['started']:
+                return {'status': initial['reason']}
+            batch = initial['batch']
+            if not source_paths.intersection(batch['sources']):
+                return {'status': 'batch_running'}
+        if reconcile._scan(root, source_roots, skip_paths) != batch['snapshot']:
+            return {'status': 'pending_review', 'reason': 'source_changed_during_refresh'}
         journal = {'schema': 'qmd-topical-refresh-v1', 'batchId': initial['batch']['batchId'],
                    'oldGenerationId': old_generation_id, 'oldCardId': old_id,
                    'oldCardSha256': old_sha, 'sourceRoots': sorted(source_roots),
@@ -298,7 +329,8 @@ def _refresh_locked(root, source_roots, old_card, old_generation_id,
     retired = publisher.retire_stale(root, old_generation_id, old_id,
                                      source_roots, [old_card])
     journal['phase'] = 'old_retired'; _save(root, journal)
-    ready = publisher.sync(root, allow_empty=not new_cards, allow_stale=True)
+    ready = publisher.sync(root, allow_empty=not new_cards, allow_stale=True,
+                           reclaim_retired=True)
     journal['phase'] = 'qmd_synced'; _save(root, journal)
     finished = reconcile.finish_backend_batch(root, source_roots,
         batch['batchId'], generation_id, new_cards, old_card_id=old_id,
@@ -327,34 +359,57 @@ def recover_pending(root: Path) -> dict:
     return result
 
 
-def auto_refresh_pending(root: Path, *, generation_runner=None,
-                         verification_runner=None, skip_paths=()) -> dict:
-    """One bounded, explicitly opted-in project turn; no global activation."""
+def read_auto_policy(root: Path) -> dict | None:
+    """Read the full owner policy before a hook may scan or claim work."""
     root = experiment.require_sandbox(root)
     path = root / AUTO_CONFIG
     if not path.exists() and not path.is_symlink():
-        return {'status': 'pending_review', 'reason': 'auto_teacher_policy_required'}
+        return None
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     try:
         info = os.fstat(fd)
         if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
                 or info.st_mode & 0o077 or info.st_size > 65536):
             raise topical.TopicalError('unsafe_auto_refresh_config')
-        cfg = json.loads(os.read(fd, info.st_size + 1))
+        try:
+            cfg = json.loads(os.read(fd, info.st_size + 1))
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise topical.TopicalError('invalid_auto_refresh_config') from exc
     finally:
         os.close(fd)
     if (not isinstance(cfg, dict) or set(cfg) != {'schema', 'enabled', 'sourceRoots',
             'engine', 'compileCfg', 'maxEstimatedCents'} or
             cfg['schema'] != 'qmd-topical-auto-refresh-v1' or
-            cfg['enabled'] is not True or cfg['engine'] != 'codex' or
+            type(cfg['enabled']) is not bool or cfg['engine'] != 'codex' or
             not isinstance(cfg['sourceRoots'], list) or not cfg['sourceRoots'] or
             not isinstance(cfg['compileCfg'], dict) or
             type(cfg['maxEstimatedCents']) is not int or
             not 20 <= cfg['maxEstimatedCents'] <= 160):
         raise topical.TopicalError('invalid_auto_refresh_config')
+    try:
+        if not all(isinstance(value, str) and
+                   reconcile.safe_rel(value, explicit_root=True) == value
+                   for value in cfg['sourceRoots']):
+            raise ValueError('invalid_source_root')
+    except ValueError as exc:
+        raise topical.TopicalError('invalid_auto_refresh_config') from exc
+    return cfg
+
+
+def auto_refresh_pending(root: Path, *, generation_runner=None,
+                         verification_runner=None, skip_paths=(),
+                         expected_policy_sha256=None) -> dict:
+    """One bounded, explicitly opted-in project card/source operation."""
+    root = experiment.require_sandbox(root)
+    cfg = read_auto_policy(root)
+    if cfg is None:
+        return {'status': 'pending_review', 'reason': 'auto_teacher_policy_required'}
+    if not cfg['enabled']:
+        return {'status': 'disabled'}
+    if (expected_policy_sha256 is not None and
+            stop_budget._digest(cfg) != expected_policy_sha256):
+        return {'status': 'pending_review', 'reason': 'stop_batch_policy_changed'}
     source_roots = cfg['sourceRoots']
-    if not all(isinstance(x, str) for x in source_roots):
-        raise topical.TopicalError('invalid_auto_refresh_config')
     publisher._project(root)
     publisher._qmd_runtime(root)
     state = reconcile._read(root)
@@ -381,6 +436,29 @@ def auto_refresh_pending(root: Path, *, generation_runner=None,
             trusted_card_ids=[card['cardId'] for card in cards], skip_paths=skip_paths)
         stale = sorted(card_id for card_id, row in projection.items()
                        if row['state'] == 'excluded_stale')
+        active_batch = state.get('inFlight') if state else None
+        active_paths = set(active_batch['sources']) if active_batch else set()
+        if stale and active_paths:
+            # A batch claimed for another card or a newly created source must
+            # not be taken over by the alphabetically first stale card.
+            matching = [card_id for card_id in stale if any(
+                row['path'] in active_paths for row in next(
+                    card for card in cards if card['cardId'] == card_id)['sourceRevisions'])]
+            if matching:
+                stale = matching
+            else:
+                claimed_paths = {row['path'] for card in cards
+                                 for row in card['sourceRevisions']}
+                new_paths = sorted(path for path in active_paths
+                                   if path not in claimed_paths and
+                                   state['queue'].get(path, {}).get('currentSha256') is not None)
+                if new_paths:
+                    return creator.create_one(root, source_roots, new_paths[0],
+                        cfg['compileCfg'], cfg['engine'], cfg['maxEstimatedCents'],
+                        generation_runner=generation_runner or backend.worker.run_extractor,
+                        verification_runner=verification_runner or backend.worker.run_extractor,
+                        skip_paths=skip_paths)
+                return {'status': 'batch_running'}
         if not stale:
             claimed = {row['path'] for card in cards for row in card['sourceRevisions']}
             unclaimed = [path for path, row in sorted(state['queue'].items())

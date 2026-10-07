@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { readFileSync, existsSync, mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { readFileSync, existsSync, mkdtempSync, mkdirSync, writeFileSync, openSync, closeSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { removeTemp } from './helpers/temp.mjs';
@@ -13,6 +13,25 @@ function dispatch(args, payload, env = {}) {
     encoding: 'utf8',
     env: { ...process.env, QMD_QUERY_FIXTURE: 'test/fixtures/daemon-response.json', ...env },
   }).trim();
+}
+
+// Sandbox/headless guards exit before reading stdin. Feed the same payload
+// from a file so a fast exit cannot race spawnSync's write and cause EPIPE.
+function dispatchGuard(args, payload, env = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'qmd-guard-input-'));
+  const payloadPath = join(dir, 'payload.json');
+  writeFileSync(payloadPath, JSON.stringify(payload));
+  const inputFd = openSync(payloadPath, 'r');
+  try {
+    return execFileSync('bash', ['hooks/run-hook', ...args], {
+      stdio: [inputFd, 'pipe', 'pipe'],
+      encoding: 'utf8',
+      env: { ...process.env, QMD_QUERY_FIXTURE: 'test/fixtures/daemon-response.json', ...env },
+    }).trim();
+  } finally {
+    closeSync(inputFd);
+    removeTemp(dir);
+  }
 }
 
 function selectionEvents(logPath) {
@@ -82,22 +101,22 @@ test('BUG-D: QMD_RECALL_LOG override가 존중된다', () => {
 });
 
 test('CLAUDE_HEADLESS=1 → 무출력', () => {
-  const out = dispatch(['recall', 'claude'], { prompt: PROMPT, cwd: '/tmp' }, { CLAUDE_HEADLESS: '1' });
+  const out = dispatchGuard(['recall', 'claude'], { prompt: PROMPT, cwd: '/tmp' }, { CLAUDE_HEADLESS: '1' });
   assert.equal(out, '');
 });
 
 test('--sandbox 인자 → 무출력', () => {
-  const out = dispatch(['recall', 'claude', '--sandbox'], { prompt: PROMPT, cwd: '/tmp' });
+  const out = dispatchGuard(['recall', 'claude', '--sandbox'], { prompt: PROMPT, cwd: '/tmp' });
   assert.equal(out, '');
 });
 
 test('CODEX_SANDBOX / GEMINI_SANDBOX → 무출력', () => {
-  assert.equal(dispatch(['recall', 'codex'], { prompt: PROMPT, cwd: '/tmp' }, { CODEX_SANDBOX: '1' }), '');
-  assert.equal(dispatch(['recall', 'gemini'], { prompt: PROMPT, cwd: '/tmp' }, { GEMINI_SANDBOX: '1' }), '');
+  assert.equal(dispatchGuard(['recall', 'codex'], { prompt: PROMPT, cwd: '/tmp' }, { CODEX_SANDBOX: '1' }), '');
+  assert.equal(dispatchGuard(['recall', 'gemini'], { prompt: PROMPT, cwd: '/tmp' }, { GEMINI_SANDBOX: '1' }), '');
 });
 
 test('QMD_SANDBOX=1 → 무출력 (cross-engine 공통 가드)', () => {
-  assert.equal(dispatch(['recall', 'claude'], { prompt: PROMPT, cwd: '/tmp' }, { QMD_SANDBOX: '1' }), '');
+  assert.equal(dispatchGuard(['recall', 'claude'], { prompt: PROMPT, cwd: '/tmp' }, { QMD_SANDBOX: '1' }), '');
 });
 
 test('posttool action → 비-스토리 입력에서 graceful 종료', () => {
@@ -121,9 +140,7 @@ test('알 수 없는 action → 비정상 종료', () => {
 });
 
 test('run-hook index → index_enqueue.py 위임 (sandbox 무출력)', () => {
-  const out = execFileSync('bash', ['hooks/run-hook', 'index', 'claude', '--sandbox'], {
-    input: '{}', encoding: 'utf8',
-  });
+  const out = dispatchGuard(['index', 'claude', '--sandbox'], {});
   assert.equal(out, '');
 });
 
@@ -176,9 +193,7 @@ open(${JSON.stringify(engineLog)}, 'w').write(os.environ.get('QMD_ENGINE', ''))
 });
 
 test('run-hook compile --sandbox → 무출력', () => {
-  const out = execFileSync('bash', ['hooks/run-hook', 'compile', 'claude', '--sandbox'], {
-    input: '{}', encoding: 'utf8',
-  });
+  const out = dispatchGuard(['compile', 'claude', '--sandbox'], {});
   assert.equal(out, '');
 });
 
@@ -210,8 +225,6 @@ test('run-hook gate claude → pending 프로젝트에서 gated tool 차단', ()
 });
 
 test('run-hook gate --sandbox → 무출력', () => {
-  const out = execFileSync('bash', ['hooks/run-hook', 'gate', 'claude', '--sandbox'], {
-    input: '{}', encoding: 'utf8',
-  });
+  const out = dispatchGuard(['gate', 'claude', '--sandbox'], {});
   assert.equal(out, '');
 });

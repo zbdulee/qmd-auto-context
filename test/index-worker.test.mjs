@@ -86,6 +86,7 @@ test("single-flight: 이미 lock이면 즉시 종료(큐 보존)", () => {
   const q = join(d, "queue");
   writeFileSync(q, `x\t${join(proj, "04_M")}\n`);
   const wlock = join(d, "wlock.d"); mkdirSync(wlock); // 미리 잡아둠
+  writeFileSync(join(wlock, 'pid'), String(process.pid));
   execFileSync("bash", ["backend/index_worker.sh"], { encoding: "utf8", env: {
     ...process.env, QMD_DIRTY_QUEUE: q, QMD_FAKE_QMD: stub,
     QMD_INDEX_WORKER_LOCKDIR: wlock, QMD_WRITER_LOCKDIR: join(d, "ulock.d"), QMD_NO_RELOAD: "1",
@@ -119,7 +120,7 @@ test("새 임베딩 0 → reload 스킵", () => {
   const rlog = join(d, "reload.log");
   // embed가 0 chunks
   const stub = join(d, "qmd");
-  writeFileSync(stub, `#!/bin/bash\necho "$@" >> "${log}"\n[ "$1" = embed ] && echo "Embedded 0 chunks from 0 documents in 0s"\n[ "$1" = update ] && echo "All collections updated."\n`);
+  writeFileSync(stub, `#!/bin/bash\necho "$@" >> "${log}"\n[ "$1" = embed ] && echo "Embedded 0 chunks from 0 documents in 0s"\n[ "$1" = update ] && echo "All collections updated."\nexit 0\n`);
   chmodSync(stub, 0o755);
   const manager = makeStubManager(d, rlog);
   const proj = join(d, "proj"); mkdirSync(join(proj, "04_M"), { recursive: true });
@@ -166,14 +167,51 @@ test("EMBED_LOCK 잡혀 있으면 embed 스킵 + 큐 복원", () => {
   const elock = join(d, "el.d"); mkdirSync(elock);
   // pid 파일에 살아있는 pid(현재 Node 프로세스) 기록 → worker가 stale 오판하지 않도록
   writeFileSync(join(elock, "pid"), String(process.pid));
-  execFileSync("bash", ["backend/index_worker.sh"], { encoding: "utf8", env: {
+  assert.throws(() => execFileSync("bash", ["backend/index_worker.sh"], { encoding: "utf8", env: {
     ...process.env, QMD_DIRTY_QUEUE: q, QMD_FAKE_QMD: stub,
     QMD_INDEX_WORKER_LOCKDIR: join(d, "wl.d"), QMD_WRITER_LOCKDIR: join(d, "ul.d"),
     QMD_EMBED_LOCKDIR: elock, QMD_NO_RELOAD: "1",
-  }});
+  }}), {status: 75});
   const calls = readFileSync(log, "utf8");
   assert.doesNotMatch(calls, /embed/); // embed 미호출
   assert.match(readFileSync(q, "utf8"), /04_M/); // 큐 복원
+});
+
+test("embed 실패 뒤 큐가 남아 다음 worker 실행에서 재시도된다", () => {
+  const d = mkdtempSync(join(tmpdir(), "wk-embed-retry-"));
+  const calls = join(d, "calls.log");
+  const failOnce = join(d, "fail-once");
+  const stub = join(d, "qmd");
+  writeFileSync(stub, `#!/bin/bash
+echo "$@" >> "${calls}"
+if [ "$1" = embed ]; then
+  if [ ! -e "${failOnce}" ]; then
+    touch "${failOnce}"
+    echo "embedding context unavailable" >&2
+    exit 1
+  fi
+  echo "Embedded 1 chunks from 1 documents in 1s"
+fi
+`);
+  chmodSync(stub, 0o755);
+  const collection = join(d, "docs"); mkdirSync(collection);
+  const queue = join(d, "queue");
+  const entry = `synthetic-docs\t${collection}\n`;
+  writeFileSync(queue, entry);
+  const env = {
+    ...process.env, QMD_DIRTY_QUEUE: queue, QMD_FAKE_QMD: stub,
+    QMD_INDEX_WORKER_LOG: join(d, "worker.log"),
+    QMD_INDEX_WORKER_LOCKDIR: join(d, "wl.d"),
+    QMD_WRITER_LOCKDIR: join(d, "ul.d"), QMD_EMBED_LOCKDIR: join(d, "el.d"),
+    QMD_NO_RELOAD: "1",
+  };
+  assert.throws(() => execFileSync("bash", ["backend/index_worker.sh"], { encoding: "utf8", env }), {status: 1});
+  assert.equal(readFileSync(queue, "utf8"), entry);
+  assert.match(readFileSync(env.QMD_INDEX_WORKER_LOG, "utf8"), /embed failed — claim retained/);
+  execFileSync("bash", ["backend/index_worker.sh"], { encoding: "utf8", env });
+  assert.equal(readFileSync(queue, "utf8"), "");
+  assert.equal((readFileSync(calls, "utf8").match(/^embed$/gm) || []).length, 2);
+  assert.equal(existsSync(env.QMD_EMBED_LOCKDIR), false);
 });
 
 // (C) delete-triggered reload — 새 임베딩 0이지만 update에서 N removed → reload 필요
@@ -269,13 +307,14 @@ print(",".join(order))
 // BUG-C regression: writer lock busy 시 requeue가 셸 리디렉션이 아니라 dirty_queue.py/snapshot과
 // 동일한 fcntl.flock(LOCK_EX)로 큐에 append 하는지 검증. 외부에서 큐의 fcntl 락을 잡고 있으면
 // requeue는 그 락이 풀릴 때까지 블록돼야 한다(락 미사용이면 즉시 append하고 끝난다).
-test("BUG-C: writer lock busy requeue가 fcntl LOCK_EX 하에 직렬화된다(외부 락 동안 블록)", () => {
+test("BUG-C: writer lock busy에서도 durable claim과 원본 큐가 남는다", () => {
   const d = mkdtempSync(join(tmpdir(), "wk-req-"));
   const stub = makeStubQmd(d, join(d, "calls.log"));
   const proj = join(d, "proj"); mkdirSync(join(proj, "04_M"), { recursive: true });
   const q = join(d, "queue");
   writeFileSync(q, `x\t${join(proj, "04_M")}\n`);
-  const wlock = join(d, "ulock.d"); mkdirSync(wlock); // writer lock 선점 → requeue 경로 강제
+  const wlock = join(d, "ulock.d"); mkdirSync(wlock); // writer lock 선점 → pending 경로 강제
+  writeFileSync(join(wlock, 'pid'), String(process.pid));
 
   // 외부 holder: 큐 파일의 fcntl LOCK_EX를 ~0.6s 잡고 있다가 푼다.
   const holderScript = `
@@ -290,18 +329,18 @@ with open(${JSON.stringify(q)}, "r+", encoding="utf-8") as f:
   execFileSync("python3", ["-c", "import time; time.sleep(0.2)"]);
 
   const t0 = Date.now();
-  execFileSync("bash", ["backend/index_worker.sh"], { encoding: "utf8", env: {
+  assert.throws(() => execFileSync("bash", ["backend/index_worker.sh"], { encoding: "utf8", env: {
     ...process.env, QMD_DIRTY_QUEUE: q, QMD_FAKE_QMD: stub,
     QMD_INDEX_WORKER_LOCKDIR: join(d, "wlock.d"),
     QMD_WRITER_LOCKDIR: wlock, QMD_EMBED_LOCKDIR: join(d, "elock.d"),
     QMD_NO_RELOAD: "1",
-  }});
+  }}), {status: 75});
   const elapsed = Date.now() - t0;
   holder.kill();
 
-  // 락이 동작했다면 requeue append는 holder unlock(~0.6s - 0.2s) 이후에 끝났어야 한다.
-  assert.ok(elapsed >= 250, `requeue가 외부 fcntl 락 동안 블록되지 않았다(elapsed=${elapsed}ms) — 락 미사용 의심`);
+  // 원본 큐는 건드리지 않으며 claim 생성은 고정 sidecar 락으로 직렬화된다.
   assert.match(readFileSync(q, "utf8"), /04_M/); // 큐 복원(무유실)
+  assert.equal(JSON.parse(readFileSync(q + '.claim.json', 'utf8')).phase, 'processing');
 });
 
 // BUG-D regression: index-worker 동작 로그는 QMD_RECALL_LOG를 상속하지 않고 전용

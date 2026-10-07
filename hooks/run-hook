@@ -2,7 +2,7 @@
 # qmd auto-context 공통 hook 디스패처.
 # usage: run-hook <action> <engine> [--sandbox]
 #   action: recall | update | update-queued | posttool | index | compile | gate
-#   sandbox-only prototype: topical-event | topical-stop | topical-reconcile
+#   topical-event | topical-stop | topical-reconcile
 #   engine: claude | codex | gemini
 # 플러그인 루트는 CLAUDE_PLUGIN_ROOT/PLUGIN_ROOT(있으면) 또는 스크립트 위치(dirname)로 결정.
 set -u
@@ -35,6 +35,7 @@ ROOT="${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:-}}"
 if [ -z "$ROOT" ]; then
   ROOT="$(cd "$(dirname "$0")/.." && pwd)" || { echo "run-hook: cannot resolve plugin root" >&2; exit 1; }
 fi
+_qmd_code_root="$(cd "$(dirname "$0")/.." && pwd)" || exit 0
 
 # Local trial installs may ship this marker to keep existing auto-wiki projects
 # from sending source text to a model. It does not affect manual skills.
@@ -52,35 +53,50 @@ if [ -e "$_qmd_runtime_file" ] || [ -L "$_qmd_runtime_file" ]; then
   done <<< "$_qmd_assignments"
 fi
 
-# An explicitly marked project may request one bounded v2 refresh turn. The
-# owner-only project config is checked by the Python worker before any model
-# call; merely installing this hook does not activate a project.
-if [ "$ACTION" = "topical-reconcile" ] && [ -n "${QMD_TOPICAL_PROJECT_ROOT:-}" ]; then
-  python3 "$ROOT/core/topical_hook_queue.py" reconcile "$QMD_TOPICAL_PROJECT_ROOT" </dev/null >/dev/null 2>&1 || true
-  exit 0
+# Host hooks other than SessionStart stop before backend/model/index work while
+# an existing project needs explicit setup. Preserve stdin for the chosen core
+# action; the private temporary name is removed before dispatch/exec.
+if [ "$ACTION" != "update-queued" ]; then
+  _qmd_payload_file="$(mktemp "${TMPDIR:-/tmp}/qmd-hook-payload.XXXXXXXX")" || exit 0
+  trap 'rm -f "$_qmd_payload_file"' EXIT
+  cat >"$_qmd_payload_file" || exit 0
+  case "$ACTION" in
+    topical-event|topical-stop|topical-reconcile)
+      if ! _qmd_topical_root="$(python3 "$_qmd_code_root/core/setup_guard.py" hook-root "$ACTION" "$_qmd_payload_file" "$PWD" 2>/dev/null)"; then
+        [ "$ACTION" = "topical-stop" ] && printf '{}\n'
+        exit 0
+      fi
+      ;;
+    *)
+      if ! python3 "$_qmd_code_root/core/setup_guard.py" hook "$ACTION" "$_qmd_payload_file" "$PWD" >/dev/null 2>&1; then
+        exit 0
+      fi
+      ;;
+  esac
+  exec <"$_qmd_payload_file"
+  rm -f "$_qmd_payload_file"
+  trap - EXIT
 fi
 
-# Opt-in sandbox adapter only. Package manifests reference these actions,
-# but without an explicit sandbox root they never start a backend or model.
+# The validated host cwd/config binds ordinary hooks to a selected project.
+# Explicit sandbox roots remain accepted by setup_guard for isolated fixtures.
 case "$ACTION" in
   topical-event|topical-stop|topical-reconcile)
-    if [ -z "${QMD_TOPICAL_SANDBOX_ROOT:-}" ]; then
-      [ "$ACTION" = "topical-stop" ] && printf '{}\n'
-      exit 0
-    fi
     case "$ACTION" in
       topical-event) topical_action=event ;;
       topical-stop) topical_action=boundary ;;
       *) topical_action=reconcile ;;
     esac
     if [ "$ACTION" = "topical-event" ]; then
-      python3 "$ROOT/core/wiki_topical_reconcile.py" "$topical_action" \
-        --root "$QMD_TOPICAL_SANDBOX_ROOT" \
-        --settings-json "$QMD_TOPICAL_SANDBOX_ROOT/.topical-reconcile-hook.json" >/dev/null || exit $?
+      if [ -f "$_qmd_topical_root/.topical-reconcile-hook.json" ]; then
+        python3 "$ROOT/core/wiki_topical_reconcile.py" "$topical_action" \
+          --root "$_qmd_topical_root" \
+          --settings-json "$_qmd_topical_root/.topical-reconcile-hook.json" >/dev/null || exit $?
+      fi
     else
       # Full source scans and model/QMD work are durable jobs. Stop records
       # only the turn key, never the assistant message or source body.
-      python3 "$ROOT/core/topical_hook_queue.py" "$topical_action" "$QMD_TOPICAL_SANDBOX_ROOT" >/dev/null || true
+      python3 "$ROOT/core/topical_hook_queue.py" "$topical_action" "$_qmd_topical_root" >/dev/null || true
     fi
     # Stop requires JSON output. No hook action exposes source paths or queue
     # internals to the model; the durable state is the handoff.

@@ -3,6 +3,8 @@ import fcntl
 import os
 from pathlib import Path
 
+from dirty_queue_claim import queue_lock
+
 
 def queue_path():
     return Path(os.environ.get(
@@ -20,10 +22,15 @@ def enqueue_collections(selected, *, project_root=None):
         f"{name}\t{selected[name]}" + (f"\t{project_root}" if project_root else "") + "\n"
         for name in sorted(selected)
     ]
-    with open(q, "a", encoding="utf-8") as f:
-        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-        f.writelines(lines)
-        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+    # The stable sidecar lock also covers the worker's atomic ACK replacement.
+    # Locking the queue inode alone would let an already-open enqueuer append to
+    # an unlinked old inode after replacement and silently lose that edit.
+    with queue_lock(q):
+        with open(q, "a", encoding="utf-8") as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            f.writelines(lines)
+            f.flush(); os.fsync(f.fileno())
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
 
 def enqueue_project_collections(project_root, selected):

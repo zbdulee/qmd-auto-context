@@ -359,7 +359,8 @@ def _call(root: Path, runtime: dict, args: list[str]):
     return result
 
 
-def sync(root: Path, *, allow_empty: bool = False, allow_stale: bool = False) -> dict:
+def sync(root: Path, *, allow_empty: bool = False, allow_stale: bool = False,
+         reclaim_retired: bool = False) -> dict:
     root, wiki, collection = _project(root)
     runtime = _qmd_runtime(root)
     cards = list((wiki / "topical-v2").glob("*/*.md")) if (wiki / "topical-v2").is_dir() else []
@@ -394,6 +395,11 @@ def sync(root: Path, *, allow_empty: bool = False, allow_stale: bool = False) ->
         _call(root, runtime, ["collection", "add", str(wiki), "--name", collection, "--mask", "**/*.md"])
     if fresh_cards:
         _call(root, runtime, ["embed", "-c", collection, "--max-docs-per-batch", "1", "--max-batch-mb", "1"])
+    if reclaim_retired:
+        # QMD update deactivates retired documents but retains their vectors.
+        # Its own cleanup removes inactive rows and unreferenced embeddings on
+        # this selected project DB. Recheck fresh cards after cleanup below.
+        _call(root, runtime, ["cleanup"])
     db = sqlite3.connect(runtime["INDEX_PATH"])
     try:
         db.execute("PRAGMA query_only=ON")

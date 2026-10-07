@@ -220,6 +220,8 @@ def load_request(path, root):
                                 'adapter', 'modelDir', 'allowExecution'}}
     allowed_index = {'none': {'mode'}, 'shadow': {'mode', 'config', 'wikiDir', 'modelCache',
                                                 'expectedModel', 'expectedDimension', 'sourceIndex', 'allowExecution'}}
+    if index.get('mode') == 'shadow' and index.get('bootstrapEmptyWiki') is True:
+        allowed_index['shadow'] = allowed_index['shadow'] | {'bootstrapEmptyWiki', 'bootstrapIndexRoute'}
     for item, allowed in ((qmd, allowed_qmd), (laya, allowed_laya), (index, allowed_index)):
         mode = item.get('mode')
         if mode not in allowed or set(item) != allowed[mode]: raise ValueError('invalid_install_request')
@@ -237,6 +239,11 @@ def load_request(path, root):
     if index['mode'] == 'shadow' and (type(index['expectedDimension']) is not int or
                                       index['expectedDimension'] < 1 or not index['expectedModel']):
         raise ValueError('invalid_install_request')
+    if index.get('bootstrapEmptyWiki') and (index['sourceIndex'] is not None or
+            request['config'] != 'preserve' or request['wiki'] != {'mode': 'preserve'} or
+            not isinstance(index.get('bootstrapIndexRoute'), str) or
+            not Path(index['bootstrapIndexRoute']).is_absolute()):
+        raise ValueError('empty_bootstrap_requires_new_project')
     return request
 
 
@@ -382,6 +389,45 @@ def _check_laya(request, staged):
     return staged
 
 
+def _bootstrap_raw_index_route():
+    cache = Path(os.environ.get('XDG_CACHE_HOME') or Path.home() / '.cache')
+    route = Path(os.environ.get('INDEX_PATH') or cache / 'qmd/index.sqlite')
+    if not route.is_absolute(): raise ValueError('invalid_qmd_runtime_path')
+    return route
+
+
+def _bootstrap_index_route_guard(root, recorded_route):
+    """Recheck the plan's route and the current route before every cutover step."""
+    if not isinstance(recorded_route, str) or not Path(recorded_route).is_absolute():
+        raise ValueError('empty_bootstrap_requires_new_project')
+    for route in {Path(recorded_route), _bootstrap_raw_index_route()}:
+        if not route.exists() and not route.is_symlink(): continue
+        resolved = route.resolve()
+        if (route.is_symlink() or not route.is_file() or root == route or root in route.parents
+                or root == resolved or root in resolved.parents):
+            raise ValueError('empty_bootstrap_requires_new_project')
+        # A shared global DB may serve other projects. It is exempt only when
+        # its QMD collection paths prove that it does not cover this project.
+        try:
+            with sqlite_read.connect(route) as db:
+                tables = {row[0] for row in db.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'")}
+                if not {'store_collections', 'documents'} <= tables:
+                    raise ValueError('bootstrap_shared_index_unreviewed')
+                paths = [row[0] for row in db.execute('SELECT path FROM store_collections')]
+                orphan = db.execute('SELECT 1 FROM documents WHERE active=1 AND '
+                    'collection NOT IN (SELECT name FROM store_collections) LIMIT 1').fetchone()
+                if orphan: raise ValueError('bootstrap_shared_index_unreviewed')
+        except (OSError, sqlite3.Error) as exc:
+            raise ValueError('bootstrap_shared_index_unreviewed') from exc
+        for value in paths:
+            path = Path(value) if isinstance(value, str) else Path('')
+            if not path.is_absolute(): raise ValueError('bootstrap_shared_index_unreviewed')
+            path = path.resolve()
+            if path == root or path in root.parents or root in path.parents:
+                raise ValueError('empty_bootstrap_requires_new_project')
+
+
 def _wiki_corpus(root, request):
     index = request['index']
     wiki = Path(index['wikiDir'])
@@ -427,7 +473,16 @@ def _wiki_corpus(root, request):
                         file_sha(source_path) != revision['sha256']):
                     raise ValueError('shadow_v2_source_changed')
                 sources[revision['path']] = revision['sha256']
-    if not documents: raise ValueError('shadow_wiki_empty')
+    if not documents:
+        if not index.get('bootstrapEmptyWiki'):
+            raise ValueError('shadow_wiki_empty')
+        _bootstrap_index_route_guard(root, index.get('bootstrapIndexRoute'))
+        old_paths = (root / '.auto-context.json', root / '.agents/qmd-recall.json',
+                     root / 'qmd-db/index.sqlite', root / '.auto-context/qmd/index.sqlite')
+        if (source['kind'] != 'modern' or index['sourceIndex'] is not None or
+                _legacy_wiki(root) or any(path.exists() or path.is_symlink()
+                                          for path in old_paths)):
+            raise ValueError('empty_bootstrap_requires_new_project')
     return {'collection': names[0], 'wikiDir': str(wiki),
             'qmdConfigSha256': file_sha(config), 'documents': documents,
             'sourceRevisions': sources}
@@ -439,6 +494,10 @@ def _check_shadow_documents(index_path, corpus, expected_model):
                            'ORDER BY path,hash', (corpus['collection'],)).fetchall()
         if [list(row) for row in found] != corpus['documents']:
             raise ValueError('shadow_wiki_documents_mismatch')
+        if not corpus['documents'] and (db.execute(
+                'SELECT 1 FROM documents WHERE active=1 LIMIT 1').fetchone() or
+                db.execute('SELECT 1 FROM content_vectors LIMIT 1').fetchone()):
+            raise ValueError('shadow_bootstrap_probe_not_removed')
         for _, content_sha in corpus['documents']:
             if not db.execute('SELECT 1 FROM content_vectors WHERE hash=? AND model=? LIMIT 1',
                               (content_sha, expected_model)).fetchone():
@@ -449,6 +508,10 @@ def _stage_index(root, request, qmd):
     index = request['index']
     if index['mode'] == 'none': return {'mode': 'none'}
     if not index['allowExecution']: raise ValueError('shadow_index_execution_not_enabled')
+    if index.get('bootstrapEmptyWiki'):
+        pointer = root / '.auto-context/qmd-index-active.json'
+        if pointer.exists() or pointer.is_symlink():
+            raise ValueError('empty_bootstrap_requires_new_project')
     corpus = _wiki_corpus(root, request)
     prior = os.environ.get('INDEX_PATH')
     try:
@@ -457,7 +520,8 @@ def _stage_index(root, request, qmd):
         stage = runtime_update.stage_shadow_index(root, qmd_bin=qmd['wrapper'],
             config_file=index['config'], wiki_dir=index['wikiDir'],
             model_cache=index['modelCache'], expected_model=index['expectedModel'],
-            expected_dimension=index['expectedDimension'], allow_execution=True)
+            expected_dimension=index['expectedDimension'], allow_execution=True,
+            bootstrap_empty=index.get('bootstrapEmptyWiki', False))
     finally:
         if prior is None: os.environ.pop('INDEX_PATH', None)
         else: os.environ['INDEX_PATH'] = prior

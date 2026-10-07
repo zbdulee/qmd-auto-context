@@ -1024,6 +1024,9 @@ def main():
 
     if os.environ.get("QMD_SANDBOX") or "--sandbox" in sys.argv:
         return 0
+    import setup_guard
+    if setup_guard.status(args.cwd)['status'] != 'ready':
+        return 0
     found = qmd_config.find_project_config(args.cwd)
     root = Path(found["projectRoot"]).resolve()
     config = found["config"]

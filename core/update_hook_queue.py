@@ -34,6 +34,71 @@ def _write(path, value):
         Path(tmp).unlink(missing_ok=True)
 
 
+def _setup_notice(cwd, queue, guard=None):
+    """One local, bounded installation-status hint; never starts migration."""
+    if os.environ.get('QMD_SUPPRESS_NOTICE'): return
+    import config as qmd_config
+    if guard is None:
+        import setup_guard
+        guard = setup_guard.status(cwd)
+    if guard['status'] == 'optout': return
+    found = qmd_config.find_project_config(cwd)
+    if found['configFormat'] == 'local-optout': return
+    project = Path(found['projectRoot'] if found['configFormat'] != 'none'
+                   else qmd_config.project_identity_root(cwd)).resolve()
+    auto = project / '.auto-context'
+    settings = auto / 'settings.json'
+    pointer = auto / 'qmd-index-active.json'
+    journal = auto / 'install-update-journal.json'
+    # Use the same decision that stopped hooks/workers. A present but invalid
+    # pointer or a prepared journal must still produce repair guidance.
+    reason = guard.get('reason') if guard['status'] == 'setup_required' else None
+    if reason is None:
+        if settings.is_symlink() or pointer.is_symlink() or journal.is_symlink(): return
+        if not settings.is_file(): reason = 'settings_not_ready'
+        elif not pointer.is_file(): reason = 'v2_index_not_selected'
+        if journal.is_file() and journal.stat().st_size <= 65536:
+            try:
+                state = json.loads(journal.read_text())
+                if state.get('schema') != 'qmd-install-update-v1': reason = 'setup_schema_review_required'
+            except (OSError, ValueError, AttributeError):
+                reason = 'setup_schema_review_required'
+    package = json.loads((Path(__file__).parent.parent / 'package.json').read_text())
+    version = package['version']
+    project_key = hashlib.sha256(str(project).encode()).hexdigest()[:32]
+    version_path = queue / ('setup-version-' + project_key + '.json')
+    if version_path.is_symlink(): return
+    previous = None
+    if version_path.is_file() and version_path.stat().st_size <= 4096:
+        state = json.loads(version_path.read_text())
+        if isinstance(state, dict) and state.get('schema') == 'qmd-setup-version-v1':
+            previous = state.get('version')
+    if reason is None and previous is not None and previous != version:
+        reason = 'plugin_version_changed'
+    version_state = {'schema': 'qmd-setup-version-v1', 'version': version,
+                     'project': str(project)}
+    if reason is None:
+        _write(version_path, version_state)
+        return
+    token = hashlib.sha256((str(project) + '\0' + version + '\0' + reason).encode()).hexdigest()[:32]
+    marker = queue / ('setup-notice-' + token + '.json')
+    fd, tmp = tempfile.mkstemp(prefix='.setup-notice-', dir=queue)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, 'w', encoding='utf8') as out:
+            json.dump({'schema': 'qmd-setup-notice-v1', 'project': str(project),
+                       'pluginVersion': version, 'reason': reason}, out, sort_keys=True)
+            out.write('\n'); out.flush(); os.fsync(out.fileno())
+        try: os.link(tmp, marker, follow_symlinks=False)
+        except FileExistsError: return
+        _write(version_path, version_state)
+        print(f'[qmd] 플러그인 {version}: 이 프로젝트 설치 상태({reason})를 검토하세요. '
+              'setup skill에 “설치 계획 보여줘”를 요청하면 읽기 전용 점검을 시작합니다. '
+              '긴 준비와 적용은 각각 명시적 승인 후에만 실행됩니다.')
+    finally:
+        Path(tmp).unlink(missing_ok=True)
+
+
 def enqueue(raw):
     if len(raw) > 65536: raise ValueError('oversized_session_start')
     payload = json.loads(raw) if raw.strip() else {}
@@ -45,6 +110,13 @@ def enqueue(raw):
     cwd = str(path.resolve())
     queue = _private_queue()
     key = hashlib.sha256(cwd.encode()).hexdigest()[:32]
+    import setup_guard
+    guard = setup_guard.status(cwd)
+    if guard['status'] != 'ready':
+        if guard['status'] == 'setup_required':
+            try: _setup_notice(cwd, queue, guard)
+            except (OSError, ValueError, KeyError, TypeError): pass
+        return
     job = queue/(key+'.job.json')
     # One pending job per project. Never replace a running worker's input.
     fd = None
@@ -59,6 +131,9 @@ def enqueue(raw):
             raise ValueError('unsafe_update_job')
     finally:
         if fd is not None: os.close(fd)
+    # Local version/schema/pointer checks only; no registry or model call.
+    try: _setup_notice(cwd, queue, guard)
+    except (OSError, ValueError, KeyError, TypeError): pass
     # The first opt-in decision must reach the current host turn. Resolve is a
     # bounded, read-only path; all scans/index/embed remain in the worker.
     if not os.environ.get('QMD_SUPPRESS_NOTICE'):
@@ -105,6 +180,12 @@ def worker(key):
             os.chmod(log, 0o600)
             output.write(f'{time.time():.3f} update started\n'); output.flush()
             try:
+                import setup_guard
+                if setup_guard.status(cwd)['status'] != 'ready':
+                    _write(queue/(key+'.status.json'), {'schema': 'qmd-update-hook-status-v1',
+                        'cwdHash': key, 'status': 'setup_required', 'at': time.time()})
+                    output.write(f'{time.time():.3f} setup required; job retained\n'); output.flush()
+                    return
                 import qmd_route
                 selected = qmd_route.project_paths(cwd)
                 if not selected['selected']:

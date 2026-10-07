@@ -255,6 +255,18 @@ def reconcile(root, source_roots, cards, *, trusted_card_ids=(), hints=(), skip_
         settled = previous["settledSources"] if previous else ({} if bootstrap_unclaimed and not validated else files)
         pending = _pending(settled, files)
         projection = _projection(validated, files, trusted)
+        if previous is not None and pending:
+            # A published page can be temporarily absent while a refresh
+            # retires the old generation and installs the replacement. Keep
+            # its batch owner in the durable projection until the backend
+            # finishes; never expose the carried row to recall as current.
+            for card_id, row in previous["projection"].items():
+                if card_id not in projection:
+                    carried = json.loads(canonical(row))
+                    carried["state"] = "excluded_pending_refresh"
+                    for claim in carried["claims"]:
+                        claim["state"] = "pending_refresh"
+                    projection[card_id] = carried
         state = {"schema": "topical-reconcile-v1", "sourceRoots": roots,
                  "sources": files, "settledSources": settled, "queue": pending,
                  "moves": moves, "projection": projection,
@@ -472,6 +484,39 @@ def finish_mock_batch(root, source_roots, batch_id, *, success=True, skip_paths=
         _commit(root, previous, state)
         return {"outcome": outcome, "pending": len(state["queue"]),
                 "awaitingVerification": len(state["awaitingVerification"])}
+
+
+def supersede_changed_batch(root, source_roots, batch_id, *, skip_paths=()):
+    """Release an unstarted handoff only after its source snapshot changed.
+
+    Callers must hold their own backend-operation lock and prove that no
+    generation journal owns this batch. A matching snapshot is never released:
+    another worker may still be about to claim it.
+    """
+    root = sandbox(root)
+    roots = sorted(set(safe_rel(p, explicit_root=True) for p in source_roots))
+    lock = root / '.topical-reconcile.lock'
+    if lock.is_symlink():
+        raise ValueError('unsafe_lock_symlink')
+    with lock.open('a') as stream:
+        fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+        previous = _read(root)
+        batch = previous['inFlight'] if previous else None
+        if not batch or batch['batchId'] != batch_id or previous['sourceRoots'] != roots:
+            raise ValueError('batch_not_in_flight')
+        current = _scan(root, roots, skip_paths)
+        if current == batch['snapshot']:
+            return False
+        state = json.loads(canonical(previous))
+        state['inFlight'] = None
+        state['sources'] = current
+        state['queue'] = _pending(state['settledSources'], current)
+        for card in state['projection'].values():
+            card['state'] = 'excluded_pending_refresh'
+            for claim in card['claims']:
+                claim['state'] = 'pending_refresh'
+        _commit(root, previous, state)
+        return True
 
 
 def finish_backend_batch(root, source_roots, batch_id, generation_id, new_cards,

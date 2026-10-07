@@ -93,7 +93,7 @@ def plan_update(current,target):
 
 def stage_shadow_index(project_root, *, qmd_bin, config_file, wiki_dir, model_cache,
                        expected_model, expected_dimension, allow_execution=False,
-                       runner=subprocess.run):
+                       runner=subprocess.run, bootstrap_empty=False):
     """Build a fresh index while preserving every existing DB and pointer."""
     if not allow_execution:raise ValueError('migration_execution_not_enabled')
     root=Path(project_root).resolve()
@@ -107,6 +107,8 @@ def stage_shadow_index(project_root, *, qmd_bin, config_file, wiki_dir, model_ca
     if not isinstance(expected_model,str) or not expected_model or not isinstance(expected_dimension,int) or expected_dimension<1:
         raise ValueError('invalid_migration_target')
     old=os.environ.get('INDEX_PATH')
+    if bootstrap_empty and old:
+        raise ValueError('empty_bootstrap_source_index_forbidden')
     old_bytes=Path(old).stat().st_size if old and Path(old).is_file() else 0
     needed=max(512*1024*1024,old_bytes*2)
     if shutil.disk_usage(root).free<needed:raise ValueError('insufficient_migration_disk')
@@ -129,6 +131,31 @@ def stage_shadow_index(project_root, *, qmd_bin, config_file, wiki_dir, model_ca
     for command in ([str(qmd),'update'],[str(qmd),'embed','--max-docs-per-batch','1','--max-batch-mb','1']):
         result=runner(command,cwd=root,env=env,capture_output=True,text=True,timeout=900,check=False)
         if result.returncode:raise ValueError('shadow_index_build_failed')
+    probe_models=[]
+    if bootstrap_empty:
+        if inspect_index(index).get('activeDocuments') != 0:
+            raise ValueError('empty_bootstrap_wiki_changed')
+        probe=generation/'bootstrap-probe';probe.mkdir(mode=0o700)
+        (probe/'probe.md').write_text('Synthetic local bootstrap vector proof.\n')
+        name='qmd-bootstrap-probe-'+uuid.uuid4().hex
+        try:
+            for command in ([str(qmd),'collection','add',str(probe),'--name',name,'--mask','*.md'],
+                            [str(qmd),'embed','--max-docs-per-batch','1','--max-batch-mb','1']):
+                result=runner(command,cwd=root,env=env,capture_output=True,text=True,timeout=900,check=False)
+                if result.returncode:raise ValueError('bootstrap_vector_probe_failed')
+            verified=inspect_index(index)
+            probe_models=verified.get('modelFingerprints',[])
+            if (verified.get('activeDocuments') != 1 or
+                    verified.get('dimension') != expected_dimension or
+                    verified.get('vectorFormat') != 'vec0-cosine' or
+                    len(probe_models) != 1 or probe_models[0]['model'] != expected_model):
+                raise ValueError('bootstrap_vector_probe_failed')
+            for command in ([str(qmd),'collection','remove',name],[str(qmd),'cleanup']):
+                result=runner(command,cwd=root,env=env,capture_output=True,text=True,timeout=900,check=False)
+                if result.returncode:raise ValueError('bootstrap_probe_cleanup_failed')
+        finally:
+            (probe/'probe.md').unlink(missing_ok=True)
+            (stage_config/'index.yml').write_bytes(config.read_bytes())
     search=runner([str(qmd),'vsearch','synthetic compatibility probe','--format','json'],
                   cwd=root,env=env,capture_output=True,text=True,timeout=120,check=False)
     try:
@@ -138,13 +165,24 @@ def stage_shadow_index(project_root, *, qmd_bin, config_file, wiki_dir, model_ca
     if search.returncode or not isinstance(hits,list):
         raise ValueError('shadow_search_probe_failed')
     inspected=inspect_index(index)
-    if (inspected.get('status')!='readable' or inspected['activeDocuments']<1 or
+    if (inspected.get('status')!='readable' or
             inspected['dimension']!=expected_dimension or
-            not any(row['model']==expected_model for row in inspected['modelFingerprints'])):
+            inspected['vectorFormat']!='vec0-cosine' or
+            (bootstrap_empty and (inspected['activeDocuments']!=0 or
+                                  inspected['modelFingerprints'])) or
+            (not bootstrap_empty and (inspected['activeDocuments']<1 or
+                not any(row['model']==expected_model for row in inspected['modelFingerprints'])))):
         raise ValueError('shadow_index_probe_failed')
+    if bootstrap_empty:
+        with sqlite_read.connect(index) as db:
+            if (db.execute('SELECT 1 FROM documents LIMIT 1').fetchone() or
+                    db.execute('SELECT 1 FROM content_vectors LIMIT 1').fetchone()):
+                raise ValueError('bootstrap_probe_cleanup_failed')
     prepared={'schema':'qmd-shadow-index-v1','index':str(index),
               'inspection':inspected,'sourceIndex':old,
               'sourceIndexFingerprint':sqlite_read.snapshot_fingerprint(old) if old else None}
+    if bootstrap_empty:
+        prepared['bootstrapModelFingerprints']=probe_models
     prepared['configSha256'] = _sha(stage_config/'index.yml')
     path=generation/'prepared.json'
     fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
@@ -266,11 +304,20 @@ def select_runtime(project_root):
         raise ValueError('index_pointer_changed')
     inspection=inspect_index(index,include_file_hash=False)
     original=prepared.get('inspection')
+    # QMD cleanup removes the final embedding row when the last document is
+    # retired. The selected DB then has no row from which to read the staged
+    # model fingerprint. Its pinned config and schema still identify the
+    # generation; retain the fingerprint check whenever any vector remains.
+    model_fingerprints={(row['model'],row['fingerprint'])
+                        for row in inspection.get('modelFingerprints',[])}
+    expected_fingerprints={(row['model'],row['fingerprint'])
+                           for row in (prepared.get('bootstrapModelFingerprints') or
+                                       original.get('modelFingerprints',[]))} if isinstance(original,dict) else set()
+    empty_after_retirement=(inspection.get('activeDocuments')==0 and not model_fingerprints)
     if (inspection.get('status')!='readable' or not isinstance(original,dict) or
             any(inspection.get(key)!=original.get(key) for key in
                 ('schemaSha256','dimension','vectorFormat')) or
-            not set((row['model'],row['fingerprint']) for row in original['modelFingerprints']) <=
-                set((row['model'],row['fingerprint']) for row in inspection['modelFingerprints'])):
+            not (expected_fingerprints<=model_fingerprints or empty_after_retirement)):
         raise ValueError('index_pointer_changed')
     return {'INDEX_PATH':str(index),'QMD_CONFIG_DIR':str(config.parent),
             'XDG_CACHE_HOME':str(cache),'generation':str(generation)}

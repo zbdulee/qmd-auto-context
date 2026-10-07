@@ -9,6 +9,7 @@ test('SessionStart update queues once and records detached completion', () => {
       env:{...process.env,QMD_RECALL_LOG:'',PYTHONDONTWRITEBYTECODE:'1'},
     }));
   assert.equal(result.fastEnqueue,true);
+  assert.equal(result.oneTimeSetupNotice,true);
   assert.equal(result.duplicateCoalesced,true);
   assert.equal(result.durableStatus,true);
   assert.equal(result.failureRetry,true);

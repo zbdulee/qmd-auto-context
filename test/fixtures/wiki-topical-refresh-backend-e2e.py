@@ -87,7 +87,25 @@ with tempfile.TemporaryDirectory(prefix='qmd-refresh-backend-') as temporary:
         'enabled':True,'sourceRoots':['sources'],'engine':'codex',
         'compileCfg':cfg,'maxEstimatedCents':20}))
     auto_config.chmod(0o600)
+    # A Stop batch for an unrelated new source cannot be claimed by this card.
+    (sources / 'unrelated.md').write_text('An unrelated synthetic note.\n')
+    unrelated = reconcile.start_batch(root, ['sources'], [old],
+        trusted_card_ids=['two-bells'])
+    assert unrelated['started'] and set(unrelated['batch']['sources']) == {'sources/unrelated.md'}
     (sources / 'a.md').unlink()
+    blocked = refresh.refresh_one(root, ['sources'], old, old_id, cfg, 'codex',
+        allow_backend_execution=True,
+        generation_runner=lambda *_: (_ for _ in ()).throw(AssertionError('wrong_batch_backend')),
+        verification_runner=verify_runner)
+    assert blocked == {'status': 'batch_running'}
+    assert not (root / 'topical-refresh-state.json').exists()
+    assert reconcile._read(root)['inFlight']['batchId'] == unrelated['batch']['batchId']
+    (sources / 'unrelated.md').unlink()
+    assert reconcile.supersede_changed_batch(root, ['sources'],
+        unrelated['batch']['batchId']) is True
+    preclaimed = reconcile.start_batch(root, ['sources'], [old],
+        trusted_card_ids=['two-bells'])
+    assert preclaimed['started'] and set(preclaimed['batch']['sources']) == {'sources/a.md'}
     projected = reconcile.safe_projection(root, ['sources'], [old],
                                            trusted_card_ids=['two-bells'])
     assert projected['two-bells']['state'] == 'excluded_stale'
@@ -106,8 +124,35 @@ with tempfile.TemporaryDirectory(prefix='qmd-refresh-backend-') as temporary:
         calls.append(('generate', len(payload['sources'])))
         assert [s['path'] for s in payload['sources']] == ['sources/b.md']
         assert payload['existingWikiCandidates'] == []
+        # A second worker cannot enter this batch while the first owns the
+        # refresh lock, even before its generation response is recorded.
+        try:
+            refresh.refresh_one(root, ['sources'], old, old_id, cfg, 'codex',
+                allow_backend_execution=True, generation_runner=generation_runner,
+                verification_runner=verify_runner)
+        except topical.TopicalError as error:
+            assert error.code == 'refresh_busy'
+        else:
+            raise AssertionError('concurrent_refresh_entered_batch')
         return {'schema': topical.SCHEMA, 'cards': [card(['b.md'])]}, None, 0
     original_save = refresh._save
+    def interrupt_before_claim_record(root_arg, row):
+        if row['phase'] == 'claimed':
+            raise RuntimeError('synthetic_crash_before_refresh_journal')
+        return original_save(root_arg, row)
+    refresh._save = interrupt_before_claim_record
+    try:
+        refresh.auto_refresh_pending(root, generation_runner=generation_runner,
+            verification_runner=verify_runner)
+    except RuntimeError as error:
+        assert str(error) == 'synthetic_crash_before_refresh_journal'
+    else:
+        raise AssertionError('synthetic_claim_interrupt_missing')
+    finally:
+        refresh._save = original_save
+    assert reconcile._read(root)['inFlight']['batchId'] == preclaimed['batch']['batchId']
+    assert not (root / 'topical-refresh-state.json').exists()
+    assert sum(kind == 'generate' for kind, _ in calls) == 0
     def interrupt_after_generation(root_arg, row):
         if row['phase'] == 'generated':
             raise RuntimeError('synthetic_crash_after_completed_generation')
@@ -122,6 +167,7 @@ with tempfile.TemporaryDirectory(prefix='qmd-refresh-backend-') as temporary:
         raise AssertionError('synthetic_generation_interrupt_missing')
     finally:
         refresh._save = original_save
+    assert json.loads((root / 'topical-refresh-state.json').read_text())['batchId'] == preclaimed['batch']['batchId']
     assert sum(kind == 'generate' for kind, _ in calls) == 1
     safe_recovery = refresh.recover_pending(root)
     assert safe_recovery == {'status': 'pending_review',
@@ -209,9 +255,18 @@ with tempfile.TemporaryDirectory(prefix='qmd-refresh-backend-') as temporary:
             (collection, f'topical-v2/{old_id}/two-bells.md')).fetchone()
         new_active = db.execute('SELECT active FROM documents WHERE collection=? AND path=?',
             (collection, f'topical-v2/{new_id}/two-bells.md')).fetchone()
-    assert old_active and old_active[0] == 0 and new_active and new_active[0] == 1
+    assert old_active is None and new_active and new_active[0] == 1
+    # Stop recorded an edit, then the source was deleted before its worker ran.
+    # No backend journal exists yet, so the changed handoff is superseded by
+    # the final deletion snapshot rather than looping on batch_running.
+    (sources / 'b.md').write_text('The silver bell marks late dusk.\n')
+    predeleted = reconcile.start_batch(root, ['sources'], [new],
+        trusted_card_ids=['two-bells'])
+    assert predeleted['started'] and 'sources/b.md' in predeleted['batch']['sources']
     (sources / 'b.md').unlink()
+    deletion_batches = []
     def commit_then_interrupt(*args, **kwargs):
+        deletion_batches.append(args[2])
         original_finish(*args, **kwargs)
         raise RuntimeError('synthetic_crash_after_reconcile_commit')
     reconcile.finish_backend_batch = commit_then_interrupt
@@ -225,11 +280,15 @@ with tempfile.TemporaryDirectory(prefix='qmd-refresh-backend-') as temporary:
         raise AssertionError('synthetic_commit_interrupt_missing')
     finally:
         reconcile.finish_backend_batch = original_finish
+    assert deletion_batches and deletion_batches[0] != predeleted['batch']['batchId']
     deleted = refresh.recover_pending(root)
     assert deleted['status'] == 'already_completed' and deleted['generationId'] is None
     with sqlite3.connect(root / 'qmd-db/index.sqlite') as db:
         assert db.execute('SELECT COUNT(*) FROM documents WHERE collection=? AND active=1',
                           (collection,)).fetchone()[0] == 0
+        assert db.execute('SELECT COUNT(*) FROM documents WHERE collection=?',
+                          (collection,)).fetchone()[0] == 0
+        assert db.execute('SELECT COUNT(*) FROM content_vectors').fetchone()[0] == 0
     assert calls == [('verify', 2), ('generate', 1), ('verify', 1)]
     print(json.dumps({'backendGenerationAndVerification': True,
                       'multisourceReverseReference': True,
@@ -239,5 +298,11 @@ with tempfile.TemporaryDirectory(prefix='qmd-refresh-backend-') as temporary:
                       'staleIndexExcludedDuringCrash': True,
                       'sessionStartRecovery': True,
                       'committedBatchRecovered': True,
+                      'preclaimedStopBatchResumed': True,
+                      'unrelatedBatchRejected': True,
+                      'claimCrashRetried': True,
+                      'concurrentRefreshRejected': True,
+                      'changedBatchSuperseded': True,
                       'staleCardRetired': True, 'lastSourceDeletedFromQmd': True,
+                      'retiredDocumentAndVectorReclaimed': True,
                       'backendCalls': len(calls), 'externalCalls': 0}))

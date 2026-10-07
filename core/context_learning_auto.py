@@ -58,6 +58,9 @@ def _policy(project: Path):
 
 
 def run(project: Path) -> dict:
+    import setup_guard
+    if setup_guard.status(project)['status'] != 'ready':
+        return {'status': 'setup_required'}
     item = _policy(project)
     if item is None:
         return {"status": "disabled"}
@@ -107,6 +110,9 @@ def run(project: Path) -> dict:
 
 
 def launch(project: Path, *, data_mode: str | None = None) -> dict:
+    import setup_guard
+    if setup_guard.status(project)['status'] != 'ready':
+        return {'status': 'setup_required'}
     item = _policy(project)
     if item is None:
         return {"status": "disabled"}
@@ -120,6 +126,10 @@ def launch(project: Path, *, data_mode: str | None = None) -> dict:
         if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
             raise ValueError("unsafe_auto_cycle_log")
         env = {key: os.environ[key] for key in ("PATH", "LANG", "TMPDIR") if key in os.environ}
+        # The synthetic legacy fixture has no v2 pointer; carry its explicit
+        # test-only guard override into this deliberately scrubbed child env.
+        if os.environ.get('QMD_SETUP_GUARD_FIXTURE') == '1':
+            env['QMD_SETUP_GUARD_FIXTURE'] = '1'
         # The current-corpus gate must read the exact QMD index/config that the
         # preceding worker updated, including an isolated project override.
         route = qmd_route.project_paths(project)
