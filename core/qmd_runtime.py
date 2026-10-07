@@ -21,8 +21,14 @@ import uuid
 
 VERSION='2.5.3'
 SCHEMA='qmd-managed-runtime-v1'
+SUPPORTED_NODE_MAJORS=frozenset((22,24,26))
 CAPABILITIES=('qmd vsearch','qmd search','qmd get','qmd collection add',
               'qmd update','qmd embed')
+
+
+def supported_node_version(value):
+    match=re.fullmatch(r'v(\d+)\.\d+\.\d+',value.strip())
+    return bool(match and int(match.group(1)) in SUPPORTED_NODE_MAJORS)
 
 
 def managed_root(home=None):
@@ -62,8 +68,8 @@ def _probe(qmd, node):
     help_result=subprocess.run([str(node),str(qmd),'--help'],capture_output=True,
         text=True,timeout=10,check=False)
     if (version.returncode or version.stdout.strip()!='qmd '+VERSION or
-            node_version.returncode or not re.fullmatch(r'v\d+\.\d+\.\d+',node_version.stdout.strip()) or
-            int(node_version.stdout.strip().split('.')[0][1:])<22 or help_result.returncode or
+            node_version.returncode or not supported_node_version(node_version.stdout) or
+            help_result.returncode or
             any(capability not in help_result.stdout for capability in CAPABILITIES)):
         raise ValueError('qmd_runtime_incompatible')
     package=qmd.parent.parent/'package.json'

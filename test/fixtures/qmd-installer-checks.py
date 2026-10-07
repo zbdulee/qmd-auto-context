@@ -22,9 +22,12 @@ assert locked['packageIntegrity'] == ('sha512-wUKc4pSPDbgs7mV7JYE8/Qj1pNXXatJFV8
 with tempfile.TemporaryDirectory(prefix='qmd-install-fake-') as name:
     base = Path(name).resolve(); root = base / 'managed'
     node = base / 'synthetic-node24'
-    node.write_text('#!/bin/sh\nif [ "$1" = "--version" ]; then printf "v24.0.0\\n"; '
-        'else exec ' + shlex.quote(str(Path(host_node).resolve())) + ' "$@"; fi\n')
-    node.chmod(0o700)
+    def set_node_version(version):
+        node.write_text('#!/bin/sh\nif [ "$1" = "--version" ]; then printf ' +
+            shlex.quote(version + '\n') + '; else exec ' +
+            shlex.quote(str(Path(host_node).resolve())) + ' "$@"; fi\n')
+        node.chmod(0o700)
+    set_node_version('v24.0.0')
     npm = base / 'fake-npm'; npm.write_text('#!/bin/sh\nexit 99\n'); npm.chmod(0o700)
     calls = []
     def fake_runner(command, *, cwd, env, **kwargs):
@@ -54,6 +57,21 @@ with tempfile.TemporaryDirectory(prefix='qmd-install-fake-') as name:
     assert len(calls) == 1
     qmd_runtime.activate(root, staged['generation'])
     assert qmd_runtime.select(root)['wrapper'] == staged['wrapper']
+    qmd = Path(staged['generation']) / 'package/node_modules/@tobilu/qmd/bin/qmd'
+    # Both installer preflight and reuse probe share the same even-major policy.
+    for version in ('v20.19.0', 'v23.1.0', 'v25.1.0', 'v27.0.0', 'invalid'):
+        set_node_version(version)
+        try: installer._node(node)
+        except ValueError as exc: assert str(exc) == 'qmd_node_unsupported'
+        else: raise AssertionError('installer accepted ' + version)
+        try: qmd_runtime._probe(qmd, node)
+        except ValueError as exc: assert str(exc) == 'qmd_runtime_incompatible'
+        else: raise AssertionError('runtime accepted ' + version)
+    for version in ('v22.0.0', 'v24.21.0', 'v26.0.0'):
+        set_node_version(version)
+        assert installer._node(node) == node.resolve()
+        assert qmd_runtime._probe(qmd, node)['nodeVersion'] == version
     print(json.dumps({'lockedPackages': locked['packageCount'],
         'noActualNpmExecution': True, 'inactiveStage': True,
-        'explicitLifecycleGate': True, 'isolatedActivationTest': True}))
+        'explicitLifecycleGate': True, 'isolatedActivationTest': True,
+        'nodeMajorsChecked': [20, 22, 23, 24, 25, 26, 27]}))

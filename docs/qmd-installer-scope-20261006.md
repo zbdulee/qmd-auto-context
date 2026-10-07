@@ -12,7 +12,9 @@ model was changed. Existing Mini QMD 2.5.3 was also reused by earlier fixtures.
 `core/qmd_installer.py` requires two explicit execution gates, validates the
 checked-in `locks/qmd-2.5.3/package-lock.json` SHA-256
 `a31cc40f0cbaa413d0b9988c6d7617daa60bb902379fac7f432e77b5b3f7cf3e`,
-checks every registry URL and SHA-512 integrity, checks Node >=22, and calls
+checks every registry URL and SHA-512 integrity, accepts Node 22/24 LTS or
+Node 26 Current as a test target (native compatibility still requires a real
+Node 26 probe), and calls
 `npm ci` only inside a new owner-private generation with its own npm cache and
 empty user npm config. It probes QMD commands and the native SQLite module,
 then writes a prepared wrapper. It never changes the active runtime pointer.

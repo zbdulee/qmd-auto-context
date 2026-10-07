@@ -26,6 +26,9 @@ and Hermes Agent sessions. Install this plugin for your host, then ask the
 `setup` skill to inspect the project and prepare a reviewed runtime. The managed
 QMD setup is available on macOS arm64; other hosts can use a separately installed
 supported global qmd CLI. Projects remain inactive until you explicitly opt in.
+Managed QMD accepts Node 22 or 24 LTS. Node 26 Current is in the test matrix;
+its native QMD compatibility still needs a Node 26 probe. Node 20 is end of life;
+upgrade to Node 22 or 24 LTS before managed setup.
 
 | Host | Installation route | Runtime support |
 |---|---|---|
@@ -45,6 +48,9 @@ continue below.
 상태를 읽기 전용으로 확인합니다. macOS arm64에서는 검토한 요청에 따라
 QMD 2.5.3을 격리된 관리형 세대에 준비하거나 호환되는 기존 설치를
 재사용할 수 있습니다. 준비와 적용은 별도 요청이며 기존 DB와 설정을 보존합니다.
+관리형 QMD에는 Node 22·24 LTS를 권장합니다. Node 26 Current는 시험 대상이며
+실제 native QMD 호환성 검증은 남아 있습니다. 수명이 끝난 Node 20은 관리형
+설치·재사용에서 거부하므로 Node 22 또는 24 LTS로 올린 뒤 준비하세요.
 
 Linux 및 다른 아키텍처에는 현재 관리형 설치가 제공되지 않습니다. 해당
 환경에서는 지원 버전(`>=2.5.3 <3.0.0`)의 qmd CLI를 별도로 설치한 뒤

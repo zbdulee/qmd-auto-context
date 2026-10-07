@@ -3,6 +3,9 @@
   "version": "0.35.2-dev.20261004",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": "^22.0.0 || ^24.0.0 || ^26.0.0"
+  },
   "scripts": {
     "test": "QMD_RECALL_LOG= node --test"
   }

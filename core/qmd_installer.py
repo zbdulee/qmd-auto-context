@@ -60,7 +60,7 @@ def _node(node):
         raise ValueError('unsafe_qmd_node')
     version = subprocess.run([str(node), '--version'], capture_output=True,
         text=True, timeout=10, check=False)
-    if version.returncode or not re.fullmatch(r'v\d+\.\d+\.\d+', version.stdout.strip()) or int(version.stdout.strip().split('.')[0][1:]) < 22:
+    if version.returncode or not qmd_runtime.supported_node_version(version.stdout):
         raise ValueError('qmd_node_unsupported')
     return node
 
